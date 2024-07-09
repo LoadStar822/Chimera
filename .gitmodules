@@ -1,0 +1,9 @@
+[submodule "lib/klib"]
+	path = lib/klib
+	url = https://github.com/attractivechaos/klib.git
+[submodule "lib/seqan3"]
+	path = lib/seqan3
+	url = https://github.com/seqan/seqan3.git
+[submodule "lib/genome_updater"]
+	path = lib/genome_updater
+	url = https://github.com/pirovc/genome_updater.git
