@@ -53,6 +53,12 @@ class SingleTable {
     return kTagsPerBucket * num_buckets_; 
   }
 
+  template <class Archive>
+  void serialize(Archive& ar) {
+	  ar(num_buckets_);
+	  ar(cereal::binary_data(buckets_, sizeof(Bucket) * (num_buckets_ + kPaddingBuckets)));
+  }
+
   std::string Info() const {
     std::stringstream ss;
     ss << "SingleHashtable with tag size: " << bits_per_tag << " bits \n";

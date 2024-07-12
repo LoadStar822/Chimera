@@ -47,7 +47,9 @@ class HashUtil {
 // See Martin Dietzfelbinger, "Universal hashing and k-wise independent random
 // variables via integer arithmetic without primes".
 class TwoIndependentMultiplyShift {
-  unsigned __int128 multiply_, add_;
+  //unsigned __int128 multiply_, add_;
+
+    int64_t multiply_, add_;
 
  public:
   TwoIndependentMultiplyShift() {
@@ -64,6 +66,12 @@ class TwoIndependentMultiplyShift {
   uint64_t operator()(uint64_t key) const {
     return (add_ + multiply_ * static_cast<decltype(multiply_)>(key)) >> 64;
   }
+
+  template <class Archive>
+  void serialize(Archive& ar) {
+	  ar(multiply_, add_);
+  }
+
 };
 
 // See Patrascu and Thorup's "The Power of Simple Tabulation Hashing"

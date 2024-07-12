@@ -117,6 +117,13 @@ class CuckooFilter {
 
   // size of the filter in bytes.
   size_t SizeInBytes() const { return table_->SizeInBytes(); }
+
+  template <class Archive>
+  void serialize(Archive& ar) {
+	  ar(num_items_, victim_.index, victim_.tag, victim_.used);
+	  ar(*table_);
+      ar(hasher_);
+  }
 };
 
 template <typename ItemType, size_t bits_per_item,

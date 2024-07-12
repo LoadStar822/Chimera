@@ -16,17 +16,35 @@ endif()
 
 
 # 设置编译选项
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fno-strict-aliasing -O3")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fno-strict-aliasing -O0 -g")
+
+# 设置SeqAn3库的路径
+set(SEQAN3_DIR "${CMAKE_SOURCE_DIR}/libs/seqan3/share/cmake/seqan3")
+set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/libs/seqan3/share/cmake/seqan3")
+set(SEQAN3_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/libs/seqan3/include")
 
 # 查找 OpenSSL 包
 find_package(OpenSSL REQUIRED)
+find_package( BZip2 REQUIRED )
+find_package( ZLIB REQUIRED )
+if (OpenSSL_FOUND)
+    message(STATUS "Found OpenSSL: ${OPENSSL_VERSION}")
+    message(STATUS "OpenSSL Include Dir: ${OPENSSL_INCLUDE_DIR}")
+    message(STATUS "OpenSSL Libraries: ${OPENSSL_LIBRARIES}")
+else()
+    message(FATAL_ERROR "OpenSSL not found")
+endif()
+find_package (seqan3 REQUIRED)
+
 
 # 包含目录
 include_directories(
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/src/build
     ${PROJECT_SOURCE_DIR}/src/classify
-    ${PROJECT_SOURCE_DIR}/lib/seqan3/include
+    ${PROJECT_SOURCE_DIR}/libs/klib
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include
+    ${PROJECT_SOURCE_DIR}/src/build/filter
 )
 
 # 递归地查找源文件，但排除 CMake 生成的文件
@@ -51,12 +69,18 @@ file(GLOB_RECURSE HEADERS
 # 添加可执行文件
 add_executable(Chimera ${SOURCES})
 
+# 构建test.cpp
+add_executable(test ${PROJECT_SOURCE_DIR}/test.cpp)
+
 # 链接库和 OpenSSL
 target_link_libraries(Chimera
     PRIVATE
     OpenSSL::SSL
     OpenSSL::Crypto
     pthread
+    BZip2::BZip2
+    ZLIB::ZLIB
+    seqan3::seqan3
 )
 
 # 设置包含目录
@@ -65,8 +89,41 @@ target_include_directories(Chimera
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/src/build
     ${PROJECT_SOURCE_DIR}/src/classify
-    ${PROJECT_SOURCE_DIR}/lib/seqan3/include
+    ${PROJECT_SOURCE_DIR}/libs/klib
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include
+    ${PROJECT_SOURCE_DIR}/src/build/filter
+
 )
+
+
+target_link_libraries(test
+    PRIVATE
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    pthread
+    BZip2::BZip2
+    ZLIB::ZLIB
+    seqan3::seqan3
+)
+target_include_directories(test
+    PUBLIC
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/src/build
+    ${PROJECT_SOURCE_DIR}/src/classify
+    ${PROJECT_SOURCE_DIR}/libs/klib
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include
+    ${PROJECT_SOURCE_DIR}/src/build/filter
+
+)
+
+
+
+# 忽略 register 关键字警告
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    add_compile_options(-Wno-register)
+    add_compile_options(-Wno-sign-compare) # 忽略 signed/unsigned 比较警告
+endif()
+
 
 # 安装规则
 install(TARGETS Chimera

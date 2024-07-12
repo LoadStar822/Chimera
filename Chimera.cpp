@@ -1,56 +1,150 @@
-﻿// Chimera.cpp: 定义应用程序的入口点。
-//
-
+﻿/*
+ * -----------------------------------------------------------------------------
+ * Filename:      Chimera.cpp
+ *
+ * Author:        Qinzhong Tian
+ *
+ * Email:         tianqinzhong@qq.com
+ *
+ * Created Date:  2024-07-09
+ *
+ * Last Modified: 2024-07-09
+ *
+ * Description:
+ *  This is a simple C++ program that outputs "Hello, World!".
+ *
+ * Version:
+ *  1.0
+ * -----------------------------------------------------------------------------
+ */
 #include "Chimera.h"
 
-#include "src/build/filter/cuckoofilter.h"  // 引入Cuckoo Filter的头文件
 
-#include <assert.h>        // 引入断言库，用于调试
-#include <math.h>          // 引入数学库
-#include <iostream>        // 引入输入输出流库
-#include <vector>          // 引入向量库
 
-using cuckoofilter::CuckooFilter;   // 使用cuckoofilter命名空间中的CuckooFilter类
+using cuckoofilter::CuckooFilter;   
+
+namespace chimera
+{
+	//创建一个结构来存储路径和taxid
+	typedef struct {
+		kstring_t path;
+		int taxid;
+	} fileInput;
+
+	// 定义别名
+	typedef kvec_t(fileInput) fileInputVec;
+
+	// 读取文件并处理最小化器
+	// 读取文件并处理最小化器
+	void process_files(fileInputVec& test, cuckoofilter::CuckooFilter<uint64_t, 12>& filter, const Config& config) {
+		auto minimiser_view = seqan3::views::minimiser_hash(seqan3::shape{ seqan3::ungapped{ config.kmer_size } },
+			seqan3::window_size{ config.window_size },
+			seqan3::seed{ 0x8F3F73B5CF1C9ADE });
+
+		for (size_t i = 0; i < kv_size(test); ++i) {
+			fileInput fi = kv_A(test, i);
+			std::cout << "Processing file: " << fi.path.s << std::endl;
+
+			gzFile gzfp = gzopen(fi.path.s, "r");
+			if (!gzfp) {
+				fprintf(stderr, "Failed to open gzipped file: %s\n", fi.path.s);
+				continue;
+			}
+
+			kseq_t* seq = kseq_init(gzfp);
+			while (kseq_read(seq) >= 0) {
+				if (seq->seq.l < config.min_length) {
+					std::cout << "Skipped short sequence of length: " << seq->seq.l << std::endl;
+					continue;
+				}
+
+				std::vector<seqan3::dna4> dna_sequence;
+				dna_sequence.reserve(seq->seq.l);
+				for (size_t j = 0; j < seq->seq.l; ++j) {
+					dna_sequence.push_back(seqan3::assign_char_to(seq->seq.s[j], seqan3::dna4{}));
+				}
+
+				std::cout << "Processing sequence of length: " << seq->seq.l << std::endl;
+				auto minimisers = dna_sequence | minimiser_view | std::views::common;
+				for (auto minimiser : minimisers) {
+					uint64_t minimiser_hash = static_cast<uint64_t>(minimiser);
+					std::cout << "Minimiser hash: " << minimiser_hash << std::endl;
+					if (filter.Add(minimiser_hash) != cuckoofilter::Ok) {
+						std::cerr << "Failed to insert item into the filter\n";
+					}
+					else {
+						std::cout << "Inserted minimiser hash: " << minimiser_hash << std::endl;
+					}
+				}
+			}
+
+			kseq_destroy(seq);
+			gzclose(gzfp);
+		}
+	}
+}
+
+
+
 
 int main(int argc, char** argv) {
-	size_t total_items = 58546453;  // 要插入过滤器的总项目数
-
-
-	// 创建一个Cuckoo Filter，项目类型为size_t，每个项目使用12位：
-	// CuckooFilter<size_t, 12> filter(total_items);
-	// 要启用半排序，可以将Cuckoo Filter的存储定义为PackedTable，接受size_t类型的键，并为每个键分配13位：
-	// CuckooFilter<size_t, 13, cuckoofilter::PackedTable> filter(total_items);
-	CuckooFilter<size_t, 12> filter(total_items); // 实例化一个Cuckoo Filter对象
-
-	// 向这个Cuckoo Filter中插入项目
-	size_t num_inserted = 0;  // 记录成功插入的项目数量
-	for (size_t i = 0; i < total_items; i++, num_inserted++) {
-		if (filter.Add(i) != cuckoofilter::Ok) {    // 尝试添加项目，如果添加失败则跳出循环
-			break;
-		}
+	chimera::fileInputVec test;
+	kv_init(test);
+	// 打开文件
+	FILE* fp = fopen("/mnt/d/code/src/ganon/test_files/build/target_info.tsv", "r");
+	if (!fp) {
+		perror("Failed to open file");
+		return EXIT_FAILURE;
 	}
+
+	// 读取文件每一行并解析
+	char* line = NULL;
+	size_t len = 0;
+	ssize_t read;
+	while ((read = getline(&line, &len, fp)) != -1) {
+		chimera::fileInput fi;
+		fi.path.l = fi.path.m = 0;
+		fi.path.s = NULL;
+
+		// 解析路径
+		char* token = strtok(line, "\t");
+		if (token) {
+			kputs(token, &fi.path);
+		}
+
+		// 解析 taxid
+		token = strtok(NULL, "\n");
+		if (token) {
+			fi.taxid = atoi(token);
+		}
+
+		// 将解析结果添加到 kvec_t 中
+		kv_push(chimera::fileInput, test, fi);
+	}
+	free(line);
+	fclose(fp);
+
+	//配置参数
+	chimera::Config config;
+
+	// 初始化 Cuckoo Filter
+	size_t total_items = 100000; // 根据需要设置大小
+	cuckoofilter::CuckooFilter<uint64_t, 12> filter(total_items);
+
+	// 处理文件
+	chimera::process_files(test, filter, config);
+
+	// 打印Cuckoo Filter中的项目数量
+	size_t num_inserted = filter.Size();
 	std::cerr << "Inserted " << num_inserted << " items into the filter.\n";
 
-	// 检查之前插入的项目是否在过滤器中，期望所有项目都存在
-	for (size_t i = 0; i < num_inserted; i++) {
-		assert(filter.Contain(i) == cuckoofilter::Ok);  // 如果检查失败，程序会终止
+	// 释放 kvec_t 中的字符串内存
+	for (size_t i = 0; i < kv_size(test); ++i) {
+		free(kv_A(test, i).path.s);
 	}
-	std::cerr << "All inserted items are in the filter.\n";
+	kv_destroy(test);
 
-	// 检查不存在的项目，预计会有一些误报
-	size_t total_queries = 0; // 总查询次数
-	size_t false_queries = 0; // 误报次数
-	for (size_t i = total_items; i < 2 * total_items; i++) {
-		if (filter.Contain(i) == cuckoofilter::Ok) {
-			false_queries++;
-		}
-		total_queries++;
-	}
 
-	// 输出测量的误报率
-	std::cerr << "false positive rate is "
-		<< 100.0 * false_queries / total_queries << "%\n";
 
-	
 	return 0;
 }
