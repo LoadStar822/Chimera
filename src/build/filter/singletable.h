@@ -11,53 +11,63 @@
 
 namespace cuckoofilter {
 
-// the most naive table implementation: one huge bit array
+// 最简单的表格实现：一个巨大的位数组
 template <size_t bits_per_tag>
 class SingleTable {
+  // 每个桶中的标签数量
   static const size_t kTagsPerBucket = 4;
-  static const size_t kBytesPerBucket =
-      (bits_per_tag * kTagsPerBucket + 7) >> 3;
+  // 每个桶的字节数
+  static const size_t kBytesPerBucket = (bits_per_tag * kTagsPerBucket + 7) >> 3;
+  // 标签掩码，用于提取标签的位
   static const uint32_t kTagMask = (1ULL << bits_per_tag) - 1;
-  // NOTE: accomodate extra buckets if necessary to avoid overrun
-  // as we always read a uint64
-  static const size_t kPaddingBuckets =
-    ((((kBytesPerBucket + 7) / 8) * 8) - 1) / kBytesPerBucket;
+  // 注意：如果有必要，为了避免越界读取，添加额外的桶
+  // 因为我们总是读取一个 uint64
+  static const size_t kPaddingBuckets = ((((kBytesPerBucket + 7) / 8) * 8) - 1) / kBytesPerBucket;
 
+  // 桶结构，包含一个字节数组，用于存储标签位
   struct Bucket {
     char bits_[kBytesPerBucket];
   } __attribute__((__packed__));
 
-  // using a pointer adds one more indirection
+  // 使用指针增加了一次间接访问
   Bucket *buckets_;
   size_t num_buckets_;
 
- public:
-  explicit SingleTable(const size_t num) : num_buckets_(num) {
-    buckets_ = new Bucket[num_buckets_ + kPaddingBuckets];
-    memset(buckets_, 0, kBytesPerBucket * (num_buckets_ + kPaddingBuckets));
-  }
+public:
+	// 显式构造函数，初始化桶的数量并分配内存
+	explicit SingleTable(const size_t num) : num_buckets_(num) {
+		buckets_ = new Bucket[num_buckets_ + kPaddingBuckets];
+		// 初始化内存，将所有字节设置为 0
+		memset(buckets_, 0, kBytesPerBucket * (num_buckets_ + kPaddingBuckets));
+	}
 
-  ~SingleTable() { 
-    delete[] buckets_;
-  }
+	// 析构函数，释放分配的内存
+	~SingleTable() {
+		delete[] buckets_;
+	}
 
-  size_t NumBuckets() const {
-    return num_buckets_;
-  }
+	// 返回桶的数量
+	size_t NumBuckets() const {
+		return num_buckets_;
+	}
 
-  size_t SizeInBytes() const { 
-    return kBytesPerBucket * num_buckets_; 
-  }
+	// 返回表的字节大小
+	size_t SizeInBytes() const {
+		return kBytesPerBucket * num_buckets_;
+	}
 
-  size_t SizeInTags() const { 
-    return kTagsPerBucket * num_buckets_; 
-  }
+	// 返回表的标签数量
+	size_t SizeInTags() const {
+		return kTagsPerBucket * num_buckets_;
+	}
 
-  template <class Archive>
-  void serialize(Archive& ar) {
-	  ar(num_buckets_);
-	  ar(cereal::binary_data(buckets_, sizeof(Bucket) * (num_buckets_ + kPaddingBuckets)));
-  }
+	// 序列化函数，用于将表的状态保存到存档中
+	template <class Archive>
+	void serialize(Archive& ar) {
+		ar(num_buckets_);
+		ar(cereal::binary_data(buckets_, sizeof(Bucket) * (num_buckets_ + kPaddingBuckets)));
+	}
+
 
   std::string Info() const {
     std::stringstream ss;

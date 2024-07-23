@@ -307,6 +307,7 @@ public:
             // 使用哈希函数计算值的索引
             size_t idx = hash_and_fit(value, hash_seeds[i]);
             // 加上 bin 的偏移量
+ 
             idx += bin.get();
             // 确保计算的索引在数据范围内
             assert(idx < data.size());
