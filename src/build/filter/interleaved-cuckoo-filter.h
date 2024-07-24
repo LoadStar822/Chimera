@@ -8,13 +8,14 @@
 
 namespace interleaved_cuckoo_filter {
 	class InterleavedCuckooFilter {
+		TwoIndependentMultiplyShift hasher;
 		size_t bins{}; // number of user bins
 		size_t tc_bins{}; // number of technical bins
 		size_t bin_size{}; // size of each bin
 		size_t bin_words{}; // number of 64-bit integers required to store the bins, where each 64-bit integer can store 64 bins
 		sdsl::int_vector<1> data; // data structure to store the bins
 		sdsl::int_vector<64> tags; // data structure to store the tags
-		size_t MaxCuckooCount{ 500 }; // maximum number of cuckoo kicks
+		int MaxCuckooCount{ 500 }; // maximum number of cuckoo kicks
 		size_t TagNum{ 4 }; // number of tags per bin
 		size_t hash_shift{}; // number of bits to shift the hash value
 		size_t hash_func_count{ 2 }; // number of hash functions to use
@@ -93,7 +94,6 @@ namespace interleaved_cuckoo_filter {
 		bool insertTag(size_t binIndex, size_t value)
 		{
 			assert(binIndex < bins);
-			bool insertOK = false;
 			size_t indexStart, index;
 			for (size_t i = 0; i < hash_func_count; i++)
 			{
@@ -103,13 +103,14 @@ namespace interleaved_cuckoo_filter {
 				{
 					// Calculate the current index
 					index = indexStart + j;
-					if (data[index] == 0)
+					if (data[index] == 0 || tags[index] == value)
 					{
 						// Insert the tag if the current slot is empty
 						data[index] = 1;
 						tags[index] = value;
 						return true;
 					}
+
 					else
 					{
 						// Continue to the next slot if the current bin is occupied
@@ -135,12 +136,11 @@ namespace interleaved_cuckoo_filter {
 		 */
 		bool kickOut(size_t binIndex, size_t value)
 		{
-			size_t oldIndex, newIndex, oldTag{ value }, newTag;
+			size_t oldIndex, oldTag{ value }, newTag;
 			for (int count = 0; count < MaxCuckooCount; count++)
 			{
 				// Calculate the index for the current cuckoo kick
 				oldIndex = hash(oldTag, hash_seeds[count % hash_func_count]) + binIndex * TagNum + count % TagNum;
-
 				// Check if the current slot is occupied
 				if (data[oldIndex] == 1)
 				{
@@ -159,6 +159,80 @@ namespace interleaved_cuckoo_filter {
 				}
 			}
 			return false;
+		}
+
+		bool lookupTag(size_t binIndex, size_t value)
+		{
+			assert(binIndex < bins);
+			size_t indexStart, index;
+			for (size_t i = 0; i < hash_func_count; i++)
+			{
+				// Calculate the starting index for the current hash function
+				indexStart = hash(value, hash_seeds[i]) + binIndex * TagNum;
+				for (size_t j = 0; j < TagNum; j++)
+				{
+					// Calculate the current index
+					index = indexStart + j;
+					if (data[index] == 1 && tags[index] == value)
+					{
+						return true;
+					}
+				}
+			}
+			return false;
+		}
+
+		/**
+		 * Serialize the Interleaved Cuckoo Filter to the specified output stream.
+		 *
+		 * @param os The output stream to serialize the Interleaved Cuckoo Filter to.
+		 */
+		template <class Archive>
+		void serialize(Archive& ar) {
+			ar(bins);
+			ar(tc_bins);
+			ar(bin_size);
+			ar(bin_words);
+			ar(data);
+			ar(TagNum);
+			ar(hash_shift);
+			ar(hash_func_count);
+		}
+
+		/**
+		 * Get the data structure that stores the bins.
+		 *
+		 * @return The data structure that stores the bins.
+		 */
+		sdsl::int_vector<1> getdata() {
+			return data;
+		}
+
+		void generateHash(const size_t& value, size_t* index, uint32_t* tag)
+		{
+			const uint64_t hash = hasher(value);
+		}
+	};
+
+	class TwoIndependentMultiplyShift {
+		//unsigned __int128 multiply_, add_;
+
+		int64_t multiply_, add_;
+
+	public:
+		TwoIndependentMultiplyShift() {
+			::std::random_device random;
+			for (auto v : { &multiply_, &add_ }) {
+				*v = random();
+				for (int i = 1; i <= 4; ++i) {
+					*v = *v << 32;
+					*v |= random();
+				}
+			}
+		}
+
+		uint64_t operator()(uint64_t key) const {
+			return (add_ + multiply_ * static_cast<decltype(multiply_)>(key)) >> 64;
 		}
 	};
 } // namespace interleaved_cuckoo_filter
