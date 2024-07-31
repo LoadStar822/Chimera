@@ -67,10 +67,10 @@ file(GLOB_RECURSE HEADERS
 )
 
 # 添加可执行文件
-add_executable(Chimera ${SOURCES} "src/build/filter/interleaved-cuckoo-filter.h")
+add_executable(Chimera ${SOURCES} "src/build/filter/interleaved-cuckoo-filter.h" "src/classify/counting_filter.h")
 
 # 构建test.cpp
-add_executable(test ${PROJECT_SOURCE_DIR}/test.cpp "src/build/filter/interleaved-cuckoo-filter.h")
+add_executable(test ${PROJECT_SOURCE_DIR}/test.cpp "src/build/filter/interleaved-cuckoo-filter.h" "src/classify/counting_filter.h")
 
 # 链接库和 OpenSSL
 target_link_libraries(Chimera

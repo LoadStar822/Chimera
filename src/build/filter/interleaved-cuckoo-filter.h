@@ -1,3 +1,23 @@
+/*
+ * -----------------------------------------------------------------------------
+ * Filename:      interleaved-cuckoo-filter.h
+ *
+ * Author:        Qinzhong Tian
+ *
+ * Email:         tianqinzhong@qq.com
+ *
+ * Created Date:  2024-07-09
+ *
+ * Last Modified: 2024-07-26
+ *
+ * Description:
+ *  This is the header file of the Interleaved Cuckoo Filter,
+ *	which contains the basic operations of the Interleaved Cuckoo Filter
+ *
+ * Version:
+ *  1.0
+ * -----------------------------------------------------------------------------
+ */
 #ifndef INTERLEAVED_CUCKOO_FILTER_H_
 #define INTERLEAVED_CUCKOO_FILTER_H_
 
@@ -5,10 +25,11 @@
 #include <stdexcept>
 #include <sdsl/int_vector.hpp>
 #include <hashutil.h>
+#include <kvec.h>
 
-namespace interleaved_cuckoo_filter {
+namespace chimera {
 	class InterleavedCuckooFilter {
-		TwoIndependentMultiplyShift hasher;
+		typedef kvec_t(int) kvector;
 		size_t bins{}; // number of user bins
 		size_t tc_bins{}; // number of technical bins
 		size_t bin_size{}; // size of each bin
@@ -24,12 +45,7 @@ namespace interleaved_cuckoo_filter {
 			   10650232656628343401ULL, // 2**64 / sqrt(3)
 			   16499269484942379435ULL, // 2**64 / (sqrt(5)/2)
 			   4893150838803335377ULL }; // 2**64 / (3*pi/5)
-		struct VictimCache {
-			size_t index; // index of the victim cache
-			size_t tag; // tag value of the victim cache
-			bool used; // flag indicating if the victim cache is used
-		};
-		VictimCache victim;
+		kvector result;
 
 	public:
 		InterleavedCuckooFilter() = default;
@@ -208,33 +224,61 @@ namespace interleaved_cuckoo_filter {
 			return data;
 		}
 
-		void generateHash(const size_t& value, size_t* index, uint32_t* tag)
+		kvector bulk_contain(size_t value)
 		{
-			const uint64_t hash = hasher(value);
-		}
-	};
-
-	class TwoIndependentMultiplyShift {
-		//unsigned __int128 multiply_, add_;
-
-		int64_t multiply_, add_;
-
-	public:
-		TwoIndependentMultiplyShift() {
-			::std::random_device random;
-			for (auto v : { &multiply_, &add_ }) {
-				*v = random();
-				for (int i = 1; i <= 4; ++i) {
-					*v = *v << 32;
-					*v |= random();
+			kvector result;
+			kv_init(result);
+			kv_resize(int, result, bins);
+			std::memset(result.a, 0, sizeof(int) * bins);
+			kv_size(result) = bins;
+			kvec_t(size_t) hashs;
+			kv_init(hashs);
+			for (size_t i = 0; i < hash_func_count; i++)
+			{
+				kv_push(size_t, hashs, hash(value, hash_seeds[i]));
+			}
+			for (size_t batch = 0; batch < bin_words; batch++)
+			{
+				size_t tmp{ 0 };
+				for (size_t i = 0; i < hash_func_count; i++)
+				{
+					tmp |= data.get_int(kv_A(hashs, i));
+					kv_A(hashs, i) = kv_A(hashs, i) + 64;
+				}
+				for (int bit = 0; bit < 64; bit += 4)
+				{
+					int bin_index = (batch * 16) + (bit / 4);
+					uint8_t tag_bits = (tmp >> bit) & 0xF;
+					if (tag_bits)
+					{
+						kv_A(result, bin_index)++;
+					}
 				}
 			}
+			kv_destroy(hashs);
+			return result;
 		}
 
-		uint64_t operator()(uint64_t key) const {
-			return (add_ + multiply_ * static_cast<decltype(multiply_)>(key)) >> 64;
+		template <std::ranges::range value_range_t>
+		kvector bulk_count(value_range_t&& values)
+		{
+			kvector result;
+			kv_init(result);
+			kv_resize(int, result, bins);
+			std::memset(result.a, 0, sizeof(int) * bins);
+			kv_size(result) = bins;
+			for (auto value : values)
+			{
+				kvector tmp = bulk_contain(value);
+				for (size_t i = 0; i < tmp.n; i++)
+				{
+					kv_A(result, i) += kv_A(tmp, i);
+				}
+				kv_destroy(tmp);
+			}
+			return result;
 		}
 	};
-} // namespace interleaved_cuckoo_filter
+} // namespace chimera
 
 #endif // INTERLEAVED_CUCKOO_FILTER_H_
