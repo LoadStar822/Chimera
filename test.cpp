@@ -138,20 +138,21 @@
 //	return 0;
 //}
 
-//#include <seqan3/alphabet/nucleotide/dna4.hpp>
-//#include <seqan3/core/debug_stream.hpp>
-//#include <seqan3/search/dream_index/interleaved_bloom_filter.hpp>
-//#include <seqan3/search/views/kmer_hash.hpp>
-//#include <iostream>
-//#include <vector>
-//#include <algorithm>
-//#include <chrono>
-//#include <sdsl/int_vector.hpp>
-//#include <numeric> // for std::iota
-//#include <kvec.h>
-//#include <interleaved-cuckoo-filter.h>
-//using namespace seqan3::literals;
-//
+#include <seqan3/alphabet/nucleotide/dna4.hpp>
+#include <seqan3/core/debug_stream.hpp>
+#include <seqan3/search/dream_index/interleaved_bloom_filter.hpp>
+#include <seqan3/search/views/kmer_hash.hpp>
+#include <seqan3/search/views/minimiser_hash.hpp>
+#include <iostream>
+#include <vector>
+#include <algorithm>
+#include <chrono>
+#include <sdsl/int_vector.hpp>
+#include <numeric> // for std::iota
+#include <kvec.h>
+#include <interleaved-cuckoo-filter.h>
+using namespace seqan3::literals;
+
 //int main()
 //{
 //	//记录构建时间
@@ -166,7 +167,18 @@
 //	auto const sequence1 = "ACTGACTGACTGATC"_dna4;
 //	auto const sequence2 = "GTGACTGACTGACTCG"_dna4;
 //	auto const sequence3 = "AAAAAAACGATCGACA"_dna4;
-//	auto       hash_adaptor = seqan3::views::kmer_hash(seqan3::ungapped{ 5u });
+//	auto       hash_adaptor = seqan3::views::minimiser_hash(seqan3::shape{ seqan3::ungapped{4} }, seqan3::window_size{ 8 });
+//
+//	std::cout << "bin0: " << std::endl;
+//	for (auto&& value : sequence1 | hash_adaptor)
+//		seqan3::debug_stream << value << '\n';
+//	std::cout << "bin4: " << std::endl;
+//	for (auto&& value : sequence2 | hash_adaptor)
+//		seqan3::debug_stream << value << '\n';
+//	std::cout << "bin7: " << std::endl;
+//	for (auto&& value : sequence3 | hash_adaptor)
+//		seqan3::debug_stream << value << '\n';
+//
 //	//记录插入的时间
 //	start = std::chrono::high_resolution_clock::now();
 //
@@ -258,51 +270,112 @@
 //		archive(icf);
 //	}
 //
-//	//读取序列化文件
-//	seqan3::interleaved_bloom_filter loaded_ibf{ seqan3::bin_count{ 8u },
-//									  seqan3::bin_size{ 8192u },
-//									  seqan3::hash_function_count{ 2u } };
-//
 //	return 0;
 //}
 
-#include "khashl.h"
-#include <cstdint>
-#include <iostream>
+using namespace sdsl;
 
-static inline uint64_t hash_fn(uint64_t key)
-{
-	return key;
+// 使用掩码批量插入八位数到 bit_vector
+void batch_insert_to_bit_vector(bit_vector& bv, uint8_t value, size_t position) {
+	uint64_t mask = static_cast<uint64_t>(value) << (position % 64);  // 将8位数移到正确位置
+	size_t idx = position / 64;
+	bv.data()[idx] |= mask;  // 批量写入
+	if ((position % 64) > 56) {
+		// 处理跨越64位边界的情况
+		bv.data()[idx + 1] |= (value >> (64 - (position % 64)));
+	}
 }
-static inline uint64_t hash64(uint64_t key) {
-	key += ~(key << 32);
-	key ^= (key >> 22);
-	key += (key << 13);
-	key ^= (key >> 8);
-	key += ~(key << 19);
-	key ^= (key >> 33);
-	return key;
-}
-static inline uint64_t get_key(const uint64_t n, const uint64_t x)
-{
-	return hash64(x % (n >> 2));
-}
-KHASHL_MAP_INIT(, intmap_t, intmap, uint64_t, uint64_t, hash_fn, kh_eq_generic)
 
-int main()
-{
-	intmap_t* h = intmap_init();
-	khint64_t k;
-	uint64_t x = 1, z, step{ (50000000 - 10000000) / 5 };
-	for (uint64_t i = 0; i < 100; i++)
-	{
-		int ab;
-		x = hash64(x);
-		k = intmap_put(h, get_key(10000000, x), &ab);
+// 插入八位数到 int_vector<8>
+void insert_to_int_vector(int_vector<8>& iv, uint8_t value, size_t position) {
+	iv[position] = value;
+}
+
+// 查询 bit_vector 中的值
+uint8_t query_bit_vector(bit_vector& bv, size_t position) {
+	uint64_t mask = 0xFFULL << (position % 64);
+	size_t idx = position / 64;
+	uint64_t chunk = (bv.data()[idx] & mask) >> (position % 64);
+	if ((position % 64) > 56) {
+		chunk |= (bv.data()[idx + 1] & 0xFFULL) << (64 - (position % 64));
 	}
-	for (uint64_t i = 0; i < 100; i++)
-	{
-		std::cout << kh_val(h, i) << std::endl;
+	return static_cast<uint8_t>(chunk);
+}
+
+// 查询 int_vector<8> 中的值
+uint8_t query_int_vector(int_vector<8>& iv, size_t position) {
+	return iv[position];
+}
+
+int main() {
+	const size_t num_elements = 100000000;  // 测试元素数量
+	const uint8_t test_value = 0b10101010; // 测试插入值
+
+	// 构建 bit_vector 和 int_vector<8>
+	auto start_bv_construct = std::chrono::high_resolution_clock::now();
+	bit_vector bv(num_elements * 8, 0); // 每个元素8位
+	auto end_bv_construct = std::chrono::high_resolution_clock::now();
+
+	auto start_iv_construct = std::chrono::high_resolution_clock::now();
+	int_vector<8> iv(num_elements, 0);
+	auto end_iv_construct = std::chrono::high_resolution_clock::now();
+
+	// 测试 bit_vector 的插入性能
+	auto start_bv_insert = std::chrono::high_resolution_clock::now();
+	for (size_t i = 0; i < num_elements; ++i) {
+		batch_insert_to_bit_vector(bv, test_value, i * 8);
 	}
+	auto end_bv_insert = std::chrono::high_resolution_clock::now();
+
+	// 测试 int_vector<8> 的插入性能
+	auto start_iv_insert = std::chrono::high_resolution_clock::now();
+	for (size_t i = 0; i < num_elements; ++i) {
+		insert_to_int_vector(iv, test_value, i);
+	}
+	auto end_iv_insert = std::chrono::high_resolution_clock::now();
+
+	// 测试 bit_vector 的查询性能
+	auto start_bv_query = std::chrono::high_resolution_clock::now();
+	for (size_t i = 0; i < num_elements; ++i) {
+		volatile uint8_t value = query_bit_vector(bv, i * 8); // 使用volatile防止优化
+	}
+	auto end_bv_query = std::chrono::high_resolution_clock::now();
+
+	// 测试 int_vector<8> 的查询性能
+	auto start_iv_query = std::chrono::high_resolution_clock::now();
+	for (size_t i = 0; i < num_elements; ++i) {
+		volatile uint8_t value = query_int_vector(iv, i);
+	}
+	auto end_iv_query = std::chrono::high_resolution_clock::now();
+
+	// 测试 bit_vector 的 get_int 性能
+	auto start_bv_get_int = std::chrono::high_resolution_clock::now();
+	for (size_t i = 0; i < num_elements; ++i) {
+		size_t index = i * 8;
+		volatile uint64_t value = bv.get_int(index, 64); // 使用volatile防止优化
+	}
+	auto end_bv_get_int = std::chrono::high_resolution_clock::now();
+
+	// 测试 int_vector<8> 的 get_int 性能
+	auto start_iv_get_int = std::chrono::high_resolution_clock::now();
+	for (size_t i = 0; i < num_elements; ++i) {
+		size_t index = i * 8;
+		volatile uint8_t value = iv.get_int(index, 64);
+	}
+	auto end_iv_get_int = std::chrono::high_resolution_clock::now();
+
+	// 输出测试结果
+	std::cout << "bit_vector 构建时间: " << std::chrono::duration<double>(end_bv_construct - start_bv_construct).count() << " 秒" << std::endl;
+	std::cout << "int_vector<8> 构建时间: " << std::chrono::duration<double>(end_iv_construct - start_iv_construct).count() << " 秒" << std::endl;
+
+	std::cout << "bit_vector 插入时间: " << std::chrono::duration<double>(end_bv_insert - start_bv_insert).count() << " 秒" << std::endl;
+	std::cout << "int_vector<8> 插入时间: " << std::chrono::duration<double>(end_iv_insert - start_iv_insert).count() << " 秒" << std::endl;
+
+	std::cout << "bit_vector 查询时间: " << std::chrono::duration<double>(end_bv_query - start_bv_query).count() << " 秒" << std::endl;
+	std::cout << "int_vector<8> 查询时间: " << std::chrono::duration<double>(end_iv_query - start_iv_query).count() << " 秒" << std::endl;
+
+	std::cout << "bit_vector get_int 时间: " << std::chrono::duration<double>(end_bv_get_int - start_bv_get_int).count() << " 秒" << std::endl;
+	std::cout << "int_vector<8> get_int 时间: " << std::chrono::duration<double>(end_iv_get_int - start_iv_get_int).count() << " 秒" << std::endl;
+
 	return 0;
 }
