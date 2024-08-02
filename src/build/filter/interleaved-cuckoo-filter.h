@@ -26,6 +26,9 @@
 #include <sdsl/int_vector.hpp>
 #include <hashutil.h>
 #include <kvec.h>
+#include <cereal/archives/binary.hpp>
+#include <cereal/types/memory.hpp>
+#include <cereal/types/vector.hpp>
 
 namespace chimera {
 	class InterleavedCuckooFilter {
@@ -34,11 +37,10 @@ namespace chimera {
 		size_t tc_bins{}; // number of technical bins
 		size_t bin_size{}; // size of each bin
 		size_t bin_words{}; // number of 64-bit integers required to store the bins, where each 64-bit integer can store 64 bins
-		sdsl::int_vector<8> data; // data structure to store the bins
+		sdsl::bit_vector data; // data structure to store the bins
 		int MaxCuckooCount{ 500 }; // maximum number of cuckoo kicks
 		size_t TagNum{ 4 }; // number of tags per bin
 		size_t hashSize{}; // size of the filter
-		kvector result;
 
 	public:
 		InterleavedCuckooFilter() = default;
@@ -63,8 +65,30 @@ namespace chimera {
 			//if (loadFactor > 0.95) this->tc_bins = this->tc_bins << 1; // Equivalent to tc_bins * 2
 
 			// Resize the data structure to store the bins
-			this->data = sdsl::int_vector<8>(tc_bins * bin_size * TagNum, 0);
+			this->data = sdsl::bit_vector(tc_bins * bin_size * TagNum * 8, 0);
 			hashSize = tc_bins * bin_size * TagNum - tc_bins * (TagNum + 1);
+		}
+
+		// 使用掩码批量插入八位数到 bit_vector
+		void batch_insert_to_bit_vector(uint8_t value, size_t position) {
+			uint64_t mask = static_cast<uint64_t>(value) << (position % 64);  // 将8位数移到正确位置
+			size_t idx = position / 64;
+			data.data()[idx] |= mask;  // 批量写入
+			if ((position % 64) > 56) {
+				// 处理跨越64位边界的情况
+				data.data()[idx + 1] |= (value >> (64 - (position % 64)));
+			}
+		}
+
+		// 查询 bit_vector 中的值
+		uint8_t query_bit_vector(size_t position) {
+			uint64_t mask = 0xFFULL << (position % 64);
+			size_t idx = position / 64;
+			uint64_t chunk = (data.data()[idx] & mask) >> (position % 64);
+			if ((position % 64) > 56) {
+				chunk |= (data.data()[idx + 1] & 0xFFULL) << (64 - (position % 64));
+			}
+			return static_cast<uint8_t>(chunk);
 		}
 
 		size_t hashIndex(uint64_t value) {
@@ -77,7 +101,8 @@ namespace chimera {
 
 		inline uint8_t reduce_to_8bit(uint64_t value)
 		{
-			return static_cast<uint8_t>(value & 0xFF);
+			uint8_t reduced_value = static_cast<uint8_t>(((value * 2654435761U) >> 24) & 0xFF);
+			return reduced_value == 0 ? 1 : reduced_value; // 确保返回值大于0
 		}
 
 		/**
@@ -91,21 +116,18 @@ namespace chimera {
 		{
 			assert(binIndex < bins);
 			size_t indexStart, index;
+			uint8_t query;
 			auto tag = reduce_to_8bit(value);
 			// Calculate the starting index for the current hash function
 			indexStart = hashIndex(value) + binIndex * TagNum;
 			for (size_t j = 0; j < TagNum; j++)
 			{
 				// Calculate the current index
-				index = indexStart + j;
-				if (data[index] == 0 || data[index] == tag)
+				index = (indexStart + j) << 3;
+				query = query_bit_vector(index);
+				if (query == 0 || query == tag)
 				{
-					// Insert the tag if the current slot is empty
-					data[index] = tag;
-					for (int i = (index << 3) - 32; i < (index << 3) + 64; i++)
-					{
-						size_t y = data.get_int(i, 64);
-					}
+					batch_insert_to_bit_vector(tag, index);
 
 					return true;
 				}
@@ -121,21 +143,24 @@ namespace chimera {
 
 		bool kickOut(size_t binIndex, size_t value, uint8_t tag)
 		{
-			size_t oldIndex{ hashIndex(value) }, oldTag{ tag }, newTag;
+			size_t oldIndex{ hashIndex(value) }, oldTag{ tag }, newIndex, newTag, index;
+			uint8_t query;
 			for (int count = 0; count < MaxCuckooCount; count++)
 			{
 				oldIndex = altHash(oldIndex, oldTag) + binIndex * TagNum;
 				for (size_t j = 0; j < TagNum; j++)
 				{
-					oldIndex++;
-					if (data[oldIndex] == 0 || data[oldIndex] == oldTag)
+					index = (oldIndex + j) << 3;
+					query = query_bit_vector(index);
+					if (query == 0 || query == oldTag)
 					{
-						data[oldIndex] = oldTag;
+						batch_insert_to_bit_vector(oldTag, index);
 						return true;
 					}
 				}
-				newTag = data[oldIndex];
-				data[oldIndex] = oldTag;
+				newIndex = (oldIndex + count % TagNum) << 3;
+				newTag = query_bit_vector(newIndex);
+				batch_insert_to_bit_vector(oldTag, newIndex);
 				oldTag = newTag;
 			}
 			return false;
@@ -154,6 +179,8 @@ namespace chimera {
 			ar(bin_words);
 			ar(data);
 			ar(TagNum);
+			ar(MaxCuckooCount);
+			ar(hashSize);
 		}
 
 		/**
@@ -161,7 +188,7 @@ namespace chimera {
 		 *
 		 * @return The data structure that stores the bins.
 		 */
-		sdsl::int_vector<8> getdata() {
+		sdsl::bit_vector getdata() {
 			return data;
 		}
 
@@ -174,8 +201,9 @@ namespace chimera {
 			std::memset(result.a, 0, sizeof(bool) * bins);
 			kv_size(result) = bins;
 			uint8_t tag = reduce_to_8bit(value);
-			size_t hash1 = hashIndex(value) << 3;
+			size_t hash1 = hashIndex(value);
 			size_t hash2 = altHash(hash1, tag) << 3;
+			hash1 = hash1 << 3;
 			size_t tmp1{ 0 }, tmp2{ 0 };
 			for (size_t batch = 0; batch < bin_words; batch++)
 			{

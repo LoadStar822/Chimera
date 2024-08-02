@@ -19,9 +19,7 @@
  */
 #include "Chimera.h"
 
-
-
-using cuckoofilter::CuckooFilter;   
+using cuckoofilter::CuckooFilter;
 
 namespace chimera
 {
@@ -84,9 +82,6 @@ namespace chimera
 	}
 }
 
-
-
-
 int main(int argc, char** argv) {
 	chimera::fileInputVec test;
 	kv_init(test);
@@ -143,8 +138,6 @@ int main(int argc, char** argv) {
 		free(kv_A(test, i).path.s);
 	}
 	kv_destroy(test);
-
-
 
 	return 0;
 }
