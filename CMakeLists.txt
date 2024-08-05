@@ -1,6 +1,6 @@
 ﻿cmake_minimum_required(VERSION 3.10)
-
-project(Chimera)
+project(Chimera VERSION 0.1.0)
+add_definitions(-DCHIMERA_VERSION="${PROJECT_VERSION}")
 
 set( CMAKE_CXX_STANDARD 20 )
 set( CMAKE_CXX_STANDARD_REQUIRED ON )
@@ -42,6 +42,7 @@ include_directories(
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/src/build
     ${PROJECT_SOURCE_DIR}/src/classify
+    ${PROJECT_SOURCE_DIR}/libs/
     ${PROJECT_SOURCE_DIR}/libs/klib
     ${PROJECT_SOURCE_DIR}/libs/seqan3/include
     ${PROJECT_SOURCE_DIR}/src/build/filter
@@ -67,13 +68,13 @@ file(GLOB_RECURSE HEADERS
 )
 
 # 添加可执行文件
-add_executable(Chimera ${SOURCES} "src/build/filter/interleaved-cuckoo-filter.h" "src/classify/counting_filter.h")
+add_executable(chimera ${SOURCES} "src/build/filter/interleaved-cuckoo-filter.h" "src/build/ChimeraBuild.cpp")
 
 # 构建test.cpp
-add_executable(test ${PROJECT_SOURCE_DIR}/test.cpp "src/build/filter/interleaved-cuckoo-filter.h" "src/classify/counting_filter.h")
+add_executable(test ${PROJECT_SOURCE_DIR}/test.cpp "src/build/filter/interleaved-cuckoo-filter.h"  "src/build/ChimeraBuild.cpp")
 
 # 链接库和 OpenSSL
-target_link_libraries(Chimera
+target_link_libraries(chimera
     PRIVATE
     OpenSSL::SSL
     OpenSSL::Crypto
@@ -84,7 +85,7 @@ target_link_libraries(Chimera
 )
 
 # 设置包含目录
-target_include_directories(Chimera
+target_include_directories(chimera
     PUBLIC
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/src/build
@@ -126,6 +127,6 @@ endif()
 
 
 # 安装规则
-install(TARGETS Chimera
+install(TARGETS chimera
     DESTINATION bin
 )

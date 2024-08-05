@@ -67,6 +67,7 @@ typedef unsigned long long khint64_t;
 #define KH_LOCAL static kh_inline klib_unused
 
 typedef khint32_t khint_t;
+typedef const char* kh_cstr_t;
 
 /******************
  * malloc aliases *
@@ -359,5 +360,7 @@ static kh_inline khint_t kh_hash_bytes(int len, const unsigned char* s) {
 		h ^= s[i], h *= 16777619;
 	return h;
 }
+
+#define kh_foreach(h, k) for ((k) = 0; (k) != kh_end(h); ++(k)) if (kh_exist((h), (k)))
 
 #endif /* __AC_KHASHL_H */

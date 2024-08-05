@@ -8,7 +8,7 @@
  *
  * Created Date:  2024-07-09
  *
- * Last Modified: 2024-07-26
+ * Last Modified: 2024-08-03
  *
  * Description:
  *  This is the header file of the Interleaved Cuckoo Filter,
@@ -69,18 +69,43 @@ namespace chimera {
 			hashSize = tc_bins * bin_size * TagNum - tc_bins * (TagNum + 1);
 		}
 
-		// 使用掩码批量插入八位数到 bit_vector
+		/*
+		 * -----------------------------------------------------------------------------------------------
+		 * Function: batch_insert_to_bit_vector
+		 *
+		 * Description:
+		 * Inserts an 8-bit value into the bit_vector at the specified position using a mask.
+		 *
+		 * Parameters:
+		 * - value: The 8-bit value to be inserted.
+		 * - position: The position in the bit_vector where the value should be inserted.
+		 *
+		 * Returns: void
+		 * -----------------------------------------------------------------------------------------------
+		 */
 		void batch_insert_to_bit_vector(uint8_t value, size_t position) {
-			uint64_t mask = static_cast<uint64_t>(value) << (position % 64);  // 将8位数移到正确位置
+			uint64_t mask = static_cast<uint64_t>(value) << (position % 64);  // Move the 8-bit value to the correct position
 			size_t idx = position / 64;
-			data.data()[idx] |= mask;  // 批量写入
+			data.data()[idx] |= mask;  // Batch write the value
 			if ((position % 64) > 56) {
-				// 处理跨越64位边界的情况
+				// Handle the case where the value crosses a 64-bit boundary
 				data.data()[idx + 1] |= (value >> (64 - (position % 64)));
 			}
 		}
 
-		// 查询 bit_vector 中的值
+		/*
+		 * -----------------------------------------------------------------------------------------------
+		 * Function: query_bit_vector
+		 *
+		 * Description:
+		 * Queries the value in the bit_vector at the specified position.
+		 *
+		 * Parameters:
+		 * - position: The position in the bit_vector to query.
+		 *
+		 * Returns: The 8-bit value at the specified position.
+		 * -----------------------------------------------------------------------------------------------
+		 */
 		uint8_t query_bit_vector(size_t position) {
 			uint64_t mask = 0xFFULL << (position % 64);
 			size_t idx = position / 64;
@@ -91,26 +116,73 @@ namespace chimera {
 			return static_cast<uint8_t>(chunk);
 		}
 
+		/*
+		 * -----------------------------------------------------------------------------------------------
+		 * Function: hashIndex
+		 *
+		 * Description:
+		 * Calculates the hash index for a given value.
+		 *
+		 * Parameters:
+		 * - value: The value for which to calculate the hash index.
+		 *
+		 * Returns: The hash index.
+		 * -----------------------------------------------------------------------------------------------
+		 */
 		size_t hashIndex(uint64_t value) {
 			return value % hashSize;
 		}
 
+		/*
+		 * -----------------------------------------------------------------------------------------------
+		 * Function: altHash
+		 *
+		 * Description:
+		 * Calculates the alternative hash for a given position and tag.
+		 *
+		 * Parameters:
+		 * - pos: The position for which to calculate the alternative hash.
+		 * - tag: The tag for which to calculate the alternative hash.
+		 *
+		 * Returns: The alternative hash.
+		 * -----------------------------------------------------------------------------------------------
+		 */
 		size_t altHash(size_t pos, uint8_t tag) {
 			return (pos ^ (tag * 0x5bd1e995)) % hashSize;
 		}
 
+		/*
+		 * -----------------------------------------------------------------------------------------------
+		 * Function: reduce_to_8bit
+		 *
+		 * Description:
+		 * Reduces a 64-bit value to an 8-bit value.
+		 *
+		 * Parameters:
+		 * - value: The 64-bit value to be reduced.
+		 *
+		 * Returns: The reduced 8-bit value.
+		 * -----------------------------------------------------------------------------------------------
+		 */
 		inline uint8_t reduce_to_8bit(uint64_t value)
 		{
 			uint8_t reduced_value = static_cast<uint8_t>(((value * 2654435761U) >> 24) & 0xFF);
-			return reduced_value == 0 ? 1 : reduced_value; // 确保返回值大于0
+			return reduced_value == 0 ? 1 : reduced_value; // Ensure that the returned value is greater than 0
 		}
 
-		/**
-		 * Insert a tag into the specified bin of the Interleaved Cuckoo Filter.
+		/*
+		 * -----------------------------------------------------------------------------------------------
+		 * Function: insertTag
 		 *
-		 * @param binIndex The index of the bin to insert the tag into.
-		 * @param value The value of the tag to insert.
-		 * @return True if the tag was successfully inserted, false otherwise.
+		 * Description:
+		 * Inserts a tag into the specified bin of the Interleaved Cuckoo Filter.
+		 *
+		 * Parameters:
+		 * - binIndex: The index of the bin to insert the tag into.
+		 * - value: The value of the tag to insert.
+		 *
+		 * Returns: True if the tag was successfully inserted, false otherwise.
+		 * -----------------------------------------------------------------------------------------------
 		 */
 		bool insertTag(size_t binIndex, size_t value)
 		{
@@ -141,6 +213,21 @@ namespace chimera {
 			return true;
 		}
 
+		/*
+		 * -----------------------------------------------------------------------------------------------
+		 * Function: kickOut
+		 *
+		 * Description:
+		 * Kicks out a tag from the specified bin and inserts a new tag in its place.
+		 *
+		 * Parameters:
+		 * - binIndex: The index of the bin to kick out the tag from.
+		 * - value: The value of the tag to insert.
+		 * - tag: The tag to insert.
+		 *
+		 * Returns: True if the tag was successfully kicked out and inserted, false otherwise.
+		 * -----------------------------------------------------------------------------------------------
+		 */
 		bool kickOut(size_t binIndex, size_t value, uint8_t tag)
 		{
 			size_t oldIndex{ hashIndex(value) }, oldTag{ tag }, newIndex, newTag, index;
@@ -184,14 +271,18 @@ namespace chimera {
 		}
 
 		/**
-		 * Get the data structure that stores the bins.
-		 *
-		 * @return The data structure that stores the bins.
-		 */
-		sdsl::bit_vector getdata() {
-			return data;
-		}
-
+		* -----------------------------------------------------------------------------------------------
+		* Function: bulk_contain
+		*
+		* Description:
+		* Checks if the given value is present in the Interleaved Cuckoo Filter.
+		*
+		* Parameters:
+		* - value: The value to check for.
+		*
+		* Returns: A kvector_bool indicating the presence of the value in each bin.
+		* -----------------------------------------------------------------------------------------------
+		*/
 		typedef kvec_t(bool) kvector_bool;
 		kvector_bool bulk_contain(size_t value)
 		{
@@ -225,6 +316,19 @@ namespace chimera {
 			return result;
 		}
 
+		/**
+		* -----------------------------------------------------------------------------------------------
+		* Function: bulk_count
+		*
+		* Description:
+		* Counts the occurrences of values in the Interleaved Cuckoo Filter.
+		*
+		* Parameters:
+		* - values: A range of values to count.
+		*
+		* Returns: A kvector indicating the count of each value in each bin.
+		* -----------------------------------------------------------------------------------------------
+		*/
 		template <std::ranges::range value_range_t>
 		kvector bulk_count(value_range_t&& values)
 		{

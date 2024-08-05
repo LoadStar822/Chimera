@@ -1,4 +1,0 @@
-#ifndef COUNTING_FILTER_H_
-#define COUNTING_FILTER_H_
-
-#endif // COUNTING_FILTER_H_
