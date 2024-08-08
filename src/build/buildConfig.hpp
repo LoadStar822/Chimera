@@ -1,3 +1,22 @@
+/*
+ * -----------------------------------------------------------------------------
+ * Filename:      buildConfig.hpp
+ *
+ * Author:        Qinzhong Tian
+ *
+ * Email:         tianqinzhong@qq.com
+ *
+ * Created Date:  2024-07-30
+ *
+ * Last Modified: 2024-08-06
+ *
+ * Description:
+ *  This is a simple C++ program that outputs "Hello, World!".
+ *
+ * Version:
+ *  1.0
+ * -----------------------------------------------------------------------------
+ */
 #pragma once
 #ifndef BUILDCONFIG_HPP
 #define BUILDCONFIG_HPP
@@ -41,6 +60,7 @@ namespace ChimeraBuild {
 		size_t invalidNum = 0;
 		size_t sequenceNum = 0;
 		size_t skippedNum = 0;
+		size_t bpLength = 0;
 	};
 
 	struct ICFConfig {

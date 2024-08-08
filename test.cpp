@@ -1,22 +1,22 @@
-﻿#include <seqan3/alphabet/nucleotide/dna4.hpp>
-#include <seqan3/core/debug_stream.hpp>
-#include <seqan3/search/dream_index/interleaved_bloom_filter.hpp>
-#include <seqan3/search/views/kmer_hash.hpp>
-#include <seqan3/search/views/minimiser_hash.hpp>
-#include <iostream>
-#include <vector>
-#include <algorithm>
-#include <chrono>
-#include <sdsl/int_vector.hpp>
-#include <numeric> // for std::iota
-#include <kvec.h>
-#include <interleaved-cuckoo-filter.h>
-#include <random>
-#include <cereal/archives/binary.hpp>
-#include <cereal/types/memory.hpp>
-#include <CLI11.hpp>
-using namespace seqan3;
-using namespace seqan3::literals;
+﻿//#include <seqan3/alphabet/nucleotide/dna4.hpp>
+//#include <seqan3/core/debug_stream.hpp>
+//#include <seqan3/search/dream_index/interleaved_bloom_filter.hpp>
+//#include <seqan3/search/views/kmer_hash.hpp>
+//#include <seqan3/search/views/minimiser_hash.hpp>
+//#include <iostream>
+//#include <vector>
+//#include <algorithm>
+//#include <chrono>
+//#include <sdsl/int_vector.hpp>
+//#include <numeric> // for std::iota
+//#include <kvec.h>
+//#include <interleaved-cuckoo-filter.h>
+//#include <random>
+//#include <cereal/archives/binary.hpp>
+//#include <cereal/types/memory.hpp>
+//#include <CLI11.hpp>
+//using namespace seqan3;
+//using namespace seqan3::literals;
 //// 随机生成DNA序列
 //std::vector<dna4> generate_random_dna_sequence(size_t length, std::mt19937& gen) {
 //	std::vector<dna4> sequence;
@@ -256,6 +256,54 @@ using namespace seqan3::literals;
 //		}
 //		std::cout << std::endl;
 //	}
+//
+//	return 0;
+//}
+//#include <khashOperation.hpp>
+//
+//int main() {
+//	// 初始化哈希表
+//	khash_t(str_vec_str)* h = kh_init(str_vec_str);
+//
+//	// 插入元素
+//	khash_insert_vec(h, "fruits", std::vector<std::string>{ "apple", "banana", "cherry" });
+//	khash_insert_vec(h, "colors", std::vector<std::string>{ "red", "green", "blue" });
+//
+//	// 检索元素
+//	std::vector<std::string> values;
+//	if (khash_find_vec(h, "fruits", values)) {
+//		std::cout << "Found 'fruits' with values: [";
+//		for (const auto& val : values) {
+//			std::cout << val << " ";
+//		}
+//		std::cout << "]" << std::endl;
+//	}
+//	else {
+//		std::cout << "'fruits' not found" << std::endl;
+//	}
+//
+//	khash_insert_vec(h, "fruits", std::vector<std::string>{ "orange", "pear" });
+//	khash_insert_vec(h, "fruits", std::string("peach"));
+//	khash_insert_vec(h, "people", std::string("man"));
+//
+//	// 遍历所有元素
+//	khash_iterate_vec(h);
+//
+//	// 删除元素
+//	khash_delete_vec(h, "fruits");
+//
+//	// 再次遍历以验证删除效果
+//	khash_iterate_vec(h);
+//
+//	// 删除所有元素以释放内存
+//	for (khiter_t k = kh_begin(h); k != kh_end(h); ++k) {
+//		if (kh_exist(h, k)) {
+//			free((char*)kh_key(h, k)); // 释放每个键的内存
+//		}
+//	}
+//
+//	// 销毁哈希表
+//	kh_destroy(str_vec_str, h);
 //
 //	return 0;
 //}

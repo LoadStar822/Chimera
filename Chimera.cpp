@@ -57,7 +57,7 @@ int main(int argc, char** argv)
 	build->add_option("-l,--min-length", buildConfig.min_length, "Minimum length sequence for building")
 		->default_val(0);
 	build->add_option("-t,--threads", buildConfig.threads, "Number of threads for building")
-		->default_val(1);
+		->default_val(32);
 	build->add_option("-f,--filter-size", buildConfig.filter_size, "Filter size for building (only modify in special cases)")
 		->default_val(0);
 

@@ -16,7 +16,7 @@ endif()
 
 
 # 设置编译选项
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fno-strict-aliasing -O0 -g -mavx2")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fno-strict-aliasing -O0 -g -mavx2 -fopenmp")
 
 # 设置SeqAn3库的路径
 set(SEQAN3_DIR "${CMAKE_SOURCE_DIR}/libs/seqan3/share/cmake/seqan3")
@@ -42,6 +42,7 @@ include_directories(
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/src/build
     ${PROJECT_SOURCE_DIR}/src/classify
+    ${PROJECT_SOURCE_DIR}/src/utils
     ${PROJECT_SOURCE_DIR}/libs/
     ${PROJECT_SOURCE_DIR}/libs/klib
     ${PROJECT_SOURCE_DIR}/libs/seqan3/include
@@ -71,7 +72,7 @@ file(GLOB_RECURSE HEADERS
 add_executable(chimera ${SOURCES} "src/build/filter/interleaved-cuckoo-filter.h" "src/build/ChimeraBuild.cpp")
 
 # 构建test.cpp
-add_executable(test ${PROJECT_SOURCE_DIR}/test.cpp "src/build/filter/interleaved-cuckoo-filter.h"  "src/build/ChimeraBuild.cpp")
+add_executable(test ${PROJECT_SOURCE_DIR}/test.cpp )
 
 # 链接库和 OpenSSL
 target_link_libraries(chimera
@@ -90,32 +91,13 @@ target_include_directories(chimera
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/src/build
     ${PROJECT_SOURCE_DIR}/src/classify
+    ${PROJECT_SOURCE_DIR}/src/utils
     ${PROJECT_SOURCE_DIR}/libs/klib
     ${PROJECT_SOURCE_DIR}/libs/seqan3/include
     ${PROJECT_SOURCE_DIR}/src/build/filter
 
 )
 
-
-target_link_libraries(test
-    PRIVATE
-    OpenSSL::SSL
-    OpenSSL::Crypto
-    pthread
-    BZip2::BZip2
-    ZLIB::ZLIB
-    seqan3::seqan3
-)
-target_include_directories(test
-    PUBLIC
-    ${PROJECT_SOURCE_DIR}/src
-    ${PROJECT_SOURCE_DIR}/src/build
-    ${PROJECT_SOURCE_DIR}/src/classify
-    ${PROJECT_SOURCE_DIR}/libs/klib
-    ${PROJECT_SOURCE_DIR}/libs/seqan3/include
-    ${PROJECT_SOURCE_DIR}/src/build/filter
-
-)
 
 
 
