@@ -32,7 +32,7 @@ namespace ChimeraBuild {
 		uint64_t min_length;
 		uint16_t threads;
 		bool verbose;
-		double filter_size;
+		double load_factor;
 	};
 
 	inline std::ostream& operator<<(std::ostream& os, const BuildConfig& config) {
@@ -48,7 +48,8 @@ namespace ChimeraBuild {
 			<< std::setw(20) << "Window size:" << config.window_size << std::endl
 			<< std::setw(20) << "Minimum length:" << config.min_length << std::endl
 			<< std::setw(20) << "Threads:" << config.threads << std::endl
-			<< std::setw(20) << "Filter size:" << config.filter_size << std::endl;
+			<< std::setw(20) << "Load factor:" << config.load_factor << std::endl
+			<< std::setw(20) << "Verbose:" << config.verbose << std::endl;
 
 		os << std::string(40, '=') << std::endl;
 
@@ -67,6 +68,13 @@ namespace ChimeraBuild {
 		uint8_t kmer_size;
 		uint16_t window_size;
 		size_t bins;
+		size_t bin_size;
+
+		template <class Archive>
+		void serialize(Archive& archive) {
+			archive(kmer_size, window_size, bins, bin_size);
+		}
+
 	};
 }
 

@@ -35,7 +35,8 @@
 #include <seqan3/search/views/minimiser_hash.hpp>
 #include <chrono>
 #include <dna4_traits.hpp>
-
+#include <cereal/cereal.hpp>
+#include <cereal/types/utility.hpp>
 namespace ChimeraBuild {
 	void run(BuildConfig config);
 }

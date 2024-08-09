@@ -58,8 +58,8 @@ int main(int argc, char** argv)
 		->default_val(0);
 	build->add_option("-t,--threads", buildConfig.threads, "Number of threads for building")
 		->default_val(32);
-	build->add_option("-f,--filter-size", buildConfig.filter_size, "Filter size for building (only modify in special cases)")
-		->default_val(0);
+	build->add_option("--load-factor", buildConfig.load_factor, "Loading ratio of ICF")
+		->default_val(0.95);
 
 	build->add_flag("-V,--verbose", buildConfig.verbose, "Verbose output");
 

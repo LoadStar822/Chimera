@@ -29,6 +29,7 @@
 #include <cereal/archives/binary.hpp>
 #include <cereal/types/memory.hpp>
 #include <cereal/types/vector.hpp>
+#include <immintrin.h>
 
 namespace chimera {
 	class InterleavedCuckooFilter {
@@ -63,7 +64,6 @@ namespace chimera {
 			//// Calculate the load factor
 			//double loadFactor = static_cast<double>(bins * bin_size) / (tc_bins * bin_size * TagNum);
 			//if (loadFactor > 0.95) this->tc_bins = this->tc_bins << 1; // Equivalent to tc_bins * 2
-
 			// Resize the data structure to store the bins
 			this->data = sdsl::bit_vector(tc_bins * bin_size * TagNum * 8, 0);
 			hashSize = tc_bins * bin_size * TagNum - tc_bins * (TagNum + 1);
