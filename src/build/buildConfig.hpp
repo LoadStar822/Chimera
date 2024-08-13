@@ -11,7 +11,7 @@
  * Last Modified: 2024-08-06
  *
  * Description:
- *  This is a simple C++ program that outputs "Hello, World!".
+ *  this file defines the configuration for the build module
  *
  * Version:
  *  1.0
@@ -31,7 +31,7 @@ namespace ChimeraBuild {
 		uint16_t window_size;
 		uint64_t min_length;
 		uint16_t threads;
-		bool verbose;
+		bool verbose = true;
 		double load_factor;
 	};
 

@@ -8,10 +8,10 @@
  *
  * Created Date:  2024-07-30
  *
- * Last Modified: 2024-08-06
+ * Last Modified: 2024-08-09
  *
  * Description:
- *  This is a simple C++ program that outputs "Hello, World!".
+ *  The main program of ChimeraBuild.
  *
  * Version:
  *  1.0
@@ -308,7 +308,13 @@ namespace ChimeraBuild {
             }
         }
     }
-	// 计算 taxid 映射到的 bins
+    /**
+    * Calculate the bins mapped to the taxid.
+    *
+    * @param config The configuration for the Interleaved Cuckoo Filter.
+	* @param hashCount The map containing the hash count for each taxid.
+	* @return The map containing the bins mapped to the taxid.
+	*/
 	robin_hood::unordered_map<std::string, std::size_t> calculateTaxidMapBins(
 		const ICFConfig& config,
 		const robin_hood::unordered_map<std::string, uint64_t>& hashCount) {
@@ -324,85 +330,171 @@ namespace ChimeraBuild {
 
 		return taxidBins;
 	}
-	void build(robin_hood::unordered_map<std::string, std::size_t> taxidBins, 
-		ICFConfig config, chimera::InterleavedCuckooFilter& icf, 
-		const robin_hood::unordered_map<std::string, uint64_t>& hashCount,
-		robin_hood::unordered_map<std::string, std::vector<std::string>> inputFiles){
-		size_t old = 0;
-		for (const auto& [taxid, count] : hashCount) {
-			//打开文件
-			std::ifstream ifile("tmp/" + taxid + ".mini", std::ios::binary);
-			if (ifile.fail()) {
-				std::cerr << "Failed to open minimiser file: " << taxid << ".mini" << std::endl;
-				continue;
-			}
-			//读取文件
-			uint64_t hash;
-			size_t currentPos = old; // 用于追踪当前存储位置
 
-			while (ifile.read(reinterpret_cast<char*>(&hash), sizeof(hash))) {
-				// 插入到 filter 中，将 hash 存储在 currentPos 位置
-				icf.insertTag(currentPos, hash);
+    /**
+     * Process the taxid by inserting the hashes into the Interleaved Cuckoo Filter.
+     *
+     * @param taxid The taxid to process.
+     * @param start The starting position in the filter.
+     * @param end The ending position in the filter.
+     * @param icf The Interleaved Cuckoo Filter to insert the hashes into.
+     */
+    void processTaxid(
+        const std::string& taxid,
+        size_t start,
+        size_t end,
+        chimera::InterleavedCuckooFilter& icf) {
 
-				// 更新存储位置到下一个位置
-				currentPos++;
+        // Open the minimiser file for reading
+        std::ifstream ifile("tmp/" + taxid + ".mini", std::ios::binary);
+        if (ifile.fail()) {
+            std::cerr << "Failed to open minimiser file: " << taxid << ".mini" << std::endl;
+            return;
+        }
 
-				// 如果 currentPos 超过 taxidBins[taxid]，则重置为 old
-				if (currentPos == taxidBins[taxid]) {
-					currentPos = old;
-				}
-			}
+        uint64_t hash;
+        size_t currentPos = start;
 
-			// 更新 old 的值为当前 taxid 的下一个位置，以备后续使用
-			old = taxidBins[taxid];
-			ifile.close();
-			//删除minimiser文件
-			std::filesystem::remove("tmp/" + taxid + ".mini");
-			}
-		
-	}
+        // Read the hashes from the file and insert them into the filter
+        while (ifile.read(reinterpret_cast<char*>(&hash), sizeof(hash))) {
+            // Insert the hash into the filter at the current position
+            icf.insertTag(currentPos, hash);
 
-	void saveFilter(const std::string& output_file,
-		const chimera::InterleavedCuckooFilter& icf,
-		ICFConfig& icfConfig,
-		const robin_hood::unordered_map<std::string, uint64_t>& hashCount,
-		robin_hood::unordered_map<std::string, std::size_t> taxidBins) {
+            // Update the current position to the next position
+            currentPos++;
 
-		// 打开输出文件
-		std::ofstream os(output_file, std::ios::binary);
+            // If the current position reaches the end, reset it to the start
+            if (currentPos == end) {
+                currentPos = start;
+            }
+        }
 
-		// 检查文件是否成功打开
-		if (!os.is_open()) {
-			throw std::runtime_error("Failed to open file: " + output_file);
-		}
+        // Close the minimiser file
+        ifile.close();
 
-		// 创建cereal的二进制档案
-		cereal::BinaryOutputArchive archive(os);
+        // Delete the minimiser file
+        std::filesystem::remove("tmp/" + taxid + ".mini");
+    }
 
-		// 序列化 InterleavedCuckooFilter
-		archive(icf);
+    /**
+     * Build the Interleaved Cuckoo Filter.
+     *
+     * @param taxidBins The map containing the bins mapped to the taxid.
+     * @param config The configuration for the Interleaved Cuckoo Filter.
+     * @param icf The Interleaved Cuckoo Filter object to build.
+     * @param hashCount The map containing the hash count for each taxid.
+     * @param inputFiles The map containing the input files for each taxid.
+     * @param numThreads The number of threads to use for building.
+     */
+    void build(
+        const robin_hood::unordered_map<std::string, std::size_t>& taxidBins,
+        ICFConfig config,
+        chimera::InterleavedCuckooFilter& icf,
+        const robin_hood::unordered_map<std::string, uint64_t>& hashCount,
+        robin_hood::unordered_map<std::string, std::vector<std::string>> inputFiles,
+        int numThreads) {
 
-		// 序列化 ICFConfig
-		archive(icfConfig);
+        std::vector<std::thread> threads;
 
-		// 手动将 robin_hood::unordered_map 数据转换并提取为 vector
-		std::vector<std::pair<std::string, uint64_t>> hashCountData;
-		for (const auto& kv : hashCount) {
-			hashCountData.emplace_back(kv.first, kv.second);
-		}
+        // Initialize previousEnd to 0 for the first taxid
+        size_t previousEnd = 0;
 
-		std::vector<std::pair<std::string, std::size_t>> taxidBinsData;
-		for (const auto& kv : taxidBins) {
-			taxidBinsData.emplace_back(kv.first, kv.second);
-		}
+        for (const auto& [taxid, count] : hashCount) {
+            // Get the current taxid's end position
+            size_t currentEnd = taxidBins.at(taxid);
 
-		// 序列化 vector
-		archive(hashCountData);
-		archive(taxidBinsData);
+            // Start a thread to process the insertion for the current taxid
+            threads.emplace_back(processTaxid, taxid, previousEnd, currentEnd, std::ref(icf));
 
-		// 关闭文件
-		os.close();
-	}
+            // Update previousEnd to the current end position for the next taxid to use
+            previousEnd = currentEnd;
+
+            // If the maximum number of threads is reached, wait for the threads to complete
+            if (threads.size() == static_cast<size_t>(numThreads)) {
+                for (auto& thread : threads) {
+                    if (thread.joinable()) {
+                        thread.join();
+                    }
+                }
+                threads.clear();
+            }
+        }
+
+        // Wait for all remaining threads to complete
+        for (auto& thread : threads) {
+            if (thread.joinable()) {
+                thread.join();
+            }
+        }
+    }
+
+    /**
+     * Save the Interleaved Cuckoo Filter, ICFConfig, hashCount, and taxidBins to the output file.
+     *
+     * @param output_file The path to the output file.
+     * @param icf The Interleaved Cuckoo Filter to be saved.
+     * @param icfConfig The configuration for the Interleaved Cuckoo Filter.
+     * @param hashCount The map containing the hash count for each taxid.
+     * @param taxidBins The map containing the number of bins for each taxid.
+     */
+    void saveFilter(const std::string& output_file,
+                    const chimera::InterleavedCuckooFilter& icf,
+                    ICFConfig& icfConfig,
+                    const robin_hood::unordered_map<std::string, uint64_t>& hashCount,
+                    robin_hood::unordered_map<std::string, std::size_t> taxidBins) {
+
+        // Open the output file
+        std::ofstream os(output_file, std::ios::binary);
+
+        // Check if the file is successfully opened
+        if (!os.is_open()) {
+            throw std::runtime_error("Failed to open file: " + output_file);
+        }
+
+        // Create a cereal binary archive
+        cereal::BinaryOutputArchive archive(os);
+
+        // Serialize the Interleaved Cuckoo Filter
+        archive(icf);
+
+        // Serialize the ICFConfig
+        archive(icfConfig);
+
+        // Manually convert and extract the robin_hood::unordered_map data to vector
+        std::vector<std::pair<std::string, uint64_t>> hashCountData;
+        for (const auto& kv : hashCount) {
+            hashCountData.emplace_back(kv.first, kv.second);
+        }
+
+        std::vector<std::pair<std::string, std::size_t>> taxidBinsData;
+        for (const auto& kv : taxidBins) {
+            taxidBinsData.emplace_back(kv.first, kv.second);
+        }
+
+        // Serialize the vector
+        archive(hashCountData);
+        archive(taxidBinsData);
+
+        // Close the file
+        os.close();
+
+        // Get the file size
+        std::uintmax_t fileSize = std::filesystem::file_size(output_file);
+
+        // Output the file size, formatted as KB, MB, or GB
+        if (fileSize >= 1024 * 1024 * 1024) {
+            std::cout << "Filter file size: " << std::fixed << std::setprecision(2)
+                      << static_cast<double>(fileSize) / (1024 * 1024 * 1024) << " GB" << std::endl;
+        } else if (fileSize >= 1024 * 1024) {
+            std::cout << "Filter file size: " << std::fixed << std::setprecision(2)
+                      << static_cast<double>(fileSize) / (1024 * 1024) << " MB" << std::endl;
+        } else if (fileSize >= 1024) {
+            std::cout << "Filter file size: " << std::fixed << std::setprecision(2)
+                      << static_cast<double>(fileSize) / 1024 << " KB" << std::endl;
+        } else {
+            std::cout << "Filter file size: " << fileSize << " bytes" << std::endl;
+        }
+    }
 
 	/**
 	* Run the build process with the given build configuration.
@@ -444,7 +536,6 @@ namespace ChimeraBuild {
 		if (config.verbose) {
 			std::cout << "Calculate time: ";
 			print_build_time(calculate_total_time);
-			//输出fileinfo的内容
 			std::cout << "File information:" << std::endl;
 			std::cout << "Number of files: " << fileInfo.fileNum << std::endl;
 			std::cout << "Number of invalid files: " << fileInfo.invalidNum << std::endl;
@@ -469,7 +560,7 @@ namespace ChimeraBuild {
 		std::cout << "Creating filter..." << std::endl;
 		chimera::InterleavedCuckooFilter icf(icfConfig.bins, icfConfig.bin_size);
 		robin_hood::unordered_map<std::string, std::size_t> taxidBins = calculateTaxidMapBins(icfConfig, hashCount);
-		build(taxidBins, icfConfig, icf, hashCount, inputFiles);
+		build(taxidBins, icfConfig, icf, hashCount, inputFiles, config.threads);
 		saveFilter(config.output_file, icf, icfConfig, hashCount, taxidBins);
 		auto create_filter_end = std::chrono::high_resolution_clock::now();
 		auto create_filter_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(create_filter_end - create_filter_start).count();
@@ -486,6 +577,8 @@ namespace ChimeraBuild {
 		if (config.verbose) {
 			std::cout << "Total build time: ";
 			print_build_time(build_total_time);
+			std::cout << icf << std::endl;
+			
 		}
 	}
 }

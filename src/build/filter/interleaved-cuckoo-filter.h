@@ -43,6 +43,20 @@ namespace chimera {
 		size_t TagNum{ 4 }; // number of tags per bin
 		size_t hashSize{}; // size of the filter
 
+		friend std::ostream& operator<<(std::ostream& os, const InterleavedCuckooFilter& filter) {
+			os << "InterleavedCuckooFilter Details:\n";
+			os << "  User Bins: " << filter.bins << "\n";
+			os << "  Technical Bins: " << filter.tc_bins << "\n";
+			os << "  Bin Size: " << filter.bin_size << " bits\n";
+			os << "  Bin Words: " << filter.bin_words << " 64-bit words\n";
+			os << "  Max Cuckoo Count: " << filter.MaxCuckooCount << "\n";
+			os << "  Tags per Bin: " << filter.TagNum << "\n";
+			os << "  Hash Size: " << filter.hashSize << " bits\n";
+			os << "  Data Size: " << filter.data.size() << " bits\n";
+
+			return os;
+		}
+
 	public:
 		InterleavedCuckooFilter() = default;
 		InterleavedCuckooFilter(size_t bins, size_t bin_size)
@@ -75,7 +89,7 @@ namespace chimera {
 		 *
 		 * Description:
 		 * Inserts an 8-bit value into the bit_vector at the specified position using a mask.
-		 *
+		 *c
 		 * Parameters:
 		 * - value: The 8-bit value to be inserted.
 		 * - position: The position in the bit_vector where the value should be inserted.
@@ -92,6 +106,7 @@ namespace chimera {
 				data.data()[idx + 1] |= (value >> (64 - (position % 64)));
 			}
 		}
+
 
 		/*
 		 * -----------------------------------------------------------------------------------------------
