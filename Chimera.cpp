@@ -70,22 +70,22 @@ int main(int argc, char** argv)
 
 
 	// Classify
-    // Add --single option
-    auto singleOpt = classify->add_option("-i,--single", classifyConfig.singleFiles, "Input file for classifying")
-    ->check(CLI::ExistingFile);
+	// Add --single option
+	auto singleOpt = classify->add_option("-i,--single", classifyConfig.singleFiles, "Input file for classifying")
+		->check(CLI::ExistingFile);
 
-    // Add --paired option
-    auto pairedOpt = classify->add_option("-p,--paired", classifyConfig.pairedFiles, "Paired input files for classifying")
-    ->check(CLI::ExistingFile)
-    ->excludes(singleOpt)  // Ensure that single and paired are mutually exclusive
-    ->each([](const std::string&) {});  // Use each to allow multiple inputs for paired
+	// Add --paired option
+	auto pairedOpt = classify->add_option("-p,--paired", classifyConfig.pairedFiles, "Paired input files for classifying")
+		->check(CLI::ExistingFile)
+		->excludes(singleOpt)  // Ensure that single and paired are mutually exclusive
+		->each([](const std::string&) {});  // Use each to allow multiple inputs for paired
 
-    // Custom validation function to ensure that the --paired option must have an even number of files
-    classify->callback([pairedOpt]() {
-    if (pairedOpt->count() > 0 && pairedOpt->count() % 2 != 0) {
-    throw CLI::ValidationError("--paired option must have an even number of input files");
-    }
-    });
+	// Custom validation function to ensure that the --paired option must have an even number of files
+	classify->callback([pairedOpt]() {
+		if (pairedOpt->count() > 0 && pairedOpt->count() % 2 != 0) {
+			throw CLI::ValidationError("--paired option must have an even number of input files");
+		}
+		});
 
 	classify->add_option("-o,--output", classifyConfig.outputFile, "Output file for classifying")
 		->default_val("ChimeraClassify");
@@ -99,9 +99,7 @@ int main(int argc, char** argv)
 	classify->add_option("-m,--mode", classifyConfig.mode, "Mode for classifying")
 		->default_val("fast");
 	classify->add_option("-b,--batch-size", classifyConfig.batchSize, "Batch size for classifying")
-		->default_val(10);
-	classify->add_option("-n,--batch-num", classifyConfig.batchNum, "Batch number for classifying")
-		->default_val(1000);
+		->default_val(400);
 	classify->add_flag("-q,--quiet", classifyConfig.verbose, "Quiet output")->default_val(true)->disable_flag_override();
 
 

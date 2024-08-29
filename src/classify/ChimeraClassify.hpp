@@ -45,6 +45,10 @@
 #include <mutex>
 #include <queue>
 #include <buildConfig.hpp>
+#include <cmath>
+#include <future>
+#include <BS_thread_pool.hpp>
+
 namespace ChimeraClassify {
 	void run(ClassifyConfig config);
 }

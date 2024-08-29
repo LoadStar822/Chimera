@@ -38,7 +38,6 @@ namespace ChimeraClassify {
 		std::string mode;
 		bool verbose = true;
 		size_t batchSize;
-		size_t batchNum;
 	};
 
 	inline std::ostream& operator<<(std::ostream& os, const ClassifyConfig& config) {

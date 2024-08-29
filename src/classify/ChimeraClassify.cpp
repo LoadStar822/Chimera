@@ -235,138 +235,280 @@ namespace ChimeraClassify {
         return seed >> (64u - 2u * kmer_size);
     }
 
+
+
+
+    /**
+     * @brief Process a sequence for classification.
+     * 
+     * This function processes a sequence for classification using the Interleaved Cuckoo Filter (ICF).
+     * It takes the sequence's hash values, the ICF configuration, the taxid bins, the classification configuration,
+     * the ICF object, the sequence's ID, and the vector to store the classification results.
+     * 
+     * The function calculates the number of hash values and the threshold for classification based on the configuration.
+     * It then performs a bulk count operation on the hash values using the ICF object.
+     * The function creates a classifyResult object to store the classification result for the sequence.
+     * 
+     * The function iterates over the taxid bins and calculates the count for each bin based on the bulk count result.
+     * If the count for a bin is above the threshold, the bin and count are added to the classifyResult object.
+     * The function also keeps track of the bin with the maximum count.
+     * 
+     * If the maximum count is greater than 0, the function checks the classification mode.
+     * If the mode is "fast" or there is only one bin with a count above the threshold, the classifyResult object is updated
+     * to only contain the bin with the maximum count.
+     * 
+     * Finally, the function locks the resultMutex to ensure thread safety and adds the classifyResult object to the
+     * classifyResults vector.
+     * 
+     * @param hashs1 The hash values of the sequence.
+     * @param icfConfig The configuration for the Interleaved Cuckoo Filter.
+     * @param taxidBins The taxid bins.
+     * @param config The configuration for the classification.
+     * @param icf The Interleaved Cuckoo Filter object.
+     * @param id The ID of the sequence.
+     * @param classifyResults The vector to store the classification results.
+     * @param fileInfo The information about the files and sequences.
+     */
+	std::mutex resultMutex;
+	inline void processSequence(const std::vector<size_t>& hashs1,
+		ChimeraBuild::ICFConfig& icfConfig,
+		const std::vector<std::pair<std::string, std::size_t>>& taxidBins,
+		ClassifyConfig& config,
+		chimera::InterleavedCuckooFilter& icf,
+		const std::string& id,
+		std::vector<classifyResult>& classifyResults,
+		FileInfo& fileInfo)
+    {
+        // Calculate the number of hash values and the threshold for classification
+        size_t hashNum = hashs1.size();
+        size_t threshold = std::ceil(hashNum * config.shotThreshold);
+        if (threshold == 0)
+        {
+            threshold = 1;
+        }
+
+        // Perform bulk count operation on the hash values using the Interleaved Cuckoo Filter
+        auto count = icf.bulk_count(hashs1);
+        classifyResult result;
+        result.id = id;
+
+        size_t oldIndex = 0;
+        size_t maxBinCount = 0;
+        std::pair<std::string, std::size_t> maxCount;
+
+        // Iterate over the taxid bins and calculate the count for each bin based on the bulk count result
+        for (auto const& [taxid, bins] : taxidBins)
+        {
+            size_t binCount = 0;
+            for (size_t i = oldIndex; i < bins; i++)
+            {
+                binCount += kv_A(count, i);
+            }
+            oldIndex = bins;
+            if (binCount >= threshold)
+            {
+                // Add the bin and count to the classifyResult object if the count is above the threshold
+                result.taxidCount.emplace_back(taxid, binCount);
+                if (binCount > maxBinCount)
+                {
+                    maxBinCount = binCount;
+                    maxCount = std::make_pair(taxid, binCount);
+                }
+            }
+        }
+
+        // If the maximum count is greater than 0, update the classifyResult object based on the classification mode
+        if (maxBinCount > 0)
+        {
+            fileInfo.classifiedNum++;
+            if (config.mode == "fast" || result.taxidCount.size() == 1)
+            {
+                result.taxidCount.clear();
+                result.taxidCount.emplace_back(maxCount);
+            }
+        }
+        else
+        {
+            fileInfo.unclassifiedNum++;
+            result.taxidCount.emplace_back("unclassified", 1);
+        }
+
+        // Lock the resultMutex to ensure thread safety and add the classifyResult object to the classifyResults vector
+        std::lock_guard<std::mutex> lock(resultMutex);
+        classifyResults.emplace_back(result);
+    }
+
+    /**
+     * @brief Process a batch of reads for classification.
+     * 
+     * This function processes a batch of reads for classification using the Interleaved Cuckoo Filter (ICF).
+     * It takes the batch of reads, the ICF configuration, the taxid bins, the classification configuration,
+     * the ICF object, the vector to store the classification results, and the minimiser view for hashing.
+     * 
+     * If the batch contains paired-end reads, the function generates minimizer hash values for each sequence.
+     * If the sequence lengths meet the window size requirement, the function generates the hash values using the minimiser view.
+     * For paired-end reads, the function combines the hash values from both sequences.
+     * 
+     * If the batch contains single-end reads, the function generates minimizer hash values for each sequence.
+     * If the sequence length meets the window size requirement, the function generates the hash values using the minimiser view.
+     * 
+     * The function then calls the processSequence function to perform classification on the generated hash values.
+     * 
+     * @param batch The batch of reads to process.
+     * @param icfConfig The configuration for the Interleaved Cuckoo Filter.
+     * @param taxidBins The taxid bins.
+     * @param config The configuration for the classification.
+     * @param icf The Interleaved Cuckoo Filter object.
+     * @param classifyResults The vector to store the classification results.
+     * @param minimiser_view The minimiser view for hashing.
+     * @param fileInfo The information about the files and sequences.
+     */
+    void processBatch(batchReads batch,
+        ChimeraBuild::ICFConfig& icfConfig,
+        const std::vector<std::pair<std::string, std::size_t>>& taxidBins,
+        ClassifyConfig& config,
+        chimera::InterleavedCuckooFilter& icf,
+        std::vector<classifyResult>& classifyResults,
+        const auto& minimiser_view,
+        FileInfo& fileInfo)
+    {
+        // Process batch of reads
+        std::vector<size_t> hashs1;
+        if (!batch.seqs2.empty())
+        {
+            // Process paired-end reads
+            for (size_t i = 0; i < batch.seqs2.size(); i += 2)
+            {
+
+                if (batch.seqs2[i].size() >= icfConfig.window_size)
+                {
+                    // Generate minimizer hash values for the first sequence
+                    hashs1 = batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector>();
+                    if (batch.seqs2[i + 1].size() >= icfConfig.window_size)
+                    {
+                        // Generate minimizer hash values for the second sequence
+                        std::vector<size_t> hashs2 = batch.seqs2[i + 1] | minimiser_view | seqan3::ranges::to<std::vector>();
+                        // Combine the hash values from both sequences
+                        hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
+                    }
+                }
+                // Process the combined hash values for classification
+                processSequence(hashs1, icfConfig, taxidBins, config, icf, batch.ids[i >> 1], classifyResults, fileInfo);
+            }
+        }
+        else
+        {
+            // Process single-end reads
+            for (size_t i = 0; i < batch.seqs.size(); i++)
+            {
+                if (batch.seqs[i].size() >= icfConfig.window_size)
+                {
+                    // Generate minimizer hash values for the sequence
+                    hashs1 = batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector>();
+                }
+                // Process the hash values for classification
+                processSequence(hashs1, icfConfig, taxidBins, config, icf, batch.ids[i], classifyResults, fileInfo);
+            }
+        }
+    }
+
+    /**
+     * @brief Classify the reads using the Interleaved Cuckoo Filter.
+     * 
+     * This function performs the classification of reads using the Interleaved Cuckoo Filter (ICF).
+     * It takes the ICF configuration, a queue of batchReads objects, the classification configuration,
+     * the ICF object, the taxid bins, and a vector to store the classification results.
+     * The function creates a minimiser view for hashing and processes batches from the read queue.
+     * Each batch is processed asynchronously using multiple threads, and the results are stored in the classifyResults vector.
+     * The function waits for all the tasks to complete before returning.
+     * 
+     * @param icfConfig The configuration for the Interleaved Cuckoo Filter.
+     * @param readQueue The queue of batchReads objects containing the reads to classify.
+     * @param config The configuration for the classification.
+     * @param icf The Interleaved Cuckoo Filter object.
+     * @param taxidBins The taxid bins.
+     * @param classifyResults The vector to store the classification results.
+     * @param fileInfo The information about the files and sequences.
+     */
     void classify(ChimeraBuild::ICFConfig& icfConfig,
         std::queue<batchReads>& readQueue,
         ClassifyConfig& config,
         chimera::InterleavedCuckooFilter& icf,
         std::vector<std::pair<std::string, std::size_t>>& taxidBins,
-        std::vector<classifyResult>& classifyResults
-         )
+        std::vector<classifyResult>& classifyResults,
+        FileInfo& fileInfo)
     {
+        // Create a minimiser view for hashing
         auto minimiser_view = seqan3::views::minimiser_hash(
             seqan3::shape{ seqan3::ungapped{ icfConfig.kmer_size } },
             seqan3::window_size{ icfConfig.window_size },
             seqan3::seed{ adjust_seed(icfConfig.kmer_size) });
-        while (true)
-        {
-            batchReads batch;
-            if (!readQueue.empty())
-            {
-                batch = readQueue.front();
-                readQueue.pop();
-            }
-            else
-            {
-                break;
-            }
-            std::vector<size_t> hashs1;
-            if (batch.seqs2.size() > 0)
-            {
-                for (size_t i = 0; i < batch.seqs2.size(); i += 2)
-                {
-                    classifyResult result;
-                    result.id = batch.ids[i >> 1];
-					std::vector<std::pair<std::string, std::size_t>> resultBuffer;
-					std::pair<std::string, std::size_t> maxCount;
-                    size_t seqLen1 = batch.seqs2[i].size();
-                    size_t seqLen2 = batch.seqs2[i + 1].size();
-                    if (seqLen1 >= icfConfig.window_size)
-                    {
-                        hashs1 = batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector>();
-                        if(seqLen2 >= icfConfig.window_size)
-						{
-							std::vector<size_t> hashs2 = batch.seqs2[i + 1] | minimiser_view | seqan3::ranges::to<std::vector>();
-                            hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
-						}
-                    }
-					size_t hashNum = hashs1.size();
-					size_t threshold = std::ceil(hashNum * config.shotThreshold);
-					if (threshold == 0)
-					{
-						threshold = 1;
-					}
-					auto count = icf.bulk_count(hashs1);
-					size_t oldIndex = 0;
-					size_t maxBinCount = 0;
-					for (auto const& [taxid, bins] : taxidBins)
-					{
-						size_t binCount = 0;
-						for (size_t i = oldIndex; i < bins; i++)
-						{
-							binCount += kv_A(count, i);
-						}
-						oldIndex = bins;
-						if (binCount >= threshold)
-						{
-							resultBuffer.push_back(std::make_pair(taxid, binCount));
-							if (binCount > maxBinCount)
-							{
-								maxBinCount = binCount;
-								maxCount = std::make_pair(taxid, binCount);
-							}
-						}
-					}
-					if (maxBinCount > 0)
-					{
-                        if (config.mode == "fast" || resultBuffer.size() == 1)
-                        {
-                            result.taxidCount.push_back(maxCount);
-                        }
-					}
-                }
-            }
-            else
-            {
-                for(size_t i = 0; i < batch.seqs.size(); i++)
-				{
-					size_t seqLen = batch.seqs[i].size();
-					if (seqLen >= icfConfig.window_size)
-					{
-						hashs1 = batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector>();
-					}
-                    size_t hashNum = hashs1.size();
-                    size_t threshold = std::ceil(hashNum * config.shotThreshold);
-                    if (threshold == 0)
-					{
-						threshold = 1;
-					}
-                    auto count = icf.bulk_count(hashs1);
-                    classifyResult result;
-                    result.id = batch.ids[i];
-                    size_t oldIndex = 0;
-                    size_t maxBinCount = 0;
-                    std::pair<std::string, std::size_t> maxCount;
-                    for (auto const& [taxid, bins] : taxidBins)
-					{
-						size_t binCount = 0;
-						for (size_t i = oldIndex; i < bins; i++)
-						{
-							binCount += kv_A(count, i);
-						}
-						oldIndex = bins;
-						if (binCount >= threshold)
-						{
-							result.taxidCount.push_back(std::make_pair(taxid, binCount));
-							if (binCount > maxBinCount)
-							{
-								maxBinCount = binCount;
-								maxCount = std::make_pair(taxid, binCount);
-							}
-						}
-					}
-                    if (maxBinCount > 0)
-					{
-						if (config.mode == "fast" || result.taxidCount.size() == 1)
-						{
-							result.taxidCount.push_back(maxCount);
-						}
-					}
-					classifyResults.push_back(result);
-				}
-            }
 
+        BS::thread_pool pool(config.threads);
+		//ctpl::thread_pool pool(config.threads);
+
+        std::vector<std::future<void>> futures;
+
+        // Process batches from the read queue
+        while (!readQueue.empty())
+        {
+            batchReads batch = readQueue.front();
+            readQueue.pop();
+
+
+			futures.emplace_back(pool.submit_task([batch, &icfConfig, &taxidBins, &config, &icf, &classifyResults, &minimiser_view, &fileInfo]() {
+                //auto timeStart = std::chrono::high_resolution_clock::now();
+				processBatch(std::ref(batch), icfConfig, taxidBins, config, icf, classifyResults, minimiser_view, fileInfo);
+    //            auto timeEnd = std::chrono::high_resolution_clock::now();
+    //            auto timeDuration = std::chrono::duration_cast<std::chrono::milliseconds>(timeEnd - timeStart);
+    //            if (config.verbose) {
+				//	std::cout << "Processed batch in: ";
+				//	print_classify_time(timeDuration.count());
+				//}
+				}));
+        }
+
+        // Wait for the remaining tasks to complete
+        for (auto& f : futures)
+        {
+            f.get();
         }
     }
+
+
+    void saveResult(std::vector<classifyResult> classifyResults,
+                    ClassifyConfig config)
+    {
+        // Open the output file
+		std::ofstream os(config.outputFile);
+
+		// Check if the file is successfully opened
+		if (!os.is_open())
+		{
+			throw std::runtime_error("Failed to open file: " + config.outputFile);
+		}
+
+		// Write the classification results to the output file
+		for (const auto& result : classifyResults)
+		{
+			os << result.id << '\t';
+			for (const auto& [taxid, count] : result.taxidCount)
+			{
+                if (taxid == "unclassified")
+                {
+                    os << taxid << '\t';
+                    continue;
+                }
+				os << taxid << ':' << count << '\t';
+			}
+			os << '\n';
+		}
+
+		// Close the file
+		os.close();
+    }
+
+
 
 	void run(ClassifyConfig config) {
 		if (config.verbose) {
@@ -396,7 +538,7 @@ namespace ChimeraClassify {
 		auto classifyStart = std::chrono::high_resolution_clock::now();
         std::cout << "Classifying sequences..." << std::endl;
         std::vector<classifyResult> classifyResults;
-        classify(icfConfig, readQueue, config, icf, taxidBins, classifyResults);
+        classify(icfConfig, readQueue, config, icf, taxidBins, classifyResults, fileInfo);
 
         auto classifyEnd = std::chrono::high_resolution_clock::now();
         auto classifyDuration = std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd - classifyStart);
@@ -405,9 +547,28 @@ namespace ChimeraClassify {
 			print_classify_time(classifyDuration.count());
 		}
 
+        auto saveStart = std::chrono::high_resolution_clock::now();
+        std::cout << "Saving classification results..." << std::endl;
+        saveResult(classifyResults, config);
+        auto saveEnd = std::chrono::high_resolution_clock::now();
+        auto saveDuration = std::chrono::duration_cast<std::chrono::milliseconds>(saveEnd - saveStart);
+        if (config.verbose) {
+            std::cout << "\nSave time: ";
+            print_classify_time(saveDuration.count());
+			std::cout << "Total sequences: " << fileInfo.sequenceNum << std::endl;
+            std::cout << "Classified sequences: " << fileInfo.classifiedNum << " (" << (static_cast<double>(fileInfo.classifiedNum) / fileInfo.sequenceNum) * 100 << "%)" << std::endl;
+            std::cout << "Unclassified sequences: " << fileInfo.unclassifiedNum << " (" << (static_cast<double>(fileInfo.unclassifiedNum) / fileInfo.sequenceNum) * 100 << "%)" << std::endl;
+        }
+        
+
 
 		auto TotalclassifyEnd = std::chrono::high_resolution_clock::now();
 		auto TotalclassifyDuration = std::chrono::duration_cast<std::chrono::milliseconds>(TotalclassifyEnd - TotalclassifyStart);
 
+        if(config.verbose) {
+			std::cout << "\nTotal classify time: ";
+			print_classify_time(TotalclassifyDuration.count());
+		}
 	}
 }
+	

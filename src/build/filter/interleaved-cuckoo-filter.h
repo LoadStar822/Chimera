@@ -352,15 +352,38 @@ namespace chimera {
 			kv_resize(int, result, bins);
 			std::memset(result.a, 0, sizeof(int) * bins);
 			kv_size(result) = bins;
-			for (auto value : values)
+
+#pragma omp parallel
 			{
-				kvector_bool tmp = bulk_contain(value);
-				for (size_t i = 0; i < tmp.n; i++)
+				kvector local_result;
+				kv_init(local_result);
+				kv_resize(int, local_result, bins);
+				std::memset(local_result.a, 0, sizeof(int) * bins);
+				kv_size(local_result) = bins;
+
+#pragma omp for nowait
+				for (size_t idx = 0; idx < std::ranges::distance(values); ++idx)
 				{
-					kv_A(result, i) += kv_A(tmp, i);
+					auto value = values[idx];
+					kvector_bool tmp = bulk_contain(value);
+					for (size_t i = 0; i < tmp.n; i++)
+					{
+						kv_A(local_result, i) += kv_A(tmp, i);
+					}
+					kv_destroy(tmp);
 				}
-				kv_destroy(tmp);
+
+#pragma omp critical
+				{
+					for (size_t i = 0; i < bins; i++)
+					{
+						kv_A(result, i) += kv_A(local_result, i);
+					}
+				}
+
+				kv_destroy(local_result);
 			}
+
 			return result;
 		}
 	};
