@@ -32,3 +32,6 @@
 *.app
 /out/build/linux-debug
 /.vs
+/src/download/.idea
+/src/download/build/main
+/src/download/__pycache__
