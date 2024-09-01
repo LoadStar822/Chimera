@@ -8,10 +8,10 @@
  *
  * Created Date:  2024-07-09
  *
- * Last Modified: 2024-07-09
+ * Last Modified: 2024-09-01
  *
  * Description:
- *  This is a simple C++ program that outputs "Hello, World!".
+ *  This is the main entry for Chimera
  *
  * Version:
  *  1.0

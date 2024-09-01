@@ -8,10 +8,10 @@
  *
  * Created Date:  2024-08-09
  *
- * Last Modified: 2024-08-06
+ * Last Modified: 2024-09-01
  *
  * Description:
- *  This is a simple C++ program that outputs "Hello, World!".
+ *  Classify functions for Chimera
  *
  * Version:
  *  1.0
@@ -22,6 +22,16 @@
 
 namespace ChimeraClassify {
 
+
+	/**
+	 * @brief Print the time taken for classification in a human-readable format.
+	 *
+	 * This function prints the time taken for classification in a human-readable format.
+	 * It calculates the seconds, minutes, and hours from the milliseconds.
+	 * The function outputs different formats based on the length of time.
+	 *
+	 * @param milliseconds The time taken for classification in milliseconds.
+	 */
 	void print_classify_time(long long milliseconds) {
 		// Calculate seconds, minutes, and hours
 		long long total_seconds = milliseconds / 1000;
@@ -482,7 +492,18 @@ namespace ChimeraClassify {
         }
     }
 
-
+	/**
+	 * @brief Save the classification results to an output file.
+	 *
+	 * This function saves the classification results to an output file in TSV format.
+	 * It takes the classification results and the configuration for saving the results.
+	 * The function opens the output file and writes the classification results to the file.
+	 * Each line in the file contains the sequence ID followed by the taxid and count pairs.
+	 * The function closes the file after writing the results.
+	 *
+	 * @param classifyResults The classification results to save.
+	 * @param config The configuration for saving the results.
+	 */
     void saveResult(std::vector<classifyResult> classifyResults,
                     ClassifyConfig config)
     {
@@ -522,7 +543,17 @@ namespace ChimeraClassify {
     }
 
 
-
+	/**
+	 * @brief Run the classification process.
+	 *
+	 * This function runs the classification process using the provided configuration.
+	 * It prints the configuration if the verbose flag is set.
+	 * The function sets the number of threads for OpenMP and starts the classification process.
+	 * It measures the time taken for reading, classifying, and saving the results.
+	 * The function prints the time taken for each step if the verbose flag is set.
+	 *
+	 * @param config The configuration for the classification process.
+	 */
 	void run(ClassifyConfig config) {
 		if (config.verbose) {
 			std::cout << config << std::endl;

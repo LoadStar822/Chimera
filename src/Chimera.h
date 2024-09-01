@@ -11,7 +11,7 @@
  * Last Modified: 2024-07-09
  *
  * Description:
- *  This is a simple C++ program that outputs "Hello, World!".
+ *  This is the main entry for Chimera
  *
  * Version:
  *  1.0

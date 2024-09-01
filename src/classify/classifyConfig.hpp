@@ -8,10 +8,10 @@
  *
  * Created Date:  2024-08-10
  *
- * Last Modified: 2024-08-06
+ * Last Modified: 2024-09-01
  *
  * Description:
- *  This is a simple C++ program that outputs "Hello, World!".
+ *  Classify configuration for Chimera
  *
  * Version:
  *  1.0
