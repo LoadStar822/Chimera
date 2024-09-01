@@ -431,7 +431,7 @@ def write_tax(tax_file, info, tax):
 
 
 
-def main():
+def download():
     parser = argparse.ArgumentParser(description='Download NCBI fasta file ')
 
     parser.add_argument("-d", "--database", help="Database (genbank, refseq)")
@@ -533,6 +533,3 @@ def main():
 
     os.system(f"rm -rf {tmpFolder}")
 
-
-if __name__ == '__main__':
-    main()
