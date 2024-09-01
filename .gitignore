@@ -34,3 +34,7 @@
 /src/download/.idea
 /src/download/build/main
 /src/download/__pycache__
+/__pycache__/chimera.cpython-38.pyc
+/.idea
+/out/install/linux-debug/bin
+/src/profile/__pycache__
