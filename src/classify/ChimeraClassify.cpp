@@ -326,6 +326,13 @@ namespace ChimeraClassify {
                 result.taxidCount.clear();
                 result.taxidCount.emplace_back(maxCount);
             }
+            else if (config.mode == "normal")
+            {
+				// Sort the taxidCount vector based on the count in descending order
+				std::sort(result.taxidCount.begin(), result.taxidCount.end(), [](const auto& a, const auto& b) {
+					return a.second > b.second;  // Sort in descending order
+					});
+            }
         }
         else
         {
@@ -479,8 +486,14 @@ namespace ChimeraClassify {
     void saveResult(std::vector<classifyResult> classifyResults,
                     ClassifyConfig config)
     {
+		// Ensure the output file has a .tsv extension
+		std::string outputFile = config.outputFile;
+		if (std::filesystem::path(outputFile).extension() != ".tsv") {
+			outputFile += ".tsv";
+		}
+        
         // Open the output file
-		std::ofstream os(config.outputFile);
+		std::ofstream os(outputFile, std::ios::out);
 
 		// Check if the file is successfully opened
 		if (!os.is_open())
@@ -491,15 +504,15 @@ namespace ChimeraClassify {
 		// Write the classification results to the output file
 		for (const auto& result : classifyResults)
 		{
-			os << result.id << '\t';
+            os << result.id << '\t';
 			for (const auto& [taxid, count] : result.taxidCount)
 			{
                 if (taxid == "unclassified")
                 {
-                    os << taxid << '\t';
+                    os << taxid;
                     continue;
                 }
-				os << taxid << ':' << count << '\t';
+                os << taxid << ':' << count << '\t';
 			}
 			os << '\n';
 		}

@@ -57,6 +57,7 @@ namespace ChimeraClassify {
 		os << std::setw(20) << "Output file:" << config.outputFile << std::endl
 			<< std::setw(20) << "Database file:" << config.dbFile << std::endl
 			<< std::setw(20) << "Shot threshold:" << config.shotThreshold << std::endl
+			<< std::setw(20) << "Mode:" << config.mode << std::endl
 			<< std::setw(20) << "Threads:" << config.threads << std::endl
 			<< std::setw(20) << "Verbose:" << config.verbose << std::endl;
 

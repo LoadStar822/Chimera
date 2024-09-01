@@ -1,6 +1,8 @@
 ﻿cmake_minimum_required(VERSION 3.10)
 project(Chimera VERSION 0.1.0)
 add_definitions(-DCHIMERA_VERSION="${PROJECT_VERSION}")
+set(PROJECT_ROOT_DIR "${CMAKE_SOURCE_DIR}")
+add_definitions(-DPROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}")
 
 set( CMAKE_CXX_STANDARD 20 )
 set( CMAKE_CXX_STANDARD_REQUIRED ON )
@@ -69,13 +71,11 @@ file(GLOB_RECURSE HEADERS
 )
 
 # 添加可执行文件
-add_executable(chimera ${SOURCES} "src/build/filter/interleaved-cuckoo-filter.h" "src/build/ChimeraBuild.cpp")
+add_executable(Chimera ${SOURCES} "src/build/filter/interleaved-cuckoo-filter.h" "src/build/ChimeraBuild.cpp")
 
-# 构建test.cpp
-add_executable(test ${PROJECT_SOURCE_DIR}/test.cpp )
 
 # 链接库和 OpenSSL
-target_link_libraries(chimera
+target_link_libraries(Chimera
     PRIVATE
     OpenSSL::SSL
     OpenSSL::Crypto
@@ -86,7 +86,7 @@ target_link_libraries(chimera
 )
 
 # 设置包含目录
-target_include_directories(chimera
+target_include_directories(Chimera
     PUBLIC
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/src/build
@@ -109,6 +109,6 @@ endif()
 
 
 # 安装规则
-install(TARGETS chimera
+install(TARGETS Chimera
     DESTINATION bin
 )

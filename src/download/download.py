@@ -98,7 +98,7 @@ def prompt_user(options):
 
 
 def build_command(options):
-    cmd = ["./genome_updater.sh"]
+    cmd = ["genome_updater.sh"]
 
     if options.database:
         cmd.append(f"-d '{options.database}'")
@@ -276,27 +276,6 @@ def load_assembly_accession(input_files):
     return info
 
 
-def download(urls: list, output_prefix: str):
-    """
-    Parameters:
-    * **urls** *[list]*: List of urls to download
-    * **output_prefix** *[str]*: Output directory to save files
-
-    Returns:
-    * list of files saved
-    """
-    files = []
-    for url in urls:
-        outfile = output_prefix + os.path.basename(url)
-        urlstream = urllib.request.urlopen(url)
-        with open(outfile, 'b+w') as f:
-            f.write(urlstream.read())
-        urlstream.close()
-        files.append(outfile)
-
-    return files
-
-
 def parse_assembly_summary(info, assembly_summary, level):
     count_assembly_summary = {}
     unique_acc = set(info.index)
@@ -429,9 +408,7 @@ def write_tax(tax_file, info, tax):
         f.write(info_subset.to_csv(sep="\t", header=False, index=False))
 
 
-
-
-def download():
+def download(interactive=False):
     parser = argparse.ArgumentParser(description='Download NCBI fasta file ')
 
     parser.add_argument("-d", "--database", help="Database (genbank, refseq)")
@@ -452,13 +429,16 @@ def download():
     parser.add_argument('-q', '--quit', action='store_true', help="Enable quit mode")
     parser.add_argument('-v', '--verbose', action='store_true', help="Enable verbose mode")
 
-    args = parser.parse_args()
+    if not interactive:
+        args = parser.parse_args()
+    else:
+        args = parser.parse_args([])
 
-    if not any(vars(args).values()):
+    if not any(vars(args).values() or interactive):
         options = argparse.Namespace(**prompt_user(args))
     else:
         options = args
-        if options.quit != True:
+        if not options.quit:
             options.quite_or_verbose = False
     command = build_command(options)
 
@@ -533,3 +513,8 @@ def download():
 
     os.system(f"rm -rf {tmpFolder}")
 
+    return options
+
+
+if __name__ == "__main__":
+    download()

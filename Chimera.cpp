@@ -36,7 +36,7 @@
 int main(int argc, char** argv)
 {
 	// Create the main application object
-	CLI::App app{ "Chimera - A tool for sequence analysis" };
+	CLI::App app{ "Chimera - A versatile tool for metagenomic classification" };
 	ChimeraBuild::BuildConfig buildConfig;
 	ChimeraClassify::ClassifyConfig classifyConfig;
 
@@ -45,7 +45,6 @@ int main(int argc, char** argv)
 	// Create subcommands
 	auto build = app.add_subcommand("build", "Build a sequence database");
 	auto classify = app.add_subcommand("classify", "Classify sequences");
-	auto profile = app.add_subcommand("profile", "Generate sequence profile");
 
 	// Build
 	build->add_option("-i,--input", buildConfig.input_file, "Input file for building")
@@ -105,12 +104,6 @@ int main(int argc, char** argv)
 
 
 
-	// Profile
-	std::string profile_input_file;
-	profile->add_option("-i,--input", profile_input_file, "Input file for profiling")
-		->required()
-		->check(CLI::ExistingFile);
-
 
 
 	if (argc == 1) {
@@ -121,7 +114,18 @@ int main(int argc, char** argv)
 	CLI11_PARSE(app, argc, argv);
 
 	if (show_version) {
-		std::cout << "Chimera version: " << VERSION_INFO << std::endl;
+		std::cout << "======================================" << std::endl;
+		std::cout << "        Chimera - Metagenomic Tool" << std::endl;
+		std::cout << "======================================" << std::endl;
+		std::cout << "Version      : " << VERSION_INFO << std::endl;
+		std::cout << "Build Date   : " << __DATE__ << " " << __TIME__ << std::endl;
+		std::cout << "Compiled with: " << "GCC " << __VERSION__ << std::endl;
+		std::cout << "OS           : Ubuntu 22.04 (WSL)" << std::endl;
+		std::cout << "======================================" << std::endl;
+		std::cout << "Developed by : Qinzhong Tian" << std::endl;
+		std::cout << "Team         : MalabZ" << std::endl;
+		std::cout << "Homepage     : https://loadstar822.github.io/" << std::endl;
+		std::cout << "======================================" << std::endl;
 		return 0;
 	}
 
@@ -130,10 +134,6 @@ int main(int argc, char** argv)
 	}
 	else if (*classify) {
 		ChimeraClassify::run(classifyConfig);
-	}
-	else if (*profile) {
-		std::cout << "Profiling sequences..." << std::endl;
-		std::cout << "Input file: " << profile_input_file << std::endl;
 	}
 
 	return 0;
