@@ -2,8 +2,9 @@ import argparse
 import os
 import shutil
 import subprocess
-import src.download.download as download
-import src.profile.conversion2Krona as conversion2Krona
+from src.download import download
+from src.profile import conversion2Krona
+
 
 
 def get_chimera_path():
@@ -112,7 +113,6 @@ def run_chimera(args, chimera_path):
             print("Krona chart generated.")
         return 0
 
-
     command = [chimera_path]
 
     if args.version:
@@ -158,13 +158,12 @@ def run_chimera(args, chimera_path):
     download.run(command)
 
 
+def main():
+    chimera_path = get_chimera_path()
+    args = parse_arguments()
+    validate_arguments(args)
+    run_chimera(args, chimera_path)
+
+
 if __name__ == "__main__":
-    try:
-        chimera_path = get_chimera_path()
-        args = parse_arguments()
-        validate_arguments(args)
-        run_chimera(args, chimera_path)
-    except ValueError as e:
-        print(f"Error: {e}")
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
+    main()
