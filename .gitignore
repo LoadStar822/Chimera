@@ -38,3 +38,5 @@
 /.idea
 /out/install/linux-debug/bin
 /src/profile/__pycache__
+/meta.yaml
+/.condaignore

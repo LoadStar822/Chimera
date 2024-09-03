@@ -1,10 +1,10 @@
 import argparse
 import os
 import shutil
+import sys
 import subprocess
 from src.download import download
 from src.profile import conversion2Krona
-
 
 
 def get_chimera_path():
@@ -85,12 +85,11 @@ def parse_arguments():
     profile_parser.add_argument("-o", "--output", default="ChimeraProfile", help="Output file for profiling")
     profile_parser.add_argument("-k", "--krona", action="store_true", help="Generate Krona chart")
 
+    if len(sys.argv) == 1:
+        parser.print_help(sys.stderr)
+        sys.exit(1)
+
     return parser.parse_args()
-
-
-def validate_arguments(args):
-    if not args.version and args.command is None:
-        raise ValueError("You must specify one of the following commands: download, build, classify, profile")
 
 
 def run_chimera(args, chimera_path):
@@ -161,7 +160,6 @@ def run_chimera(args, chimera_path):
 def main():
     chimera_path = get_chimera_path()
     args = parse_arguments()
-    validate_arguments(args)
     run_chimera(args, chimera_path)
 
 
