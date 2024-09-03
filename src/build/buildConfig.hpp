@@ -22,6 +22,8 @@
 #define BUILDCONFIG_HPP
 #include <iostream>
 #include <iomanip>
+#include <cstdint>
+
 namespace ChimeraBuild {
 	struct BuildConfig {
 		std::string input_file;

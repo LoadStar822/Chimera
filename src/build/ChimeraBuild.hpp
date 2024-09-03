@@ -39,6 +39,8 @@
 #include <thread>
 #include <vector>
 #include <mutex>
+#include <cstdint>
+
 
 namespace ChimeraBuild {
 	void run(BuildConfig config);

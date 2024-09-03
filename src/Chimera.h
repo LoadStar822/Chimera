@@ -20,5 +20,7 @@
 #pragma once
 
 #include <iostream>
+#include <cstdint>
+
 
 KSEQ_INIT(gzFile, gzread)

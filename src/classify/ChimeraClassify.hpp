@@ -48,6 +48,8 @@
 #include <cmath>
 #include <future>
 #include <BS_thread_pool.hpp>
+#include <cstdint>
+
 
 namespace ChimeraClassify {
 	void run(ClassifyConfig config);
