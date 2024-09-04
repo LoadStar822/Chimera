@@ -21,7 +21,7 @@ endif()
 
 
 # 设置编译选项
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fno-strict-aliasing -O3 -march=native -fopenmp -flto -funroll-loops")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fno-strict-aliasing -O3 -fopenmp -flto -funroll-loops")
 
 # 设置SeqAn3库的路径
 set(SEQAN3_DIR "${CMAKE_SOURCE_DIR}/libs/seqan3/share/cmake/seqan3")
