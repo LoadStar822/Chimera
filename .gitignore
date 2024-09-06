@@ -40,3 +40,5 @@
 /src/profile/__pycache__
 /meta.yaml
 /.condaignore
+/out
+/Dockerfile

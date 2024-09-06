@@ -174,6 +174,11 @@ namespace ChimeraClassify {
         {
             throw std::runtime_error("No input files specified");
         }
+
+		if (config.verbose) {
+			std::cout << "Number of files: " << fileInfo.fileNum << std::endl;
+            std::cout << "Number of sequences: " << fileInfo.sequenceNum << std::endl << std::endl;
+		}
     }
 
     /**
@@ -330,7 +335,10 @@ namespace ChimeraClassify {
         // If the maximum count is greater than 0, update the classifyResult object based on the classification mode
         if (maxBinCount > 0)
         {
-            fileInfo.classifiedNum++;
+			{
+				std::lock_guard<std::mutex> lock(resultMutex); // 加锁保护 classifiedNum 的访问
+				fileInfo.classifiedNum++;
+			}
             if (config.mode == "fast" || result.taxidCount.size() == 1)
             {
                 result.taxidCount.clear();
@@ -346,7 +354,10 @@ namespace ChimeraClassify {
         }
         else
         {
-            fileInfo.unclassifiedNum++;
+			{
+				std::lock_guard<std::mutex> lock(resultMutex); // 加锁保护 unclassifiedNum 的访问
+				fileInfo.unclassifiedNum++;
+			}
             result.taxidCount.emplace_back("unclassified", 1);
         }
 

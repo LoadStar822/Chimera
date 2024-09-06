@@ -29,7 +29,6 @@
 #include <cereal/archives/binary.hpp>
 #include <cereal/types/memory.hpp>
 #include <cereal/types/vector.hpp>
-#include <immintrin.h>
 
 namespace chimera {
 	class InterleavedCuckooFilter {
@@ -352,38 +351,15 @@ namespace chimera {
 			kv_resize(int, result, bins);
 			std::memset(result.a, 0, sizeof(int) * bins);
 			kv_size(result) = bins;
-
-#pragma omp parallel
+			for (auto value : values)
 			{
-				kvector local_result;
-				kv_init(local_result);
-				kv_resize(int, local_result, bins);
-				std::memset(local_result.a, 0, sizeof(int) * bins);
-				kv_size(local_result) = bins;
-
-#pragma omp for nowait
-				for (size_t idx = 0; idx < std::ranges::distance(values); ++idx)
+				kvector_bool tmp = bulk_contain(value);
+				for (size_t i = 0; i < tmp.n; i++)
 				{
-					auto value = values[idx];
-					kvector_bool tmp = bulk_contain(value);
-					for (size_t i = 0; i < tmp.n; i++)
-					{
-						kv_A(local_result, i) += kv_A(tmp, i);
-					}
-					kv_destroy(tmp);
+					kv_A(result, i) += kv_A(tmp, i);
 				}
-
-#pragma omp critical
-				{
-					for (size_t i = 0; i < bins; i++)
-					{
-						kv_A(result, i) += kv_A(local_result, i);
-					}
-				}
-
-				kv_destroy(local_result);
+				kv_destroy(tmp);
 			}
-
 			return result;
 		}
 	};
