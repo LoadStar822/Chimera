@@ -47,8 +47,8 @@
 #include <buildConfig.hpp>
 #include <cmath>
 #include <future>
-#include <BS_thread_pool.hpp>
 #include <cstdint>
+#include <ctpl_stl.h>
 
 
 namespace ChimeraClassify {

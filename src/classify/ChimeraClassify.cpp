@@ -472,8 +472,7 @@ namespace ChimeraClassify {
             seqan3::window_size{ icfConfig.window_size },
             seqan3::seed{ adjust_seed(icfConfig.kmer_size) });
 
-        BS::thread_pool pool(config.threads);
-		//ctpl::thread_pool pool(config.threads);
+		ctpl::thread_pool pool(config.threads);
 
         std::vector<std::future<void>> futures;
 
@@ -484,15 +483,8 @@ namespace ChimeraClassify {
             readQueue.pop();
 
 
-			futures.emplace_back(pool.submit_task([batch, &icfConfig, &taxidBins, &config, &icf, &classifyResults, &minimiser_view, &fileInfo]() {
-                //auto timeStart = std::chrono::high_resolution_clock::now();
-				processBatch(std::ref(batch), icfConfig, taxidBins, config, icf, classifyResults, minimiser_view, fileInfo);
-    //            auto timeEnd = std::chrono::high_resolution_clock::now();
-    //            auto timeDuration = std::chrono::duration_cast<std::chrono::milliseconds>(timeEnd - timeStart);
-    //            if (config.verbose) {
-				//	std::cout << "Processed batch in: ";
-				//	print_classify_time(timeDuration.count());
-				//}
+			futures.emplace_back(pool.push([batch, &icfConfig, &taxidBins, &config, &icf, &classifyResults, &minimiser_view, &fileInfo](int id) {
+				processBatch(batch, icfConfig, taxidBins, config, icf, classifyResults, minimiser_view, fileInfo);
 				}));
         }
 
