@@ -22,7 +22,6 @@
 - [Input/Output Formats](#inputoutput-formats)
 - [Performance Optimization](#performance-optimization)
 - [FAQ](#faq)
-- [Contributing](#contributing)
 - [Contact & Support](#contact--support)
 
 ---

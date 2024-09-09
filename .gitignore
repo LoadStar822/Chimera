@@ -43,3 +43,6 @@
 /out
 /Dockerfile
 /__pycache__
+/chimera_image.tar
+/CMakeSettings.json
+/.dockerignore
