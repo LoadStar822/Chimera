@@ -10,7 +10,15 @@
 ## Table of Contents
 - [Project Overview](#project-overview)
 - [Installation](#installation)
+   1. [Source Installation](#1-source-installation)
+   2. [Conda Installation](#2-conda-installation)
+   3. [Docker Installation](#3-docker-installation)
 - [Usage Guide](#usage-guide)
+   1. [Download](#1-download)
+   2. [Build](#2-build)
+   3. [Download and Build](#3-download-and-build)
+   4. [Classify](#4-classify)
+   5. [Profile](#5-profile)
 - [Input/Output Formats](#inputoutput-formats)
 - [Performance Optimization](#performance-optimization)
 - [FAQ](#faq)
@@ -426,7 +434,7 @@ In this example, a load factor of `0.85` is used, which can speed up classificat
 
 ---
 
-## FAQ (Frequently Asked Questions)
+## FAQ
 
 ### 1. What is the difference between "fast" and "normal" classification modes?
 
