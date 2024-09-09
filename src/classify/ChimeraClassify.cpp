@@ -122,7 +122,7 @@ namespace ChimeraClassify {
         {
             // Process paired files in parallel
     #pragma omp parallel for
-            for (int i = 0; i < config.pairedFiles.size(); i += 2)
+            for (size_t i = 0; i < config.pairedFiles.size(); i += 2)
             {
                 // Increase fileInfo.fileNum by 2 using atomic operation
     #pragma omp atomic
@@ -472,26 +472,21 @@ namespace ChimeraClassify {
             seqan3::window_size{ icfConfig.window_size },
             seqan3::seed{ adjust_seed(icfConfig.kmer_size) });
 
-		ctpl::thread_pool pool(config.threads);
 
-        std::vector<std::future<void>> futures;
+		std::mutex queueMutex;
 
-        // Process batches from the read queue
-        while (!readQueue.empty())
+#pragma omp parallel
         {
-            batchReads batch = readQueue.front();
-            readQueue.pop();
+#pragma omp for
+            for (size_t i = 0; i < readQueue.size(); ++i) {
+                queueMutex.lock();
+                    batchReads batch = readQueue.front();
+                    readQueue.pop();
+                queueMutex.unlock();
 
-
-			futures.emplace_back(pool.push([batch, &icfConfig, &taxidBins, &config, &icf, &classifyResults, &minimiser_view, &fileInfo](int id) {
-				processBatch(batch, icfConfig, taxidBins, config, icf, classifyResults, minimiser_view, fileInfo);
-				}));
-        }
-
-        // Wait for the remaining tasks to complete
-        for (auto& f : futures)
-        {
-            f.get();
+                // 每个线程独立处理 batch
+                processBatch(batch, icfConfig, taxidBins, config, icf, classifyResults, minimiser_view, fileInfo);
+            }
         }
     }
 

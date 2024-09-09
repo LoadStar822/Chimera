@@ -48,7 +48,6 @@
 #include <cmath>
 #include <future>
 #include <cstdint>
-#include <ctpl_stl.h>
 
 
 namespace ChimeraClassify {

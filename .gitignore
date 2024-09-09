@@ -42,3 +42,4 @@
 /.condaignore
 /out
 /Dockerfile
+/__pycache__
