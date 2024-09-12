@@ -29,17 +29,18 @@
 #include <cstdint>
 
 namespace ChimeraClassify {
-
 	struct ClassifyConfig {
 		std::vector<std::string> singleFiles;
 		std::vector<std::string> pairedFiles;
 		std::string outputFile;
 		std::string dbFile;
+		std::string taxFile;
 		double shotThreshold;
 		uint16_t threads;
 		std::string mode;
 		bool verbose = true;
 		size_t batchSize;
+		bool lca = false;
 	};
 
 	inline std::ostream& operator<<(std::ostream& os, const ClassifyConfig& config) {
@@ -60,6 +61,8 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Database file:" << config.dbFile << std::endl
 			<< std::setw(20) << "Shot threshold:" << config.shotThreshold << std::endl
 			<< std::setw(20) << "Mode:" << config.mode << std::endl
+			<< std::setw(20) << "Batch size:" << config.batchSize << std::endl
+			<< std::setw(20) << "LCA:" << config.lca << std::endl
 			<< std::setw(20) << "Threads:" << config.threads << std::endl
 			<< std::setw(20) << "Verbose:" << config.verbose << std::endl;
 
@@ -73,6 +76,7 @@ namespace ChimeraClassify {
 		size_t sequenceNum = 0;
 		size_t unclassifiedNum = 0;
 		size_t classifiedNum = 0;
+		size_t lcaNum = 0;
 		size_t minLen = 0;
 		size_t maxLen = 0;
 		size_t avgLen = 0;

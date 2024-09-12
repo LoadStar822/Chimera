@@ -67,7 +67,6 @@ int main(int argc, char** argv)
 		->default_val(0.95);
 	build->add_flag("-q,--quiet", buildConfig.verbose, "Quiet output")->default_val(true)->disable_flag_override();
 
-
 	// Classify
 	// Add --single option
 	auto singleOpt = classify->add_option("-i,--single", classifyConfig.singleFiles, "Input file for classifying")
@@ -99,12 +98,10 @@ int main(int argc, char** argv)
 		->default_val("fast");
 	classify->add_option("-b,--batch-size", classifyConfig.batchSize, "Batch size for classifying")
 		->default_val(400);
+	classify->add_flag("--lca", classifyConfig.lca, "Enable LCA mode");
+	classify->add_option("--tax-file", classifyConfig.taxFile, "Taxonomy file for LCA mode")
+		->check(CLI::ExistingFile);
 	classify->add_flag("-q,--quiet", classifyConfig.verbose, "Quiet output")->default_val(true)->disable_flag_override();
-
-
-
-
-
 
 	if (argc == 1) {
 		std::cout << app.help() << std::endl;
@@ -124,7 +121,7 @@ int main(int argc, char** argv)
 		std::cout << "======================================" << std::endl;
 		std::cout << "Developed by : Qinzhong Tian" << std::endl;
 		std::cout << "Team         : MalabZ" << std::endl;
-		std::cout << "Homepage     : https://loadstar822.github.io/" << std::endl;
+		std::cout << "Homepage     : https://github.com/LoadStar822/Chimera" << std::endl;
 		std::cout << "======================================" << std::endl;
 		return 0;
 	}

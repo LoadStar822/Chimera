@@ -5,6 +5,7 @@ import sys
 import subprocess
 from src.download import download
 from src.profile import conversion2Krona
+from src.profile import profile
 
 
 def get_chimera_path():
@@ -77,11 +78,13 @@ def parse_arguments():
         help="Mode for classifying (choices: 'fast', 'normal'). Default is 'fast'."
     )
     classify_parser.add_argument("-b", "--batch-size", type=int, default=400, help="Batch size for classifying")
+    classify_parser.add_argument("-l", "--lca", action="store_true", help="Use LCA algorithm for classification")
+    classify_parser.add_argument("-T", "--tax-file", help="Taxonomy file for LCA classification")
     classify_parser.add_argument("-q", "--quiet", action="store_false", help="Quiet output")
 
     # Profile subcommand
     profile_parser = subparsers.add_parser("profile", help="Generate sequence profile")
-    profile_parser.add_argument("-i", "--input", nargs='+', required=True, help="Input file for profiling")
+    profile_parser.add_argument("-i", "--input", nargs='+', required=True, help="Input file(s) for profiling")
     profile_parser.add_argument("-o", "--output", default="ChimeraProfile", help="Output file for profiling")
     profile_parser.add_argument("-k", "--krona", action="store_true", help="Generate Krona chart")
 
@@ -110,6 +113,7 @@ def run_chimera(args, chimera_path):
             print("Generating Krona chart...")
             download.run(["ktImportText", args.output + ".tsv", "-o", args.output + ".html"])
             print("Krona chart generated.")
+        profile.process_file(args.input, args.output)
         return 0
 
     command = [chimera_path]
@@ -150,6 +154,11 @@ def run_chimera(args, chimera_path):
         command.extend(["-t", str(args.threads)])
         command.extend(["-m", args.mode])
         command.extend(["-b", str(args.batch_size)])
+        if args.lca:
+            command.append("--lca")
+            if not args.tax_file:
+                raise ValueError("Taxonomy file must be provided when using LCA algorithm")
+            command.extend(["--tax-file", args.tax_file])
         if args.quiet:
             command.append("-q")
 

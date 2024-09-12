@@ -28,7 +28,9 @@
 
 ## Project Overview
 
-**Chimera** is a versatile **metagenomic classification tool** developed by **Qinzhong Tian**, designed to simplify and accelerate the process of analyzing large-scale metagenomic datasets. Chimera integrates efficient algorithms and user-friendly features to deliver fast, accurate, and scalable metagenomic classification. The current version (1.0) leverages an advanced **interleaved cuckoo filter** to construct classification databases, ensuring both rapid processing and high accuracy.
+**Chimera** is a versatile **metagenomic classification tool** developed by **Qinzhong Tian**, designed to simplify and accelerate the process of analyzing large-scale metagenomic datasets. Chimera integrates efficient algorithms and user-friendly features to deliver fast, accurate, and scalable metagenomic classification. 
+
+The current version (1.1) introduces **abundance analysis**, along with the calculation of **Shannon** and **Simpson indices** for diversity assessment. Additionally, it enhances classification accuracy by incorporating the **LCA (Lowest Common Ancestor)** algorithm. Previous innovations, such as the **interleaved cuckoo filter** for constructing classification databases, ensure rapid processing and high accuracy, maintaining Chimera’s cutting-edge performance.
 
 ### 🔍 Interactive NCBI Dataset Downloads
 
@@ -38,12 +40,16 @@ Chimera offers flexibility by supporting **custom parameter configurations**, wh
 
 ### ⚡ Fast and Accurate Species Classification
 
-Chimera is optimized for both **speed and scalability**. The classification engine is **multi-threaded**, making it highly effective at processing large datasets in a short time. Its **high accuracy** is driven by advanced algorithms, ensuring reliable species-level identification.
+Chimera is optimized for both **speed and scalability**. The classification engine is **multi-threaded**, making it highly effective at processing large datasets in a short time. The underlying **interleaved cuckoo filter** technology from version 1.0 accelerates database construction and classification, while the newly added **LCA algorithm** in version 1.1 further improves classification accuracy by resolving ambiguous taxonomic assignments.
 
 Supported input formats include:
 - Standard formats: **FASTA**, **FASTQ**
 - Compressed formats: **.gz**, **.bz2**
 - **Paired-end reads** for more complex data inputs
+
+### 📊 Abundance and Diversity Analysis
+
+Chimera version 1.1 introduces advanced **abundance analysis**, allowing users to calculate the relative abundance of taxa across multiple levels of classification. Additionally, the tool computes the **Shannon index** and **Simpson index**, providing valuable insights into species diversity and evenness within a community.
 
 ### 📊 Integrated Krona Visualization
 
@@ -254,6 +260,8 @@ The `classify` function allows users to perform taxonomic classification on sing
 - `-s` or `--shot-threshold`: Shot threshold for classification accuracy (default: `0.7`).
 - `-t` or `--threads`: Number of threads to use during classification (default: `32`).
 - `-m` or `--mode`: Classification mode, either `fast` or `normal` (default: `fast`).
+- `-l` or `--lca`: Use the LCA algorithm for classification.
+- `-T` or `--tax-file`: Taxonomy file for LCA classification (required if `--lca` is used, default: `tax.info` from the downloaded dataset).
 - `-b` or `--batch-size`: Batch size for processing sequences (default: `400`).
 - `-q` or `--quiet`: Suppresses verbose output if specified.
 
@@ -270,20 +278,37 @@ chimera classify -p paired1_1.fasta paired1_2.fasta paired2_1.fasta paired2_2.fa
 ```
 This command classifies the paired-end sequences using the `ChimeraDB` database, saving the output to `results.txt`.
 
+For LCA-based classification with a custom taxonomy file:
+```bash
+chimera classify -i input.fasta -d ChimeraDB -l --tax-file tax.info -o results.txt
+```
+This command uses the LCA algorithm with a specified taxonomy file (`tax.info`) to classify the sequences in `input.fasta` and outputs the results to `results.txt`.
+
 ### 5. Profile
 
-The `profile` function generates a taxonomic profile from the classification results. Currently, it only supports generating **Krona charts**, and the `-k` parameter is required.
+The `profile` function generates a taxonomic profile from the classification results. By default, it calculates the abundance, Shannon index, and Simpson index at different taxonomic levels (e.g., kingdom, phylum, class, order, family, genus, and species). Additionally, the `-k` option can be used to generate a **Krona chart** for interactive visualization.
 
 **Available Parameters:**
 - `-i` or `--input` (required): Input file(s) containing classification results.
-- `-o` or `--output`: Output file name for the Krona chart (default: `ChimeraProfile`).
-- `-k` or `--krona` (required): Generate a Krona chart for interactive visualization.
+- `-o` or `--output`: Output file name for the profile (default: `ChimeraProfile`).
+- `-k` or `--krona`: Generate a Krona chart for interactive visualization.
+
+By default, Chimera calculates:
+- **Taxonomic abundance** at different levels.
+- **Shannon index**: A measure of diversity within a community.
+- **Simpson index**: A measure of dominance in the community.
 
 **Example:**
 ```bash
+chimera profile -i ChimeraClassify.tsv
+```
+This command generates a taxonomic profile with abundance, Shannon index, and Simpson index from the classification results in `ChimeraClassify.tsv`.
+
+To generate a Krona chart:
+```bash
 chimera profile -i ChimeraClassify.tsv -k
 ```
-This command generates a Krona chart (`ChimeraProfile.html`) from the classification results in `ChimeraClassify.tsv`.
+This command generates both the taxonomic profile and a Krona chart (`ChimeraProfile.html`) for visualizing the results.
 
 ---
 
@@ -337,6 +362,7 @@ Chimera accepts various sequence file formats for classification and generates r
     seq1    12345:10   67890:5
     seq2    12345:8
     ```
+    If **LCA mode** is selected, the taxid classified using LCA will be represented as `taxid:0`. This indicates that the LCA algorithm was applied for classification.
 
 **Example:**
 ```bash
@@ -346,15 +372,70 @@ This command classifies the sequences in `input.fasta` using the `ChimeraDB` dat
 
 ### Profiling Output
 
-Chimera’s `profile` function generates taxonomic profiles, and it currently supports output as an interactive **Krona chart**.
+Chimera’s `profile` function generates a detailed taxonomic profile at various levels (e.g., superkingdom, clade, phylum, class, order, family, genus, species). The output includes the count, relative abundance, Shannon index, and Simpson index for each taxonomic level. The output is presented in a tabular format, making it easy to interpret and analyze.
 
-- **Krona Chart (HTML)**: The profiling output is generated as an interactive Krona chart in HTML format. This chart can be opened in a web browser to explore taxonomic classifications.
+**Output format:**
+The output is divided by taxonomic levels, and each section contains the following columns:
+- **Level**: The taxonomic level (e.g., superkingdom, clade, phylum).
+- **Taxon**: The name of the taxon at the specified level.
+- **Count**: The number of sequences classified under that taxon.
+- **Relative Abundance (%)**: The percentage of sequences relative to the total.
+- **Shannon Index**: A measure of diversity.
+- **Simpson Index**: A measure of dominance.
+
+**Example Output:**
+
+```
+Level   Taxon             Count   Relative Abundance (%)  Shannon Index  Simpson Index
+
+## Superkingdom Level ##
+superkingdom    Archaea    110671   99.43   0.0353   0.0114
+superkingdom    unclassified   639   0.57   0.0353   0.0114
+
+## Clade Level ##
+clade   TACK group    110671   99.43   0.0353   0.0114
+clade   unclassified   639   0.57   0.0353   0.0114
+
+## Phylum Level ##
+phylum   Thermoproteota   110671   99.43   0.0353   0.0114
+phylum   unclassified   639   0.57   0.0353   0.0114
+
+## Class Level ##
+class   Thermoprotei   110671   99.43   0.0353   0.0114
+class   unclassified   639   0.57   0.0353   0.0114
+
+## Order Level ##
+order   Desulfurococcales   110671   99.43   0.0353   0.0114
+order   unclassified   639   0.57   0.0353   0.0114
+
+## Family Level ##
+family   Desulfurococcaceae   110671   99.43   0.0353   0.0114
+family   unclassified   639   0.57   0.0353   0.0114
+
+## Genus Level ##
+genus   Aeropyrum   110669   99.42   0.0356   0.0115
+genus   unclassified   639   0.57   0.0356   0.0115
+genus   Staphylothermus   2   0.00   0.0356   0.0115
+
+## Species Level ##
+species   Aeropyrum pernix   110610   99.37   0.0401   0.0125
+species   unclassified   639   0.57   0.0401   0.0125
+species   Aeropyrum camini   59   0.05   0.0401   0.0125
+species   Staphylothermus hellenicus   2   0.00   0.0401   0.0125
+```
+
+This output provides detailed information on the distribution and diversity of sequences across various taxonomic levels.
+
+**Krona Chart Option**:
+Additionally, you can generate a Krona chart for interactive visualization using the `-k` option.
 
 **Example:**
 ```bash
 chimera profile -i results.tsv -o krona_chart -k
 ```
 This command generates a `krona_chart.html` file from the classification results, which can be opened for visualizing the taxonomic profile.
+
+You can see an example of Krona chart visualization here: [Krona example chart](https://telatin.github.io/microbiome-bioinformatics/data/krona/krona-test.html).
 
 ---
 
@@ -456,6 +537,59 @@ Enter `y` to resume and fix the download.
 - **RAM**: At least 16GB of RAM is recommended, and larger datasets may require 64GB or more.
 - **Storage**: SSDs are recommended for better performance.
 - **Operating System**: Chimera is primarily tested on Linux (e.g., Ubuntu 20.04 or 22.04) but also supports other systems via Docker.
+
+### 4. Can I use Chimera without Python?
+
+Yes, you can use Chimera without relying on Python. Python is primarily used to provide functionality for downloading datasets and generating profiles. If you have built Chimera using Conda, you can simply use the following command to view available options:
+
+```bash
+Chimera -h
+```
+
+For source code builds, the `Chimera` executable is generated directly and can be run without Python:
+
+```bash
+./Chimera -h
+```
+
+For Docker, Chimera is the default entry point. To skip the default `chimera` command and access the Docker container's shell, use the following command:
+
+```bash
+docker run -it --rm -v "$(pwd):/app/data" --entrypoint Chimera tianqinzhong/chimera -h
+```
+
+### 5. Where is the taxfile required for LCA, and how do I interpret LCA results?
+
+If you are using Chimera's built-in `download` function, the `taxfile` is located in the downloaded dataset folder as `tax.info`. For custom datasets, you will need to manually create a `taxfile` in a specific format. Each line of the file represents a taxonomic rank and includes the following fields, separated by tabs:
+
+```
+<taxid>   <parent taxid>   <rank>   <name>
+```
+
+- **taxid**: The unique identifier for the taxonomic entity.
+- **parent taxid**: The taxid of the parent taxon in the hierarchy.
+- **rank**: The taxonomic rank (e.g., species, genus, family, etc.).
+- **name**: The scientific name of the taxon.
+
+For example:
+```
+1       0           no rank        root
+2157    131567      superkingdom   Archaea
+2158    183925      order          Methanobacteriales
+2159    2158        family         Methanobacteriaceae
+2160    2159        genus          Methanobacterium
+2162    2160        species        Methanobacterium formicicum
+```
+
+This example defines a taxonomic hierarchy starting from `root` (no rank) down to the species **Methanobacterium formicicum**.
+
+- **taxid 1** is the root of the hierarchy with no parent (`parent taxid = 0`).
+- **taxid 2157** represents the **Archaea** superkingdom, which belongs to the parent taxon **131567**.
+- Similarly, **taxid 2162** represents the species **Methanobacterium formicicum**, which is a descendant of the genus **Methanobacterium** (`taxid 2160`).
+
+### Interpreting LCA Results
+
+In the classification output, any result classified using the LCA algorithm will be shown as `taxid:0`. This indicates that the Lowest Common Ancestor (LCA) method was applied, and the classification could not be resolved to a more specific taxonomic level.
 
 
 

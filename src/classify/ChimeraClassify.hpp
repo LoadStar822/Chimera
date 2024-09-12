@@ -48,7 +48,7 @@
 #include <cmath>
 #include <future>
 #include <cstdint>
-
+#include <LCA.hpp>
 
 namespace ChimeraClassify {
 	void run(ClassifyConfig config);
