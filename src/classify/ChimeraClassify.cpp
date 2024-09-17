@@ -312,6 +312,10 @@ namespace ChimeraClassify {
 				binCount += kv_A(count, i);
 			}
 			oldIndex = bins;
+			if (binCount > hashNum)
+			{
+				binCount = hashNum;
+			}
 			if (binCount >= threshold)
 			{
 				// Add the bin and count to the classifyResult object if the count is above the threshold

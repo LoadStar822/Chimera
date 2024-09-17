@@ -53,7 +53,7 @@ int main(int argc, char** argv)
 	build->add_option("-o,--output", buildConfig.output_file, "Output file for building")
 		->default_val("ChimeraDB");
 	build->add_option("-m,--mode", buildConfig.mode, "Mode for building")
-		->default_val("default");
+		->default_val("normal");
 	build->add_option("-k,--kmer", buildConfig.kmer_size, "Kmer size for building")
 		->default_val(19)
 		->check(CLI::Range(1, 31));

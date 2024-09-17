@@ -152,77 +152,81 @@ namespace ChimeraBuild {
 		robin_hood::unordered_map<std::string, uint64_t>& hashCount,
 		FileInfo& fileInfo)
 	{
-		// Create a view for generating minimiser hashes
 		auto minimiser_view = seqan3::views::minimiser_hash(
 			seqan3::shape{ seqan3::ungapped{ config.kmer_size } },
 			seqan3::window_size{ config.window_size },
 			seqan3::seed{ adjust_seed(config.kmer_size) });
 
-		// Parallelize the task using dynamic scheduling
+		std::vector<std::pair<std::string, std::string>> taxid_file_pairs;
+		for (auto& [taxid, files] : inputFiles)
+		{
+			for (auto& file : files)
+			{
+				taxid_file_pairs.emplace_back(taxid, file);
+			}
+		}
+
+		std::unordered_map<std::string, std::mutex> file_mutex_map;
+
+		std::mutex hashCount_mutex;
+		std::mutex fileInfo_mutex;
+
 #pragma omp parallel
 		{
-#pragma omp single
+			std::unordered_map<std::string, uint64_t> threadHashCount;
+			FileInfo threadFileInfo = {};
+
+#pragma omp for nowait schedule(dynamic)
+			for (size_t i = 0; i < taxid_file_pairs.size(); ++i)
 			{
-				// Iterate over each taxid and its associated files
-				for (auto& [taxid, files] : inputFiles)
+				auto& [taxid, file] = taxid_file_pairs[i];
+
+				seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ file };
+				robin_hood::unordered_set<uint64_t> hashes;
+
+				for (auto const& [header, seq] : fin)
 				{
-#pragma omp task firstprivate(taxid, files)
+					if (seq.size() < config.min_length)
 					{
-						// Create a private FileInfo object for each thread
-						FileInfo threadFileInfo;
+						threadFileInfo.skippedNum++;
+						continue;
+					}
+					threadFileInfo.sequenceNum++;
+					threadFileInfo.bpLength += seq.size();
 
-						// Process each file
-						for (auto& file : files)
-						{
-							// Open the sequence file for reading
-							seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ file };
-							robin_hood::unordered_set<uint64_t> hashes;
+					const auto minihash = seq | minimiser_view | std::views::common;
+					hashes.insert(minihash.begin(), minihash.end());
+				}
 
-							// Iterate over each sequence in the file
-							for (auto const& [header, seq] : fin)
-							{
-								// Skip sequences that are shorter than the minimum length
-								if (seq.size() < config.min_length)
-								{
-									threadFileInfo.skippedNum++;
-									continue;
-								}
-								threadFileInfo.sequenceNum++;
-								threadFileInfo.bpLength += seq.size();
+				threadHashCount[taxid] += hashes.size();
 
-								// Generate minimiser hashes for the sequence and insert them into the set
-								const auto minihash = seq | minimiser_view | std::views::common;
-								hashes.insert(minihash.begin(), minihash.end());
-							}
-
-							// Update the hashCount map using a critical section
-#pragma omp critical
-							{
-								hashCount[taxid] += hashes.size();
-							}
-
-							// Write the minimiser hashes to a file
-							std::ofstream ofile("tmp/" + taxid + ".mini", std::ios::binary | std::ios::app);
-							for (auto hash : hashes)
-							{
-								ofile.write(reinterpret_cast<char*>(&hash), sizeof(hash));
-							}
-							ofile.close();
-							if (ofile.fail())
-							{
-								std::cerr << "Failed to write minimiser file: " << taxid << ".mini" << std::endl;
-							}
-						}
-
-						// Merge the thread's private FileInfo into the global FileInfo
-						#pragma omp critical
-						{
-							fileInfo.skippedNum += threadFileInfo.skippedNum;
-							fileInfo.sequenceNum += threadFileInfo.sequenceNum;
-							fileInfo.bpLength += threadFileInfo.bpLength;
-						}
+				{
+					std::lock_guard<std::mutex> lock(file_mutex_map[taxid]);
+					std::ofstream ofile("tmp/" + taxid + ".mini", std::ios::binary | std::ios::app);
+					if (!ofile.is_open())
+					{
+						std::cerr << "Unable to open the minimize file:" << taxid << ".mini" << std::endl;
+						continue;
+					}
+					for (auto hash : hashes)
+					{
+						ofile.write(reinterpret_cast<char*>(&hash), sizeof(hash));
 					}
 				}
+			}
+
+			{
+				std::lock_guard<std::mutex> lock(hashCount_mutex);
+				for (const auto& [taxid, count] : threadHashCount)
+				{
+					hashCount[taxid] += count;
+				}
+			}
+			{
+				std::lock_guard<std::mutex> lock(fileInfo_mutex);
+				fileInfo.skippedNum += threadFileInfo.skippedNum;
+				fileInfo.sequenceNum += threadFileInfo.sequenceNum;
+				fileInfo.bpLength += threadFileInfo.bpLength;
 			}
 		}
 	}
@@ -264,50 +268,46 @@ namespace ChimeraBuild {
      * @param load_factor The desired load factor for the filter.
      * @param mode The mode of the calculation.
      */
-    void calculateFilterSize(robin_hood::unordered_map<std::string, uint64_t>& hashCount, ICFConfig& icfConfig, double load_factor, std::string mode) {
-        // Get the maximum value from the hashCount map
-        uint64_t maxValue = getMaxValue(hashCount);
-        // Calculate the total size of all values in the hashCount map
-        uint64_t totalSize = calculateTotalSize(hashCount);
-        // Set the initial iteration value
-        size_t it = 100;
-        if (maxValue < it) {
-            it = maxValue;
-        }
-        uint64_t binSize, binNum, oldbinSize, oldbinNum;
-		bool ifTheFirstIsFull = true;
-        double load;
-        // Iterate from the maximum value to the iteration value
-        for (size_t i = maxValue + 1; i > it; i -= it) {
-            binSize = i - 1;
-            binNum = 0;
-            // Calculate the number of bins for each taxid
-            for (auto const& [taxid, count] : hashCount) {
-                binNum += std::ceil(count / static_cast<double>(binSize));
-            }
-            // Calculate the load factor
-            load = totalSize / static_cast<double>(binNum * binSize);
-            // Check if the load factor exceeds the specified load factor
-            if (load > load_factor) {
-				// If  find that the load exceeds the load factor for the first time, multiply i by 2 first
-				if (i == maxValue + 1 && ifTheFirstIsFull)
-				{
-					i = maxValue * 2;
-					ifTheFirstIsFull = false;
-					continue;
+	void calculateFilterSize(robin_hood::unordered_map<std::string, uint64_t>& hashCount, ICFConfig& icfConfig, double load_factor, std::string mode) {
+		uint64_t maxValue = getMaxValue(hashCount);
+		uint64_t totalSize = calculateTotalSize(hashCount);
+
+		uint64_t minBinSize = 1;
+		uint64_t maxBinSize = maxValue * 2; 
+		uint64_t bestBinSize = maxBinSize;
+		uint64_t bestBinNum = 0;
+		double bestLoad = 0.0;
+
+		while (minBinSize <= maxBinSize) {
+			uint64_t binSize = (minBinSize + maxBinSize) / 2;
+			uint64_t binNum = 0;
+
+#pragma omp parallel for reduction(+:binNum)
+			for (size_t idx = 0; idx < hashCount.size(); ++idx) {
+				auto it = std::next(hashCount.begin(), idx);
+				uint64_t count = it->second;
+				binNum += (count + binSize - 1) / binSize;
+			}
+
+			double load = static_cast<double>(totalSize) / (binNum * binSize);
+
+			if (load > load_factor) {
+				minBinSize = binSize + 1;
+			}
+			else {
+				bestBinSize = binSize;
+				bestBinNum = binNum;
+				bestLoad = load;
+				if (load == load_factor) {
+					break;
 				}
-                // Set the configuration values to the previous values
-                icfConfig.bins = oldbinNum;
-                icfConfig.bin_size = oldbinSize;
-                break;
-            } else {
-                // Update the previous values
-                oldbinSize = binSize;
-                oldbinNum = binNum;
-                continue;
-            }
-        }
-    }
+				maxBinSize = binSize - 1;
+			}
+		}
+
+		icfConfig.bins = bestBinNum;
+		icfConfig.bin_size = bestBinSize;
+	}
     /**
     * Calculate the bins mapped to the taxid.
     *
@@ -319,13 +319,75 @@ namespace ChimeraBuild {
 		const ICFConfig& config,
 		const robin_hood::unordered_map<std::string, uint64_t>& hashCount) {
 
-		robin_hood::unordered_map<std::string, std::size_t> taxidBins;
-		size_t totalBins = 0;
-
+		std::vector<std::pair<std::string, uint64_t>> taxid_count_vector;
+		taxid_count_vector.reserve(hashCount.size());
 		for (const auto& [taxid, count] : hashCount) {
-			size_t binNum = static_cast<size_t>(std::ceil(count / static_cast<double>(config.bin_size)));
-			totalBins += binNum;
-			taxidBins[taxid] = totalBins;
+			taxid_count_vector.emplace_back(taxid, count);
+		}
+		size_t num_taxids = taxid_count_vector.size();
+
+		std::vector<std::size_t> binNums(num_taxids, 0);
+
+#pragma omp parallel for schedule(static)
+		for (size_t i = 0; i < num_taxids; ++i) {
+			const auto& [taxid, count] = taxid_count_vector[i];
+			binNums[i] = static_cast<std::size_t>(std::ceil(count / config.bin_size));
+		}
+
+		size_t num_threads = omp_get_max_threads();
+		std::vector<std::size_t> prefixSum(num_taxids, 0);
+		std::vector<std::size_t> threadSums(num_threads, 0);
+
+#pragma omp parallel
+		{
+			int tid = omp_get_thread_num();
+			size_t start = tid * num_taxids / num_threads;
+			size_t end = (tid + 1) * num_taxids / num_threads;
+			if (tid == num_threads - 1) {
+				end = num_taxids;
+			}
+
+			size_t local_sum = 0;
+			for (size_t i = start; i < end; ++i) {
+				local_sum += binNums[i];
+				prefixSum[i] = local_sum;
+			}
+
+			threadSums[tid] = local_sum;
+		}
+
+		std::vector<std::size_t> offsets(num_threads, 0);
+		for (int i = 1; i < num_threads; ++i) {
+			offsets[i] = offsets[i - 1] + threadSums[i - 1];
+		}
+
+#pragma omp parallel
+		{
+			int tid = omp_get_thread_num();
+			size_t start = tid * num_taxids / num_threads;
+			size_t end = (tid + 1) * num_taxids / num_threads;
+			if (tid == num_threads - 1) {
+				end = num_taxids;
+			}
+
+			size_t offset = offsets[tid];
+			for (size_t i = start; i < end; ++i) {
+				prefixSum[i] += offset;
+			}
+		}
+
+		robin_hood::unordered_map<std::string, std::size_t> taxidBins;
+		taxidBins.reserve(num_taxids);
+
+		std::vector<std::pair<std::string, std::size_t>> temp_bins(num_taxids);
+
+#pragma omp parallel for schedule(static)
+		for (size_t i = 0; i < num_taxids; ++i) {
+			temp_bins[i] = { taxid_count_vector[i].first, prefixSum[i] };
+		}
+
+		for (size_t i = 0; i < num_taxids; ++i) {
+			taxidBins.emplace(temp_bins[i]);
 		}
 
 		return taxidBins;
@@ -394,38 +456,22 @@ namespace ChimeraBuild {
         robin_hood::unordered_map<std::string, std::vector<std::string>> inputFiles,
         int numThreads) {
 
-        std::vector<std::thread> threads;
+		std::vector<std::tuple<std::string, size_t, size_t>> taxid_info_pairs;
+		taxid_info_pairs.reserve(hashCount.size());
 
-        // Initialize previousEnd to 0 for the first taxid
-        size_t previousEnd = 0;
+		size_t previousEnd = 0;
+		for (const auto& [taxid, count] : hashCount) {
+			size_t currentEnd = taxidBins.at(taxid);
+			taxid_info_pairs.emplace_back(taxid, previousEnd, currentEnd);
+			previousEnd = currentEnd;
+		}
 
-        for (const auto& [taxid, count] : hashCount) {
-            // Get the current taxid's end position
-            size_t currentEnd = taxidBins.at(taxid);
+#pragma omp parallel for schedule(dynamic) 
+		for (size_t i = 0; i < taxid_info_pairs.size(); ++i) {
+			const auto& [taxid, start, end] = taxid_info_pairs[i];
 
-            // Start a thread to process the insertion for the current taxid
-            threads.emplace_back(processTaxid, taxid, previousEnd, currentEnd, std::ref(icf));
-
-            // Update previousEnd to the current end position for the next taxid to use
-            previousEnd = currentEnd;
-
-            // If the maximum number of threads is reached, wait for the threads to complete
-            if (threads.size() == static_cast<size_t>(numThreads)) {
-                for (auto& thread : threads) {
-                    if (thread.joinable()) {
-                        thread.join();
-                    }
-                }
-                threads.clear();
-            }
-        }
-
-        // Wait for all remaining threads to complete
-        for (auto& thread : threads) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
+			processTaxid(taxid, start, end, icf);
+		}
     }
 
     /**
