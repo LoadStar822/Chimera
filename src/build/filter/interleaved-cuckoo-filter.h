@@ -8,14 +8,14 @@
  *
  * Created Date:  2024-07-09
  *
- * Last Modified: 2024-08-03
+ * Last Modified: 2024-09-18
  *
  * Description:
  *  This is the header file of the Interleaved Cuckoo Filter,
  *	which contains the basic operations of the Interleaved Cuckoo Filter
  *
  * Version:
- *  1.0
+ *  1.2
  * -----------------------------------------------------------------------------
  */
 #ifndef INTERLEAVED_CUCKOO_FILTER_H_
@@ -41,6 +41,7 @@ namespace chimera {
 		int MaxCuckooCount{ 500 }; // maximum number of cuckoo kicks
 		size_t TagNum{ 4 }; // number of tags per bin
 		size_t hashSize{}; // size of the filter
+		size_t bitNum{ 16 };
 
 		friend std::ostream& operator<<(std::ostream& os, const InterleavedCuckooFilter& filter) {
 			os << "InterleavedCuckooFilter Details:\n";
@@ -58,7 +59,7 @@ namespace chimera {
 
 	public:
 		InterleavedCuckooFilter() = default;
-		InterleavedCuckooFilter(size_t bins, size_t bin_size)
+		InterleavedCuckooFilter(size_t bins, size_t bin_size, int bitNum)
 		{
 			if (bins <= 0) {
 				throw std::invalid_argument("Invalid number of bins. Must be greater than 0.");
@@ -78,8 +79,36 @@ namespace chimera {
 			//double loadFactor = static_cast<double>(bins * bin_size) / (tc_bins * bin_size * TagNum);
 			//if (loadFactor > 0.95) this->tc_bins = this->tc_bins << 1; // Equivalent to tc_bins * 2
 			// Resize the data structure to store the bins
-			this->data = sdsl::bit_vector(tc_bins * bin_size * TagNum * 8, 0);
+			this->bitNum = bitNum;
+			this->data = sdsl::bit_vector(tc_bins * bin_size * TagNum * bitNum, 0);
 			hashSize = tc_bins * bin_size * TagNum - tc_bins * (TagNum + 1);
+		}
+
+		/*
+		 * -----------------------------------------------------------------------------------------------
+		 * Function: batch_insert_to_bit_vector
+		 *
+		 * Description:
+		 * Inserts an 16-bit value into the bit_vector at the specified position using a mask.
+		 *c
+		 * Parameters:
+		 * - value: The 16-bit value to be inserted.
+		 * - position: The position in the bit_vector where the value should be inserted.
+		 *
+		 * Returns: void
+		 * -----------------------------------------------------------------------------------------------
+		 */
+		void batch_insert_to_bit_vector_16bit(uint16_t value, size_t position) {
+			size_t idx = position / 64;
+			size_t offset = position % 64;
+
+			data.data()[idx] |= static_cast<uint64_t>(value) << offset;
+
+			if (offset > 64 - bitNum) {
+				size_t bits_in_first_word = 64 - offset;
+				uint16_t overflow_value = value >> bits_in_first_word;
+				data.data()[idx + 1] |= static_cast<uint64_t>(overflow_value);
+			}
 		}
 
 		/*
@@ -96,7 +125,7 @@ namespace chimera {
 		 * Returns: void
 		 * -----------------------------------------------------------------------------------------------
 		 */
-		void batch_insert_to_bit_vector(uint8_t value, size_t position) {
+		void batch_insert_to_bit_vector_8bit(uint8_t value, size_t position) {
 			uint64_t mask = static_cast<uint64_t>(value) << (position % 64);  // Move the 8-bit value to the correct position
 			size_t idx = position / 64;
 			data.data()[idx] |= mask;  // Batch write the value
@@ -106,6 +135,34 @@ namespace chimera {
 			}
 		}
 
+		/*
+		 * -----------------------------------------------------------------------------------------------
+		 * Function: query_bit_vector
+		 *
+		 * Description:
+		 * Queries the value in the bit_vector at the specified position.
+		 *
+		 * Parameters:
+		 * - position: The position in the bit_vector to query.
+		 *
+		 * Returns: The 16-bit value at the specified position.
+		 * -----------------------------------------------------------------------------------------------
+		 */
+		uint16_t query_bit_vector_16bit(size_t position) {
+			size_t idx = position / 64;
+			size_t offset = position % 64;
+
+			uint64_t chunk = data.data()[idx] >> offset;
+
+			if (offset > 64 - bitNum) {
+				size_t bits_in_first_word = 64 - offset;
+				uint64_t next_chunk = data.data()[idx + 1];
+				chunk |= next_chunk << bits_in_first_word;
+			}
+
+			uint16_t mask = (1ULL << bitNum) - 1;  // 0xFFFF
+			return static_cast<uint16_t>(chunk & mask);
+		}
 
 		/*
 		 * -----------------------------------------------------------------------------------------------
@@ -120,7 +177,7 @@ namespace chimera {
 		 * Returns: The 8-bit value at the specified position.
 		 * -----------------------------------------------------------------------------------------------
 		 */
-		uint8_t query_bit_vector(size_t position) {
+		uint8_t query_bit_vector_8bit(size_t position) {
 			uint64_t mask = 0xFFULL << (position % 64);
 			size_t idx = position / 64;
 			uint64_t chunk = (data.data()[idx] & mask) >> (position % 64);
@@ -167,6 +224,25 @@ namespace chimera {
 
 		/*
 		 * -----------------------------------------------------------------------------------------------
+		 * Function: reduce_to_16bit
+		 *
+		 * Description:
+		 * Reduces a 64-bit value to an 16-bit value.
+		 *
+		 * Parameters:
+		 * - value: The 64-bit value to be reduced.
+		 *
+		 * Returns: The reduced 16-bit value.
+		 * -----------------------------------------------------------------------------------------------
+		 */
+		inline uint16_t reduce_to_16bit(uint64_t value)
+		{
+			uint16_t reduced_value = static_cast<uint16_t>(((value * 11400714819323198485ULL) >> 48) & 0xFFFF);
+			return reduced_value == 0 ? 1 : reduced_value;
+		}
+
+		/*
+		 * -----------------------------------------------------------------------------------------------
 		 * Function: reduce_to_8bit
 		 *
 		 * Description:
@@ -201,30 +277,58 @@ namespace chimera {
 		bool insertTag(size_t binIndex, size_t value)
 		{
 			assert(binIndex < bins);
-			size_t indexStart, index;
-			uint8_t query;
-			auto tag = reduce_to_8bit(value);
-			// Calculate the starting index for the current hash function
-			indexStart = hashIndex(value) + binIndex * TagNum;
-			for (size_t j = 0; j < TagNum; j++)
+			if (bitNum == 16)
 			{
-				// Calculate the current index
-				index = (indexStart + j) << 3;
-				query = query_bit_vector(index);
-				if (query == 0 || query == tag)
+				size_t indexStart, position;
+				uint16_t query;
+				auto tag = reduce_to_16bit(value);
+				indexStart = (hashIndex(value) + binIndex * TagNum) * bitNum;
+				for (size_t j = 0; j < TagNum; j++)
 				{
-					batch_insert_to_bit_vector(tag, index);
-
-					return true;
+					position = indexStart + j * bitNum;
+					query = query_bit_vector_16bit(position);
+					if (query == 0 || query == tag)
+					{
+						batch_insert_to_bit_vector_16bit(tag, position);
+						return true;
+					}
 				}
+				// Kick out a tag if all bins are occupied
+				if (!kickOut(binIndex, value, tag))
+				{
+					throw std::runtime_error("Filter is full. Cannot insert more tags.");
+					return false;
+				}
+				return true;
 			}
-			// Kick out a tag if all bins are occupied
-			if (!kickOut(binIndex, value, tag))
+			else if (bitNum == 8)
 			{
-				throw std::runtime_error("Filter is full. Cannot insert more tags.");
-				return false;
+				size_t indexStart, index;
+				uint8_t query;
+				auto tag = reduce_to_8bit(value);
+				// Calculate the starting index for the current hash function
+				indexStart = hashIndex(value) + binIndex * TagNum;
+				for (size_t j = 0; j < TagNum; j++)
+				{
+					// Calculate the current index
+					index = (indexStart + j) << 3;
+					query = query_bit_vector_8bit(index);
+					if (query == 0 || query == tag)
+					{
+						batch_insert_to_bit_vector_8bit(tag, index);
+
+						return true;
+					}
+				}
+				// Kick out a tag if all bins are occupied
+				if (!kickOut(binIndex, value, tag))
+				{
+					throw std::runtime_error("Filter is full. Cannot insert more tags.");
+					return false;
+				}
+				return true;
 			}
-			return true;
+			return false;
 		}
 
 		/*
@@ -242,29 +346,63 @@ namespace chimera {
 		 * Returns: True if the tag was successfully kicked out and inserted, false otherwise.
 		 * -----------------------------------------------------------------------------------------------
 		 */
-		bool kickOut(size_t binIndex, size_t value, uint8_t tag)
+		bool kickOut(size_t binIndex, size_t value, uint16_t tag)
 		{
-			size_t oldIndex{ hashIndex(value) }, oldTag{ tag }, newIndex, newTag, index;
-			uint8_t query;
-			for (int count = 0; count < MaxCuckooCount; count++)
+			if (bitNum == 16)
 			{
-				oldIndex = altHash(oldIndex, oldTag) + binIndex * TagNum;
-				for (size_t j = 0; j < TagNum; j++)
+				size_t oldIndex{ hashIndex(value) }, oldTag{ tag }, newTag, position;
+				uint16_t query;
+				for (int count = 0; count < MaxCuckooCount; count++)
 				{
-					index = (oldIndex + j) << 3;
-					query = query_bit_vector(index);
-					if (query == 0 || query == oldTag)
+					oldIndex = altHash(oldIndex, oldTag) + binIndex * TagNum;
+					size_t indexStart = oldIndex * bitNum;
+					for (size_t j = 0; j < TagNum; j++)
 					{
-						batch_insert_to_bit_vector(oldTag, index);
-						return true;
+						position = indexStart + j * bitNum;
+						query = query_bit_vector_16bit(position);
+						if (query == 0 || query == oldTag)
+						{
+							batch_insert_to_bit_vector_16bit(oldTag, position);
+							return true;
+						}
 					}
+					size_t randPos = rand() % TagNum;
+					position = indexStart + randPos * bitNum;
+					newTag = query_bit_vector_16bit(position);
+					batch_insert_to_bit_vector_16bit(oldTag, position);
+					oldTag = newTag;
 				}
-				newIndex = (oldIndex + count % TagNum) << 3;
-				newTag = query_bit_vector(newIndex);
-				batch_insert_to_bit_vector(oldTag, newIndex);
-				oldTag = newTag;
+				return false;
 			}
-			return false;
+			else if (bitNum == 8)
+			{
+				size_t oldIndex{ hashIndex(value) }, oldTag{ tag }, newIndex, newTag, index;
+				uint8_t query;
+				for (int count = 0; count < MaxCuckooCount; count++)
+				{
+					oldIndex = altHash(oldIndex, oldTag) + binIndex * TagNum;
+					for (size_t j = 0; j < TagNum; j++)
+					{
+						index = (oldIndex + j) << 3;
+						query = query_bit_vector_8bit(index);
+						if (query == 0 || query == oldTag)
+						{
+							batch_insert_to_bit_vector_8bit(oldTag, index);
+							return true;
+						}
+					}
+					newIndex = (oldIndex + count % TagNum) << 3;
+					newTag = query_bit_vector_8bit(newIndex);
+					batch_insert_to_bit_vector_8bit(oldTag, newIndex);
+					oldTag = newTag;
+				}
+				return false;
+			}
+			else
+			{
+				throw std::runtime_error("Invalid bitNum.");
+				return false;
+			}
 		}
 
 		/**
@@ -282,6 +420,7 @@ namespace chimera {
 			ar(TagNum);
 			ar(MaxCuckooCount);
 			ar(hashSize);
+			ar(bitNum);
 		}
 
 		/**
@@ -300,34 +439,67 @@ namespace chimera {
 		typedef kvec_t(bool) kvector_bool;
 		kvector_bool bulk_contain(size_t value)
 		{
-			kvector_bool result;
-			kv_init(result);
-			kv_resize(bool, result, bins);
-			std::memset(result.a, 0, sizeof(bool) * bins);
-			kv_size(result) = bins;
-			uint8_t tag = reduce_to_8bit(value);
-			size_t hash1 = hashIndex(value);
-			size_t hash2 = altHash(hash1, tag) << 3;
-			hash1 = hash1 << 3;
-			size_t tmp1{ 0 }, tmp2{ 0 };
-			for (size_t batch = 0; batch < bin_words; batch++)
+			if (bitNum == 16)
 			{
-				tmp1 = data.get_int(hash1);
-				tmp2 = data.get_int(hash2);
-				hash1 += 64;
-				hash2 += 64;
-				for (int bit = 0; bit < 64; bit += 8)
+				kvector_bool result;
+				kv_init(result);
+				kv_resize(bool, result, bins);
+				std::memset(result.a, 0, sizeof(bool) * bins);
+				kv_size(result) = bins;
+				uint16_t tag = reduce_to_16bit(value);
+				size_t hash1 = hashIndex(value);
+				size_t hash2 = altHash(hash1, tag);
+				size_t position1 = hash1 << 4;
+				size_t position2 = hash2 << 4;
+				for (size_t bin = 0; bin < bins; bin++)
 				{
-					int bin_index = (batch * 2) + (bit / 32);
-					uint8_t tag_bits1 = (tmp1 >> bit) & 0xFF;
-					uint8_t tag_bits2 = (tmp2 >> bit) & 0xFF;
-					if (tag_bits1 == tag || tag_bits2 == tag)
+					size_t binOffset = (bin * TagNum) << 4;
+					for (size_t j = 0; j < TagNum; j++)
 					{
-						kv_A(result, bin_index) = true;
+						size_t pos1 = position1 + binOffset + (j << 4);
+						size_t pos2 = position2 + binOffset + (j << 4);
+						uint16_t tag_bits1 = query_bit_vector_16bit(pos1);
+						uint16_t tag_bits2 = query_bit_vector_16bit(pos2);
+						if (tag_bits1 == tag || tag_bits2 == tag)
+						{
+							kv_A(result, bin) = true;
+							break;
+						}
 					}
 				}
+				return result;
 			}
-			return result;
+			else if (bitNum == 8)
+			{
+				kvector_bool result;
+				kv_init(result);
+				kv_resize(bool, result, bins);
+				std::memset(result.a, 0, sizeof(bool) * bins);
+				kv_size(result) = bins;
+				uint8_t tag = reduce_to_8bit(value);
+				size_t hash1 = hashIndex(value);
+				size_t hash2 = altHash(hash1, tag) << 3;
+				hash1 = hash1 << 3;
+				size_t tmp1{ 0 }, tmp2{ 0 };
+				for (size_t batch = 0; batch < bin_words; batch++)
+				{
+					tmp1 = data.get_int(hash1);
+					tmp2 = data.get_int(hash2);
+					hash1 += 64;
+					hash2 += 64;
+					for (int bit = 0; bit < 64; bit += 8)
+					{
+						int bin_index = (batch * 2) + (bit / 32);
+						uint8_t tag_bits1 = (tmp1 >> bit) & 0xFF;
+						uint8_t tag_bits2 = (tmp2 >> bit) & 0xFF;
+						if (tag_bits1 == tag || tag_bits2 == tag)
+						{
+							kv_A(result, bin_index) = true;
+						}
+					}
+				}
+				return result;
+			}
 		}
 
 		/**

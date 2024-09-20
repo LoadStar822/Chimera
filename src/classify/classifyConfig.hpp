@@ -8,13 +8,13 @@
  *
  * Created Date:  2024-08-10
  *
- * Last Modified: 2024-09-01
+ * Last Modified: 2024-09-20
  *
  * Description:
  *  Classify configuration for Chimera
  *
  * Version:
- *  1.0
+ *  1.2
  * -----------------------------------------------------------------------------
  */
 #pragma once
@@ -27,6 +27,7 @@
 #include <seqan3/alphabet/nucleotide/dna4.hpp>
 #include <seqan3/core/debug_stream.hpp>
 #include <cstdint>
+#include <atomic>
 
 namespace ChimeraClassify {
 	struct ClassifyConfig {
@@ -41,6 +42,9 @@ namespace ChimeraClassify {
 		bool verbose = true;
 		size_t batchSize;
 		bool lca = false;
+		bool em = false;
+		double emThreshold;
+		size_t emIter;
 	};
 
 	inline std::ostream& operator<<(std::ostream& os, const ClassifyConfig& config) {
@@ -63,6 +67,7 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Mode:" << config.mode << std::endl
 			<< std::setw(20) << "Batch size:" << config.batchSize << std::endl
 			<< std::setw(20) << "LCA:" << config.lca << std::endl
+			<< std::setw(20) << "EM:" << config.em << std::endl
 			<< std::setw(20) << "Threads:" << config.threads << std::endl
 			<< std::setw(20) << "Verbose:" << config.verbose << std::endl;
 
@@ -72,10 +77,10 @@ namespace ChimeraClassify {
 	}
 
 	struct FileInfo {
-		size_t fileNum = 0;
-		size_t sequenceNum = 0;
-		size_t unclassifiedNum = 0;
-		size_t classifiedNum = 0;
+		std::atomic<size_t> fileNum{ 0 };
+		std::atomic<size_t> sequenceNum{ 0 };
+		std::atomic<size_t> classifiedNum{ 0 };
+		std::atomic<size_t> unclassifiedNum{ 0 };
 		size_t lcaNum = 0;
 		size_t minLen = 0;
 		size_t maxLen = 0;

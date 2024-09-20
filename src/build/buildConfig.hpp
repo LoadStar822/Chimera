@@ -8,13 +8,13 @@
  *
  * Created Date:  2024-07-30
  *
- * Last Modified: 2024-08-06
+ * Last Modified: 2024-09-19
  *
  * Description:
  *  this file defines the configuration for the build module
  *
  * Version:
- *  1.0
+ *  1.2
  * -----------------------------------------------------------------------------
  */
 #pragma once
@@ -79,10 +79,11 @@ namespace ChimeraBuild {
 		uint16_t window_size;
 		size_t bins;
 		size_t bin_size;
+		int bitNum = 16;
 
 		template <class Archive>
 		void serialize(Archive& archive) {
-			archive(kmer_size, window_size, bins, bin_size);
+			archive(kmer_size, window_size, bins, bin_size, bitNum);
 		}
 
 	};

@@ -8,13 +8,13 @@
  *
  * Created Date:  2024-07-09
  *
- * Last Modified: 2024-09-01
+ * Last Modified: 2024-09-20
  *
  * Description:
  *  This is the main entry for Chimera
  *
  * Version:
- *  1.0
+ *  1.2
  * -----------------------------------------------------------------------------
  */
 #include <CLI11.hpp>
@@ -101,6 +101,11 @@ int main(int argc, char** argv)
 	classify->add_flag("--lca", classifyConfig.lca, "Enable LCA mode");
 	classify->add_option("--tax-file", classifyConfig.taxFile, "Taxonomy file for LCA mode")
 		->check(CLI::ExistingFile);
+	classify->add_flag("-e,--EM", classifyConfig.em, "Enable EM mode");
+	classify->add_option("--em-threshold", classifyConfig.emThreshold, "EM threshold")
+		->default_val(0.001);
+	classify->add_option("--em-iter", classifyConfig.emIter, "EM iteration")
+		->default_val(100);
 	classify->add_flag("-q,--quiet", classifyConfig.verbose, "Quiet output")->default_val(true)->disable_flag_override();
 
 	if (argc == 1) {

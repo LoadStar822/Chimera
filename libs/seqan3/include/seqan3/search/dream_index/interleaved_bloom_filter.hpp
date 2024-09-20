@@ -300,7 +300,6 @@ namespace seqan3
 			for (size_t i = 0; i < hash_funs; ++i)
 			{
 				size_t idx = hash_and_fit(value, hash_seeds[i]);
-				auto x = bin.get();
 				idx += bin.get();
 				assert(idx < data.size());
 				data[idx] = 1;

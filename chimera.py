@@ -37,7 +37,9 @@ def parse_arguments():
     build_parser = subparsers.add_parser("build", help="Build a taxonomic sequence database")
     build_parser.add_argument("-i", "--input", required=True, help="Input file for building")
     build_parser.add_argument("-o", "--output", default="ChimeraDB", help="Output file for building")
-    build_parser.add_argument("-m", "--mode", default="default", help="Mode for building")
+    build_parser.add_argument("-m", "--mode", default="normal",
+                              choices=["fast", "normal"],
+                              help="Mode for building (choices: 'fast', 'normal'). Default is 'normal'.")
     build_parser.add_argument("-k", "--kmer", type=kmer_type, default=19,
                               help="Kmer size for building (must be between 1 and 31)")
     build_parser.add_argument("-w", "--window", type=int, default=31, help="Window size for building")
@@ -50,7 +52,9 @@ def parse_arguments():
     download_build_parser = subparsers.add_parser("download_and_build",
                                                   help="Download NCBI database sequences and resources and build a taxonomic sequence database")
     download_build_parser.add_argument("-o", "--output", default="ChimeraDB", help="Output file for building")
-    download_build_parser.add_argument("-m", "--mode", default="default", help="Mode for building")
+    download_build_parser.add_argument("-m", "--mode", default="normal",
+                              choices=["fast", "normal"],
+                              help="Mode for building (choices: 'fast', 'normal'). Default is 'normal'.")
     download_build_parser.add_argument("-k", "--kmer", type=kmer_type, default=19,
                                        help="Kmer size for building (must be between 1 and 31)")
     download_build_parser.add_argument("-w", "--window", type=int, default=31, help="Window size for building")
@@ -73,13 +77,22 @@ def parse_arguments():
     classify_parser.add_argument(
         "-m",
         "--mode",
-        default="fast",
+        default="normal",
         choices=["fast", "normal"],
-        help="Mode for classifying (choices: 'fast', 'normal'). Default is 'fast'."
+        help="Mode for classifying (choices: 'fast', 'normal'). Default is 'normal'."
     )
     classify_parser.add_argument("-b", "--batch-size", type=int, default=400, help="Batch size for classifying")
-    classify_parser.add_argument("-l", "--lca", action="store_true", help="Use LCA algorithm for classification")
+    group = classify_parser.add_mutually_exclusive_group()
+
+    group.add_argument("-l", "--lca", action="store_true", help="Use LCA algorithm for classification")
     classify_parser.add_argument("-T", "--tax-file", help="Taxonomy file for LCA classification")
+
+    group.add_argument("-e", "--em", action="store_true", default=True, help="Use EM algorithm for classification")
+    classify_parser.add_argument("--em-iter", type=int, default=100, help="Number of EM iterations")
+    classify_parser.add_argument("--em-threshold", type=float, default=0.001, help="EM threshold")
+
+    group.add_argument("--none", action="store_true", help="Do not use LCA or EM for classification")
+
     classify_parser.add_argument("-q", "--quiet", action="store_false", help="Quiet output")
 
     # Profile subcommand
@@ -159,6 +172,10 @@ def run_chimera(args, chimera_path):
             if not args.tax_file:
                 raise ValueError("Taxonomy file must be provided when using LCA algorithm")
             command.extend(["--tax-file", args.tax_file])
+        if args.em:
+            command.append("-e")
+            command.extend(["--em-iter", str(args.em_iter)])
+            command.extend(["--em-threshold", str(args.em_threshold)])
         if args.quiet:
             command.append("-q")
 

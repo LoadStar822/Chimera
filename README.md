@@ -22,15 +22,17 @@
 - [Input/Output Formats](#inputoutput-formats)
 - [Performance Optimization](#performance-optimization)
 - [FAQ](#faq)
+- [References & Acknowledgements](#references--acknowledgements)
+- [License](#license)
 - [Contact & Support](#contact--support)
 
 ---
 
 ## Project Overview
 
-**Chimera** is a versatile **metagenomic classification tool** developed by **Qinzhong Tian**, designed to simplify and accelerate the process of analyzing large-scale metagenomic datasets. Chimera integrates efficient algorithms and user-friendly features to deliver fast, accurate, and scalable metagenomic classification. 
+**Chimera** is a versatile **metagenomic classification tool** developed by **Qinzhong Tian**, designed to simplify and accelerate the process of analyzing large-scale metagenomic datasets. Chimera integrates efficient algorithms and user-friendly features to deliver fast, accurate, and scalable metagenomic classification.
 
-The current version (1.1) introduces **abundance analysis**, along with the calculation of **Shannon** and **Simpson indices** for diversity assessment. Additionally, it enhances classification accuracy by incorporating the **LCA (Lowest Common Ancestor)** algorithm. Previous innovations, such as the **interleaved cuckoo filter** for constructing classification databases, ensure rapid processing and high accuracy, maintaining Chimera’s cutting-edge performance.
+The current version (1.2) brings significant enhancements in classification accuracy and performance through the introduction of a **16-bit interleaved cuckoo filter** and the **Expectation-Maximization (EM) algorithm**. These updates further refine Chimera’s existing infrastructure, improving both speed and accuracy. Previous versions, including version 1.1, introduced **abundance analysis**, diversity indices, and the **LCA (Lowest Common Ancestor) algorithm** for more precise classification.
 
 ### 🔍 Interactive NCBI Dataset Downloads
 
@@ -40,7 +42,7 @@ Chimera offers flexibility by supporting **custom parameter configurations**, wh
 
 ### ⚡ Fast and Accurate Species Classification
 
-Chimera is optimized for both **speed and scalability**. The classification engine is **multi-threaded**, making it highly effective at processing large datasets in a short time. The underlying **interleaved cuckoo filter** technology from version 1.0 accelerates database construction and classification, while the newly added **LCA algorithm** in version 1.1 further improves classification accuracy by resolving ambiguous taxonomic assignments.
+Chimera is optimized for both **speed and scalability**. The classification engine is **multi-threaded**, making it highly effective at processing large datasets in a short time. Version 1.2 introduced the **16-bit interleaved cuckoo filter** and the **EM algorithm**, significantly improving classification accuracy. Additionally, **version 1.1** added the **LCA algorithm**, which enhances accuracy by resolving ambiguous taxonomic assignments through the use of the Lowest Common Ancestor method.
 
 Supported input formats include:
 - Standard formats: **FASTA**, **FASTQ**
@@ -49,7 +51,7 @@ Supported input formats include:
 
 ### 📊 Abundance and Diversity Analysis
 
-Chimera version 1.1 introduces advanced **abundance analysis**, allowing users to calculate the relative abundance of taxa across multiple levels of classification. Additionally, the tool computes the **Shannon index** and **Simpson index**, providing valuable insights into species diversity and evenness within a community.
+Chimera version 1.1 introduced **abundance analysis**, allowing users to calculate the relative abundance of taxa across multiple taxonomic levels. The tool also calculates the **Shannon index** and **Simpson index**, providing valuable insights into species diversity and community evenness. These features continue to play a key role in Chimera’s functionality.
 
 ### 📊 Integrated Krona Visualization
 
@@ -217,16 +219,21 @@ This command starts the interactive session for dataset downloading.
 
 The `build` function is used to construct a classification database from the downloaded datasets. It requires specifying the **input file** (usually `target.tsv` located in the downloaded folder) and allows customization of other parameters, though most parameters have sensible defaults.
 
-**Available Parameters:**
-- `-i` or `--input` (required): Input file (e.g., `target.tsv`).
-- `-o` or `--output`: Output database file name (default: `ChimeraDB`).
-- `-m` or `--mode`: Building mode (default: `default`).
-- `-k` or `--kmer`: K-mer size (default: `19`).
-- `-w` or `--window`: Window size (default: `31`).
-- `-l` or `--min-length`: Minimum sequence length (default: `0`).
-- `-t` or `--threads`: Number of threads (default: `32`).
-- `--load-factor`: Loading ratio of ICF (default: `0.95`).
-- `-q` or `--quiet`: Quiet mode.
+**Available Parameters:** 
+- `-i` or `--input` (required): Input file (e.g., `target.tsv`). This file specifies the sequences and their corresponding taxonomic identifiers for building the database.
+- `-o` or `--output`: Output database file name (default: `ChimeraDB`). The resulting database will be saved as a binary file with this name.
+- `-m` or `--mode`: Building mode, with two options:
+- **fast**: Constructs an 8-bit **interleaved cuckoo filter**, prioritizing speed and reducing both memory and disk space usage by approximately half compared to the 16-bit filter. This mode is suitable for large-scale analyses where processing time and resource efficiency are key concerns, but it may have a lower classification accuracy.
+- **normal** (default): Constructs a 16-bit **interleaved cuckoo filter**, offering significantly higher accuracy but requiring more memory and disk space. This mode is recommended for applications where precision is critical.
+﻿
+**Note**: The difference between the two modes is substantial. The 16-bit filter in `normal` mode allows for more accurate taxonomic classification compared to the 8-bit filter in `fast` mode, but at the cost of higher resource usage.
+  
+- `-k` or `--kmer`: K-mer size for building the database (default: `19`). This parameter defines the length of k-mers used in the construction process, and it must be a value between 1 and 31. Adjusting the k-mer size can influence the sensitivity of the database.
+- `-w` or `--window`: Window size (default: `31`). This parameter defines the sliding window size used to scan the input sequences for k-mers. A larger window size can reduce false positives, but may also reduce sensitivity.
+- `-l` or `--min-length`: Minimum sequence length (default: `0`). Sequences shorter than this value will be excluded from the database construction. Adjusting this can be useful for filtering out very short or low-quality sequences.
+- `-t` or `--threads`: Number of threads for parallel processing (default: `32`). Increasing the number of threads can significantly speed up the database construction process, especially on multi-core systems.
+- `--load-factor`: Loading ratio of the interleaved cuckoo filter (default: `0.95`). This parameter mainly affects the **false positive rate**. Lowering the load factor reduces the filter's capacity utilization, which can decrease the false positive rate but will slightly increase the size of the database. 
+- `-q` or `--quiet`: Suppresses verbose output. Use this option to minimize output during the building process.
 
 **Example:**
 ```bash
@@ -252,18 +259,28 @@ This command downloads the necessary data and directly constructs the classifica
 
 The `classify` function allows users to perform taxonomic classification on single or paired input sequence files using the specified classification database. It supports multiple files for both single-end and paired-end reads. For paired-end reads, the number of input files must be even.
 
-**Available Parameters:**
+**Available Parameters:** 
 - `-i` or `--single`: Input files for classification (supports multiple files).
 - `-p` or `--paired`: Paired input files for classification (supports multiple paired files, must be an even number).
 - `-o` or `--output`: Output file name for classification results (default: `ChimeraClassify`).
 - `-d` or `--database` (required): The classification database file (e.g., `ChimeraDB`).
 - `-s` or `--shot-threshold`: Shot threshold for classification accuracy (default: `0.7`).
 - `-t` or `--threads`: Number of threads to use during classification (default: `32`).
-- `-m` or `--mode`: Classification mode, either `fast` or `normal` (default: `fast`).
-- `-l` or `--lca`: Use the LCA algorithm for classification.
-- `-T` or `--tax-file`: Taxonomy file for LCA classification (required if `--lca` is used, default: `tax.info` from the downloaded dataset).
-- `-b` or `--batch-size`: Batch size for processing sequences (default: `400`).
-- `-q` or `--quiet`: Suppresses verbose output if specified.
+- `-m` or `--mode`: Classification mode, either:
+- **fast**: Prioritizes speed, returning the top hit.
+- **normal** (default): Provides a more comprehensive classification, including all taxids that meet the threshold.
+- `-b` or `--batch-size`: Batch size for processing sequences (default: `400`). Larger batches may improve performance, but require more memory.
+  
+#### Algorithm Selection (Mutually Exclusive Options):
+You can select one of the following classification algorithms:
+
+- `-l` or `--lca`: Use the **LCA (Lowest Common Ancestor)** algorithm for classification. This requires the `--tax-file` option:
+- `-T` or `--tax-file`: Specifies the taxonomy file for LCA classification. If not provided, the default is `tax.info` from the downloaded dataset.
+- `-e` or `--em`: Use the **EM (Expectation-Maximization)** algorithm for classification. This is the default classification method if no other algorithm is specified.
+- `--em-iter`: Number of EM iterations (default: `100`).
+- `--em-threshold`: Convergence threshold for EM algorithm (default: `0.001`).
+- `--none`: Do not use LCA or EM for classification. In this case, classification is based solely on the top hit from the database.
+- `-q` or `--quiet`: Suppresses verbose output.
 
 **Examples:**
 For single-end input files:
@@ -363,6 +380,8 @@ Chimera accepts various sequence file formats for classification and generates r
     seq2    12345:8
     ```
     If **LCA mode** is selected, the taxid classified using LCA will be represented as `taxid:0`. This indicates that the LCA algorithm was applied for classification.
+    
+    If **EM mode** is selected, the taxid classified using the EM algorithm will be represented as `taxid:1`.
 
 **Example:**
 ```bash
@@ -518,8 +537,13 @@ In this example, a load factor of `0.85` is used, which can speed up classificat
 
 ### 1. What is the difference between "fast" and "normal" classification modes?
 
-- **Fast Mode**: In `fast` mode (`-m fast`), Chimera only reports the taxid with the highest hit count, making the classification process quicker but less detailed.
-- **Normal Mode**: In `normal` mode (`-m normal`), Chimera reports all taxids that meet the threshold. This mode provides more comprehensive results but is slower.
+- **Fast Mode**: In `fast` mode (`-m fast`), Chimera selects the taxid with the highest hit count. Only the top hit is reported, making the classification process quicker but less detailed.
+  
+- **Normal Mode**: In `normal` mode (`-m normal`), Chimera reports all taxids that meet the threshold, sorted from the highest to the lowest hit count. This mode provides a more comprehensive set of results but is slower due to the additional data it processes.
+
+If you use the **LCA** or **EM** algorithms, Chimera will automatically switch to `normal` mode, as both algorithms require all taxids that exceed the threshold for their calculations.
+
+**Note**: Not using LCA or EM algorithms may sometimes result in very low classification accuracy. It is recommended to use the **EM algorithm** for more reliable and accurate classification results.
 
 ### 2. What should I do if the database download is interrupted or fails?
 
@@ -531,14 +555,8 @@ Enable fix-only mode (re-download incomplete or failed data) [y/N]:
 ```
 Enter `y` to resume and fix the download.
 
-### 3. What are the system requirements for running Chimera?
 
-- **CPU**: Multi-core processors are recommended. Chimera supports multi-threading.
-- **RAM**: At least 16GB of RAM is recommended, and larger datasets may require 64GB or more.
-- **Storage**: SSDs are recommended for better performance.
-- **Operating System**: Chimera is primarily tested on Linux (e.g., Ubuntu 20.04 or 22.04) but also supports other systems via Docker.
-
-### 4. Can I use Chimera without Python?
+### 3. Can I use Chimera without Python?
 
 Yes, you can use Chimera without relying on Python. Python is primarily used to provide functionality for downloading datasets and generating profiles. If you have built Chimera using Conda, you can simply use the following command to view available options:
 
@@ -558,7 +576,7 @@ For Docker, Chimera is the default entry point. To skip the default `chimera` co
 docker run -it --rm -v "$(pwd):/app/data" --entrypoint Chimera tianqinzhong/chimera -h
 ```
 
-### 5. Where is the taxfile required for LCA, and how do I interpret LCA results?
+### 4. Where is the taxfile required for LCA, and how do I interpret LCA results or EM reuslts?
 
 If you are using Chimera's built-in `download` function, the `taxfile` is located in the downloaded dataset folder as `tax.info`. For custom datasets, you will need to manually create a `taxfile` in a specific format. Each line of the file represents a taxonomic rank and includes the following fields, separated by tabs:
 
@@ -587,24 +605,56 @@ This example defines a taxonomic hierarchy starting from `root` (no rank) down t
 - **taxid 2157** represents the **Archaea** superkingdom, which belongs to the parent taxon **131567**.
 - Similarly, **taxid 2162** represents the species **Methanobacterium formicicum**, which is a descendant of the genus **Methanobacterium** (`taxid 2160`).
 
-### Interpreting LCA Results
+### Interpreting LCA and EM Results
 
-In the classification output, any result classified using the LCA algorithm will be shown as `taxid:0`. This indicates that the Lowest Common Ancestor (LCA) method was applied, and the classification could not be resolved to a more specific taxonomic level.
+In the classification output:
+- Any result classified using the **LCA algorithm** will be shown as `taxid:0`. This indicates that the Lowest Common Ancestor (LCA) method was applied.
+- Any result classified using the **EM algorithm** will be shown as `taxid:1`. This indicates that the Expectation-Maximization (EM) algorithm was applied for more accurate classification.
+
+Both algorithms aim to improve classification accuracy when direct classification to a specific taxonomic level is challenging.
 
 
 
 If you have further questions, feel free to ask by opening an issue on our [GitHub repository](https://github.com/LoadStar822/Chimera/issues).
 
 
+---
+## References & Acknowledgements
+
+We would like to acknowledge the following repositories and libraries that contributed to the development of Chimera:
+
+- **[klib](https://github.com/attractivechaos/klib)**: This lightweight library was used for its highly efficient implementations of `khash` (a fast hash table) and `kvector` (a dynamic array). These data structures were integral in handling sequence data and managing the large volumes of information necessary for metagenomic classification.
+
+- **[seqan3](https://github.com/seqan/seqan3)**: SeqAn3 is a modern C++ library for sequence analysis, and Chimera leverages it for fast **minimizer** computation. Minimizers are a crucial component for reducing redundancy and optimizing memory usage during the processing of genomic data, making classification faster and more efficient.
+
+- **[CLI11](https://github.com/CLIUtils/CLI11)**: This header-only library was used to provide Chimera's flexible and intuitive command-line interface. CLI11 allows users to easily specify options, input files, and configurations, enabling the tool to handle complex workflows with minimal user friction.
+
+- **[moodycamel::ConcurrentQueue](https://github.com/cameron314/concurrentqueue)**: This library provides a lock-free queue implementation that significantly accelerates multi-threaded processing. In Chimera, it is utilized to efficiently manage task queues, enabling parallel processing of large datasets and improving overall throughput.
+
+- **[genome_updater](https://github.com/pirovc/genome_updater)**: Genome Updater is used to quickly and efficiently download genomic data from public databases. By integrating this tool, Chimera can retrieve and update datasets from sources like NCBI, automating the data acquisition step and ensuring users always have access to the latest reference genomes.
+
+- **[robin_hood unordered map & set](https://github.com/martinus/robin-hood-hashing)**: This library provides an optimized hash map implementation with Robin Hood hashing, ensuring highly efficient memory usage and fast lookups. It is used in Chimera to manage large datasets and provide fast access to taxonomic information.
+
+- **[cuckoo filter](https://github.com/efficient/cuckoofilter)**: While Chimera's implementation of the cuckoo filter differs significantly, the original **cuckoo filter** provided the initial inspiration for efficient membership testing, which helped shape Chimera’s approach to fast and scalable classification.
+
+- **[ganon](https://github.com/pirovc/ganon)**: Ganon’s implementation of the **LCA (Lowest Common Ancestor)** algorithm was integrated into Chimera to resolve ambiguous classifications by identifying the most specific shared taxonomic ancestor. This feature improves classification accuracy, particularly in complex datasets with shared sequences across multiple taxa.
+
+
+
+We are grateful to the open-source community for providing these valuable resources!
+
+---
 
 ---
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
----
+
+
 
 ## Contact & Support
 For any questions or support, feel free to reach out to us:
 - **Website**: [MalabZ](http://lab.malab.cn/~cjt/MSA/)
+- **Personal Homepage**: [Qinzhong Tian](https://loadstar822.github.io/)
 - **Email**: tianqinzhong@qq.com

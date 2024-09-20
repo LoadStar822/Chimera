@@ -8,13 +8,13 @@
  *
  * Created Date:  2024-08-09
  *
- * Last Modified: 2024-09-01
+ * Last Modified: 2024-09-19
  *
  * Description:
  *  Classify functions for Chimera
  *
  * Version:
- *  1.0
+ *  1.2
  * -----------------------------------------------------------------------------
  */
 #include <ChimeraClassify.hpp>
@@ -62,108 +62,82 @@ namespace ChimeraClassify {
 	 * @param config The configuration for parsing the reads.
 	 * @param fileInfo The information about the files and sequences.
 	 */
-	void parseReads(std::queue<batchReads>& readQueue, ClassifyConfig config, FileInfo& fileInfo)
+	void parseReads(moodycamel::ConcurrentQueue<batchReads>& readQueue, ClassifyConfig config, FileInfo& fileInfo)
 	{
 		// Count the number of sequences for each thread and accumulate it to fileInfo.sequenceNum
-		std::atomic<size_t> localSequenceNum = 0;
+		size_t totalSequenceNum = 0;
 
-		if (config.singleFiles.size() > 0)
-		{
-			// Process single files in parallel
-#pragma omp parallel for
-			for (int i = 0; i < config.singleFiles.size(); ++i)
-			{
+		if (!config.singleFiles.empty()) {
+#pragma omp parallel for reduction(+:totalSequenceNum)
+			for (size_t i = 0; i < config.singleFiles.size(); ++i) {
 				const auto& file = config.singleFiles[i];
 
-				// Increase fileInfo.fileNum using atomic operation
-#pragma omp atomic
 				fileInfo.fileNum++;
 
-				// Open the input file using sequence_file_input
-				seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields<seqan3::field::id, seqan3::field::seq>> fin{ file };
-				std::vector<batchReads> localBatches;  // Local batch storage to reduce access to the global queue
+				seqan3::sequence_file_input<raptor::dna4_traits,
+					seqan3::fields<seqan3::field::id, seqan3::field::seq>> fin{ file };
+				std::vector<batchReads> localBatches;
 
-				// Read sequences in chunks and create batchReads objects
-				for (auto&& rec : fin | seqan3::views::chunk(config.batchSize))
-				{
+				for (auto&& rec : fin | seqan3::views::chunk(config.batchSize)) {
 					batchReads batch;
-					for (auto&& r : rec)
-					{
-						batch.ids.push_back(std::move(r.id()));
-						batch.seqs.push_back(std::move(r.sequence()));
+					for (auto&& r : rec) {
+						batch.ids.emplace_back(std::move(r.id()));
+						batch.seqs.emplace_back(std::move(r.sequence()));
 					}
 
-					// Update localSequenceNum
-					localSequenceNum += batch.ids.size();
-					// Store the batch in the localBatches vector
-					localBatches.push_back(std::move(batch));
+					totalSequenceNum += batch.ids.size();
+					localBatches.emplace_back(std::move(batch));
 				}
 
-				// Push the local batches to the global queue
-#pragma omp critical
-				{
-					for (auto& b : localBatches)
-					{
-						readQueue.push(std::move(b));
-					}
+				for (auto& b : localBatches) {
+					readQueue.enqueue(std::move(b));
 				}
+				fileInfo.sequenceNum += totalSequenceNum;
 			}
-
-			// Update fileInfo.sequenceNum using atomic operation
-#pragma omp atomic
-			fileInfo.sequenceNum += localSequenceNum.load();
 		}
 		else if (config.pairedFiles.size() > 0)
 		{
-			// Process paired files in parallel
-#pragma omp parallel for
-			for (size_t i = 0; i < config.pairedFiles.size(); i += 2)
-			{
-				// Increase fileInfo.fileNum by 2 using atomic operation
-#pragma omp atomic
+#pragma omp parallel for reduction(+:totalSequenceNum)
+			for (size_t i = 0; i < config.pairedFiles.size(); i += 2) {
 				fileInfo.fileNum += 2;
 
-				// Open the input files using sequence_file_input
-				seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields<seqan3::field::id, seqan3::field::seq>> fin1{ config.pairedFiles[i] };
-				seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields<seqan3::field::id, seqan3::field::seq>> fin2{ config.pairedFiles[i + 1] };
-				std::vector<batchReads> localBatches;  // Local batch storage
+				seqan3::sequence_file_input<raptor::dna4_traits,
+					seqan3::fields<seqan3::field::id, seqan3::field::seq>> fin1{ config.pairedFiles[i] };
+				seqan3::sequence_file_input<raptor::dna4_traits,
+					seqan3::fields<seqan3::field::id, seqan3::field::seq>> fin2{ config.pairedFiles[i + 1] };
+				std::vector<batchReads> localBatches;  
 
-				// Read sequences in chunks and create batchReads objects
-				for (auto&& rec1 : fin1 | seqan3::views::chunk(config.batchSize))
-				{
+				auto it1 = fin1 | seqan3::views::chunk(config.batchSize);
+				auto it2 = fin2 | seqan3::views::chunk(config.batchSize);
+
+				while (true) {
+					auto chunk1 = it1.begin();
+					auto end1 = it1.end();
+					if (chunk1 == end1) break;
+
+					auto chunk2 = it2.begin();
+					auto end2 = it2.end();
+					if (chunk2 == end2) break;
+
 					batchReads batch;
-					for (auto&& r : rec1)
-					{
-						batch.ids.push_back(std::move(r.id()));
-						batch.seqs.push_back(std::move(r.sequence()));
+					for (auto&& r : *chunk1) {
+						batch.ids.emplace_back(std::move(r.id()));
+						batch.seqs.emplace_back(std::move(r.sequence()));
 					}
-					for (auto&& rec2 : fin2 | seqan3::views::chunk(config.batchSize))
-					{
-						for (auto&& r : rec2)
-						{
-							batch.seqs2.push_back(std::move(r.sequence()));
-						}
+					for (auto&& r : *chunk2) {
+						batch.seqs2.emplace_back(std::move(r.sequence()));
 					}
 
-					// Update localSequenceNum
-					localSequenceNum += batch.ids.size();
-					// Store the batch in the localBatches vector
-					localBatches.push_back(std::move(batch));
+					totalSequenceNum += batch.ids.size();
+					localBatches.emplace_back(std::move(batch));
 				}
 
-				// Push the local batches to the global queue
-#pragma omp critical
-				{
-					for (auto& b : localBatches)
-					{
-						readQueue.push(std::move(b));
-					}
+				for (auto& b : localBatches) {
+					readQueue.enqueue(std::move(b));
 				}
 			}
 
-			// Update fileInfo.sequenceNum using atomic operation
-#pragma omp atomic
-			fileInfo.sequenceNum += localSequenceNum.load();
+			fileInfo.sequenceNum += totalSequenceNum;
 		}
 		else
 		{
@@ -331,10 +305,7 @@ namespace ChimeraClassify {
 		// If the maximum count is greater than 0, update the classifyResult object based on the classification mode
 		if (maxBinCount > 0)
 		{
-			{
-				std::lock_guard<std::mutex> lock(resultMutex); // 加锁保护 classifiedNum 的访问
-				fileInfo.classifiedNum++;
-			}
+			fileInfo.classifiedNum++;
 			if (config.lca && result.taxidCount.size() > 1)
 			{
 				std::vector<std::string> taxids;
@@ -361,10 +332,7 @@ namespace ChimeraClassify {
 		}
 		else
 		{
-			{
-				std::lock_guard<std::mutex> lock(resultMutex); // 加锁保护 unclassifiedNum 的访问
-				fileInfo.unclassifiedNum++;
-			}
+			fileInfo.unclassifiedNum++;
 			result.taxidCount.emplace_back("unclassified", 1);
 		}
 
@@ -511,7 +479,7 @@ namespace ChimeraClassify {
 	 * @param fileInfo The information about the files and sequences.
 	 */
 	void classify(ChimeraBuild::ICFConfig& icfConfig,
-		std::queue<batchReads>& readQueue,
+		moodycamel::ConcurrentQueue<batchReads>& readQueue,
 		ClassifyConfig& config,
 		chimera::InterleavedCuckooFilter& icf,
 		std::vector<std::pair<std::string, std::size_t>>& taxidBins,
@@ -526,18 +494,13 @@ namespace ChimeraClassify {
 
 		LCA lca;
 		if (config.lca)
+		{
 			buildLCA(lca, config.taxFile);
-		std::mutex queueMutex;
-
+		}
 #pragma omp parallel
 		{
-#pragma omp for
-			for (size_t i = 0; i < readQueue.size(); ++i) {
-				queueMutex.lock();
-				batchReads batch = readQueue.front();
-				readQueue.pop();
-				queueMutex.unlock();
-
+			batchReads batch;
+			while (readQueue.try_dequeue(batch)) {
 				// 每个线程独立处理 batch
 				processBatch(batch, icfConfig, taxidBins, config, icf, classifyResults, minimiser_view, fileInfo, lca);
 			}
@@ -606,6 +569,11 @@ namespace ChimeraClassify {
 	 * @param config The configuration for the classification process.
 	 */
 	void run(ClassifyConfig config) {
+		if ((config.em || config.lca) && config.mode == "fast")
+		{
+			config.mode = "normal";
+			std::cout << "Warning: The mode is changed to 'normal' for EM algorithm or LCA classification\n";
+		}
 		if (config.verbose) {
 			std::cout << config << std::endl;
 		}
@@ -615,7 +583,7 @@ namespace ChimeraClassify {
 		std::cout << "Reading input files..." << std::endl;
 		FileInfo fileInfo;
 		seqan3::contrib::bgzf_thread_count = config.threads;
-		std::queue<batchReads> readQueue;
+		moodycamel::ConcurrentQueue<batchReads> readQueue;
 		parseReads(readQueue, config, fileInfo);
 		chimera::InterleavedCuckooFilter icf;
 		ChimeraBuild::ICFConfig icfConfig;
@@ -633,7 +601,11 @@ namespace ChimeraClassify {
 		std::cout << "Classifying sequences..." << std::endl;
 		std::vector<classifyResult> classifyResults;
 		classify(icfConfig, readQueue, config, icf, taxidBins, classifyResults, fileInfo);
-
+		if (config.em)
+		{
+			std::cout << "Running EM algorithm..." << std::endl;
+			classifyResults = EMAlgorithm(classifyResults, config.emIter, config.emThreshold);
+		}
 		auto classifyEnd = std::chrono::high_resolution_clock::now();
 		auto classifyDuration = std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd - classifyStart);
 		if (config.verbose) {

@@ -8,13 +8,13 @@
  *
  * Created Date:  2024-08-10
  *
- * Last Modified: 2024-08-10
+ * Last Modified: 2024-09-19
  *
  * Description:
- *  This is a simple C++ program that outputs "Hello, World!".
+ *  This is ChimeraClassify module for Chimera
  *
  * Version:
- *  1.0
+ *  1.2
  * -----------------------------------------------------------------------------
  */
 #include <classifyConfig.hpp>
@@ -49,6 +49,8 @@
 #include <future>
 #include <cstdint>
 #include <LCA.hpp>
+#include <concurrentqueue.h>
+#include <EM.hpp>
 
 namespace ChimeraClassify {
 	void run(ClassifyConfig config);

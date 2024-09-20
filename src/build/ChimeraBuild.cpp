@@ -8,13 +8,13 @@
  *
  * Created Date:  2024-07-30
  *
- * Last Modified: 2024-08-09
+ * Last Modified: 2024-09-19
  *
  * Description:
  *  The main program of ChimeraBuild.
  *
  * Version:
- *  1.0
+ *  1.2
  * -----------------------------------------------------------------------------
  */
 #include <ChimeraBuild.hpp>
@@ -340,7 +340,7 @@ namespace ChimeraBuild {
 
 #pragma omp parallel
 		{
-			int tid = omp_get_thread_num();
+			size_t tid = omp_get_thread_num();
 			size_t start = tid * num_taxids / num_threads;
 			size_t end = (tid + 1) * num_taxids / num_threads;
 			if (tid == num_threads - 1) {
@@ -434,8 +434,6 @@ namespace ChimeraBuild {
         // Close the minimiser file
         ifile.close();
 
-        // Delete the minimiser file
-        std::filesystem::remove("tmp/" + taxid + ".mini");
     }
 
     /**
@@ -453,8 +451,7 @@ namespace ChimeraBuild {
         ICFConfig config,
         chimera::InterleavedCuckooFilter& icf,
         const robin_hood::unordered_map<std::string, uint64_t>& hashCount,
-        robin_hood::unordered_map<std::string, std::vector<std::string>> inputFiles,
-        int numThreads) {
+        robin_hood::unordered_map<std::string, std::vector<std::string>> inputFiles) {
 
 		std::vector<std::tuple<std::string, size_t, size_t>> taxid_info_pairs;
 		taxid_info_pairs.reserve(hashCount.size());
@@ -466,7 +463,7 @@ namespace ChimeraBuild {
 			previousEnd = currentEnd;
 		}
 
-#pragma omp parallel for schedule(dynamic) 
+#pragma omp parallel for schedule(static) 
 		for (size_t i = 0; i < taxid_info_pairs.size(); ++i) {
 			const auto& [taxid, start, end] = taxid_info_pairs[i];
 
@@ -551,6 +548,7 @@ namespace ChimeraBuild {
 		if (config.verbose) {
 			std::cout << config << std::endl;
 		}
+
 		omp_set_num_threads(config.threads);
 		auto build_start = std::chrono::high_resolution_clock::now();
 
@@ -560,6 +558,19 @@ namespace ChimeraBuild {
 		FileInfo fileInfo;
 		icfConfig.kmer_size = config.kmer_size;
 		icfConfig.window_size = config.window_size;
+		if (config.mode == "normal")
+		{
+			icfConfig.bitNum = 16;
+		}
+		else if (config.mode == "fast")
+		{
+			icfConfig.bitNum = 8;
+		}
+		else
+		{
+			std::cerr << "Invalid mode: " << config.mode << std::endl;
+			return;
+		}
 		robin_hood::unordered_map<std::string, uint64_t> hashCount;
 		robin_hood::unordered_map<std::string, std::vector<std::string>> inputFiles;
 		parseInputFile(config.input_file, inputFiles, hashCount, fileInfo);
@@ -604,9 +615,17 @@ namespace ChimeraBuild {
 
 		auto create_filter_start = std::chrono::high_resolution_clock::now();
 		std::cout << "Creating filter..." << std::endl;
-		chimera::InterleavedCuckooFilter icf(icfConfig.bins, icfConfig.bin_size);
+		chimera::InterleavedCuckooFilter icf(icfConfig.bins, icfConfig.bin_size,icfConfig.bitNum);
+		auto calculate_bins_start = std::chrono::high_resolution_clock::now();
 		robin_hood::unordered_map<std::string, std::size_t> taxidBins = calculateTaxidMapBins(icfConfig, hashCount);
-		build(taxidBins, icfConfig, icf, hashCount, inputFiles, config.threads);
+		auto calculate_bins_end = std::chrono::high_resolution_clock::now();
+		auto calculate_bins_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_bins_end - calculate_bins_start).count();
+		if (config.verbose) {
+			std::cout << "Calculated bins time: ";
+			print_build_time(calculate_bins_total_time);
+			std::cout << std::endl;
+		}
+		build(taxidBins, icfConfig, icf, hashCount, inputFiles);
 		saveFilter(config.output_file, icf, icfConfig, hashCount, taxidBins);
 		auto create_filter_end = std::chrono::high_resolution_clock::now();
 		auto create_filter_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(create_filter_end - create_filter_start).count();
@@ -626,5 +645,6 @@ namespace ChimeraBuild {
 			std::cout << icf << std::endl;
 			
 		}
+		std::filesystem::remove_all(dir);
 	}
 }
