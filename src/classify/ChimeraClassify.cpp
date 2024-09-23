@@ -338,6 +338,7 @@ namespace ChimeraClassify {
 
 		// Lock the resultMutex to ensure thread safety and add the classifyResult object to the classifyResults vector
 		std::lock_guard<std::mutex> lock(resultMutex);
+		kv_destroy(count);
 		classifyResults.emplace_back(result);
 	}
 
