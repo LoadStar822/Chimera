@@ -1,5 +1,5 @@
 ﻿cmake_minimum_required(VERSION 3.10)
-project(Chimera VERSION 1.2.0)
+project(Chimera VERSION 1.2.1)
 add_definitions(-DCHIMERA_VERSION="${PROJECT_VERSION}")
 set(PROJECT_ROOT_DIR "${CMAKE_SOURCE_DIR}")
 add_definitions(-DPROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}")
@@ -21,7 +21,7 @@ endif()
 
 
 # 设置编译选项
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fno-strict-aliasing -O3 -fopenmp -flto -funroll-loops")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fno-strict-aliasing -O3 -fopenmp -flto -funroll-loops -mavx2")
 
 # 设置SeqAn3库的路径
 set(SEQAN3_DIR "${CMAKE_SOURCE_DIR}/libs/seqan3/share/cmake/seqan3")
@@ -74,7 +74,7 @@ file(GLOB_RECURSE HEADERS
 )
 
 # 添加可执行文件
-add_executable(Chimera ${SOURCES} "src/build/filter/interleaved-cuckoo-filter.h" "src/build/ChimeraBuild.cpp")
+add_executable(Chimera ${SOURCES} "src/build/filter/interleaved-cuckoo-filter.h" "src/build/ChimeraBuild.cpp" "libs/xxhash.c")
 
 
 # 链接库和 OpenSSL

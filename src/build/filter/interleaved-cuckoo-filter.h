@@ -29,6 +29,7 @@
 #include <cereal/archives/binary.hpp>
 #include <cereal/types/memory.hpp>
 #include <cereal/types/vector.hpp>
+#include <xxhash.h>
 
 namespace chimera {
 	class InterleavedCuckooFilter {
@@ -237,7 +238,8 @@ namespace chimera {
 		 */
 		inline uint16_t reduce_to_16bit(uint64_t value)
 		{
-			uint16_t reduced_value = static_cast<uint16_t>(((value * 11400714819323198485ULL) >> 48) & 0xFFFF);
+			uint64_t hash = XXH64(&value, sizeof(value), 0);
+			uint16_t reduced_value = static_cast<uint16_t>(hash & 0xFFFF);
 			return reduced_value == 0 ? 1 : reduced_value;
 		}
 
@@ -256,8 +258,9 @@ namespace chimera {
 		 */
 		inline uint8_t reduce_to_8bit(uint64_t value)
 		{
-			uint8_t reduced_value = static_cast<uint8_t>(((value * 2654435761U) >> 24) & 0xFF);
-			return reduced_value == 0 ? 1 : reduced_value; // Ensure that the returned value is greater than 0
+			uint64_t hash = XXH64(&value, sizeof(value), 0);
+			uint8_t reduced_value = static_cast<uint8_t>(hash & 0xFF);
+			return reduced_value == 0 ? 1 : reduced_value;
 		}
 
 		/*

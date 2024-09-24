@@ -51,7 +51,7 @@ def prompt_user(options):
 
     assembly_level = options.assembly_level or validate_input(
         "\nEnter assembly level(s) (complete genome, chromosome, scaffold, contig). "
-        "\nUse comma to separate multiple entries. Leave empty for all [default: complete genome]: ",
+        "\nUse comma to separate multiple entries. [default: complete genome]: ",
         valid_assembly_levels, default="complete genome"
     )
 
@@ -61,11 +61,18 @@ def prompt_user(options):
         valid_refseq_categories, default="representative genome"
     )
 
-    file_types = options.file_types or validate_input(
+    file_types = options.file_types or input(
         "\nEnter file type(s) (genomic.fna.gz, assembly_report.txt, protein.faa.gz, genomic.gbff.gz) "
         "\nUse comma to separate multiple entries [default: genomic.fna.gz]: ",
         valid_file_types, default="genomic.fna.gz"
     )
+
+    limit_assembly = (options.limit_assembly or input("\nEnter the number of assemblies to download [default: all]: ")
+                      or "0")
+
+    if not limit_assembly.isdigit():
+        print("Invalid input. Please enter a number.")
+        sys.exit(1)
 
     output_dir = options.output_dir or input(
         "\nEnter the output directory [default: ./genome_output]: ") or "./genome_output"
@@ -88,6 +95,7 @@ def prompt_user(options):
         "taxid": taxid,
         "assembly_level": assembly_level,
         "refseq_category": refseq_category,
+        "limit_assembly": limit_assembly,
         "output_dir": output_dir,
         "threads": threads,
         "dry_run": dry_run,
@@ -117,6 +125,9 @@ def build_command(options):
 
     if options.refseq_category:
         cmd.append(f"-c '{options.refseq_category}'")
+
+    if options.limit_assembly:
+        cmd.append(f"-A 'species:{options.limit_assembly}'")
 
     if options.output_dir:
         cmd.append(f"-o '{options.output_dir}'")
@@ -418,6 +429,7 @@ def download(interactive=False):
     parser.add_argument("-l", "--assembly-level", help="Assembly level (e.g., complete genome, chromosome)")
     parser.add_argument("-c", "--refseq-category",
                         help="Refseq category (e.g., reference genome, representative genome, na)")
+    parser.add_argument("-A", "--limit-assembly", help="Limit the number of assemblies to download")
     parser.add_argument("-o", "--output-dir",
                         help="Name of the output directory (required). WARNING: If the directory exists, it will be cleared.")
     parser.add_argument("-t", "--threads", help="Number of threads")
