@@ -32,6 +32,7 @@ set(SEQAN3_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/libs/seqan3/include")
 find_package(OpenSSL REQUIRED)
 find_package( BZip2 REQUIRED )
 find_package( ZLIB REQUIRED )
+find_package(Threads REQUIRED)
 if (OpenSSL_FOUND)
     message(STATUS "Found OpenSSL: ${OPENSSL_VERSION}")
     message(STATUS "OpenSSL Include Dir: ${OPENSSL_INCLUDE_DIR}")
@@ -86,6 +87,7 @@ target_link_libraries(Chimera
     BZip2::BZip2
     ZLIB::ZLIB
     seqan3::seqan3
+    Threads::Threads
 )
 
 # 设置包含目录

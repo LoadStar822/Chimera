@@ -61,18 +61,14 @@ def prompt_user(options):
         valid_refseq_categories, default="representative genome"
     )
 
-    file_types = options.file_types or input(
+    file_types = options.file_types or validate_input(
         "\nEnter file type(s) (genomic.fna.gz, assembly_report.txt, protein.faa.gz, genomic.gbff.gz) "
         "\nUse comma to separate multiple entries [default: genomic.fna.gz]: ",
         valid_file_types, default="genomic.fna.gz"
     )
 
-    limit_assembly = (options.limit_assembly or input("\nEnter the number of assemblies to download [default: all]: ")
-                      or "0")
-
-    if not limit_assembly.isdigit():
-        print("Invalid input. Please enter a number.")
-        sys.exit(1)
+    limit_assembly = options.limit_assembly or int(
+        input("\nEnter the number of assemblies to download [default: 0]: ") or 0)
 
     output_dir = options.output_dir or input(
         "\nEnter the output directory [default: ./genome_output]: ") or "./genome_output"
@@ -524,7 +520,6 @@ def download(interactive=False):
         print("\nProcessing time: " + str("%.2f" % (processEnd - processStart)) + " seconds.")
 
     os.system(f"rm -rf {tmpFolder}")
-
 
     return options
 
