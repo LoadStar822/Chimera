@@ -1,4 +1,4 @@
-# Chimera: A Versatile Metagenomic Classification Tool
+# Chimera: Efficient Database Building and High-Accuracy Metagenomic Classification
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/MalabZ/Chimera)
@@ -34,6 +34,8 @@
 
 The current version (1.3) introduces **SIMD (Single Instruction, Multiple Data) acceleration** using the **AVX2** instruction set, further enhancing performance by providing compatibility across a range of modern processors. These optimizations significantly speed up computational tasks, improving Chimera’s ability to handle large datasets quickly and efficiently. Version 1.2 previously brought significant enhancements in classification accuracy and performance through the introduction of a **16-bit interleaved cuckoo filter** and the **Expectation-Maximization (EM) algorithm**. Version 1.1 introduced **abundance analysis**, diversity indices, and the **LCA (Lowest Common Ancestor) algorithm** for more precise classification.
 
+For a detailed comparison of Chimera’s performance against other metagenomic classification tools, please visit our **[benchmark repository](https://github.com/LoadStar822/ChimeraBenchmark)**.
+
 ### 🔍 Interactive NCBI Dataset Downloads
 
 One of Chimera’s standout features is its **interactive data downloading** capability from NCBI databases. Users can easily download and process large metagenomic datasets **within the Chimera environment**. The tool automatically handles preprocessing of downloaded datasets, streamlining the workflow from data acquisition to database construction. 
@@ -60,6 +62,7 @@ Chimera comes with built-in **Krona integration** for visualizing taxonomic clas
 ### 🔄 Continual Updates and Customization
 
 Chimera is under active development, with plans for **regular updates** to introduce new features and improvements. While Chimera offers **extensive customization** for advanced users, its **default settings** ensure a simple and accessible experience for beginners. This balance makes Chimera a tool suitable for both experienced bioinformaticians and those new to metagenomic analysis.
+
 
 
 
