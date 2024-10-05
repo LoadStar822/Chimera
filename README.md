@@ -32,7 +32,7 @@
 
 **Chimera** is a versatile **metagenomic classification tool** developed by **Qinzhong Tian**, designed to simplify and accelerate the process of analyzing large-scale metagenomic datasets. Chimera integrates efficient algorithms and user-friendly features to deliver fast, accurate, and scalable metagenomic classification.
 
-The current version (1.2) brings significant enhancements in classification accuracy and performance through the introduction of a **16-bit interleaved cuckoo filter** and the **Expectation-Maximization (EM) algorithm**. These updates further refine Chimera’s existing infrastructure, improving both speed and accuracy. Previous versions, including version 1.1, introduced **abundance analysis**, diversity indices, and the **LCA (Lowest Common Ancestor) algorithm** for more precise classification.
+The current version (1.3) introduces **SIMD (Single Instruction, Multiple Data) acceleration** using the **AVX2** instruction set, further enhancing performance by providing compatibility across a range of modern processors. These optimizations significantly speed up computational tasks, improving Chimera’s ability to handle large datasets quickly and efficiently. Version 1.2 previously brought significant enhancements in classification accuracy and performance through the introduction of a **16-bit interleaved cuckoo filter** and the **Expectation-Maximization (EM) algorithm**. Version 1.1 introduced **abundance analysis**, diversity indices, and the **LCA (Lowest Common Ancestor) algorithm** for more precise classification.
 
 ### 🔍 Interactive NCBI Dataset Downloads
 
@@ -42,7 +42,7 @@ Chimera offers flexibility by supporting **custom parameter configurations**, wh
 
 ### ⚡ Fast and Accurate Species Classification
 
-Chimera is optimized for both **speed and scalability**. The classification engine is **multi-threaded**, making it highly effective at processing large datasets in a short time. Version 1.2 introduced the **16-bit interleaved cuckoo filter** and the **EM algorithm**, significantly improving classification accuracy. Additionally, **version 1.1** added the **LCA algorithm**, which enhances accuracy by resolving ambiguous taxonomic assignments through the use of the Lowest Common Ancestor method.
+Chimera is optimized for both **speed and scalability**. The classification engine is **multi-threaded**, making it highly effective at processing large datasets in a short time. Version 1.3 introduced **SIMD acceleration** with **AVX2** instructions, boosting computational efficiency across platforms. **Version 1.2** introduced the **16-bit interleaved cuckoo filter** and the **EM algorithm**, significantly improving classification accuracy. Additionally, **version 1.1** added the **LCA algorithm**, which enhances accuracy by resolving ambiguous taxonomic assignments through the use of the Lowest Common Ancestor method.
 
 Supported input formats include:
 - Standard formats: **FASTA**, **FASTQ**
@@ -638,6 +638,12 @@ We would like to acknowledge the following repositories and libraries that contr
 - **[cuckoo filter](https://github.com/efficient/cuckoofilter)**: While Chimera's implementation of the cuckoo filter differs significantly, the original **cuckoo filter** provided the initial inspiration for efficient membership testing, which helped shape Chimera’s approach to fast and scalable classification.
 
 - **[ganon](https://github.com/pirovc/ganon)**: Ganon’s implementation of the **LCA (Lowest Common Ancestor)** algorithm was integrated into Chimera to resolve ambiguous classifications by identifying the most specific shared taxonomic ancestor. This feature improves classification accuracy, particularly in complex datasets with shared sequences across multiple taxa.
+
+- **[cereal](https://github.com/USCiLab/cereal)**: **cereal** is a C++11 library for serialization, used in Chimera for saving and loading large taxonomic databases efficiently. Its flexibility and ease of integration have made managing persistent data straightforward.
+
+- **[sdsl-lite](https://github.com/simongog/sdsl-lite)**: Chimera uses **sdsl** (Succinct Data Structure Library) mainly for its **bit_vector** functionality, which helps in efficiently representing binary data and manipulating large sets of information with minimal memory overhead.
+
+- **[SIMDe](https://github.com/simd-everywhere/simde)**: **SIMDe** (Single Instruction, Multiple Data Everywhere) was used to enable portable SIMD (vectorized) instructions across multiple platforms, enhancing the speed of computational tasks without sacrificing compatibility.
 
 
 
