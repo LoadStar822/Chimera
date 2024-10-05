@@ -145,7 +145,7 @@ def build_command(options):
     else:
         cmd.append("-V")
 
-    cmd.append("-N")
+    cmd.append("-N -a")
 
     return " ".join(cmd)
 

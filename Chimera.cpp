@@ -8,13 +8,13 @@
  *
  * Created Date:  2024-07-09
  *
- * Last Modified: 2024-09-20
+ * Last Modified: 2024-10-05
  *
  * Description:
  *  This is the main entry for Chimera
  *
  * Version:
- *  1.2
+ *  1.3
  * -----------------------------------------------------------------------------
  */
 #include <CLI11.hpp>
@@ -122,7 +122,7 @@ int main(int argc, char** argv)
 		std::cout << "Version      : " << VERSION_INFO << std::endl;
 		std::cout << "Build Date   : " << __DATE__ << " " << __TIME__ << std::endl;
 		std::cout << "Compiled with: " << "GCC " << __VERSION__ << std::endl;
-		std::cout << "OS           : Ubuntu 22.04 (WSL)" << std::endl;
+		std::cout << "OS           : Ubuntu 20.04" << std::endl;
 		std::cout << "======================================" << std::endl;
 		std::cout << "Developed by : Qinzhong Tian" << std::endl;
 		std::cout << "Team         : MalabZ" << std::endl;

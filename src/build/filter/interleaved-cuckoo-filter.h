@@ -8,14 +8,14 @@
  *
  * Created Date:  2024-07-09
  *
- * Last Modified: 2024-09-18
+ * Last Modified: 2024-10-05
  *
  * Description:
  *  This is the header file of the Interleaved Cuckoo Filter,
  *	which contains the basic operations of the Interleaved Cuckoo Filter
  *
  * Version:
- *  1.2
+ *  1.3
  * -----------------------------------------------------------------------------
  */
 #ifndef INTERLEAVED_CUCKOO_FILTER_H_
@@ -30,6 +30,9 @@
 #include <cereal/types/memory.hpp>
 #include <cereal/types/vector.hpp>
 #include <xxhash.h>
+#include <simde/x86/avx2.h>
+#include <vector>
+#include <cstdint>
 
 namespace chimera {
 	class InterleavedCuckooFilter {
@@ -99,7 +102,7 @@ namespace chimera {
 		 * Returns: void
 		 * -----------------------------------------------------------------------------------------------
 		 */
-		void batch_insert_to_bit_vector_16bit(uint16_t value, size_t position) {
+		inline void batch_insert_to_bit_vector_16bit(uint16_t value, size_t position) {
 			size_t idx = position / 64;
 			size_t offset = position % 64;
 
@@ -149,7 +152,7 @@ namespace chimera {
 		 * Returns: The 16-bit value at the specified position.
 		 * -----------------------------------------------------------------------------------------------
 		 */
-		uint16_t query_bit_vector_16bit(size_t position) {
+		inline uint16_t query_bit_vector_16bit(size_t position) {
 			size_t idx = position / 64;
 			size_t offset = position % 64;
 
@@ -178,7 +181,7 @@ namespace chimera {
 		 * Returns: The 8-bit value at the specified position.
 		 * -----------------------------------------------------------------------------------------------
 		 */
-		uint8_t query_bit_vector_8bit(size_t position) {
+		inline uint8_t query_bit_vector_8bit(size_t position) {
 			uint64_t mask = 0xFFULL << (position % 64);
 			size_t idx = position / 64;
 			uint64_t chunk = (data.data()[idx] & mask) >> (position % 64);
@@ -201,7 +204,7 @@ namespace chimera {
 		 * Returns: The hash index.
 		 * -----------------------------------------------------------------------------------------------
 		 */
-		size_t hashIndex(uint64_t value) {
+		inline size_t hashIndex(uint64_t value) {
 			return value % hashSize;
 		}
 
@@ -219,7 +222,7 @@ namespace chimera {
 		 * Returns: The alternative hash.
 		 * -----------------------------------------------------------------------------------------------
 		 */
-		size_t altHash(size_t pos, uint8_t tag) {
+		inline size_t altHash(size_t pos, uint8_t tag) {
 			return (pos ^ (tag * 0x5bd1e995)) % hashSize;
 		}
 
@@ -440,68 +443,98 @@ namespace chimera {
 		* -----------------------------------------------------------------------------------------------
 		*/
 		typedef kvec_t(bool) kvector_bool;
-		kvector_bool bulk_contain(size_t value)
+		inline void bulk_contain(size_t value, kvector_bool& result)
 		{
 			if (bitNum == 16)
 			{
-				kvector_bool result;
-				kv_init(result);
-				kv_resize(bool, result, bins);
-				std::memset(result.a, 0, sizeof(bool) * bins);
-				kv_size(result) = bins;
 				uint16_t tag = reduce_to_16bit(value);
 				size_t hash1 = hashIndex(value);
 				size_t hash2 = altHash(hash1, tag);
 				size_t position1 = hash1 << 4;
 				size_t position2 = hash2 << 4;
-				for (size_t bin = 0; bin < bins; bin++)
+
+				const size_t stride = (TagNum) << 4;
+				size_t binOffset = 0;
+
+				const size_t N = 2;
+				size_t bin = 0;
+
+				simde__m256i tag_vec = simde_mm256_set1_epi16((int16_t)tag);
+
+				for (; bin + N <= bins; bin += N)
 				{
-					size_t binOffset = (bin * TagNum) << 4;
-					for (size_t j = 0; j < TagNum; j++)
+					uint64_t tag_bits1_0 = data.get_int(position1 + binOffset + 0 * stride);
+					uint64_t tag_bits1_1 = data.get_int(position1 + binOffset + 1 * stride);
+					uint64_t tag_bits2_0 = data.get_int(position2 + binOffset + 0 * stride);
+					uint64_t tag_bits2_1 = data.get_int(position2 + binOffset + 1 * stride);
+
+					simde__m256i tag_bits_vec = simde_mm256_set_epi64x(
+						tag_bits2_1, tag_bits1_1, tag_bits2_0, tag_bits1_0);
+
+					simde__m256i cmp_mask = simde_mm256_cmpeq_epi16(tag_bits_vec, tag_vec);
+
+					uint32_t cmp_result = simde_mm256_movemask_epi8(cmp_mask);
+
+					if (cmp_result & 0xFFFF)
 					{
-						size_t pos1 = position1 + binOffset + (j << 4);
-						size_t pos2 = position2 + binOffset + (j << 4);
-						uint16_t tag_bits1 = query_bit_vector_16bit(pos1);
-						uint16_t tag_bits2 = query_bit_vector_16bit(pos2);
-						if (tag_bits1 == tag || tag_bits2 == tag)
-						{
-							kv_A(result, bin) = true;
-							break;
-						}
+						kv_A(result, bin) = true;
 					}
+					if (cmp_result & 0xFFFF0000)
+					{
+						kv_A(result, bin + 1) = true;
+					}
+
+					binOffset += N * stride;
 				}
-				return result;
+				for (; bin < bins; ++bin)
+				{
+					size_t pos1 = position1 + binOffset;
+					size_t pos2 = position2 + binOffset;
+					uint64_t tag_bits1 = data.get_int(pos1);
+					uint64_t tag_bits2 = data.get_int(pos2);
+
+					simde__m128i tag_bits_vec = simde_mm_set_epi64x(tag_bits2, tag_bits1);
+					simde__m128i tag_vec_128 = simde_mm_set1_epi16((int16_t)tag);
+					simde__m128i cmp_mask = simde_mm_cmpeq_epi16(tag_bits_vec, tag_vec_128);
+					int cmp_result = simde_mm_movemask_epi8(cmp_mask);
+
+					if (cmp_result != 0)
+					{
+						kv_A(result, bin) = true;
+					}
+
+					binOffset += stride;
+				}
 			}
 			else if (bitNum == 8)
 			{
-				kvector_bool result;
-				kv_init(result);
-				kv_resize(bool, result, bins);
-				std::memset(result.a, 0, sizeof(bool) * bins);
-				kv_size(result) = bins;
 				uint8_t tag = reduce_to_8bit(value);
 				size_t hash1 = hashIndex(value);
 				size_t hash2 = altHash(hash1, tag) << 3;
 				hash1 = hash1 << 3;
 				size_t tmp1{ 0 }, tmp2{ 0 };
+
+				simde__m128i tag_vec = simde_mm_set1_epi8(static_cast<char>(tag));
+
 				for (size_t batch = 0; batch < bin_words; batch++)
 				{
 					tmp1 = data.get_int(hash1);
 					tmp2 = data.get_int(hash2);
 					hash1 += 64;
 					hash2 += 64;
-					for (int bit = 0; bit < 64; bit += 8)
-					{
-						int bin_index = (batch * 2) + (bit / 32);
-						uint8_t tag_bits1 = (tmp1 >> bit) & 0xFF;
-						uint8_t tag_bits2 = (tmp2 >> bit) & 0xFF;
-						if (tag_bits1 == tag || tag_bits2 == tag)
-						{
-							kv_A(result, bin_index) = true;
-						}
-					}
+
+					simde__m128i data_vec = simde_mm_set_epi64x(static_cast<long long>(tmp2), static_cast<long long>(tmp1));
+
+					simde__m128i cmp = simde_mm_cmpeq_epi8(data_vec, tag_vec);
+
+					int mask = simde_mm_movemask_epi8(cmp);
+
+					bool match0 = (mask & 0x0F0F) != 0;
+					bool match1 = (mask & 0xF0F0) != 0;
+
+					kv_A(result, batch * 2 + 0) = match0;
+					kv_A(result, batch * 2 + 1) = match1;
 				}
-				return result;
 			}
 		}
 
@@ -519,22 +552,50 @@ namespace chimera {
 		* -----------------------------------------------------------------------------------------------
 		*/
 		template <std::ranges::range value_range_t>
-		kvector bulk_count(value_range_t&& values)
+		inline kvector bulk_count(value_range_t&& values)
 		{
 			kvector result;
 			kv_init(result);
 			kv_resize(int, result, bins);
 			std::memset(result.a, 0, sizeof(int) * bins);
 			kv_size(result) = bins;
+
+			kvector_bool tmp_result;
+			kv_init(tmp_result);
+			kv_resize(bool, tmp_result, bins);
+			kv_size(tmp_result) = bins;
+
+			const size_t simd_width = 8; // 256 bits / 32 bits per int
+			size_t i = 0;
+
 			for (auto value : values)
 			{
-				kvector_bool tmp = bulk_contain(value);
-				for (size_t i = 0; i < tmp.n; i++)
+				std::fill(tmp_result.a, tmp_result.a + bins, false);
+				bulk_contain(value, tmp_result);
+
+				for (i = 0; i + simd_width <= bins; i += simd_width)
 				{
-					kv_A(result, i) += kv_A(tmp, i);
+					simde__m256i mask = simde_mm256_loadu_si256(reinterpret_cast<const simde__m256i*>(&tmp_result.a[i]));
+
+					simde__m256i ones = simde_mm256_set1_epi8(1);
+
+					simde__m256i increment = simde_mm256_and_si256(mask, ones);
+
+					simde__m256i increment_int = simde_mm256_cvtepi8_epi32(simde_mm256_castsi256_si128(increment));
+
+					simde__m256i current = simde_mm256_loadu_si256(reinterpret_cast<const simde__m256i*>(&result.a[i]));
+
+					simde__m256i updated = simde_mm256_add_epi32(current, increment_int);
+
+					simde_mm256_storeu_si256(reinterpret_cast<simde__m256i*>(&result.a[i]), updated);
 				}
-				kv_destroy(tmp);
+
+				for (; i < bins; ++i)
+				{
+					result.a[i] += tmp_result.a[i] ? 1 : 0;
+				}
 			}
+			kv_destroy(tmp_result);
 			return result;
 		}
 	};

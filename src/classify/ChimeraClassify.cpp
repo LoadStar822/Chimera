@@ -8,13 +8,13 @@
  *
  * Created Date:  2024-08-09
  *
- * Last Modified: 2024-09-19
+ * Last Modified: 2024-10-03
  *
  * Description:
  *  Classify functions for Chimera
  *
  * Version:
- *  1.2
+ *  1.3
  * -----------------------------------------------------------------------------
  */
 #include <ChimeraClassify.hpp>
@@ -105,7 +105,7 @@ namespace ChimeraClassify {
 					seqan3::fields<seqan3::field::id, seqan3::field::seq>> fin1{ config.pairedFiles[i] };
 				seqan3::sequence_file_input<raptor::dna4_traits,
 					seqan3::fields<seqan3::field::id, seqan3::field::seq>> fin2{ config.pairedFiles[i + 1] };
-				std::vector<batchReads> localBatches;  
+				std::vector<batchReads> localBatches;
 
 				auto it1 = fin1 | seqan3::views::chunk(config.batchSize);
 				auto it2 = fin2 | seqan3::views::chunk(config.batchSize);
@@ -249,7 +249,6 @@ namespace ChimeraClassify {
 	 * @param classifyResults The vector to store the classification results.
 	 * @param fileInfo The information about the files and sequences.
 	 */
-	std::mutex resultMutex;
 	inline void processSequence(const std::vector<size_t>& hashs1,
 		ChimeraBuild::ICFConfig& icfConfig,
 		const std::vector<std::pair<std::string, std::size_t>>& taxidBins,
@@ -324,10 +323,9 @@ namespace ChimeraClassify {
 			}
 			else if (config.mode == "normal")
 			{
-				// Sort the taxidCount vector based on the count in descending order
-				std::sort(result.taxidCount.begin(), result.taxidCount.end(), [](const auto& a, const auto& b) {
-					return a.second > b.second;  // Sort in descending order
-					});
+				//// Sort the taxidCount vector based on the count in descending order
+				//std::sort(result.taxidCount.begin(), result.taxidCount.end(), [](const auto& a, const auto& b) {
+				//	return a.second > b.second;  // Sort in descending order
 			}
 		}
 		else
@@ -337,9 +335,8 @@ namespace ChimeraClassify {
 		}
 
 		// Lock the resultMutex to ensure thread safety and add the classifyResult object to the classifyResults vector
-		std::lock_guard<std::mutex> lock(resultMutex);
 		kv_destroy(count);
-		classifyResults.emplace_back(result);
+		classifyResults.emplace_back(std::move(result));
 	}
 
 	/**
@@ -367,7 +364,7 @@ namespace ChimeraClassify {
 	 * @param minimiser_view The minimiser view for hashing.
 	 * @param fileInfo The information about the files and sequences.
 	 */
-	void processBatch(batchReads batch,
+	inline void processBatch(batchReads batch,
 		ChimeraBuild::ICFConfig& icfConfig,
 		const std::vector<std::pair<std::string, std::size_t>>& taxidBins,
 		ClassifyConfig& config,
@@ -384,6 +381,7 @@ namespace ChimeraClassify {
 			// Process paired-end reads
 			for (size_t i = 0; i < batch.seqs2.size(); i += 2)
 			{
+				hashs1.clear();
 				if (batch.seqs2[i].size() >= icfConfig.window_size)
 				{
 					// Generate minimizer hash values for the first sequence
@@ -405,6 +403,7 @@ namespace ChimeraClassify {
 			// Process single-end reads
 			for (size_t i = 0; i < batch.seqs.size(); i++)
 			{
+				hashs1.clear();
 				if (batch.seqs[i].size() >= icfConfig.window_size)
 				{
 					// Generate minimizer hash values for the sequence
@@ -487,7 +486,6 @@ namespace ChimeraClassify {
 		std::vector<classifyResult>& classifyResults,
 		FileInfo& fileInfo)
 	{
-		// Create a minimiser view for hashing
 		auto minimiser_view = seqan3::views::minimiser_hash(
 			seqan3::shape{ seqan3::ungapped{ icfConfig.kmer_size } },
 			seqan3::window_size{ icfConfig.window_size },
@@ -498,13 +496,85 @@ namespace ChimeraClassify {
 		{
 			buildLCA(lca, config.taxFile);
 		}
-#pragma omp parallel
-		{
-			batchReads batch;
-			while (readQueue.try_dequeue(batch)) {
-				// 每个线程独立处理 batch
-				processBatch(batch, icfConfig, taxidBins, config, icf, classifyResults, minimiser_view, fileInfo, lca);
+
+		using minimiser_view_t = decltype(minimiser_view);
+
+		struct classify_thread_data {
+			ChimeraBuild::ICFConfig* icfConfig;
+			moodycamel::ConcurrentQueue<batchReads>* readQueue;
+			ClassifyConfig* config;
+			chimera::InterleavedCuckooFilter* icf;
+			std::vector<std::pair<std::string, std::size_t>>* taxidBins;
+			FileInfo* fileInfo;
+			LCA* lca;
+			minimiser_view_t minimiser_view;
+			std::vector<classifyResult> localClassifyResults;
+
+			classify_thread_data(
+				ChimeraBuild::ICFConfig* icfConfig,
+				moodycamel::ConcurrentQueue<batchReads>* readQueue,
+				ClassifyConfig* config,
+				chimera::InterleavedCuckooFilter* icf,
+				std::vector<std::pair<std::string, std::size_t>>* taxidBins,
+				FileInfo* fileInfo,
+				LCA* lca,
+				minimiser_view_t minimiser_view)
+				: icfConfig(icfConfig),
+				readQueue(readQueue),
+				config(config),
+				icf(icf),
+				taxidBins(taxidBins),
+				fileInfo(fileInfo),
+				lca(lca),
+				minimiser_view(std::move(minimiser_view)) 
+			{
 			}
+		};
+
+		int num_threads = config.threads;
+		std::vector<classify_thread_data> thread_data;
+		thread_data.reserve(num_threads); 
+
+		for (int i = 0; i < num_threads; ++i) {
+			thread_data.emplace_back(
+				&icfConfig,
+				&readQueue,
+				&config,
+				&icf,
+				&taxidBins,
+				&fileInfo,
+				&lca,
+				minimiser_view 
+			);
+		}
+
+		auto classify_worker = [](void* _data, long tid, int nthr) {
+			classify_thread_data* thread_data = static_cast<classify_thread_data*>(_data);
+			classify_thread_data& data = thread_data[tid];
+			batchReads batch;
+			while (data.readQueue->try_dequeue(batch)) {
+				processBatch(batch,
+					*data.icfConfig,
+					*data.taxidBins,
+					*data.config,
+					*data.icf,
+					data.localClassifyResults, 
+					data.minimiser_view,
+					*data.fileInfo,
+					*data.lca);
+			}
+			};
+
+		void* thread_pool = kt_forpool_init(num_threads);
+
+		kt_forpool(thread_pool, classify_worker, thread_data.data(), num_threads);
+
+		kt_forpool_destroy(thread_pool);
+
+		for (int i = 0; i < num_threads; ++i) {
+			classifyResults.insert(classifyResults.end(),
+				thread_data[i].localClassifyResults.begin(),
+				thread_data[i].localClassifyResults.end());
 		}
 	}
 

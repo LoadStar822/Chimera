@@ -1,5 +1,5 @@
 ﻿cmake_minimum_required(VERSION 3.10)
-project(Chimera VERSION 1.2.1)
+project(Chimera VERSION 1.3.0)
 add_definitions(-DCHIMERA_VERSION="${PROJECT_VERSION}")
 set(PROJECT_ROOT_DIR "${CMAKE_SOURCE_DIR}")
 add_definitions(-DPROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}")
@@ -21,7 +21,18 @@ endif()
 
 
 # 设置编译选项
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fno-strict-aliasing -O3 -fopenmp -flto -funroll-loops -mavx2")
+include(CheckCXXCompilerFlag)
+
+# 检测是否支持 AVX2 指令集
+check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
+
+if(COMPILER_SUPPORTS_AVX2)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -fopenmp -DNDEBUG -mavx2 -flto")
+    message(STATUS "AVX2 instructions are supported and enabled.")
+else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -fopenmp -DNDEBUG -flto")
+    message(WARNING "AVX2 instructions are not supported. Proceeding without AVX2 optimization.")
+endif()
 
 # 设置SeqAn3库的路径
 set(SEQAN3_DIR "${CMAKE_SOURCE_DIR}/libs/seqan3/share/cmake/seqan3")
@@ -75,7 +86,7 @@ file(GLOB_RECURSE HEADERS
 )
 
 # 添加可执行文件
-add_executable(Chimera ${SOURCES} "src/build/filter/interleaved-cuckoo-filter.h" "src/build/ChimeraBuild.cpp" "libs/xxhash.c")
+add_executable(Chimera ${SOURCES} "src/build/filter/interleaved-cuckoo-filter.h" "src/build/ChimeraBuild.cpp" "libs/xxhash.c" "libs/klib/kthread.c")
 
 
 # 链接库和 OpenSSL

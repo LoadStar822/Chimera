@@ -63,7 +63,9 @@ namespace cuckoofilter {
 		}
 
 		uint64_t operator()(uint64_t key) const {
-			return (add_ + multiply_ * static_cast<decltype(multiply_)>(key)) >> 64;
+			__uint128_t product = static_cast<__uint128_t>(multiply_) * key;
+			__uint128_t sum = static_cast<__uint128_t>(add_) + product;
+			return sum >> 64;
 		}
 	};
 

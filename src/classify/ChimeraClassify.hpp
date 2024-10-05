@@ -8,13 +8,13 @@
  *
  * Created Date:  2024-08-10
  *
- * Last Modified: 2024-09-19
+ * Last Modified: 2024-10-01
  *
  * Description:
  *  This is ChimeraClassify module for Chimera
  *
  * Version:
- *  1.2
+ *  1.3
  * -----------------------------------------------------------------------------
  */
 #include <classifyConfig.hpp>
@@ -51,6 +51,7 @@
 #include <LCA.hpp>
 #include <concurrentqueue.h>
 #include <EM.hpp>
+#include "kthread.h"
 
 namespace ChimeraClassify {
 	void run(ClassifyConfig config);
