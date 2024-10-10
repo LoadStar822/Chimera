@@ -485,7 +485,6 @@ namespace ChimeraBuild {
 			threadLoad[minThread] += fileSize;
 		}
 
-		// 并行执行任务
 #pragma omp parallel num_threads(numThreads)
 		{
 			int threadId = omp_get_thread_num();
