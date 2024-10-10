@@ -526,14 +526,14 @@ namespace ChimeraClassify {
 				taxidBins(taxidBins),
 				fileInfo(fileInfo),
 				lca(lca),
-				minimiser_view(std::move(minimiser_view)) 
+				minimiser_view(std::move(minimiser_view))
 			{
 			}
 		};
 
 		int num_threads = config.threads;
 		std::vector<classify_thread_data> thread_data;
-		thread_data.reserve(num_threads); 
+		thread_data.reserve(num_threads);
 
 		for (int i = 0; i < num_threads; ++i) {
 			thread_data.emplace_back(
@@ -544,7 +544,7 @@ namespace ChimeraClassify {
 				&taxidBins,
 				&fileInfo,
 				&lca,
-				minimiser_view 
+				minimiser_view
 			);
 		}
 
@@ -558,7 +558,7 @@ namespace ChimeraClassify {
 					*data.taxidBins,
 					*data.config,
 					*data.icf,
-					data.localClassifyResults, 
+					data.localClassifyResults,
 					data.minimiser_view,
 					*data.fileInfo,
 					*data.lca);

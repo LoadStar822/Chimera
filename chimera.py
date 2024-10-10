@@ -46,6 +46,7 @@ def parse_arguments():
     build_parser.add_argument("-l", "--min-length", type=int, default=0, help="Minimum length sequence for building")
     build_parser.add_argument("-t", "--threads", type=int, default=32, help="Number of threads for building")
     build_parser.add_argument("--load-factor", type=float, default=0.95, help="Loading ratio of ICF")
+    build_parser.add_argument("-M,--max-hashes", type=int, default=1000000, help="Maximum number of hashes per taxid")
     build_parser.add_argument("-q", "--quiet", action="store_false", help="Quiet output")
 
     # Download and Build combined subcommand
@@ -152,6 +153,7 @@ def run_chimera(args, chimera_path):
         command.extend(["-l", str(args.min_length)])
         command.extend(["-t", str(args.threads)])
         command.extend(["--load-factor", str(args.load_factor)])
+        command.extend(["-M", str(args.max_hashes)])
         if args.quiet:
             command.append("-q")
 

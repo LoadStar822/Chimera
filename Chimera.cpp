@@ -65,6 +65,8 @@ int main(int argc, char** argv)
 		->default_val(32);
 	build->add_option("--load-factor", buildConfig.load_factor, "Loading ratio of ICF")
 		->default_val(0.95);
+	build->add_option("-M,--max-hashes", buildConfig.maxHashesPerTaxid, "Maximum number of hashes per taxid")
+		->default_val(1000000);
 	build->add_flag("-q,--quiet", buildConfig.verbose, "Quiet output")->default_val(true)->disable_flag_override();
 
 	// Classify

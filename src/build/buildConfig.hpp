@@ -35,25 +35,27 @@ namespace ChimeraBuild {
 		uint16_t threads;
 		bool verbose = true;
 		double load_factor;
+		size_t maxHashesPerTaxid;
 	};
 
 	inline std::ostream& operator<<(std::ostream& os, const BuildConfig& config) {
-		os << std::string(40, '=') << std::endl;
+		os << std::string(50, '=') << std::endl;
 		os << " Build Configuration " << std::endl;
-		os << std::string(40, '=') << std::endl;
+		os << std::string(50, '=') << std::endl;
 
 		os << std::left
-			<< std::setw(20) << "Input file:" << config.input_file << std::endl
-			<< std::setw(20) << "Output file:" << config.output_file << std::endl
-			<< std::setw(20) << "Mode:" << config.mode << std::endl
-			<< std::setw(20) << "Kmer size:" << (int)config.kmer_size << std::endl
-			<< std::setw(20) << "Window size:" << config.window_size << std::endl
-			<< std::setw(20) << "Minimum length:" << config.min_length << std::endl
-			<< std::setw(20) << "Threads:" << config.threads << std::endl
-			<< std::setw(20) << "Load factor:" << config.load_factor << std::endl
-			<< std::setw(20) << "Verbose:" << config.verbose << std::endl;
+			<< std::setw(25) << "Input file:" << config.input_file << std::endl
+			<< std::setw(25) << "Output file:" << config.output_file << std::endl
+			<< std::setw(25) << "Mode:" << config.mode << std::endl
+			<< std::setw(25) << "Kmer size:" << (int)config.kmer_size << std::endl
+			<< std::setw(25) << "Window size:" << config.window_size << std::endl
+			<< std::setw(25) << "Minimum length:" << config.min_length << std::endl
+			<< std::setw(25) << "Threads:" << config.threads << std::endl
+			<< std::setw(25) << "Load factor:" << config.load_factor << std::endl
+			<< std::setw(25) << "Max hashes per taxid:" << config.maxHashesPerTaxid << std::endl  // 调整宽度为25
+			<< std::setw(25) << "Verbose:" << config.verbose << std::endl;
 
-		os << std::string(40, '=') << std::endl;
+		os << std::string(50, '=') << std::endl;
 
 		return os;
 	}
@@ -85,7 +87,6 @@ namespace ChimeraBuild {
 		void serialize(Archive& archive) {
 			archive(kmer_size, window_size, bins, bin_size, bitNum);
 		}
-
 	};
 }
 

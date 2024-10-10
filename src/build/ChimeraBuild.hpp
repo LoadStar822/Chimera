@@ -40,7 +40,9 @@
 #include <vector>
 #include <mutex>
 #include <cstdint>
+#include <execution>
 
+namespace fs = std::filesystem;
 
 namespace ChimeraBuild {
 	void run(BuildConfig config);

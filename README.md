@@ -236,6 +236,7 @@ The `build` function is used to construct a classification database from the dow
 - `-l` or `--min-length`: Minimum sequence length (default: `0`). Sequences shorter than this value will be excluded from the database construction. Adjusting this can be useful for filtering out very short or low-quality sequences.
 - `-t` or `--threads`: Number of threads for parallel processing (default: `32`). Increasing the number of threads can significantly speed up the database construction process, especially on multi-core systems.
 - `--load-factor`: Loading ratio of the interleaved cuckoo filter (default: `0.95`). This parameter mainly affects the **false positive rate**. Lowering the load factor reduces the filter's capacity utilization, which can decrease the false positive rate but will slightly increase the size of the database. 
+- `-M` or `--max-hashes`: Maximum number of hashes per taxid (default: `1000000`). This parameter limits the number of hashes stored for each taxid, which can help control memory usage.
 - `-q` or `--quiet`: Suppresses verbose output. Use this option to minimize output during the building process.
 
 **Example:**
