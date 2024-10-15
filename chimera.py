@@ -46,7 +46,7 @@ def parse_arguments():
     build_parser.add_argument("-l", "--min-length", type=int, default=0, help="Minimum length sequence for building")
     build_parser.add_argument("-t", "--threads", type=int, default=32, help="Number of threads for building")
     build_parser.add_argument("--load-factor", type=float, default=0.95, help="Loading ratio of ICF")
-    build_parser.add_argument("-M,--max-hashes", type=int, default=1000000, help="Maximum number of hashes per taxid")
+    build_parser.add_argument("-M", "--max-hashes", type=int, default=1000000, help="Maximum number of hashes per taxid")
     build_parser.add_argument("-q", "--quiet", action="store_false", help="Quiet output")
 
     # Download and Build combined subcommand
@@ -63,6 +63,7 @@ def parse_arguments():
                                        help="Minimum length sequence for building")
     download_build_parser.add_argument("-t", "--threads", type=int, default=32, help="Number of threads for building")
     download_build_parser.add_argument("--load-factor", type=float, default=0.95, help="Loading ratio of ICF")
+    download_build_parser.add_argument("-M", "--max-hashes", type=int, default=1000000, help="Maximum number of hashes per taxid")
     download_build_parser.add_argument("-q", "--quiet", action="store_false", help="Quiet output")
 
     # Classify subcommand
@@ -129,6 +130,8 @@ def run_chimera(args, chimera_path):
             print("Krona chart generated.")
         profile.process_file(args.input, args.output)
         return 0
+
+    print(vars(args))
 
     command = [chimera_path]
 
