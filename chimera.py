@@ -131,8 +131,6 @@ def run_chimera(args, chimera_path):
         profile.process_file(args.input, args.output)
         return 0
 
-    print(vars(args))
-
     command = [chimera_path]
 
     if args.version:
