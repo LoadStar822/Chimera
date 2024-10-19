@@ -28,11 +28,11 @@
 
 ---
 
-## Project Overview
+## Project Overview 
 
 **Chimera** is a versatile **metagenomic classification tool** developed by **Qinzhong Tian**, designed to simplify and accelerate the process of analyzing large-scale metagenomic datasets. Chimera integrates efficient algorithms and user-friendly features to deliver fast, accurate, and scalable metagenomic classification.
 
-The current version (1.3) introduces **SIMD (Single Instruction, Multiple Data) acceleration** using the **AVX2** instruction set, further enhancing performance by providing compatibility across a range of modern processors. These optimizations significantly speed up computational tasks, improving Chimera’s ability to handle large datasets quickly and efficiently. Version 1.2 previously brought significant enhancements in classification accuracy and performance through the introduction of a **16-bit interleaved cuckoo filter** and the **Expectation-Maximization (EM) algorithm**. Version 1.1 introduced **abundance analysis**, diversity indices, and the **LCA (Lowest Common Ancestor) algorithm** for more precise classification.
+The current version (1.4) enhances classification accuracy by upgrading the previous **Expectation-Maximization (EM) algorithm** to the more advanced **Variational EM algorithm**, which improves convergence speed and robustness in complex datasets. **SIMD (Single Instruction, Multiple Data) acceleration** using the **AVX2** instruction set, introduced in version 1.3, continues to further enhance performance by providing compatibility across a range of modern processors. These optimizations significantly speed up computational tasks, improving Chimera’s ability to handle large datasets quickly and efficiently. Version 1.2 previously brought significant enhancements in classification accuracy and performance through the introduction of a **16-bit interleaved cuckoo filter**. Version 1.1 introduced **abundance analysis**, diversity indices, and the **LCA (Lowest Common Ancestor) algorithm** for more precise classification.
 
 For a detailed comparison of Chimera’s performance against other metagenomic classification tools, please visit our **[benchmark repository](https://github.com/LoadStar822/ChimeraBenchmark)**.
 
@@ -44,7 +44,7 @@ Chimera offers flexibility by supporting **custom parameter configurations**, wh
 
 ### ⚡ Fast and Accurate Species Classification
 
-Chimera is optimized for both **speed and scalability**. The classification engine is **multi-threaded**, making it highly effective at processing large datasets in a short time. Version 1.3 introduced **SIMD acceleration** with **AVX2** instructions, boosting computational efficiency across platforms. **Version 1.2** introduced the **16-bit interleaved cuckoo filter** and the **EM algorithm**, significantly improving classification accuracy. Additionally, **version 1.1** added the **LCA algorithm**, which enhances accuracy by resolving ambiguous taxonomic assignments through the use of the Lowest Common Ancestor method.
+Chimera is optimized for both **speed and scalability**. The classification engine is **multi-threaded**, making it highly effective at processing large datasets in a short time. Version 1.4 upgraded the **EM algorithm** to the **Variational EM algorithm**, further improving classification accuracy in challenging datasets. Version 1.3 introduced **SIMD acceleration** with **AVX2** instructions, boosting computational efficiency across platforms. **Version 1.2** introduced the **16-bit interleaved cuckoo filter**, and **version 1.1** added the **LCA algorithm**, which enhances accuracy by resolving ambiguous taxonomic assignments through the use of the Lowest Common Ancestor method.
 
 Supported input formats include:
 - Standard formats: **FASTA**, **FASTQ**
@@ -62,7 +62,6 @@ Chimera comes with built-in **Krona integration** for visualizing taxonomic clas
 ### 🔄 Continual Updates and Customization
 
 Chimera is under active development, with plans for **regular updates** to introduce new features and improvements. While Chimera offers **extensive customization** for advanced users, its **default settings** ensure a simple and accessible experience for beginners. This balance makes Chimera a tool suitable for both experienced bioinformaticians and those new to metagenomic analysis.
-
 
 
 

@@ -1,5 +1,5 @@
 ﻿cmake_minimum_required(VERSION 3.10)
-project(Chimera VERSION 1.3.3)
+project(Chimera VERSION 1.4.0)
 add_definitions(-DCHIMERA_VERSION="${PROJECT_VERSION}")
 set(PROJECT_ROOT_DIR "${CMAKE_SOURCE_DIR}")
 add_definitions(-DPROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}")

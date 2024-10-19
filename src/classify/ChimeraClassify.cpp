@@ -8,13 +8,13 @@
  *
  * Created Date:  2024-08-09
  *
- * Last Modified: 2024-10-03
+ * Last Modified: 2024-10-19
  *
  * Description:
  *  Classify functions for Chimera
  *
  * Version:
- *  1.3
+ *  1.4
  * -----------------------------------------------------------------------------
  */
 #include <ChimeraClassify.hpp>
@@ -672,16 +672,23 @@ namespace ChimeraClassify {
 		std::cout << "Classifying sequences..." << std::endl;
 		std::vector<classifyResult> classifyResults;
 		classify(icfConfig, readQueue, config, icf, taxidBins, classifyResults, fileInfo);
-		if (config.em)
-		{
-			std::cout << "Running EM algorithm..." << std::endl;
-			classifyResults = EMAlgorithm(classifyResults, config.emIter, config.emThreshold);
-		}
 		auto classifyEnd = std::chrono::high_resolution_clock::now();
 		auto classifyDuration = std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd - classifyStart);
 		if (config.verbose) {
 			std::cout << "Classify time: ";
 			print_classify_time(classifyDuration.count());
+		}
+		if (config.em)
+		{
+			auto EMstart = std::chrono::high_resolution_clock::now();
+			std::cout << "Running EM algorithm..." << std::endl;
+			classifyResults = EMAlgorithm(classifyResults, config.emIter, config.emThreshold);
+			auto EMend = std::chrono::high_resolution_clock::now();
+			auto EMduration = std::chrono::duration_cast<std::chrono::milliseconds>(EMend - EMstart);
+			if (config.verbose) {
+				std::cout << "EM time: ";
+				print_classify_time(EMduration.count());
+			}
 		}
 
 		auto saveStart = std::chrono::high_resolution_clock::now();
