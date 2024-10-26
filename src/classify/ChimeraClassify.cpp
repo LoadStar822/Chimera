@@ -275,6 +275,7 @@ namespace ChimeraClassify {
 		size_t oldIndex = 0;
 		size_t maxBinCount = 0;
 		std::pair<std::string, std::size_t> maxCount;
+		std::unordered_map<std::string, size_t> taxidToCount;
 
 		// Iterate over the taxid bins and calculate the count for each bin based on the bulk count result
 		for (auto const& [taxid, bins] : taxidBins)
@@ -289,21 +290,41 @@ namespace ChimeraClassify {
 			{
 				binCount = hashNum;
 			}
-			if (binCount >= threshold)
+			taxidToCount[taxid] = binCount;
+			if (binCount > maxBinCount)
 			{
-				// Add the bin and count to the classifyResult object if the count is above the threshold
+				maxBinCount = binCount;
+			}
+		}
+
+		// First filter step: remove bins with count less than 80% of the maximum count
+		size_t thresholdCount = static_cast<size_t>(0.8 * static_cast<double>(maxBinCount));
+		for (const auto& [taxid, binCount] : taxidToCount)
+		{
+			if (binCount >= thresholdCount && binCount >= threshold)
+			{
 				result.taxidCount.emplace_back(taxid, binCount);
-				if (binCount > maxBinCount)
+
+				if (binCount == maxBinCount)
 				{
-					maxBinCount = binCount;
 					maxCount = std::make_pair(taxid, binCount);
 				}
+				fileInfo.taxidTotalMatches[taxid] += 1;
 			}
 		}
 
 		// If the maximum count is greater than 0, update the classifyResult object based on the classification mode
-		if (maxBinCount > 0)
+		if (!result.taxidCount.empty())
 		{
+
+			bool isUniqueMapping = (result.taxidCount.size() == 1);
+			if (isUniqueMapping)
+			{
+				fileInfo.uniqueTaxids.insert(result.taxidCount.front().first);
+				const std::string& taxid = result.taxidCount.front().first;
+				fileInfo.taxidUniqueMatches[taxid] += 1;
+			}
+
 			fileInfo.classifiedNum++;
 			if (config.lca && result.taxidCount.size() > 1)
 			{
@@ -460,6 +481,90 @@ namespace ChimeraClassify {
 		lca.doEulerWalk("1");
 	}
 
+
+	void secondFilteringStep(std::vector<classifyResult>& classifyResults, const std::unordered_set<std::string>& uniqueTaxids)
+	{
+		for (auto& result : classifyResults)
+		{
+			result.taxidCount.erase(
+				std::remove_if(
+					result.taxidCount.begin(),
+					result.taxidCount.end(),
+					[&uniqueTaxids](const auto& pair)
+					{
+						return uniqueTaxids.find(pair.first) == uniqueTaxids.end();
+					}),
+				result.taxidCount.end()
+			);
+			if (result.taxidCount.empty())
+			{
+				result.taxidCount.emplace_back("unclassified", 1);
+			}
+		}
+	}
+
+	void thirdFilteringStep(std::vector<classifyResult>& classifyResults, FileInfo& fileInfo)
+	{
+		std::unordered_set<std::string> lowUniqueTaxids;
+		for (const auto& [taxid, totalMatches] : fileInfo.taxidTotalMatches)
+		{
+			size_t uniqueMatches = fileInfo.taxidUniqueMatches[taxid];
+			if (uniqueMatches < 0.05 * totalMatches)
+			{
+				lowUniqueTaxids.insert(taxid);
+			}
+		}
+
+		std::unordered_map<std::string, std::unordered_set<std::string>> taxidToReads;
+		for (const auto& result : classifyResults)
+		{
+			for (const auto& [taxid, count] : result.taxidCount)
+			{
+				taxidToReads[taxid].insert(result.id);
+			}
+		}
+
+		for (const auto& taxid : lowUniqueTaxids)
+		{
+			const auto& reads = taxidToReads[taxid];
+			if (reads.empty()) continue; 
+			for (const auto& [otherTaxid, otherReads] : taxidToReads)
+			{
+				if (taxid == otherTaxid) continue;
+				size_t sharedReads = 0;
+				for (const auto& readId : reads)
+				{
+					if (otherReads.find(readId) != otherReads.end())
+					{
+						sharedReads++;
+					}
+				}
+				double sharedPercentage = static_cast<double>(sharedReads) / reads.size();
+				if (sharedPercentage >= 0.95)
+				{
+					for (auto& result : classifyResults)
+					{
+						if (reads.find(result.id) != reads.end())
+						{
+							result.taxidCount.erase(
+								std::remove_if(
+									result.taxidCount.begin(),
+									result.taxidCount.end(),
+									[&taxid](const auto& pair)
+									{
+										return pair.first == taxid;
+									}),
+								result.taxidCount.end()
+							);
+							result.taxidCount.emplace_back(otherTaxid, 0);
+						}
+					}
+					break;
+				}
+			}
+		}
+	}
+
 	/**
 	 * @brief Classify the reads using the Interleaved Cuckoo Filter.
 	 *
@@ -505,7 +610,7 @@ namespace ChimeraClassify {
 			ClassifyConfig* config;
 			chimera::InterleavedCuckooFilter* icf;
 			std::vector<std::pair<std::string, std::size_t>>* taxidBins;
-			FileInfo* fileInfo;
+			FileInfo localFileInfo;
 			LCA* lca;
 			minimiser_view_t minimiser_view;
 			std::vector<classifyResult> localClassifyResults;
@@ -516,7 +621,6 @@ namespace ChimeraClassify {
 				ClassifyConfig* config,
 				chimera::InterleavedCuckooFilter* icf,
 				std::vector<std::pair<std::string, std::size_t>>* taxidBins,
-				FileInfo* fileInfo,
 				LCA* lca,
 				minimiser_view_t minimiser_view)
 				: icfConfig(icfConfig),
@@ -524,7 +628,6 @@ namespace ChimeraClassify {
 				config(config),
 				icf(icf),
 				taxidBins(taxidBins),
-				fileInfo(fileInfo),
 				lca(lca),
 				minimiser_view(std::move(minimiser_view))
 			{
@@ -542,7 +645,6 @@ namespace ChimeraClassify {
 				&config,
 				&icf,
 				&taxidBins,
-				&fileInfo,
 				&lca,
 				minimiser_view
 			);
@@ -560,7 +662,7 @@ namespace ChimeraClassify {
 					*data.icf,
 					data.localClassifyResults,
 					data.minimiser_view,
-					*data.fileInfo,
+					data.localFileInfo,
 					*data.lca);
 			}
 			};
@@ -575,7 +677,26 @@ namespace ChimeraClassify {
 			classifyResults.insert(classifyResults.end(),
 				thread_data[i].localClassifyResults.begin(),
 				thread_data[i].localClassifyResults.end());
+
+			fileInfo.uniqueTaxids.insert(thread_data[i].localFileInfo.uniqueTaxids.begin(),
+				thread_data[i].localFileInfo.uniqueTaxids.end());
+
+
+			for (const auto& [taxid, count] : thread_data[i].localFileInfo.taxidTotalMatches) {
+				fileInfo.taxidTotalMatches[taxid] += count;
+			}
+			for (const auto& [taxid, count] : thread_data[i].localFileInfo.taxidUniqueMatches) {
+				fileInfo.taxidUniqueMatches[taxid] += count;
+			}
+
+			fileInfo.classifiedNum += thread_data[i].localFileInfo.classifiedNum;
+			fileInfo.unclassifiedNum += thread_data[i].localFileInfo.unclassifiedNum;
 		}
+
+		secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
+
+		thirdFilteringStep(classifyResults, fileInfo);
+
 	}
 
 	/**
@@ -688,6 +809,18 @@ namespace ChimeraClassify {
 			if (config.verbose) {
 				std::cout << "EM time: ";
 				print_classify_time(EMduration.count());
+			}
+		}
+		if (config.vem)
+		{
+			auto VEMstart = std::chrono::high_resolution_clock::now();
+			std::cout << "Running VEM algorithm..." << std::endl;
+			classifyResults = VEMAlgorithm(classifyResults, config.emIter, config.emThreshold);
+			auto VEMend = std::chrono::high_resolution_clock::now();
+			auto VEMduration = std::chrono::duration_cast<std::chrono::milliseconds>(VEMend - VEMstart);
+			if (config.verbose) {
+				std::cout << "VEM time: ";
+				print_classify_time(VEMduration.count());
 			}
 		}
 

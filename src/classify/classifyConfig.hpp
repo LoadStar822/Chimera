@@ -43,6 +43,7 @@ namespace ChimeraClassify {
 		size_t batchSize;
 		bool lca = false;
 		bool em = false;
+		bool vem = false;
 		double emThreshold;
 		size_t emIter;
 	};
@@ -68,6 +69,7 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Batch size:" << config.batchSize << std::endl
 			<< std::setw(20) << "LCA:" << config.lca << std::endl
 			<< std::setw(20) << "EM:" << config.em << std::endl
+			<< std::setw(20) << "VEM:" << config.vem << std::endl
 			<< std::setw(20) << "Threads:" << config.threads << std::endl
 			<< std::setw(20) << "Verbose:" << config.verbose << std::endl;
 
@@ -77,15 +79,18 @@ namespace ChimeraClassify {
 	}
 
 	struct FileInfo {
-		std::atomic<size_t> fileNum{ 0 };
-		std::atomic<size_t> sequenceNum{ 0 };
-		std::atomic<size_t> classifiedNum{ 0 };
-		std::atomic<size_t> unclassifiedNum{ 0 };
+		size_t fileNum{ 0 };
+		size_t sequenceNum{ 0 };
+		size_t classifiedNum{ 0 };
+		size_t unclassifiedNum{ 0 };
 		size_t lcaNum = 0;
 		size_t minLen = 0;
 		size_t maxLen = 0;
 		size_t avgLen = 0;
 		size_t bpLength = 0;
+		std::unordered_set<std::string> uniqueTaxids;
+		std::unordered_map<std::string, size_t> taxidTotalMatches;
+		std::unordered_map<std::string, size_t> taxidUniqueMatches;
 	};
 
 	struct batchReads {

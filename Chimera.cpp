@@ -56,7 +56,7 @@ int main(int argc, char** argv)
 		->default_val("normal");
 	build->add_option("-k,--kmer", buildConfig.kmer_size, "Kmer size for building")
 		->default_val(19)
-		->check(CLI::Range(1, 31));
+		->check(CLI::Range(1, 50));
 	build->add_option("-w,--window", buildConfig.window_size, "Window size for building")
 		->default_val(31);
 	build->add_option("-l,--min-length", buildConfig.min_length, "Minimum length sequence for building")
@@ -66,7 +66,7 @@ int main(int argc, char** argv)
 	build->add_option("--load-factor", buildConfig.load_factor, "Loading ratio of ICF")
 		->default_val(0.95);
 	build->add_option("-M,--max-hashes", buildConfig.maxHashesPerTaxid, "Maximum number of hashes per taxid")
-		->default_val(1000000);
+		->default_val(2000000);
 	build->add_flag("-q,--quiet", buildConfig.verbose, "Quiet output")->default_val(true)->disable_flag_override();
 
 	// Classify
@@ -103,7 +103,8 @@ int main(int argc, char** argv)
 	classify->add_flag("--lca", classifyConfig.lca, "Enable LCA mode");
 	classify->add_option("--tax-file", classifyConfig.taxFile, "Taxonomy file for LCA mode")
 		->check(CLI::ExistingFile);
-	classify->add_flag("-e,--EM", classifyConfig.em, "Enable EM mode");
+	auto emFlag = classify->add_flag("-e,--EM", classifyConfig.em, "Enable EM mode");
+	auto vemFlag = classify->add_flag("-V,--VEM", classifyConfig.vem, "Enable VEM mode")->excludes(emFlag);
 	classify->add_option("--em-threshold", classifyConfig.emThreshold, "EM threshold")
 		->default_val(0.001);
 	classify->add_option("--em-iter", classifyConfig.emIter, "EM iteration")

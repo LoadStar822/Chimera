@@ -46,7 +46,7 @@ def parse_arguments():
     build_parser.add_argument("-l", "--min-length", type=int, default=0, help="Minimum length sequence for building")
     build_parser.add_argument("-t", "--threads", type=int, default=32, help="Number of threads for building")
     build_parser.add_argument("--load-factor", type=float, default=0.95, help="Loading ratio of ICF")
-    build_parser.add_argument("-M", "--max-hashes", type=int, default=1000000, help="Maximum number of hashes per taxid")
+    build_parser.add_argument("-M", "--max-hashes", type=int, default=2000000, help="Maximum number of hashes per taxid")
     build_parser.add_argument("-q", "--quiet", action="store_false", help="Quiet output")
 
     # Download and Build combined subcommand
@@ -63,7 +63,7 @@ def parse_arguments():
                                        help="Minimum length sequence for building")
     download_build_parser.add_argument("-t", "--threads", type=int, default=32, help="Number of threads for building")
     download_build_parser.add_argument("--load-factor", type=float, default=0.95, help="Loading ratio of ICF")
-    download_build_parser.add_argument("-M", "--max-hashes", type=int, default=1000000, help="Maximum number of hashes per taxid")
+    download_build_parser.add_argument("-M", "--max-hashes", type=int, default=2000000, help="Maximum number of hashes per taxid")
     download_build_parser.add_argument("-q", "--quiet", action="store_false", help="Quiet output")
 
     # Classify subcommand
@@ -89,7 +89,8 @@ def parse_arguments():
     group.add_argument("-l", "--lca", action="store_true", help="Use LCA algorithm for classification")
     classify_parser.add_argument("-T", "--tax-file", help="Taxonomy file for LCA classification")
 
-    group.add_argument("-e", "--em", action="store_true", default=True, help="Use EM algorithm for classification")
+    group.add_argument("-e", "--em", action="store_true",  help="Use EM algorithm for classification")
+    group.add_argument("-V", "--vem", action="store_true", default=True, help="Use VEM algorithm for classification (default)")
     classify_parser.add_argument("--em-iter", type=int, default=100, help="Number of EM iterations")
     classify_parser.add_argument("--em-threshold", type=float, default=0.001, help="EM threshold")
 
@@ -177,6 +178,10 @@ def run_chimera(args, chimera_path):
             command.extend(["--tax-file", args.tax_file])
         if args.em:
             command.append("-e")
+            command.extend(["--em-iter", str(args.em_iter)])
+            command.extend(["--em-threshold", str(args.em_threshold)])
+        if args.vem:
+            command.append("-V")
             command.extend(["--em-iter", str(args.em_iter)])
             command.extend(["--em-threshold", str(args.em_threshold)])
         if args.quiet:

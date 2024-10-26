@@ -279,7 +279,8 @@ You can select one of the following classification algorithms:
 
 - `-l` or `--lca`: Use the **LCA (Lowest Common Ancestor)** algorithm for classification. This requires the `--tax-file` option:
 - `-T` or `--tax-file`: Specifies the taxonomy file for LCA classification. If not provided, the default is `tax.info` from the downloaded dataset.
-- `-e` or `--em`: Use the **EM (Expectation-Maximization)** algorithm for classification. This is the default classification method if no other algorithm is specified.
+- `-e` or `--em`: Use the **EM (Expectation-Maximization)** algorithm for classification.
+- `-V` or `--vem` : Use the **Variational EM** algorithm for classification. This is the default classification method if no other algorithm is specified.
 - `--em-iter`: Number of EM iterations (default: `100`).
 - `--em-threshold`: Convergence threshold for EM algorithm (default: `0.001`).
 - `--none`: Do not use LCA or EM for classification. In this case, classification is based solely on the top hit from the database.

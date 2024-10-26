@@ -52,6 +52,7 @@
 #include <concurrentqueue.h>
 #include <EM.hpp>
 #include "kthread.h"
+#include <VEM.hpp>
 
 namespace ChimeraClassify {
 	void run(ClassifyConfig config);
