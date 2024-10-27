@@ -761,7 +761,7 @@ namespace ChimeraClassify {
 	 * @param config The configuration for the classification process.
 	 */
 	void run(ClassifyConfig config) {
-		if ((config.em || config.lca) && config.mode == "fast")
+		if ((config.em || config.lca || config.vem) && config.mode == "fast")
 		{
 			config.mode = "normal";
 			std::cout << "Warning: The mode is changed to 'normal' for EM algorithm or LCA classification\n";

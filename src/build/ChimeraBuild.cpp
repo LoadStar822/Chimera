@@ -138,6 +138,18 @@ namespace ChimeraBuild {
 		return seed >> (64u - 2u * kmer_size);
 	}
 
+	/*
+	 * Check if the file is compressed based on the file extension.
+	 *
+	 * @param filepath The path to the file.
+	 * @return True if the file is compressed, false otherwise.
+	 */
+	static inline bool file_is_compressed(const std::filesystem::path& filepath)
+	{
+		std::string extension = filepath.extension().string();
+		return extension == ".gz" || extension == ".bgzf" || extension == ".bz2";
+	}
+
 	/**
 	 * Count the minimisers for each taxid and its associated files.
 	 *
@@ -152,11 +164,13 @@ namespace ChimeraBuild {
 		robin_hood::unordered_map<std::string, uint64_t>& hashCount,
 		FileInfo& fileInfo)
 	{
+		// Define the minimiser view
 		auto minimiser_view = seqan3::views::minimiser_hash(
 			seqan3::shape{ seqan3::ungapped{ config.kmer_size } },
 			seqan3::window_size{ config.window_size },
 			seqan3::seed{ adjust_seed(config.kmer_size) });
 
+		// Expand the pairs of taxid and files
 		std::vector<std::pair<std::string, std::string>> taxid_file_pairs;
 		for (auto& [taxid, files] : inputFiles)
 		{
@@ -166,116 +180,132 @@ namespace ChimeraBuild {
 			}
 		}
 
-		std::unordered_map<std::string, std::mutex> file_mutex_map;
+		// Global file information statistics
+		FileInfo globalFileInfo = {};
 
-		std::mutex hashCount_mutex;
+		// Mutex to protect global file information
 		std::mutex fileInfo_mutex;
-		std::mutex globalHashCount_mutex;
 
-		const size_t maxHashesPerTaxid = config.maxHashesPerTaxid;
-
-		robin_hood::unordered_map<std::string, size_t> globalHashCounts;
-
-#pragma omp parallel
+		// OpenMP parallel processing
+#pragma omp parallel for schedule(dynamic)
+		for (size_t idx = 0; idx < taxid_file_pairs.size(); ++idx)
 		{
-			FileInfo threadFileInfo = {};
+			const auto& [taxid, filename] = taxid_file_pairs[idx];
 
-			robin_hood::unordered_map<std::string, size_t> localHashCounts;
+			// Thread-local file information
+			FileInfo localFileInfo = {};
 
-#pragma omp for nowait schedule(dynamic)
-			for (size_t i = 0; i < taxid_file_pairs.size(); ++i)
+			// Thread-local hash count
+			robin_hood::unordered_map<uint64_t, uint8_t> local_hash_counts;
+
+			// Calculate the threshold
+			uint8_t cutoff = 1;
+			if (config.fixed_cutoff > 0)
 			{
-				auto& [taxid, file] = taxid_file_pairs[i];
+				cutoff = config.fixed_cutoff;
+			}
+			else
+			{
+				// Calculate the threshold based on file size and type
+				std::filesystem::path filepath(filename);
+				size_t filesize = std::filesystem::file_size(filepath);
+				bool is_compressed = file_is_compressed(filepath);
 
-				seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ file };
+				size_t adjusted_filesize = filesize * 2 / (is_compressed ? 1 : 3);
 
+				if (adjusted_filesize <= 314'572'800ULL) // 300 MB
+					cutoff = 1;
+				else if (adjusted_filesize <= 524'288'000ULL) // 500 MB
+					cutoff = 3;
+				else if (adjusted_filesize <= 1'073'741'824ULL) // 1 GB
+					cutoff = 10;
+				else if (adjusted_filesize <= 3'221'225'472ULL) // 3 GB
+					cutoff = 20;
+				else
+					cutoff = 50;
+			}
+
+			// Set the maximum hash limit
+c			size_t max_hashes = config.max_hashes_per_taxid;
+
+c			// Open the sequence file
+			seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ filename };
+
+			// Iterate over the records in the sequence file
+			for (auto& record : fin)
+			{
+				auto& seq = record.sequence();
+
+				if (seq.size() < config.min_length)
 				{
-					std::lock_guard<std::mutex> lock(file_mutex_map[taxid]);
+					localFileInfo.skippedNum++;
+					continue;
+				}
+				localFileInfo.sequenceNum++;
+				localFileInfo.bpLength += seq.size();
 
-					std::ofstream ofile("tmp/" + taxid + ".mini", std::ios::binary | std::ios::app);
-					if (!ofile.is_open())
-					{
-						std::cerr << "Unable to open the minimiser file: " << taxid << ".mini" << std::endl;
-						continue;
-					}
-
-					for (auto const& [header, seq] : fin)
-					{
-						if (seq.size() < config.min_length)
-						{
-							threadFileInfo.skippedNum++;
-							continue;
-						}
-						threadFileInfo.sequenceNum++;
-						threadFileInfo.bpLength += seq.size();
-
-						const auto minihash = seq | minimiser_view | std::views::common;
-
-						size_t currentGlobalCount = 0;
-						{
-							std::lock_guard<std::mutex> lock(globalHashCount_mutex);
-							currentGlobalCount = globalHashCounts[taxid];
-						}
-
-						size_t remainingHashes = 0;
-						if (currentGlobalCount < maxHashesPerTaxid)
-						{
-							remainingHashes = maxHashesPerTaxid - currentGlobalCount;
-						}
-						else
-						{
-							break;
-						}
-
-						size_t hashesToAdd = std::min(remainingHashes, static_cast<size_t>(std::distance(minihash.begin(), minihash.end())));
-
-						if (hashesToAdd == 0)
-						{
-							break;
-						}
-
-						auto it = minihash.begin();
-						size_t count = 0;
-						while (count < hashesToAdd && it != minihash.end())
-						{
-							uint64_t hash = *it;
-							ofile.write(reinterpret_cast<char*>(&hash), sizeof(hash));
-							++it;
-							++count;
-						}
-
-						localHashCounts[taxid] += count;
-						{
-							std::lock_guard<std::mutex> lock(globalHashCount_mutex);
-							globalHashCounts[taxid] += count;
-						}
-
-						if (globalHashCounts[taxid] >= maxHashesPerTaxid)
-						{
-							break;
-						}
-					}
-
-					ofile.close();
+				// Compute minimizers and count hash values
+				for (uint64_t hash : seq | minimiser_view)
+				{
+					uint8_t& count = local_hash_counts[hash];
+					if (count < 255)
+						++count;
 				}
 			}
 
+			// Compute minimizers and count hash values
+			std::vector<uint64_t> filtered_hashes;
+			filtered_hashes.reserve(local_hash_counts.size());
+			for (const auto& [hash, count] : local_hash_counts)
 			{
-				std::lock_guard<std::mutex> lock(hashCount_mutex);
-				for (const auto& [taxid, count] : localHashCounts)
+				if (count >= cutoff)
 				{
-					hashCount[taxid] += count;
+					filtered_hashes.push_back(hash);
 				}
 			}
 
+			// Apply maximum hash limit if set
+			if (max_hashes > 0 && filtered_hashes.size() > max_hashes)
+			{
+				// Optionally, sort hashes by value or count before truncating
+				// Here, simply truncate
+				filtered_hashes.resize(max_hashes);
+			}
+
+			// Write to the minimiser file
+			{
+				// Write to the minimiser file
+				std::string output_filename = "tmp/" + taxid + ".mini";
+
+				// Lock is required to prevent multiple threads from writing to the same taxid file
+				static std::mutex file_mutex;
+				std::lock_guard<std::mutex> lock(file_mutex);
+
+				// Lock is required to prevent multiple threads from writing to the same taxid file
+				std::ofstream ofile(output_filename, std::ios::binary | std::ios::app);
+				if (!ofile.is_open())
+				{
+					std::cerr << "Unable to open the minimiser file: " << output_filename << std::endl;
+					continue;
+				}
+
+				for (uint64_t hash : filtered_hashes)
+				{
+					ofile.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
+				}
+			}
+
+			// Update global hash count
 			{
 				std::lock_guard<std::mutex> lock(fileInfo_mutex);
-				fileInfo.skippedNum += threadFileInfo.skippedNum;
-				fileInfo.sequenceNum += threadFileInfo.sequenceNum;
-				fileInfo.bpLength += threadFileInfo.bpLength;
+				hashCount[taxid] += filtered_hashes.size();
+				fileInfo.skippedNum += localFileInfo.skippedNum;
+				fileInfo.sequenceNum += localFileInfo.sequenceNum;
+				fileInfo.bpLength += localFileInfo.bpLength;
 			}
 		}
 	}
+
 
 	/**
 	* Get the maximum value from the hashCount map.

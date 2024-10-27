@@ -35,7 +35,8 @@ namespace ChimeraBuild {
 		uint16_t threads;
 		bool verbose = true;
 		double load_factor;
-		size_t maxHashesPerTaxid;
+		size_t max_hashes_per_taxid = 0;
+		uint8_t fixed_cutoff = 0;
 	};
 
 	inline std::ostream& operator<<(std::ostream& os, const BuildConfig& config) {
@@ -52,7 +53,8 @@ namespace ChimeraBuild {
 			<< std::setw(25) << "Minimum length:" << config.min_length << std::endl
 			<< std::setw(25) << "Threads:" << config.threads << std::endl
 			<< std::setw(25) << "Load factor:" << config.load_factor << std::endl
-			<< std::setw(25) << "Max hashes per taxid:" << config.maxHashesPerTaxid << std::endl  // 调整宽度为25
+			<< std::setw(25) << "Max hashes per taxid:" << config.max_hashes_per_taxid << std::endl  
+			<< std::setw(25) << "Fixed cutoff:" << (int)config.fixed_cutoff << std::endl
 			<< std::setw(25) << "Verbose:" << config.verbose << std::endl;
 
 		os << std::string(50, '=') << std::endl;
