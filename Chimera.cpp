@@ -53,6 +53,7 @@ int main(int argc, char** argv)
 	build->add_option("-o,--output", buildConfig.output_file, "Output file for building")
 		->default_val("ChimeraDB");
 	build->add_option("-m,--mode", buildConfig.mode, "Mode for building")
+		->check(CLI::IsMember({ "normal", "fast" }))
 		->default_val("normal");
 	build->add_option("-k,--kmer", buildConfig.kmer_size, "Kmer size for building")
 		->default_val(19)
@@ -66,6 +67,10 @@ int main(int argc, char** argv)
 	build->add_option("--load-factor", buildConfig.load_factor, "Loading ratio of ICF")
 		->default_val(0.95);
 	build->add_option("-M,--max-hashes", buildConfig.max_hashes_per_taxid, "Maximum number of hashes per taxid");
+	build->add_option("-c,--fixed-cutoff", buildConfig.fixed_cutoff, "Fixed cutoff for building (0 - 255)");
+	build->add_option("-f,--filter", buildConfig.filter, "Choose the filter for building (hicf, icf)")
+		->check(CLI::IsMember({ "hicf", "icf" }))
+		->default_val("hicf");
 	build->add_flag("-q,--quiet", buildConfig.verbose, "Quiet output")->default_val(true)->disable_flag_override();
 
 	// Classify

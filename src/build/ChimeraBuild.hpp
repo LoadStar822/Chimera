@@ -41,6 +41,7 @@
 #include <mutex>
 #include <cstdint>
 #include <execution>
+#include <HyperLogLog.hpp>
 
 namespace fs = std::filesystem;
 

@@ -226,9 +226,9 @@ namespace ChimeraBuild {
 			}
 
 			// Set the maximum hash limit
-c			size_t max_hashes = config.max_hashes_per_taxid;
+			size_t max_hashes = config.max_hashes_per_taxid;
 
-c			// Open the sequence file
+			// Open the sequence file
 			seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ filename };
 
 			// Iterate over the records in the sequence file
@@ -296,6 +296,142 @@ c			// Open the sequence file
 			}
 
 			// Update global hash count
+			{
+				std::lock_guard<std::mutex> lock(fileInfo_mutex);
+				hashCount[taxid] += filtered_hashes.size();
+				fileInfo.skippedNum += localFileInfo.skippedNum;
+				fileInfo.sequenceNum += localFileInfo.sequenceNum;
+				fileInfo.bpLength += localFileInfo.bpLength;
+			}
+		}
+	}
+
+
+	void minimiser_count(
+		BuildConfig& config,
+		robin_hood::unordered_map<std::string, std::vector<std::string>>& inputFiles,
+		robin_hood::unordered_map<std::string, uint64_t>& hashCount,
+		FileInfo& fileInfo,
+		std::vector<HyperLogLog>& hllVec)
+	{
+		auto minimiser_view = seqan3::views::minimiser_hash(
+			seqan3::shape{ seqan3::ungapped{ config.kmer_size } },
+			seqan3::window_size{ config.window_size },
+			seqan3::seed{ adjust_seed(config.kmer_size) });
+
+		std::vector<std::pair<std::string, std::string>> taxid_file_pairs;
+		// build taxid to hllVec index map
+		robin_hood::unordered_map<std::string, size_t> taxid_to_index;
+		size_t index = 0;
+		for (auto& [taxid, files] : inputFiles)
+		{
+			for (auto& file : files)
+			{
+				taxid_file_pairs.emplace_back(taxid, file);
+			}
+			taxid_to_index[taxid] = index++;
+		}
+
+		std::vector<std::mutex> hllMutexes(hllVec.size());
+
+		FileInfo globalFileInfo = {};
+
+		std::mutex fileInfo_mutex;
+
+#pragma omp parallel for schedule(dynamic)
+		for (size_t idx = 0; idx < taxid_file_pairs.size(); ++idx)
+		{
+			const auto& [taxid, filename] = taxid_file_pairs[idx];
+
+			FileInfo localFileInfo = {};
+
+			robin_hood::unordered_map<uint64_t, uint8_t> local_hash_counts;
+
+			uint8_t cutoff = 1;
+			if (config.fixed_cutoff > 0)
+			{
+				cutoff = config.fixed_cutoff;
+			}
+			else
+			{
+				std::filesystem::path filepath(filename);
+				size_t filesize = std::filesystem::file_size(filepath);
+				bool is_compressed = file_is_compressed(filepath);
+
+				size_t adjusted_filesize = filesize * 2 / (is_compressed ? 1 : 3);
+
+				if (adjusted_filesize <= 314'572'800ULL) 
+					cutoff = 1;
+				else if (adjusted_filesize <= 524'288'000ULL) 
+					cutoff = 3;
+				else if (adjusted_filesize <= 1'073'741'824ULL) 
+					cutoff = 10;
+				else if (adjusted_filesize <= 3'221'225'472ULL) 
+					cutoff = 20;
+				else
+					cutoff = 50;
+			}
+
+			size_t max_hashes = config.max_hashes_per_taxid;
+
+			seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ filename };
+
+			for (auto& record : fin)
+			{
+				auto& seq = record.sequence();
+
+				if (seq.size() < config.min_length)
+				{
+					localFileInfo.skippedNum++;
+					continue;
+				}
+				localFileInfo.sequenceNum++;
+				localFileInfo.bpLength += seq.size();
+
+				for (uint64_t hash : seq | minimiser_view)
+				{
+					uint8_t& count = local_hash_counts[hash];
+					if (count < 255)
+						++count;
+				}
+			}
+
+			std::vector<uint64_t> filtered_hashes;
+			filtered_hashes.reserve(local_hash_counts.size());
+			for (const auto& [hash, count] : local_hash_counts)
+			{
+				if (count >= cutoff)
+				{
+					filtered_hashes.push_back(hash);
+				}
+			}
+
+			if (max_hashes > 0 && filtered_hashes.size() > max_hashes)
+			{
+				filtered_hashes.resize(max_hashes);
+			}
+
+			size_t hll_index = taxid_to_index[taxid];
+			{
+				std::string output_filename = "tmp/" + taxid + ".mini";
+
+				std::lock_guard<std::mutex> lock(hllMutexes[hll_index]);
+
+				std::ofstream ofile(output_filename, std::ios::binary | std::ios::app);
+				if (!ofile.is_open())
+				{
+					std::cerr << "Unable to open the minimiser file: " << output_filename << std::endl;
+					continue;
+				}
+
+
+				for (uint64_t hash : filtered_hashes)
+				{
+					hllVec[hll_index].add(hash);
+					ofile.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
+				}
+			}
+
 			{
 				std::lock_guard<std::mutex> lock(fileInfo_mutex);
 				hashCount[taxid] += filtered_hashes.size();
@@ -595,6 +731,12 @@ c			// Open the sequence file
 		}
 	}
 
+
+	void computeHyperLogLog(std::vector<HyperLogLog> hllVec, const robin_hood::unordered_map<std::string, uint64_t>& hashCount) {
+		hllVec.resize(hashCount.size());
+
+	}
+
 	/**
 	* Run the build process with the given build configuration.
 	*
@@ -604,27 +746,13 @@ c			// Open the sequence file
 		if (config.verbose) {
 			std::cout << config << std::endl;
 		}
-
 		omp_set_num_threads(config.threads);
 		auto build_start = std::chrono::high_resolution_clock::now();
-
 		auto read_start = std::chrono::high_resolution_clock::now();
 		std::cout << "Reading input files..." << std::endl;
-		ICFConfig icfConfig;
 		FileInfo fileInfo;
-		icfConfig.kmer_size = config.kmer_size;
-		icfConfig.window_size = config.window_size;
-		if (config.mode == "normal")
-		{
-			icfConfig.bitNum = 16;
-		}
-		else if (config.mode == "fast")
-		{
-			icfConfig.bitNum = 8;
-		}
-		else
-		{
-			std::cerr << "Invalid mode: " << config.mode << std::endl;
+		if (config.window_size < config.kmer_size) {
+			std::cerr << "Window size must be greater than or equal to kmer size." << std::endl;
 			return;
 		}
 		robin_hood::unordered_map<std::string, uint64_t> hashCount;
@@ -638,65 +766,100 @@ c			// Open the sequence file
 			std::cout << std::endl;
 		}
 
-		auto calculate_start = std::chrono::high_resolution_clock::now();
-		std::cout << "Calculating minimizers..." << std::endl;
 		std::filesystem::path dir = "tmp";
 		createOrResetDirectory(dir, config);
-		minimiser_count(config, inputFiles, hashCount, fileInfo);
-		auto calculate_end = std::chrono::high_resolution_clock::now();
-		auto calculate_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_end - calculate_start).count();
-		if (config.verbose) {
-			std::cout << "Calculate time: ";
-			print_build_time(calculate_total_time);
-			std::cout << "File information:" << std::endl;
-			std::cout << "Number of files: " << fileInfo.fileNum << std::endl;
-			std::cout << "Number of invalid files: " << fileInfo.invalidNum << std::endl;
-			std::cout << "Number of sequences: " << fileInfo.sequenceNum << std::endl;
-			std::cout << "Number of skipped sequences: " << fileInfo.skippedNum << std::endl;
-			std::cout << "Total base pairs: " << fileInfo.bpLength << std::endl << std::endl;
-		}
 
-		auto calculate_filter_size_start = std::chrono::high_resolution_clock::now();
-		std::cout << "Calculating filter size..." << std::endl;
-		calculateFilterSize(hashCount, icfConfig, config.load_factor, config.mode);
-		auto calculate_filter_size_end = std::chrono::high_resolution_clock::now();
-		auto calculate_filter_size_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_filter_size_end - calculate_filter_size_start).count();
-		if (config.verbose) {
-			std::cout << "Calculate filter size time: ";
-			print_build_time(calculate_filter_size_total_time);
-			std::cout << std::endl;
+		if (config.filter == "hicf")
+		{
+			std::cout << "Calculating minimizers and hyperloglog..." << std::endl;
+			auto calculate_start = std::chrono::high_resolution_clock::now();
+			std::vector<HyperLogLog> hllVec;
+			hllVec.resize(hashCount.size());
+			minimiser_count(config, inputFiles, hashCount, fileInfo, hllVec);
+			auto calculate_end = std::chrono::high_resolution_clock::now();
+			auto calculate_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_end - calculate_start).count();
+			if (config.verbose) {
+				std::cout << "Calculate time: ";
+				print_build_time(calculate_total_time);
+				std::cout << "File information:" << std::endl;
+				std::cout << "Number of files: " << fileInfo.fileNum << std::endl;
+				std::cout << "Number of invalid files: " << fileInfo.invalidNum << std::endl;
+				std::cout << "Number of sequences: " << fileInfo.sequenceNum << std::endl;
+				std::cout << "Number of skipped sequences: " << fileInfo.skippedNum << std::endl;
+				std::cout << "Total base pairs: " << fileInfo.bpLength << std::endl << std::endl;
+			}
 		}
+		else if (config.filter == "icf")
+		{
+			auto calculate_start = std::chrono::high_resolution_clock::now();
+			std::cout << "Calculating minimizers..." << std::endl;
+			minimiser_count(config, inputFiles, hashCount, fileInfo);
+			auto calculate_end = std::chrono::high_resolution_clock::now();
+			auto calculate_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_end - calculate_start).count();
+			if (config.verbose) {
+				std::cout << "Calculate time: ";
+				print_build_time(calculate_total_time);
+				std::cout << "File information:" << std::endl;
+				std::cout << "Number of files: " << fileInfo.fileNum << std::endl;
+				std::cout << "Number of invalid files: " << fileInfo.invalidNum << std::endl;
+				std::cout << "Number of sequences: " << fileInfo.sequenceNum << std::endl;
+				std::cout << "Number of skipped sequences: " << fileInfo.skippedNum << std::endl;
+				std::cout << "Total base pairs: " << fileInfo.bpLength << std::endl << std::endl;
+			}
+			ICFConfig icfConfig;
+			icfConfig.kmer_size = config.kmer_size;
+			icfConfig.window_size = config.window_size;
+			if (config.mode == "normal")
+			{
+				icfConfig.bitNum = 16;
+			}
+			else if (config.mode == "fast")
+			{
+				icfConfig.bitNum = 8;
+			}
+			auto calculate_filter_size_start = std::chrono::high_resolution_clock::now();
+			std::cout << "Calculating filter size..." << std::endl;
+			calculateFilterSize(hashCount, icfConfig, config.load_factor, config.mode);
+			auto calculate_filter_size_end = std::chrono::high_resolution_clock::now();
+			auto calculate_filter_size_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_filter_size_end - calculate_filter_size_start).count();
+			if (config.verbose) {
+				std::cout << "Calculate filter size time: ";
+				print_build_time(calculate_filter_size_total_time);
+				std::cout << std::endl;
+			}
+			auto create_filter_start = std::chrono::high_resolution_clock::now();
+			std::cout << "Creating filter..." << std::endl;
+			chimera::InterleavedCuckooFilter icf(icfConfig.bins, icfConfig.bin_size, icfConfig.bitNum);
+			auto calculate_bins_start = std::chrono::high_resolution_clock::now();
+			robin_hood::unordered_map<std::string, std::size_t> taxidBins = calculateTaxidMapBins(icfConfig, hashCount);
+			auto calculate_bins_end = std::chrono::high_resolution_clock::now();
+			auto calculate_bins_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_bins_end - calculate_bins_start).count();
+			if (config.verbose) {
+				std::cout << "Calculated bins time: ";
+				print_build_time(calculate_bins_total_time);
+				std::cout << std::endl;
+			}
+			build(taxidBins, icfConfig, icf, hashCount, inputFiles);
+			saveFilter(config.output_file, icf, icfConfig, hashCount, taxidBins);
+			auto create_filter_end = std::chrono::high_resolution_clock::now();
+			auto create_filter_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(create_filter_end - create_filter_start).count();
+			if (config.verbose) {
+				std::cout << "Create filter time: ";
+				print_build_time(create_filter_total_time);
+				std::cout << std::endl;
+				std::cout << icf << std::endl;
+			}
+		}
+		
 
-		auto create_filter_start = std::chrono::high_resolution_clock::now();
-		std::cout << "Creating filter..." << std::endl;
-		chimera::InterleavedCuckooFilter icf(icfConfig.bins, icfConfig.bin_size, icfConfig.bitNum);
-		auto calculate_bins_start = std::chrono::high_resolution_clock::now();
-		robin_hood::unordered_map<std::string, std::size_t> taxidBins = calculateTaxidMapBins(icfConfig, hashCount);
-		auto calculate_bins_end = std::chrono::high_resolution_clock::now();
-		auto calculate_bins_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_bins_end - calculate_bins_start).count();
-		if (config.verbose) {
-			std::cout << "Calculated bins time: ";
-			print_build_time(calculate_bins_total_time);
-			std::cout << std::endl;
-		}
-		build(taxidBins, icfConfig, icf, hashCount, inputFiles);
-		saveFilter(config.output_file, icf, icfConfig, hashCount, taxidBins);
-		auto create_filter_end = std::chrono::high_resolution_clock::now();
-		auto create_filter_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(create_filter_end - create_filter_start).count();
-		if (config.verbose) {
-			std::cout << "Create filter time: ";
-			print_build_time(create_filter_total_time);
-			std::cout << std::endl;
-		}
+		
 
 		auto build_end = std::chrono::high_resolution_clock::now();
-
 		// Calculate the total build time in milliseconds
 		auto build_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(build_end - build_start).count();
 		if (config.verbose) {
 			std::cout << "Total build time: ";
 			print_build_time(build_total_time);
-			std::cout << icf << std::endl;
 		}
 		std::filesystem::remove_all(dir);
 	}
