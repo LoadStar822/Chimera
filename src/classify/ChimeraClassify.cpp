@@ -749,6 +749,300 @@ namespace ChimeraClassify {
 		os.close();
 	}
 
+
+	void loadFilter(const std::string& inputFile,
+		chimera::hicf::HierarchicalInterleavedCuckooFilter& hicf,
+		ChimeraBuild::HICFConfig& hicfConfig,
+		std::vector<std::string>& indexToTaxid)
+	{
+		// Open the input file
+		std::ifstream is(inputFile, std::ios::binary);
+
+		// Check if the file is successfully opened
+		if (!is.is_open()) {
+			throw std::runtime_error("Failed to open file: " + inputFile);
+		}
+
+		// Create a cereal binary input archive
+		cereal::BinaryInputArchive archive(is);
+
+		archive(hicf);
+		archive(indexToTaxid);
+		archive(hicfConfig);
+		
+		is.close();
+	}
+
+
+	inline void processSequence(const std::vector<size_t>& hashs1,
+		ChimeraBuild::HICFConfig& hicfConfig,
+		const std::vector<std::string>& indexToTaxid,
+		ClassifyConfig& config,
+		chimera::hicf::HierarchicalInterleavedCuckooFilter& hicf,
+		const std::string& id,
+		std::vector<classifyResult>& classifyResults,
+		FileInfo& fileInfo,
+		LCA& lca)
+	{
+		// Calculate the number of hash values and the threshold for classification
+		size_t hashNum = hashs1.size();
+		size_t threshold = std::ceil(hashNum * config.shotThreshold);
+		if (threshold == 0)
+		{
+			threshold = 1;
+		}
+
+		// Perform bulk count operation on the hash values using the Interleaved Cuckoo Filter
+		auto count = hicf.bulkCount(hashs1, threshold);
+		classifyResult result;
+		result.id = id;
+
+		size_t oldIndex = 0;
+		size_t maxBinCount = 0;
+		std::pair<std::string, std::size_t> maxCount;
+		std::unordered_map<std::string, size_t> taxidToCount;
+		size_t i = 0;
+		for (const auto& taxid : indexToTaxid)
+		{
+			taxidToCount[taxid] = kv_A(count, i);
+			if (kv_A(count, i) > maxBinCount)
+			{
+				maxBinCount = kv_A(count, i);
+			}
+			++i;
+		}
+
+		// First filter step: remove bins with count less than 80% of the maximum count
+		size_t thresholdCount = static_cast<size_t>(0.8 * static_cast<double>(maxBinCount));
+		for (const auto& [taxid, binCount] : taxidToCount)
+		{
+			if (binCount >= thresholdCount && binCount >= threshold)
+			{
+				result.taxidCount.emplace_back(taxid, binCount);
+
+				if (binCount == maxBinCount)
+				{
+					maxCount = std::make_pair(taxid, binCount);
+				}
+				fileInfo.taxidTotalMatches[taxid] += 1;
+			}
+		}
+
+		// If the maximum count is greater than 0, update the classifyResult object based on the classification mode
+		if (!result.taxidCount.empty())
+		{
+
+			bool isUniqueMapping = (result.taxidCount.size() == 1);
+			if (isUniqueMapping)
+			{
+				fileInfo.uniqueTaxids.insert(result.taxidCount.front().first);
+				const std::string& taxid = result.taxidCount.front().first;
+				fileInfo.taxidUniqueMatches[taxid] += 1;
+			}
+
+			fileInfo.classifiedNum++;
+			if (config.lca && result.taxidCount.size() > 1)
+			{
+				std::vector<std::string> taxids;
+				for (auto& [taxid, count] : result.taxidCount)
+				{
+					taxids.push_back(taxid);
+				}
+				std::string lcaTaxid = lca.getLCA(taxids);
+				result.taxidCount.clear();
+				result.taxidCount.emplace_back(lcaTaxid, 0);
+			}
+			else if (config.mode == "fast" || result.taxidCount.size() == 1)
+			{
+				result.taxidCount.clear();
+				result.taxidCount.emplace_back(maxCount);
+			}
+			else if (config.mode == "normal")
+			{
+				//// Sort the taxidCount vector based on the count in descending order
+				//std::sort(result.taxidCount.begin(), result.taxidCount.end(), [](const auto& a, const auto& b) {
+				//	return a.second > b.second;  // Sort in descending order
+			}
+		}
+		else
+		{
+			fileInfo.unclassifiedNum++;
+			result.taxidCount.emplace_back("unclassified", 1);
+		}
+
+		// Lock the resultMutex to ensure thread safety and add the classifyResult object to the classifyResults vector
+		kv_destroy(count);
+		classifyResults.emplace_back(std::move(result));
+	}
+
+
+	inline void processBatch(batchReads batch,
+		ChimeraBuild::HICFConfig& hicfConfig,
+		const std::vector<std::string>& indexToTaxid,
+		ClassifyConfig& config,
+		chimera::hicf::HierarchicalInterleavedCuckooFilter& hicf,
+		std::vector<classifyResult>& classifyResults,
+		const auto& minimiser_view,
+		FileInfo& fileInfo,
+		LCA& lca)
+	{
+		// Process batch of reads
+		std::vector<size_t> hashs1;
+		if (!batch.seqs2.empty())
+		{
+			// Process paired-end reads
+			for (size_t i = 0; i < batch.seqs2.size(); i += 2)
+			{
+				hashs1.clear();
+				if (batch.seqs2[i].size() >= hicfConfig.windowSize)
+				{
+					// Generate minimizer hash values for the first sequence
+					hashs1 = batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector>();
+					if (batch.seqs2[i + 1].size() >= hicfConfig.windowSize)
+					{
+						// Generate minimizer hash values for the second sequence
+						std::vector<size_t> hashs2 = batch.seqs2[i + 1] | minimiser_view | seqan3::ranges::to<std::vector>();
+						// Combine the hash values from both sequences
+						hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
+					}
+				}
+				// Process the combined hash values for classification
+				processSequence(hashs1, hicfConfig, indexToTaxid, config, hicf, batch.ids[i >> 1], classifyResults, fileInfo, lca);
+			}
+		}
+		else
+		{
+			// Process single-end reads
+			for (size_t i = 0; i < batch.seqs.size(); i++)
+			{
+				hashs1.clear();
+				if (batch.seqs[i].size() >= hicfConfig.windowSize)
+				{
+					// Generate minimizer hash values for the sequence
+					hashs1 = batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector>();
+				}
+				// Process the hash values for classification
+				processSequence(hashs1, hicfConfig, indexToTaxid, config, hicf, batch.ids[i], classifyResults, fileInfo, lca);
+			}
+		}
+	}
+
+	void classify(ChimeraBuild::HICFConfig& hicfConfig,
+		moodycamel::ConcurrentQueue<batchReads>& readQueue,
+		ClassifyConfig& config,
+		chimera::hicf::HierarchicalInterleavedCuckooFilter& hicf,
+		std::vector<std::string>& indexToTaxid,
+		std::vector<classifyResult>& classifyResults,
+		FileInfo& fileInfo)
+	{
+		auto minimiser_view = seqan3::views::minimiser_hash(
+			seqan3::shape{ seqan3::ungapped{ hicfConfig.kmerSize } },
+			seqan3::window_size{ hicfConfig.windowSize },
+			seqan3::seed{ adjust_seed(hicfConfig.kmerSize) });
+
+		LCA lca;
+		if (config.lca)
+		{
+			buildLCA(lca, config.taxFile);
+		}
+
+		using minimiser_view_t = decltype(minimiser_view);
+
+		struct classify_thread_data {
+			ChimeraBuild::HICFConfig* hicfConfig;
+			moodycamel::ConcurrentQueue<batchReads>* readQueue;
+			ClassifyConfig* config;
+			chimera::hicf::HierarchicalInterleavedCuckooFilter* hicf;
+			std::vector<std::string>* indexToTaxid;
+			FileInfo localFileInfo;
+			LCA* lca;
+			minimiser_view_t minimiser_view;
+			std::vector<classifyResult> localClassifyResults;
+
+			classify_thread_data(
+				ChimeraBuild::HICFConfig* hicfConfig,
+				moodycamel::ConcurrentQueue<batchReads>* readQueue,
+				ClassifyConfig* config,
+				chimera::hicf::HierarchicalInterleavedCuckooFilter* hicf,
+				std::vector<std::string>* indexToTaxid,
+				LCA* lca,
+				minimiser_view_t minimiser_view)
+				: hicfConfig(hicfConfig),
+				readQueue(readQueue),
+				config(config),
+				hicf(hicf),
+				indexToTaxid(indexToTaxid),
+				lca(lca),
+				minimiser_view(std::move(minimiser_view))
+			{
+			}
+		};
+
+		int num_threads = config.threads;
+		std::vector<classify_thread_data> thread_data;
+		thread_data.reserve(num_threads);
+
+		for (int i = 0; i < num_threads; ++i) {
+			thread_data.emplace_back(
+				&hicfConfig,
+				&readQueue,
+				&config,
+				&hicf,
+				&indexToTaxid,
+				&lca,
+				minimiser_view
+			);
+		}
+
+		auto classify_worker = [](void* _data, long tid, int nthr) {
+			classify_thread_data* thread_data = static_cast<classify_thread_data*>(_data);
+			classify_thread_data& data = thread_data[tid];
+			batchReads batch;
+			while (data.readQueue->try_dequeue(batch)) {
+				processBatch(batch,
+					*data.hicfConfig,
+					*data.indexToTaxid,
+					*data.config,
+					*data.hicf,
+					data.localClassifyResults,
+					data.minimiser_view,
+					data.localFileInfo,
+					*data.lca);
+			}
+			};
+
+		void* thread_pool = kt_forpool_init(num_threads);
+
+		kt_forpool(thread_pool, classify_worker, thread_data.data(), num_threads);
+
+		kt_forpool_destroy(thread_pool);
+
+		for (int i = 0; i < num_threads; ++i) {
+			classifyResults.insert(classifyResults.end(),
+				thread_data[i].localClassifyResults.begin(),
+				thread_data[i].localClassifyResults.end());
+
+			fileInfo.uniqueTaxids.insert(thread_data[i].localFileInfo.uniqueTaxids.begin(),
+				thread_data[i].localFileInfo.uniqueTaxids.end());
+
+
+			for (const auto& [taxid, count] : thread_data[i].localFileInfo.taxidTotalMatches) {
+				fileInfo.taxidTotalMatches[taxid] += count;
+			}
+			for (const auto& [taxid, count] : thread_data[i].localFileInfo.taxidUniqueMatches) {
+				fileInfo.taxidUniqueMatches[taxid] += count;
+			}
+
+			fileInfo.classifiedNum += thread_data[i].localFileInfo.classifiedNum;
+			fileInfo.unclassifiedNum += thread_data[i].localFileInfo.unclassifiedNum;
+		}
+
+		secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
+
+		thirdFilteringStep(classifyResults, fileInfo);
+
+	}
+
 	/**
 	 * @brief Run the classification process.
 	 *
@@ -773,32 +1067,67 @@ namespace ChimeraClassify {
 		auto TotalclassifyStart = std::chrono::high_resolution_clock::now();
 		auto readStart = std::chrono::high_resolution_clock::now();
 		std::cout << "Reading input files..." << std::endl;
+
 		FileInfo fileInfo;
 		seqan3::contrib::bgzf_thread_count = config.threads;
 		moodycamel::ConcurrentQueue<batchReads> readQueue;
 		parseReads(readQueue, config, fileInfo);
-		chimera::InterleavedCuckooFilter icf;
-		ChimeraBuild::ICFConfig icfConfig;
-		robin_hood::unordered_map<std::string, uint64_t> hashCount;
-		std::vector<std::pair<std::string, std::size_t>> taxidBins;
-		loadFilter(config.dbFile, icf, icfConfig, hashCount, taxidBins);
-		auto readEnd = std::chrono::high_resolution_clock::now();
-		auto readDuration = std::chrono::duration_cast<std::chrono::milliseconds>(readEnd - readStart);
-		if (config.verbose) {
-			std::cout << "Read time: ";
-			print_classify_time(readDuration.count());
-			std::cout << "Number of taxids: " << taxidBins.size() << std::endl << std::endl;
-		}
-		auto classifyStart = std::chrono::high_resolution_clock::now();
-		std::cout << "Classifying sequences..." << std::endl;
 		std::vector<classifyResult> classifyResults;
-		classify(icfConfig, readQueue, config, icf, taxidBins, classifyResults, fileInfo);
-		auto classifyEnd = std::chrono::high_resolution_clock::now();
-		auto classifyDuration = std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd - classifyStart);
-		if (config.verbose) {
-			std::cout << "Classify time: ";
-			print_classify_time(classifyDuration.count());
+		if (config.filter == "icf")
+		{
+			std::vector<std::pair<std::string, std::size_t>> taxidBins;
+			chimera::InterleavedCuckooFilter icf;
+			ChimeraBuild::ICFConfig icfConfig;
+			robin_hood::unordered_map<std::string, uint64_t> hashCount;
+			loadFilter(config.dbFile, icf, icfConfig, hashCount, taxidBins);
+			auto readEnd = std::chrono::high_resolution_clock::now();
+			auto readDuration = std::chrono::duration_cast<std::chrono::milliseconds>(readEnd - readStart);
+			if (config.verbose) {
+				std::cout << "Read time: ";
+				print_classify_time(readDuration.count());
+				std::cout << "Number of taxids: " << taxidBins.size() << std::endl << std::endl;
+			}
+			auto classifyStart = std::chrono::high_resolution_clock::now();
+			std::cout << "Classifying sequences by icf..." << std::endl;
+			classify(icfConfig, readQueue, config, icf, taxidBins, classifyResults, fileInfo);
+			auto classifyEnd = std::chrono::high_resolution_clock::now();
+			auto classifyDuration = std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd - classifyStart);
+			if (config.verbose) {
+				std::cout << "Classify time: ";
+				print_classify_time(classifyDuration.count());
+			}
 		}
+		else if (config.filter == "hicf")
+		{
+			std::vector<std::string> indexToTaxid;
+			chimera::hicf::HierarchicalInterleavedCuckooFilter hicf;
+			ChimeraBuild::HICFConfig hicfConfig;
+			loadFilter(config.dbFile, hicf, hicfConfig, indexToTaxid);
+			auto readEnd = std::chrono::high_resolution_clock::now();
+			auto readDuration = std::chrono::duration_cast<std::chrono::milliseconds>(readEnd - readStart);
+			if (config.verbose) {
+				std::cout << "Read time: ";
+				print_classify_time(readDuration.count());
+				std::cout << "Number of taxids: " << indexToTaxid.size() << std::endl << std::endl;
+			}
+
+			auto classifyStart = std::chrono::high_resolution_clock::now();
+			std::cout << "Classifying sequences by hicf..." << std::endl;
+			classify(hicfConfig, readQueue, config, hicf, indexToTaxid, classifyResults, fileInfo);
+			auto classifyEnd = std::chrono::high_resolution_clock::now();
+			auto classifyDuration = std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd - classifyStart);
+			if (config.verbose) {
+				std::cout << "Classify time: ";
+				print_classify_time(classifyDuration.count());
+			}
+		}
+		else
+		{
+			throw std::runtime_error("Invalid filter type: " + config.filter);
+		}
+
+
+
 		if (config.em)
 		{
 			auto EMstart = std::chrono::high_resolution_clock::now();

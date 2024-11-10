@@ -36,6 +36,7 @@ namespace ChimeraClassify {
 		std::string outputFile;
 		std::string dbFile;
 		std::string taxFile;
+		std::string filter{ "hicf" };
 		double shotThreshold;
 		uint16_t threads;
 		std::string mode;
@@ -66,6 +67,7 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Database file:" << config.dbFile << std::endl
 			<< std::setw(20) << "Shot threshold:" << config.shotThreshold << std::endl
 			<< std::setw(20) << "Mode:" << config.mode << std::endl
+			<< std::setw(20) << "Filter:" << config.filter << std::endl
 			<< std::setw(20) << "Batch size:" << config.batchSize << std::endl
 			<< std::setw(20) << "LCA:" << config.lca << std::endl
 			<< std::setw(20) << "EM:" << config.em << std::endl

@@ -236,6 +236,10 @@ The `build` function is used to construct a classification database from the dow
 - `-t` or `--threads`: Number of threads for parallel processing (default: `32`). Increasing the number of threads can significantly speed up the database construction process, especially on multi-core systems.
 - `--load-factor`: Loading ratio of the interleaved cuckoo filter (default: `0.95`). This parameter mainly affects the **false positive rate**. Lowering the load factor reduces the filter's capacity utilization, which can decrease the false positive rate but will slightly increase the size of the database. 
 - `-M` or `--max-hashes`: Maximum number of hashes per taxid (default: `1000000`). This parameter limits the number of hashes stored for each taxid, which can help control memory usage.
+- `-a` or `--alpha`: The weight parameters for building HICF have a default value of `1.2`. Please do not modify them unless there are special circumstances
+- `--relaxed-load-factor`: The relaxed load factor for the hierarchical interleaved cuckoo filter. The default value is `0.95`. This parameter can be used to adjust the load factor for
+- `-c` or `--fixed-cutoff`: Filter out the truncation threshold of minimizers with fewer occurrences when calculating them. By default, it is not set and will be automatically calculated based on file size, with a range of `(0-255)`
+- `-f` or `--filter`: Select the type of filter to use (ICF, HICF) and default to `ICF`
 - `-q` or `--quiet`: Suppresses verbose output. Use this option to minimize output during the building process.
 
 **Example:**
@@ -284,6 +288,7 @@ You can select one of the following classification algorithms:
 - `--em-iter`: Number of EM iterations (default: `100`).
 - `--em-threshold`: Convergence threshold for EM algorithm (default: `0.001`).
 - `--none`: Do not use LCA or EM for classification. In this case, classification is based solely on the top hit from the database.
+- `-f` or `--filter`: Select the type of filter to use (ICF, HICF) and default to `ICF`
 - `-q` or `--quiet`: Suppresses verbose output.
 
 **Examples:**

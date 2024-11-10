@@ -47,6 +47,11 @@ def parse_arguments():
     build_parser.add_argument("-t", "--threads", type=int, default=32, help="Number of threads for building")
     build_parser.add_argument("--load-factor", type=float, default=0.95, help="Loading ratio of ICF")
     build_parser.add_argument("-M", "--max-hashes", type=int, default=2000000, help="Maximum number of hashes per taxid")
+    build_parser.add_argument("-a", "--alpha", type=float, default=1.2, help="Alpha value for HICF")
+    build_parser.add_argument("--relaxed-load-factor", type=float, default=0.95, help="Relaxed loading ratio of HICF")
+    build_parser.add_argument("-f", "--filter", default="icf", choices=["icf", "hicf"],
+                              help="Filter for building (choices: 'icf', 'hicf'). Default is 'icf'.")
+    build_parser.add_argument("-c", "--fixed-cutoff", type=int, help="Fixed cutoff for minimizer (0 - 255)")
     build_parser.add_argument("-q", "--quiet", action="store_false", help="Quiet output")
 
     # Download and Build combined subcommand
@@ -64,6 +69,12 @@ def parse_arguments():
     download_build_parser.add_argument("-t", "--threads", type=int, default=32, help="Number of threads for building")
     download_build_parser.add_argument("--load-factor", type=float, default=0.95, help="Loading ratio of ICF")
     download_build_parser.add_argument("-M", "--max-hashes", type=int, default=2000000, help="Maximum number of hashes per taxid")
+    download_build_parser.add_argument("-a", "--alpha", type=float, default=1.2, help="Alpha value for HICF")
+    download_build_parser.add_argument("--relaxed-load-factor", type=float, default=0.95, help="Relaxed loading ratio of HICF")
+    download_build_parser.add_argument("-f", "--filter", default="icf", choices=["icf", "hicf"],
+                              help="Filter for building (choices: 'icf', 'hicf'). Default is 'icf'.")
+    download_build_parser.add_argument("-c", "--fixed-cutoff", type=int,
+                              help="Fixed cutoff for minimizer (0 - 255)")
     download_build_parser.add_argument("-q", "--quiet", action="store_false", help="Quiet output")
 
     # Classify subcommand
@@ -83,6 +94,8 @@ def parse_arguments():
         choices=["fast", "normal"],
         help="Mode for classifying (choices: 'fast', 'normal'). Default is 'normal'."
     )
+    classify_parser.add_argument("-f", "--filter", default="icf", choices=["icf", "hicf"],
+                                 help="Filter for classifying (choices: 'icf', 'hicf'). Default is 'icf'.")
     classify_parser.add_argument("-b", "--batch-size", type=int, default=400, help="Batch size for classifying")
     group = classify_parser.add_mutually_exclusive_group()
 
@@ -155,6 +168,11 @@ def run_chimera(args, chimera_path):
         command.extend(["-l", str(args.min_length)])
         command.extend(["-t", str(args.threads)])
         command.extend(["--load-factor", str(args.load_factor)])
+        command.extend(["-a", str(args.alpha)])
+        command.extend(["--relaxed-load-factor", str(args.relaxed_load_factor)])
+        command.extend(["-f", args.filter])
+        if args.fixed_cutoff:
+            command.extend(["-c", str(args.fixed_cutoff)])
         command.extend(["-M", str(args.max_hashes)])
         if args.quiet:
             command.append("-q")
@@ -171,6 +189,7 @@ def run_chimera(args, chimera_path):
         command.extend(["-t", str(args.threads)])
         command.extend(["-m", args.mode])
         command.extend(["-b", str(args.batch_size)])
+        command.extend(["-f", args.filter])
         if args.lca:
             command.append("--lca")
             if not args.tax_file:

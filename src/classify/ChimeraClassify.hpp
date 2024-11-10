@@ -53,6 +53,7 @@
 #include <EM.hpp>
 #include "kthread.h"
 #include <VEM.hpp>
+#include <hierarchical-interleaved-cuckoo-filter.h>
 
 namespace ChimeraClassify {
 	void run(ClassifyConfig config);

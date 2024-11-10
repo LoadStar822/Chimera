@@ -29,14 +29,17 @@ namespace ChimeraBuild {
 		std::string input_file;
 		std::string output_file;
 		std::string mode;
+		std::string filter{ "hicf" };
 		uint8_t kmer_size;
 		uint16_t window_size;
 		uint64_t min_length;
 		uint16_t threads;
 		bool verbose = true;
-		double load_factor;
+		double load_factor{ 0.95 };
 		size_t max_hashes_per_taxid = 0;
 		uint8_t fixed_cutoff = 0;
+		double alpha{ 1.2 };
+		double relaxedLoadFactor{ 0.95 };
 	};
 
 	inline std::ostream& operator<<(std::ostream& os, const BuildConfig& config) {
@@ -47,13 +50,16 @@ namespace ChimeraBuild {
 		os << std::left
 			<< std::setw(25) << "Input file:" << config.input_file << std::endl
 			<< std::setw(25) << "Output file:" << config.output_file << std::endl
+			<< std::setw(25) << "Filter:" << config.filter << std::endl
 			<< std::setw(25) << "Mode:" << config.mode << std::endl
 			<< std::setw(25) << "Kmer size:" << (int)config.kmer_size << std::endl
 			<< std::setw(25) << "Window size:" << config.window_size << std::endl
 			<< std::setw(25) << "Minimum length:" << config.min_length << std::endl
 			<< std::setw(25) << "Threads:" << config.threads << std::endl
 			<< std::setw(25) << "Load factor:" << config.load_factor << std::endl
-			<< std::setw(25) << "Max hashes per taxid:" << config.max_hashes_per_taxid << std::endl  
+			<< std::setw(25) << "Relaxed load factor:" << config.relaxedLoadFactor << std::endl
+			<< std::setw(25) << "Alpha:" << config.alpha << std::endl
+			<< std::setw(25) << "Max hashes per taxid:" << config.max_hashes_per_taxid << std::endl
 			<< std::setw(25) << "Fixed cutoff:" << (int)config.fixed_cutoff << std::endl
 			<< std::setw(25) << "Verbose:" << config.verbose << std::endl;
 
@@ -88,6 +94,27 @@ namespace ChimeraBuild {
 		template <class Archive>
 		void serialize(Archive& archive) {
 			archive(kmer_size, window_size, bins, bin_size, bitNum);
+		}
+	};
+
+	struct HICFConfig {
+		size_t userBinsNum;
+		size_t technicalBinsNum;
+		size_t technicalBinsMaxNum;
+		uint8_t tagNum{ 4 };
+		uint8_t tagBits{ 16 };
+		int MaxCuckooCount{ 500 };
+		double loadFactor{ 0.95 };
+		double relaxedLoadFactor{ 0.95 };
+		uint8_t kmerSize;
+		uint16_t windowSize;
+		size_t totalHashes;
+
+
+		template <class Archive>
+		void serialize(Archive& archive) {
+			archive(userBinsNum, technicalBinsNum, tagNum, tagBits, MaxCuckooCount, loadFactor);
+			archive(relaxedLoadFactor, kmerSize, windowSize, technicalBinsMaxNum, totalHashes);
 		}
 	};
 }

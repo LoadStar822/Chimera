@@ -17,6 +17,7 @@
  *  1.0
  * -----------------------------------------------------------------------------
  */
+#pragma once
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -35,12 +36,12 @@
 class HyperLogLog
 {
 public:
-	explicit HyperLogLog(uint8_t bits = 5)
+	explicit HyperLogLog(uint8_t bits = 12)
 		: bits(bits), size(1ULL << bits), registers(size, 0)
 	{
 		if (bits < 5 || bits > 32)
 			throw std::invalid_argument("Bit width must be in the range [5,32].");
-
+		double alpha;
 		switch (size)
 		{
 		case 16:
@@ -130,6 +131,12 @@ public:
 		}
 	}
 
+	double merge_and_estimate(HyperLogLog const& other)
+	{
+		merge(other);
+		return estimate();
+	}
+
 	void reset()
 	{
 		std::fill(registers.begin(), registers.end(), 0);
@@ -139,13 +146,12 @@ public:
 	template<class Archive>
 	void serialize(Archive& ar)
 	{
-		ar(bits, size, alpha, correction_factor, registers);
+		ar(bits, size, correction_factor, registers);
 	}
 
 private:
 	uint8_t bits;
 	uint64_t size;
-	double alpha;
 	double correction_factor;
 	std::vector<uint8_t> registers;
 

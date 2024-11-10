@@ -52,3 +52,5 @@
 /test.cpp
 /.vscode
 /.vscode
+/cmake-build-debug
+/cmake-build-debug-wsl
