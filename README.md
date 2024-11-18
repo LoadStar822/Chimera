@@ -1,4 +1,4 @@
-# Chimera: Ultrafast Database Construction with Interleaved Cuckoo Filter and High-Accuracy Taxonomic Classification for Metagenomic Studies
+# Chimera: Ultrafast Database Construction with Interleaved Merged Cuckoo Filter and High-Accuracy Taxonomic Classification for Metagenomic Studies
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/MalabZ/Chimera)
