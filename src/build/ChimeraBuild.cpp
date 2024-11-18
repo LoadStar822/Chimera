@@ -8,7 +8,7 @@
  *
  * Created Date:  2024-07-30
  *
- * Last Modified: 2024-09-19
+ * Last Modified: 2024-11-18
  *
  * Description:
  *  The main program of ChimeraBuild.
@@ -53,7 +53,7 @@ namespace ChimeraBuild {
 	* @param hashCount The map to store the hash count.
 	* @param fileInfo The struct to store file information.
 	*/
-	void parseInputFile(const std::string& filePath, robin_hood::unordered_map<std::string, std::vector<std::string>>& inputFiles, robin_hood::unordered_map<std::string, uint64_t>& hashCount, FileInfo& fileInfo) {
+	void parseInputFile(const std::string& filePath, robin_hood::unordered_flat_map<std::string, std::vector<std::string>>& inputFiles, robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount, FileInfo& fileInfo) {
 		// Open the input file
 		std::ifstream inputFile(filePath);
 		if (!inputFile.is_open()) {
@@ -160,8 +160,8 @@ namespace ChimeraBuild {
 	 */
 	void minimiser_count(
 		BuildConfig& config,
-		robin_hood::unordered_map<std::string, std::vector<std::string>>& inputFiles,
-		robin_hood::unordered_map<std::string, uint64_t>& hashCount,
+		robin_hood::unordered_flat_map<std::string, std::vector<std::string>>& inputFiles,
+		robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
 		FileInfo& fileInfo)
 	{
 		// Define the minimiser view
@@ -172,7 +172,7 @@ namespace ChimeraBuild {
 
 		// Expand the pairs of taxid and files
 		std::vector<std::pair<std::string, std::string>> taxid_file_pairs;
-		robin_hood::unordered_map<std::string, size_t> taxid_to_index;
+		robin_hood::unordered_flat_map<std::string, size_t> taxid_to_index;
 		std::vector<std::string> index_to_taxid;
 		size_t index = 0;
 		for (auto& [taxid, files] : inputFiles)
@@ -197,11 +197,30 @@ namespace ChimeraBuild {
 		{
 			const auto& [taxid, filename] = taxid_file_pairs[idx];
 
+			size_t taxid_index = taxid_to_index[taxid];
+
+			bool skip_processing = false;
+			{
+				std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index]);
+				if (config.max_hashes_per_taxid > 0 && hashCount[taxid] >= config.max_hashes_per_taxid)
+				{
+					skip_processing = true;
+				}
+			}
+			if (skip_processing)
+			{
+				{
+					std::lock_guard<std::mutex> lock(fileInfo_mutex);
+					fileInfo.skippedNum++;
+				}
+				continue;
+			}
+
 			// Thread-local file information
 			FileInfo localFileInfo = {};
 
 			// Thread-local hash count
-			robin_hood::unordered_map<uint64_t, uint8_t> local_hash_counts;
+			robin_hood::unordered_flat_map<uint64_t, uint8_t> local_hash_counts;
 
 			// Calculate the threshold
 			uint8_t cutoff = 1;
@@ -233,31 +252,32 @@ namespace ChimeraBuild {
 			// Set the maximum hash limit
 			size_t max_hashes = config.max_hashes_per_taxid;
 
-			// Open the sequence file
-			seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ filename };
-
-			// Iterate over the records in the sequence file
-			for (auto& record : fin)
 			{
-				auto& seq = record.sequence();
+				// Open the sequence file
+				seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ filename };
 
-				if (seq.size() < config.min_length)
+				// Iterate over the records in the sequence file
+				for (auto& record : fin)
 				{
-					localFileInfo.skippedNum++;
-					continue;
-				}
-				localFileInfo.sequenceNum++;
-				localFileInfo.bpLength += seq.size();
+					auto& seq = record.sequence();
 
-				// Compute minimizers and count hash values
-				for (uint64_t hash : seq | minimiser_view)
-				{
-					uint8_t& count = local_hash_counts[hash];
-					if (count < 255)
-						++count;
+					if (seq.size() < config.min_length)
+					{
+						localFileInfo.skippedSeqNum++;
+						continue;
+					}
+					localFileInfo.sequenceNum++;
+					localFileInfo.bpLength += seq.size();
+
+					// Compute minimizers and count hash values
+					for (uint64_t hash : seq | minimiser_view)
+					{
+						uint8_t& count = local_hash_counts[hash];
+						if (count < 255)
+							++count;
+					}
 				}
 			}
-
 			// Compute minimizers and count hash values
 			std::vector<uint64_t> filtered_hashes;
 			filtered_hashes.reserve(local_hash_counts.size());
@@ -265,47 +285,69 @@ namespace ChimeraBuild {
 			{
 				if (count >= cutoff)
 				{
-					filtered_hashes.push_back(hash);
+					filtered_hashes.emplace_back(hash);
 				}
 			}
 
-			// Apply maximum hash limit if set
+			local_hash_counts.clear();
+
 			if (max_hashes > 0 && filtered_hashes.size() > max_hashes)
 			{
-				// Optionally, sort hashes by value or count before truncating
-				// Here, simply truncate
 				filtered_hashes.resize(max_hashes);
 			}
 
 			// Write to the minimiser file
-			size_t taxid_index = taxid_to_index[taxid];
 			{
-				// Write to the minimiser file
-				std::string output_filename = "tmp/" + taxid + ".mini";
+
 
 				// Lock is required to prevent multiple threads from writing to the same taxid file
 				std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index]);
 
 
-				// Lock is required to prevent multiple threads from writing to the same taxid file
-				std::ofstream ofile(output_filename, std::ios::binary | std::ios::app);
-				if (!ofile.is_open())
+				if (max_hashes > 0)
 				{
-					std::cerr << "Unable to open the minimiser file: " << output_filename << std::endl;
-					continue;
+					size_t current_count = hashCount[taxid];
+					if (current_count >= max_hashes)
+					{
+						filtered_hashes.clear();
+					}
+					else
+					{
+						size_t remaining = max_hashes - current_count;
+						if (filtered_hashes.size() > remaining)
+						{
+							filtered_hashes.resize(remaining);
+						}
+						hashCount[taxid] += filtered_hashes.size();
+					}
+				}
+				else
+				{
+					hashCount[taxid] += filtered_hashes.size();
+				}
+				if (!filtered_hashes.empty())
+				{
+					std::string output_filename = "tmp/" + taxid + ".mini";
+					std::ofstream ofile(output_filename, std::ios::binary | std::ios::app);
+					if (!ofile.is_open())
+					{
+						std::cerr << "Unable to open the minimiser file: " << output_filename << std::endl;
+						continue;
+					}
+					for (uint64_t hash : filtered_hashes)
+					{
+						ofile.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
+					}
 				}
 
-				for (uint64_t hash : filtered_hashes)
-				{
-					ofile.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
-				}
 			}
+
 
 			// Update global hash count
 			{
 				std::lock_guard<std::mutex> lock(fileInfo_mutex);
-				hashCount[taxid] += filtered_hashes.size();
 				fileInfo.skippedNum += localFileInfo.skippedNum;
+				fileInfo.skippedSeqNum += localFileInfo.skippedSeqNum;
 				fileInfo.sequenceNum += localFileInfo.sequenceNum;
 				fileInfo.bpLength += localFileInfo.bpLength;
 			}
@@ -330,7 +372,7 @@ namespace ChimeraBuild {
 	 */
 	std::vector<std::string> minimiser_count(
 		BuildConfig& config,
-		robin_hood::unordered_map<std::string, std::vector<std::string>>& inputFiles,
+		robin_hood::unordered_flat_map<std::string, std::vector<std::string>>& inputFiles,
 		size_t& hashCounts,
 		FileInfo& fileInfo,
 		std::vector<HyperLogLog>& hllVec)
@@ -342,7 +384,7 @@ namespace ChimeraBuild {
 
 		std::vector<std::pair<std::string, std::string>> taxid_file_pairs;
 		// build taxid to hllVec index map
-		robin_hood::unordered_map<std::string, size_t> taxid_to_index;
+		robin_hood::unordered_flat_map<std::string, size_t> taxid_to_index;
 		std::vector<std::string> index_to_taxid;
 		size_t index = 0;
 		for (auto& [taxid, files] : inputFiles)
@@ -368,7 +410,7 @@ namespace ChimeraBuild {
 
 			FileInfo localFileInfo = {};
 
-			robin_hood::unordered_map<uint64_t, uint8_t> local_hash_counts;
+			robin_hood::unordered_flat_map<uint64_t, uint8_t> local_hash_counts;
 
 			uint8_t cutoff = 1;
 			if (config.fixed_cutoff > 0)
@@ -405,7 +447,7 @@ namespace ChimeraBuild {
 
 				if (seq.size() < config.min_length)
 				{
-					localFileInfo.skippedNum++;
+					localFileInfo.skippedSeqNum++;
 					continue;
 				}
 				localFileInfo.sequenceNum++;
@@ -458,6 +500,7 @@ namespace ChimeraBuild {
 				std::lock_guard<std::mutex> lock(fileInfo_mutex);
 				hashCounts += filtered_hashes.size();
 				fileInfo.skippedNum += localFileInfo.skippedNum;
+				fileInfo.skippedSeqNum += localFileInfo.skippedSeqNum;
 				fileInfo.sequenceNum += localFileInfo.sequenceNum;
 				fileInfo.bpLength += localFileInfo.bpLength;
 			}
@@ -472,7 +515,7 @@ namespace ChimeraBuild {
 	* @param hashCount The map containing the values.
 	* @return The maximum value.
 	*/
-	uint64_t getMaxValue(const robin_hood::unordered_map<std::string, uint64_t>& hashCount) {
+	uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount) {
 		uint64_t maxValue = 0;
 		for (const auto& kv : hashCount) {
 			if (kv.second > maxValue) {
@@ -488,7 +531,7 @@ namespace ChimeraBuild {
 	* @param hashCount The map containing the values.
 	* @return The total size.
 	*/
-	uint64_t calculateTotalSize(const robin_hood::unordered_map<std::string, uint64_t>& hashCount) {
+	uint64_t calculateTotalSize(const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount) {
 		uint64_t totalSize = 0;
 		for (const auto& kv : hashCount) {
 			totalSize += kv.second;
@@ -504,7 +547,7 @@ namespace ChimeraBuild {
 	 * @param load_factor The desired load factor for the filter.
 	 * @param mode The mode of the calculation.
 	 */
-	void calculateFilterSize(robin_hood::unordered_map<std::string, uint64_t>& hashCount, ICFConfig& icfConfig, double load_factor, std::string mode) {
+	void calculateFilterSize(robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount, ICFConfig& icfConfig, double load_factor, std::string mode) {
 		uint64_t maxValue = getMaxValue(hashCount);
 		uint64_t totalSize = calculateTotalSize(hashCount);
 
@@ -564,10 +607,10 @@ namespace ChimeraBuild {
 	* @param hashCount The map containing the hash count for each taxid.
 	* @return The map containing the bins mapped to the taxid.
 	*/
-	robin_hood::unordered_map<std::string, std::size_t> calculateTaxidMapBins(
+	robin_hood::unordered_flat_map<std::string, std::size_t> calculateTaxidMapBins(
 		const ICFConfig& config,
-		const robin_hood::unordered_map<std::string, uint64_t>& hashCount) {
-		robin_hood::unordered_map<std::string, std::size_t> taxidBins;
+		const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount) {
+		robin_hood::unordered_flat_map<std::string, std::size_t> taxidBins;
 		size_t totalBins = 0;
 
 		for (const auto& [taxid, count] : hashCount) {
@@ -631,11 +674,11 @@ namespace ChimeraBuild {
 	 * @param numThreads The number of threads to use for building.
 	 */
 	void build(
-		const robin_hood::unordered_map<std::string, std::size_t>& taxidBins,
+		const robin_hood::unordered_flat_map<std::string, std::size_t>& taxidBins,
 		ICFConfig config,
 		chimera::InterleavedCuckooFilter& icf,
-		const robin_hood::unordered_map<std::string, uint64_t>& hashCount,
-		robin_hood::unordered_map<std::string, std::vector<std::string>> inputFiles) {
+		const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
+		robin_hood::unordered_flat_map<std::string, std::vector<std::string>> inputFiles) {
 		std::vector<std::tuple<std::string, size_t, size_t, uintmax_t>> taxid_info_pairs;
 		taxid_info_pairs.reserve(hashCount.size());
 
@@ -696,8 +739,8 @@ namespace ChimeraBuild {
 	void saveFilter(const std::string& output_file,
 		const chimera::InterleavedCuckooFilter& icf,
 		ICFConfig& icfConfig,
-		const robin_hood::unordered_map<std::string, uint64_t>& hashCount,
-		robin_hood::unordered_map<std::string, std::size_t> taxidBins) {
+		const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
+		robin_hood::unordered_flat_map<std::string, std::size_t> taxidBins) {
 		// Open the output file
 		std::ofstream os(output_file, std::ios::binary);
 
@@ -715,7 +758,7 @@ namespace ChimeraBuild {
 		// Serialize the ICFConfig
 		archive(icfConfig);
 
-		// Manually convert and extract the robin_hood::unordered_map data to vector
+		// Manually convert and extract the robin_hood::unordered_flat_map data to vector
 		std::vector<std::pair<std::string, uint64_t>> hashCountData;
 		for (const auto& kv : hashCount) {
 			hashCountData.emplace_back(kv.first, kv.second);
@@ -1302,6 +1345,112 @@ namespace ChimeraBuild {
 		}
 	}
 
+
+	/**
+	 * @brief Constructs the Interleaved Merged Cuckoo Filter (IMCF) using provided groups and returns a mapping of indices to taxids.
+	 *
+	 * This function builds the IMCF by iterating over groups of taxids, reading minimizer files, and inserting minimizer hashes
+	 * into the IMCF. Each group represents a set of taxids that are processed together, with each minimizer hash being inserted
+	 * into the corresponding index in the filter.
+	 *
+	 * @param imcf A reference to the Interleaved Merged Cuckoo Filter object to be built.
+	 * @param groups A vector of Group objects, where each Group contains a collection of taxids.
+	 *
+	 * @return A vector of vectors, where each sub-vector maps the index in the IMCF to the corresponding taxid strings.
+	 *
+	 * @details
+	 * The function first resizes `indexToTaxid` to match the number of groups and resizes each sub-vector to the number of taxids
+	 * in the group. It then iterates over each group, reads the minimizer hashes from a file named in the format "tmp/{taxid}.mini",
+	 * and inserts each hash into the IMCF using the `insertTag` method.
+	 *
+	 * The function is parallelized using OpenMP to process each group concurrently, speeding up the construction process.
+	 *
+	 * If the minimizer file for a taxid cannot be opened, an error message is printed to `std::cerr`.
+	 *
+	 * @note
+	 * Ensure that the temporary files containing minimizer hashes ("tmp/{taxid}.mini") are pre-generated and accessible.
+	 * The function assumes that `imcf.insertTag` is implemented and capable of inserting 64-bit minimizer hashes into the filter.
+	 */
+	std::vector<std::vector<std::string>> buildIMCF(
+		chimera::imcf::InterleavedMergedCuckooFilter& imcf,
+		std::vector<chimera::imcf::Group>& groups)
+	{
+		// Initialize the index-to-taxid mapping structure with the number of groups
+		std::vector<std::vector<std::string>> indexToTaxid;
+		indexToTaxid.resize(groups.size());
+		// Parallel loop to process each group concurrently
+#pragma omp parallel for
+		for (size_t i = 0; i < groups.size(); i++)
+		{
+			// Resize the sub-vector to hold the taxids for the current group
+			indexToTaxid[i].resize(groups[i].taxids.size());
+			// Iterate over each taxid in the current group
+			for (size_t index = 0; index < groups[i].taxids.size(); index++)
+			{
+				indexToTaxid[i][index] = groups[i].taxids[index];
+				auto taxid = groups[i].taxids[index];
+				// Open the corresponding minimizer file for reading
+				std::ifstream ifile("tmp/" + taxid + ".mini", std::ios::binary);
+				if (ifile.fail()) {
+					std::cerr << "Failed to open minimiser file: " << taxid << ".mini" << std::endl;
+				}
+				// Read minimizer hashes and insert them into the IMCF
+				uint64_t hash;
+				while (ifile.read(reinterpret_cast<char*>(&hash), sizeof(hash)))
+				{
+					imcf.insertTag(i, hash, index);
+				}
+				ifile.close();
+			}
+		}
+		// Return the constructed index-to-taxid mapping
+		return indexToTaxid;
+	}
+
+	void saveIMCF(chimera::imcf::InterleavedMergedCuckooFilter& imcf,
+		const std::string& output_file,
+		std::vector<std::vector<std::string>>& indexToTaxid,
+		IMCFConfig& imcfConfig)
+	{
+		// Open the output file
+		std::ofstream os(output_file + ".imcf", std::ios::binary);
+
+		// Check if the file is successfully opened
+		if (!os.is_open()) {
+			throw std::runtime_error("Failed to open file: " + output_file);
+		}
+
+		// Create a cereal binary archive
+		cereal::BinaryOutputArchive archive(os);
+
+		// Serialize 
+		archive(imcf);
+		archive(indexToTaxid);
+		archive(imcfConfig);
+
+		os.close();
+
+		// Get the file size
+		std::uintmax_t fileSize = std::filesystem::file_size(output_file + ".imcf");
+
+		// Output the file size, formatted as KB, MB, or GB
+		if (fileSize >= 1024 * 1024 * 1024) {
+			std::cout << "Filter file size: " << std::fixed << std::setprecision(2)
+				<< static_cast<double>(fileSize) / (1024 * 1024 * 1024) << " GB" << std::endl;
+		}
+		else if (fileSize >= 1024 * 1024) {
+			std::cout << "Filter file size: " << std::fixed << std::setprecision(2)
+				<< static_cast<double>(fileSize) / (1024 * 1024) << " MB" << std::endl;
+		}
+		else if (fileSize >= 1024) {
+			std::cout << "Filter file size: " << std::fixed << std::setprecision(2)
+				<< static_cast<double>(fileSize) / 1024 << " KB" << std::endl;
+		}
+		else {
+			std::cout << "Filter file size: " << fileSize << " bytes" << std::endl;
+		}
+	}
+
 	/**
 	* Run the build process with the given build configuration.
 	*
@@ -1320,8 +1469,8 @@ namespace ChimeraBuild {
 			std::cerr << "Window size must be greater than or equal to kmer size." << std::endl;
 			return;
 		}
-		robin_hood::unordered_map<std::string, uint64_t> hashCount;
-		robin_hood::unordered_map<std::string, std::vector<std::string>> inputFiles;
+		robin_hood::unordered_flat_map<std::string, uint64_t> hashCount;
+		robin_hood::unordered_flat_map<std::string, std::vector<std::string>> inputFiles;
 		parseInputFile(config.input_file, inputFiles, hashCount, fileInfo);
 		auto read_end = std::chrono::high_resolution_clock::now();
 		auto read_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(read_end - read_start).count();
@@ -1333,8 +1482,65 @@ namespace ChimeraBuild {
 
 		std::filesystem::path dir = "tmp";
 		createOrResetDirectory(dir, config);
+		if (config.filter == "imcf")
+		{
+			auto calculate_start = std::chrono::high_resolution_clock::now();
+			std::cout << "Calculating minimizers..." << std::endl;
+			minimiser_count(config, inputFiles, hashCount, fileInfo);
+			auto calculate_end = std::chrono::high_resolution_clock::now();
+			auto calculate_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_end - calculate_start).count();
+			if (config.verbose) {
+				std::cout << "Calculate time: ";
+				print_build_time(calculate_total_time);
+				std::cout << "File information:" << std::endl;
+				std::cout << "Number of files: " << fileInfo.fileNum << std::endl;
+				std::cout << "Number of invalid files: " << fileInfo.invalidNum << std::endl;
+				std::cout << "Number of skipped files: " << fileInfo.skippedNum << std::endl;
+				std::cout << "Number of sequences: " << fileInfo.sequenceNum << std::endl;
+				std::cout << "Number of skipped sequences: " << fileInfo.skippedSeqNum << std::endl;
+				std::cout << "Total base pairs: " << fileInfo.bpLength << std::endl << std::endl;
+			}
 
-		if (config.filter == "hicf")
+			auto partition_start = std::chrono::high_resolution_clock::now();
+			std::cout << "Partitioning hashcout..." << std::endl;
+			std::vector<chimera::imcf::Group> groups = chimera::imcf::partitionHashCount(hashCount, config.mode, 16);
+			auto partition_end = std::chrono::high_resolution_clock::now();
+			auto partition_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(partition_end - partition_start).count();
+			if (config.verbose) {
+				std::cout << "Partition time: ";
+				print_build_time(partition_total_time);
+				std::cout << std::endl;
+			}
+
+			auto build_start = std::chrono::high_resolution_clock::now();
+			std::cout << "Building IMCF..." << std::endl;
+			IMCFConfig imcfConfig;
+			imcfConfig.loadFactor = config.load_factor;
+			imcfConfig.kmerSize = config.kmer_size;
+			imcfConfig.windowSize = config.window_size;
+			chimera::imcf::InterleavedMergedCuckooFilter imcf(groups, imcfConfig);
+			std::vector<std::vector<std::string>> indexToTaxid = buildIMCF(imcf, groups);
+			auto build_end = std::chrono::high_resolution_clock::now();
+			auto build_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(build_end - build_start).count();
+			if (config.verbose) {
+				std::cout << "Build time: ";
+				print_build_time(build_total_time);
+				std::cout << std::endl;
+				std::cout << imcf << std::endl;
+			}
+
+			auto save_start = std::chrono::high_resolution_clock::now();
+			std::cout << "Saving IMCF..." << std::endl;
+			saveIMCF(imcf, config.output_file, indexToTaxid, imcfConfig);
+			auto save_end = std::chrono::high_resolution_clock::now();
+			auto save_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(save_end - save_start).count();
+			if (config.verbose) {
+				std::cout << "Save time: ";
+				print_build_time(save_total_time);
+				std::cout << std::endl;
+			}
+		}
+		else if (config.filter == "hicf")
 		{
 			std::cout << "Calculating minimizers and hyperloglog..." << std::endl;
 			auto calculate_start = std::chrono::high_resolution_clock::now();
@@ -1352,8 +1558,9 @@ namespace ChimeraBuild {
 				std::cout << "File information:" << std::endl;
 				std::cout << "Number of files: " << fileInfo.fileNum << std::endl;
 				std::cout << "Number of invalid files: " << fileInfo.invalidNum << std::endl;
+				std::cout << "Number of skipped files: " << fileInfo.skippedNum << std::endl;
 				std::cout << "Number of sequences: " << fileInfo.sequenceNum << std::endl;
-				std::cout << "Number of skipped sequences: " << fileInfo.skippedNum << std::endl;
+				std::cout << "Number of skipped sequences: " << fileInfo.skippedSeqNum << std::endl;
 				std::cout << "Total base pairs: " << fileInfo.bpLength << std::endl << std::endl;
 			}
 
@@ -1439,8 +1646,9 @@ namespace ChimeraBuild {
 				std::cout << "File information:" << std::endl;
 				std::cout << "Number of files: " << fileInfo.fileNum << std::endl;
 				std::cout << "Number of invalid files: " << fileInfo.invalidNum << std::endl;
+				std::cout << "Number of skipped files: " << fileInfo.skippedNum << std::endl;
 				std::cout << "Number of sequences: " << fileInfo.sequenceNum << std::endl;
-				std::cout << "Number of skipped sequences: " << fileInfo.skippedNum << std::endl;
+				std::cout << "Number of skipped sequences: " << fileInfo.skippedSeqNum << std::endl;
 				std::cout << "Total base pairs: " << fileInfo.bpLength << std::endl << std::endl;
 			}
 			ICFConfig icfConfig;
@@ -1468,7 +1676,7 @@ namespace ChimeraBuild {
 			std::cout << "Creating filter..." << std::endl;
 			chimera::InterleavedCuckooFilter icf(icfConfig.bins, icfConfig.bin_size, icfConfig.bitNum);
 			auto calculate_bins_start = std::chrono::high_resolution_clock::now();
-			robin_hood::unordered_map<std::string, std::size_t> taxidBins = calculateTaxidMapBins(icfConfig, hashCount);
+			robin_hood::unordered_flat_map<std::string, std::size_t> taxidBins = calculateTaxidMapBins(icfConfig, hashCount);
 			auto calculate_bins_end = std::chrono::high_resolution_clock::now();
 			auto calculate_bins_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_bins_end - calculate_bins_start).count();
 			if (config.verbose) {
@@ -1476,7 +1684,17 @@ namespace ChimeraBuild {
 				print_build_time(calculate_bins_total_time);
 				std::cout << std::endl;
 			}
+
+			auto build_icf_start = std::chrono::high_resolution_clock::now();
 			build(taxidBins, icfConfig, icf, hashCount, inputFiles);
+			auto build_icf_end = std::chrono::high_resolution_clock::now();
+			auto build_icf_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(build_icf_end - build_icf_start).count();
+			if (config.verbose) {
+				std::cout << "Build ICF time: ";
+				print_build_time(build_icf_total_time);
+				std::cout << std::endl;
+			}
+
 			saveFilter(config.output_file, icf, icfConfig, hashCount, taxidBins);
 			auto create_filter_end = std::chrono::high_resolution_clock::now();
 			auto create_filter_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(create_filter_end - create_filter_start).count();
@@ -1494,6 +1712,7 @@ namespace ChimeraBuild {
 		if (config.verbose) {
 			std::cout << "Total build time: ";
 			print_build_time(build_total_time);
+			std::cout << "Remove temporary files..." << std::endl;
 		}
 		std::filesystem::remove_all(dir);
 	}

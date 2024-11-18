@@ -8,7 +8,7 @@
  *
  * Created Date:  2024-08-10
  *
- * Last Modified: 2024-10-01
+ * Last Modified: 2024-11-18
  *
  * Description:
  *  This is ChimeraClassify module for Chimera
@@ -54,6 +54,7 @@
 #include "kthread.h"
 #include <VEM.hpp>
 #include <hierarchical-interleaved-cuckoo-filter.h>
+#include <interleaved-merged-cuckoo-filter.h>
 
 namespace ChimeraClassify {
 	void run(ClassifyConfig config);

@@ -8,7 +8,7 @@
  *
  * Created Date:  2024-07-30
  *
- * Last Modified: 2024-09-19
+ * Last Modified: 2024-11-18
  *
  * Description:
  *  this file defines the configuration for the build module
@@ -73,6 +73,7 @@ namespace ChimeraBuild {
 		size_t invalidNum = 0;
 		size_t sequenceNum = 0;
 		size_t skippedNum = 0;
+		size_t skippedSeqNum = 0;
 		size_t bpLength = 0;
 
 		void operator+=(const FileInfo& other) {
@@ -115,6 +116,21 @@ namespace ChimeraBuild {
 		void serialize(Archive& archive) {
 			archive(userBinsNum, technicalBinsNum, tagNum, tagBits, MaxCuckooCount, loadFactor);
 			archive(relaxedLoadFactor, kmerSize, windowSize, technicalBinsMaxNum, totalHashes);
+		}
+	};
+
+	struct IMCFConfig {
+		size_t binNum;
+		size_t binSize;
+		uint8_t kmerSize;
+		uint16_t windowSize;
+		int MaxCuckooCount{ 500 };
+		double loadFactor{ 0.95 };
+
+		template <class Archive>
+		void serialize(Archive& archive) {
+			archive(binNum, binSize, MaxCuckooCount, loadFactor);
+			archive(kmerSize, windowSize);
 		}
 	};
 }

@@ -28,23 +28,23 @@
 
 ---
 
-## Project Overview 
+## Project Overview  
 
 **Chimera** is a versatile **metagenomic classification tool** developed by **Qinzhong Tian**, designed to simplify and accelerate the process of analyzing large-scale metagenomic datasets. Chimera integrates efficient algorithms and user-friendly features to deliver fast, accurate, and scalable metagenomic classification.
 
-The current version (1.4) enhances classification accuracy by upgrading the previous **Expectation-Maximization (EM) algorithm** to the more advanced **Variational EM algorithm**, which improves convergence speed and robustness in complex datasets. **SIMD (Single Instruction, Multiple Data) acceleration** using the **AVX2** instruction set, introduced in version 1.3, continues to further enhance performance by providing compatibility across a range of modern processors. These optimizations significantly speed up computational tasks, improving Chimera’s ability to handle large datasets quickly and efficiently. Version 1.2 previously brought significant enhancements in classification accuracy and performance through the introduction of a **16-bit interleaved cuckoo filter**. Version 1.1 introduced **abundance analysis**, diversity indices, and the **LCA (Lowest Common Ancestor) algorithm** for more precise classification.
+The current version (1.6) introduces the **Interleaved Merged Cuckoo Filter (IMCF)**, which dramatically reduces database construction memory usage and significantly increases classification speed, all while maintaining nearly unchanged classification accuracy. Version 1.5 previously added the **Hierarchical Interleaved Cuckoo Filter (HICF)**, though it proved less practical compared to the new IMCF. Version 1.4 enhanced classification accuracy by upgrading the previous **Expectation-Maximization (EM) algorithm** to the more advanced **Variational EM algorithm**, improving convergence speed and robustness in complex datasets. **SIMD (Single Instruction, Multiple Data) acceleration** using the **AVX2** instruction set, introduced in version 1.3, continues to further enhance performance by providing compatibility across a range of modern processors. These optimizations significantly speed up computational tasks, improving Chimera’s ability to handle large datasets quickly and efficiently. Version 1.2 brought significant enhancements in classification accuracy and performance through the introduction of a **16-bit interleaved cuckoo filter**. Version 1.1 introduced **abundance analysis**, diversity indices, and the **LCA (Lowest Common Ancestor) algorithm** for more precise classification.
 
 For a detailed comparison of Chimera’s performance against other metagenomic classification tools, please visit our **[benchmark repository](https://github.com/LoadStar822/ChimeraBenchmark)**.
 
 ### 🔍 Interactive NCBI Dataset Downloads
 
-One of Chimera’s standout features is its **interactive data downloading** capability from NCBI databases. Users can easily download and process large metagenomic datasets **within the Chimera environment**. The tool automatically handles preprocessing of downloaded datasets, streamlining the workflow from data acquisition to database construction. 
+One of Chimera’s standout features is its **interactive data downloading** capability from NCBI databases. Users can easily download and process large metagenomic datasets **within the Chimera environment**. The tool automatically handles preprocessing of downloaded datasets, streamlining the workflow from data acquisition to database construction.
 
 Chimera offers flexibility by supporting **custom parameter configurations**, while also providing **default settings** for users seeking a simpler setup.
 
 ### ⚡ Fast and Accurate Species Classification
 
-Chimera is optimized for both **speed and scalability**. The classification engine is **multi-threaded**, making it highly effective at processing large datasets in a short time. Version 1.4 upgraded the **EM algorithm** to the **Variational EM algorithm**, further improving classification accuracy in challenging datasets. Version 1.3 introduced **SIMD acceleration** with **AVX2** instructions, boosting computational efficiency across platforms. **Version 1.2** introduced the **16-bit interleaved cuckoo filter**, and **version 1.1** added the **LCA algorithm**, which enhances accuracy by resolving ambiguous taxonomic assignments through the use of the Lowest Common Ancestor method.
+Chimera is optimized for both **speed and scalability**. The classification engine is **multi-threaded**, making it highly effective at processing large datasets in a short time. Version 1.6's **IMCF** marks a major advancement in speed and memory efficiency. Version 1.4 upgraded the **EM algorithm** to the **Variational EM algorithm**, further improving classification accuracy in challenging datasets. Version 1.3 introduced **SIMD acceleration** with **AVX2** instructions, boosting computational efficiency across platforms. **Version 1.2** introduced the **16-bit interleaved cuckoo filter**, and **version 1.1** added the **LCA algorithm**, enhancing accuracy by resolving ambiguous taxonomic assignments through the use of the Lowest Common Ancestor method.
 
 Supported input formats include:
 - Standard formats: **FASTA**, **FASTQ**
@@ -57,7 +57,7 @@ Chimera version 1.1 introduced **abundance analysis**, allowing users to calcula
 
 ### 📊 Integrated Krona Visualization
 
-Chimera comes with built-in **Krona integration** for visualizing taxonomic classification results. Using the **profile function**, users can easily convert their classification data into interactive **Krona charts**, allowing for **intuitive exploration** of metagenomic data. 
+Chimera comes with built-in **Krona integration** for visualizing taxonomic classification results. Using the **profile function**, users can easily convert their classification data into interactive **Krona charts**, allowing for **intuitive exploration** of metagenomic data.
 
 ### 🔄 Continual Updates and Customization
 
@@ -81,7 +81,7 @@ For users who prefer to build Chimera from source, here are the detailed steps. 
 
 Before building Chimera, ensure you have the following dependencies installed:
 
-- **Ubuntu 22.04** (or equivalent Linux distribution)
+- **Ubuntu 20.04** (or equivalent Linux distribution)
 - **Python 3.8** (required, installable via PPA for older distributions)
 - **CMake** (for compiling C++ components)
 - **Krona Tools** (for visualization)
@@ -225,21 +225,25 @@ The `build` function is used to construct a classification database from the dow
 - `-i` or `--input` (required): Input file (e.g., `target.tsv`). This file specifies the sequences and their corresponding taxonomic identifiers for building the database.
 - `-o` or `--output`: Output database file name (default: `ChimeraDB`). The resulting database will be saved as a binary file with this name.
 - `-m` or `--mode`: Building mode, with two options:
-- **fast**: Constructs an 8-bit **interleaved cuckoo filter**, prioritizing speed and reducing both memory and disk space usage by approximately half compared to the 16-bit filter. This mode is suitable for large-scale analyses where processing time and resource efficiency are key concerns, but it may have a lower classification accuracy.
-- **normal** (default): Constructs a 16-bit **interleaved cuckoo filter**, offering significantly higher accuracy but requiring more memory and disk space. This mode is recommended for applications where precision is critical.
-﻿
-**Note**: The difference between the two modes is substantial. The 16-bit filter in `normal` mode allows for more accurate taxonomic classification compared to the 8-bit filter in `fast` mode, but at the cost of higher resource usage.
+  - **fast**: 
+    - **For IMCF**: Constructs an **Interleaved Merged Cuckoo Filter** without splitting large species data as much as possible, reducing the number of CFs to improve both database construction speed and classification speed. However, this mode may result in larger database sizes if the dataset is unbalanced.
+    - **For ICF**: Constructs an 8-bit **interleaved cuckoo filter**, prioritizing speed and reducing both memory and disk space usage by approximately half compared to the 16-bit filter. This mode is suitable for large-scale analyses where processing time and resource efficiency are key concerns but may have a lower classification accuracy.
+  - **normal** (default): 
+    - **For IMCF**: Splits data of large species into multiple CFs to prevent the database from becoming excessively large, although this might increase the number of CFs and affect speed.
+    - **For ICF**: Constructs a 16-bit **interleaved cuckoo filter**, offering significantly higher accuracy but requiring more memory and disk space. This mode is recommended for applications where precision is critical.
   
+**Note**: The difference between the `fast` and `normal` modes is significant. The `fast` mode is optimized for speed and resource efficiency but may lead to larger databases with unbalanced datasets, while the `normal` mode ensures a more balanced database size at the potential cost of speed due to a higher number of CFs.
+
 - `-k` or `--kmer`: K-mer size for building the database (default: `19`). This parameter defines the length of k-mers used in the construction process, and it must be a value between 1 and 31. Adjusting the k-mer size can influence the sensitivity of the database.
 - `-w` or `--window`: Window size (default: `31`). This parameter defines the sliding window size used to scan the input sequences for k-mers. A larger window size can reduce false positives, but may also reduce sensitivity.
 - `-l` or `--min-length`: Minimum sequence length (default: `0`). Sequences shorter than this value will be excluded from the database construction. Adjusting this can be useful for filtering out very short or low-quality sequences.
 - `-t` or `--threads`: Number of threads for parallel processing (default: `32`). Increasing the number of threads can significantly speed up the database construction process, especially on multi-core systems.
-- `--load-factor`: Loading ratio of the interleaved cuckoo filter (default: `0.95`). This parameter mainly affects the **false positive rate**. Lowering the load factor reduces the filter's capacity utilization, which can decrease the false positive rate but will slightly increase the size of the database. 
-- `-M` or `--max-hashes`: Maximum number of hashes per taxid (default: `1000000`). This parameter limits the number of hashes stored for each taxid, which can help control memory usage.
+- `--load-factor`: Loading ratio of the cuckoo filter (default: `0.58`). This parameter mainly affects the **false positive rate**. Lowering the load factor reduces the filter's capacity utilization, which can decrease the false positive rate but will slightly increase the size of the database. 
+- `-M` or `--max-hashes`: Maximum number of hashes per taxid (default: `2000000`). This parameter limits the number of hashes stored for each taxid, which can help control memory usage.
 - `-a` or `--alpha`: The weight parameters for building HICF have a default value of `1.2`. Please do not modify them unless there are special circumstances
 - `--relaxed-load-factor`: The relaxed load factor for the hierarchical interleaved cuckoo filter. The default value is `0.95`. This parameter can be used to adjust the load factor for
 - `-c` or `--fixed-cutoff`: Filter out the truncation threshold of minimizers with fewer occurrences when calculating them. By default, it is not set and will be automatically calculated based on file size, with a range of `(0-255)`
-- `-f` or `--filter`: Select the type of filter to use (ICF, HICF) and default to `ICF`
+- `-f` or `--filter`: Select the type of filter to use (ICF, HICF, IMCF) and default to `IMCF`
 - `-q` or `--quiet`: Suppresses verbose output. Use this option to minimize output during the building process.
 
 **Example:**
@@ -288,7 +292,7 @@ You can select one of the following classification algorithms:
 - `--em-iter`: Number of EM iterations (default: `100`).
 - `--em-threshold`: Convergence threshold for EM algorithm (default: `0.001`).
 - `--none`: Do not use LCA or EM for classification. In this case, classification is based solely on the top hit from the database.
-- `-f` or `--filter`: Select the type of filter to use (ICF, HICF) and default to `ICF`
+- `-f` or `--filter`: Select the type of filter to use (ICF, HICF, IMCF) and default to `IMCF`
 - `-q` or `--quiet`: Suppresses verbose output.
 
 **Examples:**
@@ -544,17 +548,7 @@ In this example, a load factor of `0.85` is used, which can speed up classificat
 
 ## FAQ
 
-### 1. What is the difference between "fast" and "normal" classification modes?
-
-- **Fast Mode**: In `fast` mode (`-m fast`), Chimera selects the taxid with the highest hit count. Only the top hit is reported, making the classification process quicker but less detailed.
-  
-- **Normal Mode**: In `normal` mode (`-m normal`), Chimera reports all taxids that meet the threshold, sorted from the highest to the lowest hit count. This mode provides a more comprehensive set of results but is slower due to the additional data it processes.
-
-If you use the **LCA** or **EM** algorithms, Chimera will automatically switch to `normal` mode, as both algorithms require all taxids that exceed the threshold for their calculations.
-
-**Note**: Not using LCA or EM algorithms may sometimes result in very low classification accuracy. It is recommended to use the **EM algorithm** for more reliable and accurate classification results.
-
-### 2. What should I do if the database download is interrupted or fails?
+### 1. What should I do if the database download is interrupted or fails?
 
 If your database download is interrupted or fails during the interactive mode, you can choose to re-download the incomplete or failed data by enabling the fix-only mode. When prompted, type `y` to proceed.
 
@@ -565,7 +559,7 @@ Enable fix-only mode (re-download incomplete or failed data) [y/N]:
 Enter `y` to resume and fix the download.
 
 
-### 3. Can I use Chimera without Python?
+### 2. Can I use Chimera without Python?
 
 Yes, you can use Chimera without relying on Python. Python is primarily used to provide functionality for downloading datasets and generating profiles. If you have built Chimera using Conda, you can simply use the following command to view available options:
 
@@ -585,7 +579,7 @@ For Docker, Chimera is the default entry point. To skip the default `chimera` co
 docker run -it --rm -v "$(pwd):/app/data" --entrypoint Chimera tianqinzhong/chimera -h
 ```
 
-### 4. Where is the taxfile required for LCA, and how do I interpret LCA results or EM reuslts?
+### 3. Where is the taxfile required for LCA, and how do I interpret LCA results or EM reuslts?
 
 If you are using Chimera's built-in `download` function, the `taxfile` is located in the downloaded dataset folder as `tax.info`. For custom datasets, you will need to manually create a `taxfile` in a specific format. Each line of the file represents a taxonomic rank and includes the following fields, separated by tabs:
 
@@ -622,10 +616,37 @@ In the classification output:
 
 Both algorithms aim to improve classification accuracy when direct classification to a specific taxonomic level is challenging.
 
+### 4. What should I do if I encounter the error message: 
 
+```
+terminate called after throwing an instance of 'std::runtime_error'
+what(): Filter is full. Cannot insert more tags.
+```
 
-If you have further questions, feel free to ask by opening an issue on our [GitHub repository](https://github.com/LoadStar822/Chimera/issues).
+This error occurs when the cuckoo filter reaches its capacity and fails to insert a minimizer hash within the allowed number of relocation attempts, potentially causing an infinite loop. This situation often arises when the load factor is too high for the dataset being used.
 
+**Solution**:
+- **Lower the Load Factor**: Adjust the `--load-factor` parameter to a lower value when constructing your database. This change increases the space available for new entries, helping to avoid the filter becoming full and preventing infinite relocation attempts.
+- **Experiment with Different Values**: The optimal load factor can vary depending on the dataset. You may need to try multiple values to find the best setting that balances space utilization and performance.
+- **Improved Accuracy**: Using a lower load factor can also lead to higher classification accuracy, as it reduces the likelihood of collisions and increases the robustness of the filter.
+
+### 5. How do I choose an appropriate load factor and maximum number of hashes?
+
+Selecting the right **load factor** and **maximum number of hashes** is crucial for optimizing both the performance and accuracy of database construction.
+
+**Recommendations**:
+- **Load Factor**: The optimal load factor can depend on the characteristics of your dataset. Below are examples from our own usage:
+  - **Archaea (2024.10.10)**: We used a load factor of `0.95`.
+  - **CompleteONE (2024.9.26)**: We used a load factor of `0.6`.
+  - **Complete (2024.10.7)**: We used a load factor of `0.58`.
+
+  Adjusting the load factor impacts how densely packed the cuckoo filter is. A higher load factor can improve space efficiency but may increase the risk of insertion failures, while a lower load factor provides more room for new entries and can enhance accuracy at the cost of increased space usage.
+
+- **Maximum Number of Hashes**: We recommend using the default value of **2,000,000** hashes. Increasing the maximum hash count beyond this value generally yields minimal improvements in classification accuracy but can significantly impact performance, potentially causing longer build times and increased memory usage.
+
+By using these settings as guidelines, you can tailor the load factor and maximum number of hashes to suit your specific data and performance requirements.
+
+<br/>By carefully adjusting the load factor, you can ensure that the database construction completes without hitting the capacity limits of the cuckoo filter.
 
 ---
 ## References & Acknowledgements

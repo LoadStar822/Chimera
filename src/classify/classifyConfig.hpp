@@ -8,7 +8,7 @@
  *
  * Created Date:  2024-08-10
  *
- * Last Modified: 2024-09-20
+ * Last Modified: 2024-11-18
  *
  * Description:
  *  Classify configuration for Chimera
@@ -28,6 +28,7 @@
 #include <seqan3/core/debug_stream.hpp>
 #include <cstdint>
 #include <atomic>
+#include <robin_hood.h>
 
 namespace ChimeraClassify {
 	struct ClassifyConfig {
@@ -91,8 +92,8 @@ namespace ChimeraClassify {
 		size_t avgLen = 0;
 		size_t bpLength = 0;
 		std::unordered_set<std::string> uniqueTaxids;
-		std::unordered_map<std::string, size_t> taxidTotalMatches;
-		std::unordered_map<std::string, size_t> taxidUniqueMatches;
+		robin_hood::unordered_flat_map<std::string, size_t> taxidTotalMatches;
+		robin_hood::unordered_flat_map<std::string, size_t> taxidUniqueMatches;
 	};
 
 	struct batchReads {

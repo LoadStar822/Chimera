@@ -8,7 +8,7 @@
  *
  * Created Date:  2024-07-30
  *
- * Last Modified: 2024-08-09
+ * Last Modified: 2024-11-18
  *
  * Description:
  * this file defines the configuration for the build module
@@ -44,6 +44,7 @@
 #include <HyperLogLog.hpp>
 #include <toolbox.hpp>
 #include <hierarchical-interleaved-cuckoo-filter.h>
+#include <interleaved-merged-cuckoo-filter.h>
 
 namespace fs = std::filesystem;
 

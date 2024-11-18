@@ -8,7 +8,7 @@
  *
  * Created Date:  2024-07-09
  *
- * Last Modified: 2024-10-05
+ * Last Modified: 2024-11-18
  *
  * Description:
  *  This is the main entry for Chimera
@@ -65,16 +65,17 @@ int main(int argc, char** argv)
 	build->add_option("-t,--threads", buildConfig.threads, "Number of threads for building")
 		->default_val(32);
 	build->add_option("--load-factor", buildConfig.load_factor, "Loading ratio of ICF")
-		->default_val(0.95);
+		->default_val(0.58);
 	build->add_option("-a,--alpha", buildConfig.alpha, "Alpha value for building")
 		->default_val(1.2);
 	build->add_option("--relaxed-load-factor", buildConfig.relaxedLoadFactor, "Relaxed loading ratio of ICF")
 		->default_val(0.95);
-	build->add_option("-M,--max-hashes", buildConfig.max_hashes_per_taxid, "Maximum number of hashes per taxid");
+	build->add_option("-M,--max-hashes", buildConfig.max_hashes_per_taxid, "Maximum number of hashes per taxid")
+		->default_val(2000000);
 	build->add_option("-c,--fixed-cutoff", buildConfig.fixed_cutoff, "Fixed cutoff for building (0 - 255)");
-	build->add_option("-f,--filter", buildConfig.filter, "Choose the filter for building (hicf, icf)")
-		->check(CLI::IsMember({ "hicf", "icf" }))
-		->default_val("icf");
+	build->add_option("-f,--filter", buildConfig.filter, "Choose the filter for building (hicf, icf, imcf)")
+		->check(CLI::IsMember({ "hicf", "icf", "imcf" }))
+		->default_val("imcf");
 	build->add_flag("-q,--quiet", buildConfig.verbose, "Quiet output")->default_val(true)->disable_flag_override();
 
 	// Classify
@@ -105,10 +106,11 @@ int main(int argc, char** argv)
 	classify->add_option("-t,--threads", classifyConfig.threads, "Number of threads for classifying")
 		->default_val(32);
 	classify->add_option("-m,--mode", classifyConfig.mode, "Mode for classifying")
-		->default_val("fast");
+		->check(CLI::IsMember({ "normal", "fast" }))
+		->default_val("normal");
 	classify->add_option("-f,--filter", classifyConfig.filter, "Filter for classifying")
-		->default_val("icf")
-		->check(CLI::IsMember({ "hicf", "icf" }));
+		->default_val("imcf")
+		->check(CLI::IsMember({ "hicf", "icf", "imcf"  }));
 	classify->add_option("-b,--batch-size", classifyConfig.batchSize, "Batch size for classifying")
 		->default_val(400);
 	classify->add_flag("--lca", classifyConfig.lca, "Enable LCA mode");

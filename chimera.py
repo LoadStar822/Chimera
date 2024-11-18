@@ -45,12 +45,12 @@ def parse_arguments():
     build_parser.add_argument("-w", "--window", type=int, default=31, help="Window size for building")
     build_parser.add_argument("-l", "--min-length", type=int, default=0, help="Minimum length sequence for building")
     build_parser.add_argument("-t", "--threads", type=int, default=32, help="Number of threads for building")
-    build_parser.add_argument("--load-factor", type=float, default=0.95, help="Loading ratio of ICF")
+    build_parser.add_argument("--load-factor", type=float, default=0.58, help="Loading ratio of CF")
     build_parser.add_argument("-M", "--max-hashes", type=int, default=2000000, help="Maximum number of hashes per taxid")
     build_parser.add_argument("-a", "--alpha", type=float, default=1.2, help="Alpha value for HICF")
     build_parser.add_argument("--relaxed-load-factor", type=float, default=0.95, help="Relaxed loading ratio of HICF")
-    build_parser.add_argument("-f", "--filter", default="icf", choices=["icf", "hicf"],
-                              help="Filter for building (choices: 'icf', 'hicf'). Default is 'icf'.")
+    build_parser.add_argument("-f", "--filter", default="imcf", choices=["icf", "hicf", "imcf"],
+                              help="Filter for building (choices: 'icf', 'hicf, 'imcf'). Default is 'imcf'.")
     build_parser.add_argument("-c", "--fixed-cutoff", type=int, help="Fixed cutoff for minimizer (0 - 255)")
     build_parser.add_argument("-q", "--quiet", action="store_false", help="Quiet output")
 
@@ -67,12 +67,12 @@ def parse_arguments():
     download_build_parser.add_argument("-l", "--min-length", type=int, default=0,
                                        help="Minimum length sequence for building")
     download_build_parser.add_argument("-t", "--threads", type=int, default=32, help="Number of threads for building")
-    download_build_parser.add_argument("--load-factor", type=float, default=0.95, help="Loading ratio of ICF")
+    download_build_parser.add_argument("--load-factor", type=float, default=0.58, help="Loading ratio of CF")
     download_build_parser.add_argument("-M", "--max-hashes", type=int, default=2000000, help="Maximum number of hashes per taxid")
     download_build_parser.add_argument("-a", "--alpha", type=float, default=1.2, help="Alpha value for HICF")
     download_build_parser.add_argument("--relaxed-load-factor", type=float, default=0.95, help="Relaxed loading ratio of HICF")
-    download_build_parser.add_argument("-f", "--filter", default="icf", choices=["icf", "hicf"],
-                              help="Filter for building (choices: 'icf', 'hicf'). Default is 'icf'.")
+    download_build_parser.add_argument("-f", "--filter", default="imcf", choices=["icf", "hicf", "imcf"],
+                              help="Filter for building (choices: 'icf', 'hicf, 'imcf'). Default is 'imcf'.")
     download_build_parser.add_argument("-c", "--fixed-cutoff", type=int,
                               help="Fixed cutoff for minimizer (0 - 255)")
     download_build_parser.add_argument("-q", "--quiet", action="store_false", help="Quiet output")
@@ -94,8 +94,8 @@ def parse_arguments():
         choices=["fast", "normal"],
         help="Mode for classifying (choices: 'fast', 'normal'). Default is 'normal'."
     )
-    classify_parser.add_argument("-f", "--filter", default="icf", choices=["icf", "hicf"],
-                                 help="Filter for classifying (choices: 'icf', 'hicf'). Default is 'icf'.")
+    classify_parser.add_argument("-f", "--filter", default="imcf", choices=["icf", "hicf", "imcf"],
+                                 help="Filter for classifying (choices: 'icf', 'hicf', 'imcf'). Default is 'imcf'.")
     classify_parser.add_argument("-b", "--batch-size", type=int, default=400, help="Batch size for classifying")
     group = classify_parser.add_mutually_exclusive_group()
 
