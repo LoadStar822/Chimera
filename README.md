@@ -23,6 +23,7 @@
 - [Performance Optimization](#performance-optimization)
 - [FAQ](#faq)
 - [References & Acknowledgements](#references--acknowledgements)
+- [**Publication**](#publication)
 - [License](#license)
 - [Contact & Support](#contact--support)
 
@@ -681,7 +682,17 @@ We are grateful to the open-source community for providing these valuable resour
 
 ---
 
----
+## Publication
+
+Chimera has been preprinted on **BioRxiv**, providing an in-depth analysis of its methodology and performance.
+
+📄 **Title:** *Chimera: Ultrafast and Memory-efficient Database Construction for High-Accuracy Taxonomic Classification in the Age of Expanding Genomic Data*  
+🔗 **BioRxiv Link:** [https://www.biorxiv.org/content/10.1101/2025.03.26.645388v1](https://www.biorxiv.org/content/10.1101/2025.03.26.645388v1)  
+📌 **DOI:** [https://doi.org/10.1101/2025.03.26.645388](https://doi.org/10.1101/2025.03.26.645388)  
+📅 **Preprint Date:** March 28, 2025
+
+This publication presents the latest findings and validation results of Chimera. If you find this work useful, please consider citing it.
+
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
