@@ -54,3 +54,5 @@
 /.vscode
 /cmake-build-debug
 /cmake-build-debug-wsl
+/build/
+/poetry.lock

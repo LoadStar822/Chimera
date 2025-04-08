@@ -23,7 +23,7 @@
 - [Performance Optimization](#performance-optimization)
 - [FAQ](#faq)
 - [References & Acknowledgements](#references--acknowledgements)
-- [**Publication**](#publication)
+- [Publication](#publication)
 - [License](#license)
 - [Contact & Support](#contact--support)
 
@@ -117,7 +117,7 @@ Before building Chimera, ensure you have the following dependencies installed:
 
    ```bash
    wget https://github.com/marbl/Krona/releases/download/v2.8.1/KronaTools-2.8.1.tar -O /tmp/KronaTools.tar
-   tar -xvf /tmp/KronaTools.tar -C /opt/
+   sudo tar -xvf /tmp/KronaTools.tar -C /opt/
    sudo mkdir -p /opt/krona
    sudo chmod +x /opt/KronaTools-2.8.1/install.pl
    sudo /opt/KronaTools-2.8.1/install.pl --prefix /opt/krona
@@ -210,13 +210,49 @@ Chimera provides five main functions to facilitate metagenomic data processing: 
 
 ### 1. Download
 
-The `download` function allows users to fetch datasets from NCBI or other sources. Running `chimera download` enters an **interactive mode** where users can specify datasets to download.
+The `download` function allows users to fetch datasets from NCBI or other sources. Chimera supports both **interactive mode** and **command-line parameter mode** for downloading datasets.
+
+#### Interactive Mode
+
+Running `chimera download` without additional parameters enters an **interactive mode** where users can specify datasets to download through a guided process.
 
 **Example:**
 ```bash
 chimera download
 ```
 This command starts the interactive session for dataset downloading.
+
+#### Command-Line Parameter Mode
+
+Chimera also supports direct command-line parameters for automated or scripted downloads:
+
+**Available Parameters:**
+- `-d` or `--database`: Database to download from (default: `refseq`)
+  - Options: `genbank`, `refseq`
+- `-g` or `--organism-group`: Organism groups to download (comma-separated)
+  - Options: `archaea`, `bacteria`, `fungi`, `human`, `invertebrate`, `metagenomes`, `other`, `plant`, `protozoa`, `vertebrate_mammalian`, `vertebrate_other`, `viral`
+- `-T` or `--taxid`: Taxonomy IDs to download (comma-separated)
+  - Example: `562,623`
+- `-f` or `--file-types`: File types to download (default: `genomic.fna.gz`)
+  - Options: `genomic.fna.gz`, `assembly_report.txt`, `protein.faa.gz`, `genomic.gbff.gz`
+- `-l` or `--assembly-level`: Assembly levels to download (default: `complete genome`)
+  - Options: `complete genome`, `chromosome`, `scaffold`, `contig`
+- `-c` or `--refseq-category`: RefSeq categories to download (default: `representative genome`)
+  - Options: `reference genome`, `representative genome`, `na`
+- `-A` or `--limit-assembly`: Limit number of assemblies to download (default: `0` for unlimited)
+- `-o` or `--output-dir`: Output directory path (default: `./genome_output`)
+- `-t` or `--threads`: Number of download threads (default: `1`)
+- `-k` or `--dry-run`: Enable dry run mode (no actual downloads)
+- `-i` or `--fix-mode`: Only re-download incomplete or failed files
+- `-m` or `--md5-check`: Check MD5 of downloaded files (default: `True`)
+- `-q` or `--quiet`: Suppress output messages
+- `-v` or `--verbose`: Show detailed progress messages
+
+**Example with Command-Line Parameters:**
+```bash
+chimera download -d refseq -g "bacteria,archaea" -l "complete genome" -f genomic.fna.gz -o ./my_genomes -t 4
+```
+This command downloads complete bacterial and archaeal genomes from RefSeq, saving them to the `./my_genomes` directory using 4 download threads.
 
 ### 2. Build
 

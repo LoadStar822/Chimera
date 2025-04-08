@@ -3,9 +3,9 @@ import os
 import shutil
 import sys
 import subprocess
-from src.download import download
 from src.profile import conversion2Krona
 from src.profile import profile
+from src.download import download as downloader
 
 
 def get_chimera_path():
@@ -24,6 +24,14 @@ def kmer_type(x):
 
 
 def parse_arguments():
+    if len(sys.argv) > 1 and sys.argv[1] == "download":
+        parser = argparse.ArgumentParser(description="Chimera - A versatile tool for metagenomic classification")
+        subparsers = parser.add_subparsers(dest="command", required=False)
+        download_parser = subparsers.add_parser("download", help="Download NCBI database sequences and resources")
+        
+        args = parser.parse_args(sys.argv[1:2])
+        return args
+    
     parser = argparse.ArgumentParser(description="Chimera - A versatile tool for metagenomic classification")
 
     parser.add_argument("-v", "--version", action="store_true", help="Show version information")
@@ -126,11 +134,27 @@ def parse_arguments():
 
 def run_chimera(args, chimera_path):
     if args.command == "download":
-        download.download(interactive=True)
+        # 获取原始命令行参数
+        cmd_args = sys.argv
+        # 找到"download"在参数列表中的位置
+        try:
+            download_index = cmd_args.index("download")
+            # 提取"download"之后的所有参数
+            download_args = cmd_args[download_index+1:]
+            
+            # 如果有额外参数，则使用非交互模式
+            if download_args:
+                downloader.download(interactive=False, raw_args=download_args)
+            else:
+                # 无参数时使用交互模式
+                downloader.download(interactive=True)
+        except ValueError:
+            # 找不到"download"参数，使用交互模式
+            downloader.download(interactive=True)
         return 0
 
     if args.command == "download_and_build":
-        options = download.download(interactive=True)
+        options = downloader.download(interactive=True)
         args.command = "build"
         args.input = os.path.join(options.output_dir, "target.tsv")
 
@@ -140,7 +164,7 @@ def run_chimera(args, chimera_path):
             conversion2Krona.convert_multiple_files_to_krona_format(args.input, args.output)
             print("Conversion completed.")
             print("Generating Krona chart...")
-            download.run(["ktImportText", args.output + ".tsv", "-o", args.output + ".html"])
+            downloader.run_command(["ktImportText", args.output + ".tsv", "-o", args.output + ".html"])
             print("Krona chart generated.")
         profile.process_file(args.input, args.output)
         return 0
@@ -207,7 +231,7 @@ def run_chimera(args, chimera_path):
             command.append("-q")
 
     # Execute the command using the provided run function
-    download.run(command)
+    downloader.run_command(command)
 
 
 def main():
