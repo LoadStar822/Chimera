@@ -237,8 +237,8 @@ Chimera also supports direct command-line parameters for automated or scripted d
   - Options: `genomic.fna.gz`, `assembly_report.txt`, `protein.faa.gz`, `genomic.gbff.gz`
 - `-l` or `--assembly-level`: Assembly levels to download (default: `complete genome`)
   - Options: `complete genome`, `chromosome`, `scaffold`, `contig`
-- `-c` or `--refseq-category`: RefSeq categories to download (default: `representative genome`)
-  - Options: `reference genome`, `representative genome`, `na`
+- `-c` or `--refseq-category`: RefSeq categories to download (default: `reference genome`)
+  - Options: `reference genome`, `na`
 - `-A` or `--limit-assembly`: Limit number of assemblies to download (default: `0` for unlimited)
 - `-o` or `--output-dir`: Output directory path (default: `./genome_output`)
 - `-t` or `--threads`: Number of download threads (default: `1`)

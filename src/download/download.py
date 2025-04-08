@@ -16,14 +16,14 @@ VALID_ORGANISM_GROUPS = [
     "other", "plant", "protozoa", "vertebrate_mammalian", "vertebrate_other", "viral"
 ]
 VALID_ASSEMBLY_LEVELS = ["complete genome", "chromosome", "scaffold", "contig"]
-VALID_REFSEQ_CATEGORIES = ["reference genome", "representative genome", "na"]
+VALID_REFSEQ_CATEGORIES = ["reference genome", "na"]
 VALID_FILE_TYPES = ["genomic.fna.gz", "assembly_report.txt", "protein.faa.gz", "genomic.gbff.gz"]
 VALID_TAXONOMY_MODES = ["ncbi", "gtdb"]
 VALID_DOWNLOADERS = ["wget", "curl"]
 
 DEFAULT_DATABASE = "refseq"
 DEFAULT_ASSEMBLY_LEVEL = "complete genome"
-DEFAULT_REFSEQ_CATEGORY = "representative genome"
+DEFAULT_REFSEQ_CATEGORY = "reference genome"
 DEFAULT_FILE_TYPE = "genomic.fna.gz"
 DEFAULT_OUTPUT_DIR = "./genome_output"
 DEFAULT_THREADS = "1"
@@ -98,7 +98,7 @@ def prompt_user(options):
 
     # Filter options
     refseq_category = options.refseq_category or validate_input(
-        f"\nEnter RefSeq category (reference genome, representative genome, na). "
+        f"\nEnter RefSeq category (reference genome, na). "
         f"\nUse commas for multiple entries [default: {DEFAULT_REFSEQ_CATEGORY}]: ",
         VALID_REFSEQ_CATEGORIES, default=DEFAULT_REFSEQ_CATEGORY
     )
@@ -806,35 +806,35 @@ def download(interactive=False, raw_args=None):
     parser.add_argument("-R", "--retry-attempts",
                        help=f"Number of attempts to retry download files in batches (default: {DEFAULT_RETRY_ATTEMPTS})")
 
-parser.add_argument("-n", "--conditional-exit",
-                       help="Conditional exit status based on number of failures accepted")
+    parser.add_argument("-n", "--conditional-exit",
+                        help="Conditional exit status based on number of failures accepted")
 
-parser.add_argument("-N", "--ncbi-folders",
-                       action="store_true",
-                       help="Output files in folders like NCBI ftp structure")
+    parser.add_argument("-N", "--ncbi-folders",
+                        action="store_true",
+                        help="Output files in folders like NCBI ftp structure")
 
-parser.add_argument("-L", "--downloader",
-                       help=f"Downloader to use (default: {DEFAULT_DOWNLOADER})\nOptions: {', '.join(VALID_DOWNLOADERS)}")
+    parser.add_argument("-L", "--downloader",
+                        help=f"Downloader to use (default: {DEFAULT_DOWNLOADER})\nOptions: {', '.join(VALID_DOWNLOADERS)}")
 
-parser.add_argument("-x", "--delete-extra",
-                       action="store_true",
-                       help="Allow deletion of regular extra files found in output folder")
+    parser.add_argument("-x", "--delete-extra",
+                        action="store_true",
+                        help="Allow deletion of regular extra files found in output folder")
 
-parser.add_argument("-s", "--silent",
-                       action="store_true",
-                       help="Silent output")
+    parser.add_argument("-s", "--silent",
+                        action="store_true",
+                        help="Silent output")
 
-parser.add_argument("-w", "--progress-only",
-                       action="store_true",
-                       help="Silent output with download progress only")
+    parser.add_argument("-w", "--progress-only",
+                        action="store_true",
+                        help="Silent output with download progress only")
 
-parser.add_argument("-V", "--verbose",
-                       action="store_true",
-                       help="Verbose log")
+    parser.add_argument("-V", "--verbose",
+                        action="store_true",
+                        help="Verbose log")
 
-parser.add_argument("-Z", "--debug",
-                       action="store_true",
-                       help="Print debug information and run in debug mode")
+    parser.add_argument("-Z", "--debug",
+                        action="store_true",
+                        help="Print debug information and run in debug mode")
 
     
     if raw_args is not None:
