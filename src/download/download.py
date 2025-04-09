@@ -256,8 +256,9 @@ def build_command(options):
         cmd.append(f"-M '{options.taxonomy_mode}'")
     
     if options.limit_assembly:
-        # Check if limit_assembly contains a rank specification
-        if ':' in str(options.limit_assembly):
+        if str(options.limit_assembly) == "0":
+            pass
+        elif ':' in str(options.limit_assembly):
             cmd.append(f"-A '{options.limit_assembly}'")
         else:
             cmd.append(f"-A 'species:{options.limit_assembly}'")
