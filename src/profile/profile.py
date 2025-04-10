@@ -2,7 +2,6 @@ from multitax import NcbiTx
 import math
 
 
-# 计算香农指数和辛普森指数
 def calculate_shannon_index(taxon_dict):
     total_count = sum(taxon_dict.values())
     if total_count == 0:
@@ -39,7 +38,8 @@ def process_file(input_files, output_file):
         "order": {},  # 目
         "family": {},  # 科
         "genus": {},  # 属
-        "species": {}  # 种
+        "species": {},  # 种
+        "strain": {},  # 菌株
     }
 
     # 处理每个输入文件
@@ -74,6 +74,9 @@ def process_file(input_files, output_file):
                                 if rank == "clade":
                                     count_by_level["clade"][name] = count_by_level["clade"].get(name, 0) + 1
                                     has_level["clade"] = True
+                                elif rank == "strain":
+                                    count_by_level["strain"][name] = count_by_level["strain"].get(name, 0) + 1
+                                    has_level["strain"] = True
                                 elif rank in count_by_level:
                                     count_by_level[rank][name] = count_by_level[rank].get(name, 0) + 1
                                     has_level[rank] = True
@@ -104,7 +107,26 @@ def process_file(input_files, output_file):
             # 输出层级标题
             outfile.write(f"\n## {level.capitalize()} Level ##\n")
 
+            # 按照计数从大到小排序，并将unclassified放在最后
+            sorted_items = []
+            unclassified_item = None
+            
+            # 分离unclassified和其他项
             for taxon, count in taxon_dict.items():
+                if taxon == "unclassified":
+                    unclassified_item = (taxon, count)
+                else:
+                    sorted_items.append((taxon, count))
+            
+            # 对其他项按计数从大到小排序
+            sorted_items.sort(key=lambda x: x[1], reverse=True)
+            
+            # 如果有unclassified项，添加到最后
+            if unclassified_item:
+                sorted_items.append(unclassified_item)
+            
+            # 输出排序后的结果
+            for taxon, count in sorted_items:
                 relative_abundance = (count / total_count) * 100 if total_count > 0 else 0
                 # 输出每个分类单元的计数和相对丰度
                 outfile.write(

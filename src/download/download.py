@@ -20,6 +20,9 @@ VALID_REFSEQ_CATEGORIES = ["reference genome", "na"]
 VALID_FILE_TYPES = ["genomic.fna.gz", "assembly_report.txt", "protein.faa.gz", "genomic.gbff.gz"]
 VALID_TAXONOMY_MODES = ["ncbi", "gtdb"]
 VALID_DOWNLOADERS = ["wget", "curl"]
+VALID_TAXONOMY_RANKS = [
+    "superkingdom", "phylum", "class", "order", "family", "genus", "species", "strain"
+]
 
 DEFAULT_DATABASE = "refseq"
 DEFAULT_ASSEMBLY_LEVEL = "complete genome"
@@ -28,6 +31,7 @@ DEFAULT_FILE_TYPE = "genomic.fna.gz"
 DEFAULT_OUTPUT_DIR = "./genome_output"
 DEFAULT_THREADS = "1"
 DEFAULT_TAXONOMY_MODE = "ncbi"
+DEFAULT_TAXONOMY_RANK = "species"
 DEFAULT_RETRY_ATTEMPTS = "3"
 DEFAULT_DOWNLOADER = "wget"
 
@@ -87,6 +91,11 @@ def prompt_user(options):
     taxid = options.taxid or input(
         "\nEnter taxonomy ID (e.g., 562 for NCBI or s__Escherichia coli for GTDB). "
         "Use commas for multiple entries. Leave empty for all: "
+    )
+
+    taxonomy_rank = options.taxonomy_rank or validate_input(
+        f"\nEnter taxonomy rank (superkingdom, phylum, class, order, family, genus, species, strain) [default: {DEFAULT_TAXONOMY_RANK}]: ",
+        VALID_TAXONOMY_RANKS, default=DEFAULT_TAXONOMY_RANK
     )
 
     # File options
@@ -180,6 +189,7 @@ def prompt_user(options):
         "custom_filter": custom_filter,
         # Taxonomy options
         "taxonomy_mode": taxonomy_mode,
+        "taxonomy_rank": taxonomy_rank,
         "limit_assembly": limit_assembly,
         # Run options
         "output_dir": output_dir,
@@ -254,6 +264,7 @@ def build_command(options):
     # Taxonomy options
     if options.taxonomy_mode:
         cmd.append(f"-M '{options.taxonomy_mode}'")
+    
     
     if options.limit_assembly:
         if str(options.limit_assembly) == "0":
@@ -583,16 +594,17 @@ def get_file_info(options, info, build_output_folder, assembly_summary):
         print(f" - Done in {time.time() - start_time:.2f} seconds.\n")
 
 
-def validate_taxonomy(info, tax):
+def validate_taxonomy(info, tax, taxonomy_rank="species"):
     """
-    Validate taxonomy: convert to species level nodes
+    Validate taxonomy: convert to user-specified taxonomy rank nodes
     
     Parameters:
     - info (pandas.DataFrame): Assembly information DataFrame
     - tax (multitax.NcbiTx): Taxonomy object
+    - taxonomy_rank (str): Taxonomy rank to use (default: species)
     """
-    # Convert nodes to species level parent nodes
-    info["node"] = info["node"].apply(lambda n: tax.parent_rank(n, "species"))
+    # Convert nodes to specified rank level parent nodes
+    info["node"] = info["node"].apply(lambda n: tax.parent_rank(n, taxonomy_rank))
 
     # Skip invalid nodes
     na_entries = info["node"].isna().sum()
@@ -759,6 +771,9 @@ def download(interactive=False, raw_args=None):
     parser.add_argument("-M", "--taxonomy-mode",
                        help=f"Taxonomy mode (default: {DEFAULT_TAXONOMY_MODE})\nOptions: {', '.join(VALID_TAXONOMY_MODES)}")
     
+    parser.add_argument("-Y", "--taxonomy-rank",
+                       help=f"Taxonomy rank to use (default: {DEFAULT_TAXONOMY_RANK})\nOptions: {', '.join(VALID_TAXONOMY_RANKS)}")
+    
     parser.add_argument("-A", "--limit-assembly",
                        help="Limit number of assemblies for each selected taxa. 0 for all.\nSelection by ranks also supported with rank:number (e.g., genus:3)")
     
@@ -850,9 +865,20 @@ def download(interactive=False, raw_args=None):
     
     # Build command
     command = build_command(options)
-
+    
+    # Print command information if not quiet
+    quiet = getattr(options, 'silent', False) or getattr(options, 'progress_only', False)
+    if not quiet:
+        print(f"\nGenerated command: {command}")
+        print(f"\nSetting up output directory...")
+    
     # Set up output directory
     output_folder, assembly_summary, tmp_folder = setup_output_directory(options)
+    
+    if not quiet:
+        print(f"Output folder: {output_folder}")
+        print(f"Assembly summary file: {assembly_summary}")
+        print(f"Temporary folder: {tmp_folder}")
 
     # Execute download
     try:
@@ -860,22 +886,38 @@ def download(interactive=False, raw_args=None):
         quiet = getattr(options, 'silent', False) or getattr(options, 'progress_only', False)
         if not quiet:
             download_start = time.time()
-            print("Downloading data...")
+            print("\nDownloading data...")
+            print(f"Database: {options.database if options.database else DEFAULT_DATABASE}")
+            print(f"Organism group: {options.organism_group if options.organism_group else 'All'}")
+            print(f"File types: {options.file_types if options.file_types else DEFAULT_FILE_TYPE}")
+            if options.taxid:
+                print(f"Taxonomy IDs: {options.taxid}")
+            print(f"Using {options.threads if options.threads else DEFAULT_THREADS} threads for download")
         
         # Execute download command
+        if not quiet:
+            print("\nExecuting genome_updater.sh command...")
         run_command(command, shell=True, quiet=quiet)
         
         if not quiet:
             download_end = time.time()
             print(f"\nDownload completed in {download_end - download_start:.2f} seconds.")
+            print(f"Downloaded files will be processed now...")
 
         # Processing phase
         process_start = time.time()
         if not quiet:
             print("\nProcessing data...")
+            print(f"Starting post-download processing at {time.strftime('%Y-%m-%d %H:%M:%S')}")
         
         # Get file paths
+        if not quiet:
+            print("\nLocating downloaded files...")
         file_folder = os.path.join(options.output_dir, os.path.dirname(os.readlink(assembly_summary)), "files")
+        if not quiet:
+            print(f"File folder path: {file_folder}")
+            print(f"Looking for files with extensions: {options.file_types}")
+        
         input_file = validate_input_files([file_folder], options.file_types.split(","), quiet, input_recursive=True)
 
         if not input_file:
@@ -887,8 +929,18 @@ def download(interactive=False, raw_args=None):
                 print("Valid files found.")
 
         # Load taxonomy information
+        if not quiet:
+            print("\nLoading taxonomy information...")
+            tax_start_time = time.time()
+        
         tax = NcbiTx()
+        if not quiet:
+            print("Loading assembly accessions from input files...")
+        
         info = load_assembly_accession(input_file)
+        if not quiet:
+            print(f"Found {len(info)} assembly accessions")
+            print(f"Taxonomy loading completed in {time.time() - tax_start_time:.2f} seconds")
         
         if info.empty:
             if not quiet:
@@ -896,26 +948,62 @@ def download(interactive=False, raw_args=None):
             sys.exit(1)
         
         # Get file information and validate taxonomy
+        if not quiet:
+            print("\nParsing assembly summary file and extracting metadata...")
+        
         get_file_info(options, info, tmp_folder, assembly_summary)
-        validate_taxonomy(info, tax)
+        
+        if not quiet:
+            print(f"\nValidating taxonomy using rank: {getattr(options, 'taxonomy_rank', DEFAULT_TAXONOMY_RANK)}")
+            taxonomy_start_time = time.time()
+        
+        validate_taxonomy(info, tax, getattr(options, 'taxonomy_rank', DEFAULT_TAXONOMY_RANK))
+        
+        if not quiet:
+            valid_entries = len(info)
+            print(f"Valid taxonomy entries after validation: {valid_entries}")
+            print(f"Taxonomy validation completed in {time.time() - taxonomy_start_time:.2f} seconds")
         
         # Filter taxonomy
+        if not quiet:
+            print("\nFiltering taxonomy nodes...")
+            filter_start_time = time.time()
+        
         unique_nodes = info["node"].unique()
+        if not quiet:
+            print(f"Found {len(unique_nodes)} unique taxonomy nodes")
+        
         tax.filter(unique_nodes)
         
+        if not quiet:
+            print(f"Taxonomy filtering completed in {time.time() - filter_start_time:.2f} seconds")
+        
         # Write taxonomy file
+        if not quiet:
+            print("\nWriting taxonomy information to file...")
+        
         tax_file_path = os.path.join(output_folder, "tax.info")
         write_tax(tax_file_path, info, tax)
+        
+        if not quiet:
+            print(f"Taxonomy information written to: {tax_file_path}")
+            print(f"Target information written to: {os.path.join(os.path.dirname(tax_file_path), 'target.tsv')}")
         
         if not quiet:
             process_end = time.time()
             print(f"\nProcessing completed in {process_end - process_start:.2f} seconds.")
 
         # Clean up temporary folder
+        if not quiet:
+            print("\nCleaning up temporary files...")
+        
         if os.name == 'nt':  # Windows
             os.system(f"rmdir /s /q {tmp_folder}")
         else:  # Unix/Linux
             os.system(f"rm -rf {tmp_folder}")
+            
+        if not quiet:
+            print(f"Removed temporary folder: {tmp_folder}")
 
     except Exception as e:
         print(f"Error during download process: {str(e)}")
