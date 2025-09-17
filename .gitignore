@@ -51,8 +51,8 @@
 /ChimeraProfile_profile.tsv
 /test.cpp
 /.vscode
-/.vscode
 /cmake-build-debug
 /cmake-build-debug-wsl
 /build/
 /poetry.lock
+genome_output/
