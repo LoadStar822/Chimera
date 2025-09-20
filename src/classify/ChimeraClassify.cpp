@@ -64,85 +64,104 @@ namespace ChimeraClassify {
 	 */
 	void parseReads(moodycamel::ConcurrentQueue<batchReads>& readQueue, ClassifyConfig config, FileInfo& fileInfo)
 	{
-		// Count the number of sequences for each thread and accumulate it to fileInfo.sequenceNum
-		size_t totalSequenceNum = 0;
+		size_t totalSequences = 0;
+		size_t totalFiles = 0;
 
 		if (!config.singleFiles.empty()) {
-#pragma omp parallel for reduction(+:totalSequenceNum)
-			for (size_t i = 0; i < config.singleFiles.size(); ++i) {
-				const auto& file = config.singleFiles[i];
-
-				fileInfo.fileNum++;
-
-				seqan3::sequence_file_input<raptor::dna4_traits,
-					seqan3::fields<seqan3::field::id, seqan3::field::seq>> fin{ file };
+#pragma omp parallel
+			{
 				std::vector<batchReads> localBatches;
+				size_t localSeq = 0;
+				size_t localFiles = 0;
 
-				for (auto&& rec : fin | seqan3::views::chunk(config.batchSize)) {
-					batchReads batch;
-					for (auto&& r : rec) {
-						batch.ids.emplace_back(std::move(r.id()));
-						batch.seqs.emplace_back(std::move(r.sequence()));
+#pragma omp for schedule(dynamic)
+				for (size_t i = 0; i < config.singleFiles.size(); ++i) {
+					const auto& file = config.singleFiles[i];
+					++localFiles;
+
+					seqan3::sequence_file_input<raptor::dna4_traits,
+						seqan3::fields<seqan3::field::id, seqan3::field::seq>> fin{ file };
+
+					for (auto&& rec : fin | seqan3::views::chunk(config.batchSize)) {
+						batchReads batch;
+						for (auto&& r : rec) {
+							batch.ids.emplace_back(std::move(r.id()));
+							batch.seqs.emplace_back(std::move(r.sequence()));
+						}
+						localSeq += batch.ids.size();
+						localBatches.emplace_back(std::move(batch));
 					}
-
-					totalSequenceNum += batch.ids.size();
-					localBatches.emplace_back(std::move(batch));
 				}
 
-				for (auto& b : localBatches) {
-					readQueue.enqueue(std::move(b));
+				for (auto& batch : localBatches) {
+					readQueue.enqueue(std::move(batch));
 				}
-				fileInfo.sequenceNum += totalSequenceNum;
+
+#pragma omp atomic
+				totalSequences += localSeq;
+#pragma omp atomic
+				totalFiles += localFiles;
 			}
 		}
-		else if (config.pairedFiles.size() > 0)
-		{
-#pragma omp parallel for reduction(+:totalSequenceNum)
-			for (size_t i = 0; i < config.pairedFiles.size(); i += 2) {
-				fileInfo.fileNum += 2;
-
-				seqan3::sequence_file_input<raptor::dna4_traits,
-					seqan3::fields<seqan3::field::id, seqan3::field::seq>> fin1{ config.pairedFiles[i] };
-				seqan3::sequence_file_input<raptor::dna4_traits,
-					seqan3::fields<seqan3::field::id, seqan3::field::seq>> fin2{ config.pairedFiles[i + 1] };
-				std::vector<batchReads> localBatches;
-
-				auto it1 = fin1 | seqan3::views::chunk(config.batchSize);
-				auto it2 = fin2 | seqan3::views::chunk(config.batchSize);
-
-				while (true) {
-					auto chunk1 = it1.begin();
-					auto end1 = it1.end();
-					if (chunk1 == end1) break;
-
-					auto chunk2 = it2.begin();
-					auto end2 = it2.end();
-					if (chunk2 == end2) break;
-
-					batchReads batch;
-					for (auto&& r : *chunk1) {
-						batch.ids.emplace_back(std::move(r.id()));
-						batch.seqs.emplace_back(std::move(r.sequence()));
-					}
-					for (auto&& r : *chunk2) {
-						batch.seqs2.emplace_back(std::move(r.sequence()));
-					}
-
-					totalSequenceNum += batch.ids.size();
-					localBatches.emplace_back(std::move(batch));
-				}
-
-				for (auto& b : localBatches) {
-					readQueue.enqueue(std::move(b));
-				}
+		else if (!config.pairedFiles.empty()) {
+			if (config.pairedFiles.size() % 2 != 0) {
+				throw std::runtime_error("Paired input requires an even number of files");
 			}
 
-			fileInfo.sequenceNum += totalSequenceNum;
+#pragma omp parallel
+			{
+				std::vector<batchReads> localBatches;
+				size_t localSeq = 0;
+				size_t localFiles = 0;
+
+#pragma omp for schedule(dynamic)
+				for (size_t i = 0; i < config.pairedFiles.size(); i += 2) {
+					localFiles += 2;
+
+					seqan3::sequence_file_input<raptor::dna4_traits,
+						seqan3::fields<seqan3::field::id, seqan3::field::seq>> fin1{ config.pairedFiles[i] };
+					seqan3::sequence_file_input<raptor::dna4_traits,
+						seqan3::fields<seqan3::field::id, seqan3::field::seq>> fin2{ config.pairedFiles[i + 1] };
+
+					auto range1 = fin1 | seqan3::views::chunk(config.batchSize);
+					auto range2 = fin2 | seqan3::views::chunk(config.batchSize);
+
+					auto it1 = range1.begin();
+					auto end1 = range1.end();
+					auto it2 = range2.begin();
+					auto end2 = range2.end();
+
+					for (; it1 != end1 && it2 != end2; ++it1, ++it2) {
+						batchReads batch;
+						for (auto&& r : *it1) {
+							batch.ids.emplace_back(std::move(r.id()));
+							batch.seqs.emplace_back(std::move(r.sequence()));
+						}
+						for (auto&& r : *it2) {
+							batch.seqs2.emplace_back(std::move(r.sequence()));
+						}
+
+						localSeq += batch.ids.size();
+						localBatches.emplace_back(std::move(batch));
+					}
+				}
+
+				for (auto& batch : localBatches) {
+					readQueue.enqueue(std::move(batch));
+				}
+
+#pragma omp atomic
+				totalSequences += localSeq;
+#pragma omp atomic
+				totalFiles += localFiles;
+			}
 		}
-		else
-		{
+		else {
 			throw std::runtime_error("No input files specified");
 		}
+
+		fileInfo.sequenceNum += totalSequences;
+		fileInfo.fileNum += totalFiles;
 
 		if (config.verbose) {
 			std::cout << "Number of files: " << fileInfo.fileNum << std::endl;
@@ -214,8 +233,9 @@ namespace ChimeraClassify {
 	 * @return The adjusted seed value.
 	 */
 	inline constexpr static uint64_t adjust_seed(uint8_t const kmer_size, uint64_t const seed = 0x8F3F73B5CF1C9ADEULL) noexcept {
-		// Right shift the seed by (64 - 2 * kmer_size) bits
-		return seed >> (64u - 2u * kmer_size);
+		unsigned double_k = static_cast<unsigned>(kmer_size) * 2u;
+		unsigned shift = double_k >= 64u ? 0u : (64u - double_k);
+		return seed >> shift;
 	}
 
 	/**
@@ -400,23 +420,19 @@ namespace ChimeraClassify {
 		if (!batch.seqs2.empty())
 		{
 			// Process paired-end reads
-			for (size_t i = 0; i < batch.seqs2.size(); i += 2)
+			for (size_t i = 0; i < batch.ids.size(); ++i)
 			{
 				hashs1.clear();
-				if (batch.seqs2[i].size() >= icfConfig.window_size)
+				if (i < batch.seqs.size() && batch.seqs[i].size() >= icfConfig.window_size)
 				{
-					// Generate minimizer hash values for the first sequence
-					hashs1 = batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector>();
-					if (batch.seqs2[i + 1].size() >= icfConfig.window_size)
-					{
-						// Generate minimizer hash values for the second sequence
-						std::vector<size_t> hashs2 = batch.seqs2[i + 1] | minimiser_view | seqan3::ranges::to<std::vector>();
-						// Combine the hash values from both sequences
-						hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
-					}
+					hashs1 = batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector>();
 				}
-				// Process the combined hash values for classification
-				processSequence(hashs1, icfConfig, taxidBins, config, icf, batch.ids[i >> 1], classifyResults, fileInfo, lca);
+				if (i < batch.seqs2.size() && batch.seqs2[i].size() >= icfConfig.window_size)
+				{
+					std::vector<size_t> hashs2 = batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector>();
+					hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
+				}
+				processSequence(hashs1, icfConfig, taxidBins, config, icf, batch.ids[i], classifyResults, fileInfo, lca);
 			}
 		}
 		else
@@ -742,9 +758,10 @@ namespace ChimeraClassify {
 			fileInfo.unclassifiedNum += thread_data[i].localFileInfo.unclassifiedNum;
 		}
 
-		secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
-
-		thirdFilteringStep(classifyResults, fileInfo);
+		if (!(config.em || config.vem) || !config.skip_post_filter) {
+			secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
+			thirdFilteringStep(classifyResults, fileInfo);
+		}
 
 	}
 
@@ -782,20 +799,104 @@ namespace ChimeraClassify {
 		for (const auto& result : classifyResults)
 		{
 			os << result.id << '\t';
-			for (const auto& [taxid, count] : result.taxidCount)
-			{
-				if (taxid == "unclassified")
-				{
-					os << taxid;
-					continue;
+			bool handled = false;
+			if (!result.taxidCount.empty() && result.taxidCount.front().first == "unclassified") {
+				os << "unclassified";
+				handled = true;
+			}
+			else if (config.output_posterior && !result.posteriors.empty()) {
+				auto oldFlags = os.flags();
+				auto oldPrecision = os.precision();
+				os.setf(std::ios::fixed, std::ios::floatfield);
+				os << std::setprecision(4) << result.posteriors.front().first << ':' << result.posteriors.front().second;
+				if (result.posteriors.size() > 1) {
+					os << '\t' << "POST_TOP2=" << result.posteriors[1].first << ':' << result.posteriors[1].second;
 				}
-				os << taxid << ':' << count << '\t';
+				os.flags(oldFlags);
+				os.precision(oldPrecision);
+				handled = true;
+			}
+			if (!handled) {
+				for (const auto& [taxid, count] : result.taxidCount)
+				{
+					if (taxid == "unclassified")
+					{
+						os << taxid;
+						continue;
+					}
+					os << taxid << ':' << count << '\t';
+				}
 			}
 			os << '\n';
 		}
 
 		// Close the file
 		os.close();
+	}
+
+	void postEmDecision(std::vector<classifyResult>& results,
+		const DecisionConfig& decisionConfig,
+		const std::unordered_map<std::string, double>& classWeights,
+		std::optional<std::reference_wrapper<LCA>> lca)
+	{
+		constexpr const char* kUnclassified = "unclassified";
+
+		for (auto& result : results) {
+			if (result.posteriors.empty()) {
+				result.taxidCount.clear();
+				result.taxidCount.emplace_back(kUnclassified, 1);
+				continue;
+			}
+
+			auto posterior = result.posteriors;
+			std::sort(posterior.begin(), posterior.end(), [](const auto& a, const auto& b) {
+				return a.second > b.second;
+			});
+
+			const auto& top = posterior.front();
+			double top_score = top.second;
+			double runner_up = posterior.size() > 1 ? posterior[1].second : 0.0;
+
+			bool pass = top_score >= decisionConfig.posterior_threshold;
+			if (!std::isnan(decisionConfig.margin_ratio)) {
+				double ratio = runner_up <= 0.0 ? std::numeric_limits<double>::infinity() : (top_score / runner_up);
+				pass = pass && (ratio >= decisionConfig.margin_ratio);
+			} else {
+				pass = pass && ((top_score - runner_up) >= decisionConfig.margin_delta);
+			}
+
+			double global_weight = 0.0;
+			auto weight_it = classWeights.find(top.first);
+			if (weight_it != classWeights.end()) {
+				global_weight = weight_it->second;
+			}
+			pass = pass && (global_weight >= decisionConfig.min_class_weight);
+
+			result.posteriors = std::move(posterior);
+
+			if (pass) {
+				result.taxidCount.clear();
+				result.taxidCount.emplace_back(top.first, 0);
+				continue;
+			}
+
+			if (decisionConfig.use_lca_fallback && lca && result.posteriors.size() > 1) {
+				std::vector<std::string> candidates;
+				candidates.reserve(result.posteriors.size());
+				for (const auto& entry : result.posteriors) {
+					candidates.emplace_back(entry.first);
+				}
+				std::string fallback = lca->get().getLCA(candidates);
+				if (!fallback.empty() && fallback != kUnclassified) {
+					result.taxidCount.clear();
+					result.taxidCount.emplace_back(fallback, 0);
+					continue;
+				}
+			}
+
+			result.taxidCount.clear();
+			result.taxidCount.emplace_back(kUnclassified, 1);
+		}
 	}
 
 
@@ -939,24 +1040,19 @@ namespace ChimeraClassify {
 		std::vector<size_t> hashs1;
 		if (!batch.seqs2.empty())
 		{
-			// Process paired-end reads
-			for (size_t i = 0; i < batch.seqs2.size(); i += 2)
+			for (size_t i = 0; i < batch.ids.size(); ++i)
 			{
 				hashs1.clear();
-				if (batch.seqs2[i].size() >= hicfConfig.windowSize)
+				if (i < batch.seqs.size() && batch.seqs[i].size() >= hicfConfig.windowSize)
 				{
-					// Generate minimizer hash values for the first sequence
-					hashs1 = batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector>();
-					if (batch.seqs2[i + 1].size() >= hicfConfig.windowSize)
-					{
-						// Generate minimizer hash values for the second sequence
-						std::vector<size_t> hashs2 = batch.seqs2[i + 1] | minimiser_view | seqan3::ranges::to<std::vector>();
-						// Combine the hash values from both sequences
-						hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
-					}
+					hashs1 = batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector>();
 				}
-				// Process the combined hash values for classification
-				processSequence(hashs1, hicfConfig, indexToTaxid, config, hicf, batch.ids[i >> 1], classifyResults, fileInfo, lca);
+				if (i < batch.seqs2.size() && batch.seqs2[i].size() >= hicfConfig.windowSize)
+				{
+					std::vector<size_t> hashs2 = batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector>();
+					hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
+				}
+				processSequence(hashs1, hicfConfig, indexToTaxid, config, hicf, batch.ids[i], classifyResults, fileInfo, lca);
 			}
 		}
 		else
@@ -1086,9 +1182,10 @@ namespace ChimeraClassify {
 			fileInfo.unclassifiedNum += thread_data[i].localFileInfo.unclassifiedNum;
 		}
 
-		secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
-
-		thirdFilteringStep(classifyResults, fileInfo);
+		if (!(config.em || config.vem) || !config.skip_post_filter) {
+			secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
+			thirdFilteringStep(classifyResults, fileInfo);
+		}
 
 	}
 
@@ -1321,24 +1418,19 @@ namespace ChimeraClassify {
 		std::vector<size_t> hashs1;
 		if (!batch.seqs2.empty())
 		{
-			// Process paired-end reads
-			for (size_t i = 0; i < batch.seqs2.size(); i += 2)
+			for (size_t i = 0; i < batch.ids.size(); ++i)
 			{
 				hashs1.clear();
-				if (batch.seqs2[i].size() >= imcfConfig.windowSize)
+				if (i < batch.seqs.size() && batch.seqs[i].size() >= imcfConfig.windowSize)
 				{
-					// Generate minimizer hash values for the first sequence
-					hashs1 = batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector>();
-					if (batch.seqs2[i + 1].size() >= imcfConfig.windowSize)
-					{
-						// Generate minimizer hash values for the second sequence
-						std::vector<size_t> hashs2 = batch.seqs2[i + 1] | minimiser_view | seqan3::ranges::to<std::vector>();
-						// Combine the hash values from both sequences
-						hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
-					}
+					hashs1 = batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector>();
 				}
-				// Process the combined hash values for classification
-				processSequence(hashs1, imcfConfig, indexToTaxid, config, imcf, batch.ids[i >> 1], classifyResults, fileInfo, lca);
+				if (i < batch.seqs2.size() && batch.seqs2[i].size() >= imcfConfig.windowSize)
+				{
+					std::vector<size_t> hashs2 = batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector>();
+					hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
+				}
+				processSequence(hashs1, imcfConfig, indexToTaxid, config, imcf, batch.ids[i], classifyResults, fileInfo, lca);
 			}
 		}
 		else
@@ -1450,9 +1542,10 @@ namespace ChimeraClassify {
 			}
 		}
 
-		// Apply the second and third filtering steps
-		secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
-		thirdFilteringStep(classifyResults, fileInfo);
+		if (!(config.em || config.vem) || !config.skip_post_filter) {
+			secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
+			thirdFilteringStep(classifyResults, fileInfo);
+		}
 
 	}
 
@@ -1486,6 +1579,8 @@ namespace ChimeraClassify {
 		moodycamel::ConcurrentQueue<batchReads> readQueue;
 		parseReads(readQueue, config, fileInfo);
 		std::vector<classifyResult> classifyResults;
+		std::unordered_map<std::string, double> classWeights;
+		bool posteriorModelUsed = false;
 		if (config.filter == "imcf")
 		{
 			std::vector<std::vector<std::string>> indexToTaxid;
@@ -1569,7 +1664,11 @@ namespace ChimeraClassify {
 		{
 			auto EMstart = std::chrono::high_resolution_clock::now();
 			std::cout << "Running EM algorithm..." << std::endl;
-			classifyResults = EMAlgorithm(classifyResults, config.emIter, config.emThreshold);
+			EMOptions options;
+			auto [posterior, weights] = EMAlgorithm(classifyResults, config.emIter, config.emThreshold, options);
+			classifyResults = std::move(posterior);
+			classWeights = std::move(weights);
+			posteriorModelUsed = true;
 			auto EMend = std::chrono::high_resolution_clock::now();
 			auto EMduration = std::chrono::duration_cast<std::chrono::milliseconds>(EMend - EMstart);
 			if (config.verbose) {
@@ -1581,12 +1680,43 @@ namespace ChimeraClassify {
 		{
 			auto VEMstart = std::chrono::high_resolution_clock::now();
 			std::cout << "Running VEM algorithm..." << std::endl;
-			classifyResults = VEMAlgorithm(classifyResults, config.emIter, config.emThreshold);
+			VEMOptions options;
+			auto [posterior, weights] = VEMAlgorithm(classifyResults, config.emIter, config.emThreshold, options);
+			classifyResults = std::move(posterior);
+			classWeights = std::move(weights);
+			posteriorModelUsed = true;
 			auto VEMend = std::chrono::high_resolution_clock::now();
 			auto VEMduration = std::chrono::duration_cast<std::chrono::milliseconds>(VEMend - VEMstart);
 			if (config.verbose) {
 				std::cout << "VEM time: ";
 				print_classify_time(VEMduration.count());
+			}
+		}
+
+		if (posteriorModelUsed) {
+			DecisionConfig decisionConfig;
+			decisionConfig.posterior_threshold = config.post_thres;
+			decisionConfig.margin_delta = config.post_margin;
+			decisionConfig.margin_ratio = config.post_ratio;
+			decisionConfig.min_class_weight = config.post_pi_min;
+			decisionConfig.use_lca_fallback = config.lca_fallback;
+
+			std::optional<std::reference_wrapper<LCA>> fallbackLca{};
+			LCA lcaInstance;
+			if (decisionConfig.use_lca_fallback && !config.taxFile.empty()) {
+				buildLCA(lcaInstance, config.taxFile);
+				fallbackLca = std::ref(lcaInstance);
+			}
+
+			postEmDecision(classifyResults, decisionConfig, classWeights, fallbackLca);
+			fileInfo.classifiedNum = 0;
+			fileInfo.unclassifiedNum = 0;
+			for (const auto& result : classifyResults) {
+				if (!result.taxidCount.empty() && result.taxidCount.front().first == "unclassified") {
+					++fileInfo.unclassifiedNum;
+				} else {
+					++fileInfo.classifiedNum;
+				}
 			}
 		}
 

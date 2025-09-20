@@ -48,6 +48,9 @@
 #include <cmath>
 #include <future>
 #include <cstdint>
+#include <functional>
+#include <optional>
+#include <unordered_map>
 #include <LCA.hpp>
 #include <concurrentqueue.h>
 #include <EM.hpp>
@@ -58,4 +61,8 @@
 
 namespace ChimeraClassify {
 	void run(ClassifyConfig config);
+	void postEmDecision(std::vector<classifyResult>& results,
+		const DecisionConfig& decisionConfig,
+		const std::unordered_map<std::string, double>& classWeights,
+		std::optional<std::reference_wrapper<LCA>> lca = std::nullopt);
 }

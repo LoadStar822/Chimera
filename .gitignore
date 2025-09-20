@@ -56,3 +56,4 @@
 /build/
 /poetry.lock
 genome_output/
+.cache/

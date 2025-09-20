@@ -23,12 +23,15 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <cmath>
 #include <iomanip>
-#include <seqan3/alphabet/nucleotide/dna4.hpp>
-#include <seqan3/core/debug_stream.hpp>
+#include <limits>
 #include <cstdint>
 #include <atomic>
 #include <robin_hood.h>
+#include <optional>
+#include <seqan3/alphabet/nucleotide/dna4.hpp>
+#include <seqan3/core/debug_stream.hpp>
 
 namespace ChimeraClassify {
 	struct ClassifyConfig {
@@ -48,6 +51,13 @@ namespace ChimeraClassify {
 		bool vem = false;
 		double emThreshold;
 		size_t emIter;
+		double post_thres = 0.9;
+		double post_margin = 0.2;
+		double post_ratio = std::numeric_limits<double>::quiet_NaN();
+		double post_pi_min = 1e-4;
+		bool lca_fallback = false;
+		bool output_posterior = true;
+		bool skip_post_filter = true;
 	};
 
 	inline std::ostream& operator<<(std::ostream& os, const ClassifyConfig& config) {
@@ -74,7 +84,14 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "EM:" << config.em << std::endl
 			<< std::setw(20) << "VEM:" << config.vem << std::endl
 			<< std::setw(20) << "Threads:" << config.threads << std::endl
-			<< std::setw(20) << "Verbose:" << config.verbose << std::endl;
+			<< std::setw(20) << "Verbose:" << config.verbose << std::endl
+			<< std::setw(20) << "Posterior thres:" << config.post_thres << std::endl
+			<< std::setw(20) << "Posterior margin:" << config.post_margin << std::endl
+			<< std::setw(20) << "Posterior ratio:" << (std::isnan(config.post_ratio) ? std::string("nan") : std::to_string(config.post_ratio)) << std::endl
+			<< std::setw(20) << "Posterior pi min:" << config.post_pi_min << std::endl
+			<< std::setw(20) << "LCA fallback:" << config.lca_fallback << std::endl
+			<< std::setw(20) << "Output posterior:" << config.output_posterior << std::endl
+			<< std::setw(20) << "Skip post filter:" << config.skip_post_filter << std::endl;
 
 		os << std::string(40, '=') << std::endl;
 
@@ -105,6 +122,15 @@ namespace ChimeraClassify {
 	struct classifyResult {
 		std::string id;
 		std::vector<std::pair<std::string, size_t>> taxidCount;
+		std::vector<std::pair<std::string, double>> posteriors;
+	};
+
+	struct DecisionConfig {
+		double posterior_threshold = 0.9;
+		double margin_delta = 0.2;
+		double margin_ratio = std::numeric_limits<double>::quiet_NaN();
+		double min_class_weight = 1e-4;
+		bool use_lca_fallback = false;
 	};
 }
 #endif // !CLASSIFYCONFIG_HPP

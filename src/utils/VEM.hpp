@@ -1,198 +1,225 @@
 /*
  * -----------------------------------------------------------------------------
  * Filename:      VEM.hpp
- *
- * Author:        Qinzhong Tian
- *
- * Email:         tianqinzhong@qq.com
- *
- * Created Date:  2024-10-22
- *
- * Last Modified: 2024-10-22
- *
- * Description:
- * Variational Expectation-Maximization algorithm for Chimera
- *
- * Version:
- *  1.0
  * -----------------------------------------------------------------------------
  */
-#include <iostream>
-#include <vector>
-#include <robin_hood.h>
-#include <string>
+#pragma once
+
+#include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
 #include <classifyConfig.hpp>
-#include <omp.h>  
-using namespace ChimeraClassify;
 
-/*
-* @brief Get the top match taxid based on variational probabilities
-*
-* @param variational_params A vector of taxid-probability pairs for a sample
-*/
-inline std::string getTopMatch(const robin_hood::unordered_map<std::string, double>& variational_params) {
-	std::string top_taxid;
-	double max_prob = -1.0;
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
-	for (const auto& m : variational_params) {
-		const std::string& taxid = m.first;
-		double prob = m.second;
-		if (prob > max_prob) {
-			max_prob = prob;
-			top_taxid = taxid;
-		}
+namespace ChimeraClassify {
+
+struct VEMOptions {
+	double eps = 1e-9;
+	double alpha = 1e-6;
+	double temp = 1.0;
+};
+
+namespace vem_detail {
+	constexpr const char* kUnclassifiedTaxid = "unclassified";
+
+	inline bool is_unclassified(const std::string& taxid) {
+		return taxid == kUnclassifiedTaxid;
 	}
-	return top_taxid;
+
+	inline double log_sum_exp(const std::vector<double>& values) {
+		double max_val = -std::numeric_limits<double>::infinity();
+		for (double v : values) {
+			max_val = std::max(max_val, v);
+		}
+		if (!std::isfinite(max_val)) {
+			return max_val;
+		}
+		double sum = 0.0;
+		for (double v : values) {
+			sum += std::exp(v - max_val);
+		}
+		return max_val + std::log(sum);
+	}
 }
 
-/*
-* @brief Initialize the model probabilities and variational parameters uniformly
-*
-* @param classifyResults A vector of classifyResult objects
-* @param model_probs A map of taxid-probability pairs (model parameters)
-* @param variational_params A vector of maps for each sample, storing taxid-probability pairs (variational parameters)
-*/
-inline void initializeVariationalParameters(const std::vector<classifyResult>& classifyResults,
-	robin_hood::unordered_map<std::string, double>& model_probs,
-	std::vector<robin_hood::unordered_map<std::string, double>>& variational_params) {
-
-	robin_hood::unordered_set<std::string> taxid_set;
-	for (const auto& result : classifyResults) {
-		for (const auto& pair : result.taxidCount) {
-			taxid_set.insert(pair.first);
+inline std::pair<std::vector<classifyResult>, std::unordered_map<std::string, double>>
+VEMAlgorithm(const std::vector<classifyResult>& input,
+	size_t max_iter,
+	double tol,
+	const VEMOptions& options) {
+	std::vector<classifyResult> results = input;
+	std::unordered_set<std::string> taxid_set;
+	for (const auto& record : results) {
+		for (const auto& [taxid, count] : record.taxidCount) {
+			if (vem_detail::is_unclassified(taxid)) {
+				continue;
+			}
+			taxid_set.insert(taxid);
 		}
 	}
 
-	double initial_model_prob = 1.0 / taxid_set.size();
+	std::vector<std::string> taxid_list;
+	taxid_list.reserve(taxid_set.size());
 	for (const auto& taxid : taxid_set) {
-		model_probs[taxid] = initial_model_prob;
+		taxid_list.emplace_back(taxid);
 	}
 
-	variational_params.resize(classifyResults.size());
-#pragma omp parallel for
-	for (size_t i = 0; i < classifyResults.size(); ++i) {
-		const auto& result = classifyResults[i];
-		robin_hood::unordered_map<std::string, double> local_params;
-		double initial_var_prob = 1.0 / result.taxidCount.size();
-		for (const auto& pair : result.taxidCount) {
-			local_params[pair.first] = initial_var_prob;
-		}
-		variational_params[i] = std::move(local_params);
+	std::unordered_map<std::string, double> pi;
+	if (taxid_list.empty()) {
+		return { results, pi };
 	}
-}
 
-/*
-* @brief Variational Expectation-Maximization algorithm for Chimera
-*
-* @param classifyResults A vector of classifyResult objects
-* @param max_iter Maximum number of iterations
-* @param threshold Convergence threshold
-*/
-inline std::vector<classifyResult> VEMAlgorithm(std::vector<classifyResult>& classifyResults,
-	size_t max_iter = 100, double threshold = 0.001) {
+	double uniform = 1.0 / static_cast<double>(taxid_list.size());
+	for (const auto& taxid : taxid_list) {
+		pi[taxid] = uniform;
+	}
 
-	robin_hood::unordered_map<std::string, double> model_probs;  // Model parameters
-	std::vector<robin_hood::unordered_map<std::string, double>> variational_params;  // Variational parameters
+	std::unordered_map<std::string, double> prior_counts;
+	for (const auto& taxid : taxid_list) {
+		prior_counts[taxid] = 0.0;
+	}
 
-	initializeVariationalParameters(classifyResults, model_probs, variational_params);
-
-	double prev_elbo = -std::numeric_limits<double>::infinity();
-	size_t em_iter_cnt = 0;
-
-	while (em_iter_cnt < max_iter) {
-		// Variational E-step: Update variational parameters
-		double elbo = 0.0;
-
-#pragma omp parallel for reduction(+:elbo)
-		for (size_t i = 0; i < classifyResults.size(); ++i) {
-			const auto& result = classifyResults[i];
-			auto& q = variational_params[i];
-			double sum_q = 0.0;
-
-			// Update q(taxid) ¡Ø exp(E[log P(taxid | data)])
-			for (const auto& pair : result.taxidCount) {
-				const std::string& taxid = pair.first;
-				double log_prob = std::log(model_probs[taxid]);
-				q[taxid] = std::exp(log_prob);
-				sum_q += q[taxid];
-			}
-
-			// Normalize q(taxid)
-			for (auto& pair : q) {
-				pair.second /= sum_q;
-			}
-
-			// Compute ELBO contribution for this sample
-			for (const auto& pair : q) {
-				double q_val = pair.second;
-				if (q_val > 0) {
-					elbo += q_val * (std::log(model_probs[pair.first]) - std::log(q_val));
-				}
-			}
+	size_t iteration = 0;
+	while (iteration < max_iter) {
+		std::unordered_map<std::string, double> expected_log_pi;
+		double denominator_strength = options.alpha * static_cast<double>(taxid_list.size());
+		for (const auto& taxid : taxid_list) {
+			auto it = prior_counts.find(taxid);
+			double concentration = options.alpha + (it != prior_counts.end() ? it->second : 0.0);
+			expected_log_pi[taxid] = std::log(std::max(concentration, options.eps));
+			denominator_strength += (it != prior_counts.end() ? it->second : 0.0);
+		}
+		double log_denominator = std::log(std::max(denominator_strength, options.eps));
+		for (auto& [taxid, log_val] : expected_log_pi) {
+			log_val -= log_denominator;
 		}
 
-		// M-step: Update model parameters
-		robin_hood::unordered_map<std::string, double> expected_counts;
-		double sum_counts = 0.0;
+#ifdef _OPENMP
+		int num_threads = omp_get_max_threads();
+#else
+		int num_threads = 1;
+#endif
+		std::vector<std::unordered_map<std::string, double>> thread_expected(num_threads);
 
+#ifdef _OPENMP
 #pragma omp parallel
+#endif
 		{
-			robin_hood::unordered_map<std::string, double> local_counts;
+#ifdef _OPENMP
+			int tid = omp_get_thread_num();
+#else
+			int tid = 0;
+#endif
+			auto& local_expected = thread_expected[tid];
 
-#pragma omp for nowait
-			for (size_t i = 0; i < variational_params.size(); ++i) {
-				const auto& q = variational_params[i];
-				for (const auto& pair : q) {
-#pragma omp atomic
-					local_counts[pair.first] += pair.second;
-				}
-			}
+#ifdef _OPENMP
+#pragma omp for schedule(static)
+#endif
+			for (size_t i = 0; i < results.size(); ++i) {
+				const auto& source = input[i];
+				auto& destination = results[i];
+				destination.posteriors.clear();
 
-#pragma omp critical
-			{
-				for (const auto& pair : local_counts) {
-					expected_counts[pair.first] += pair.second;
+				std::vector<std::pair<std::string, double>> candidates;
+				double max_count = 0.0;
+				for (const auto& [taxid, count] : source.taxidCount) {
+					if (vem_detail::is_unclassified(taxid)) {
+						continue;
+					}
+					double c = static_cast<double>(count);
+					candidates.emplace_back(taxid, c);
+					max_count = std::max(max_count, c);
 				}
+
+				if (candidates.empty()) {
+					continue;
+				}
+
+				double denom = max_count + options.eps * static_cast<double>(candidates.size());
+				if (denom <= 0.0) {
+					denom = options.eps * static_cast<double>(candidates.size());
+				}
+
+				std::vector<std::pair<std::string, double>> log_components;
+				log_components.reserve(candidates.size());
+				for (const auto& [taxid, c] : candidates) {
+					auto it_pi = expected_log_pi.find(taxid);
+					if (it_pi == expected_log_pi.end()) {
+						continue;
+					}
+					double likelihood = (c + options.eps) / denom;
+					double log_likelihood = options.temp * std::log(std::max(likelihood, options.eps));
+					log_components.emplace_back(taxid, it_pi->second + log_likelihood);
+				}
+
+				if (log_components.empty()) {
+					continue;
+				}
+
+				std::vector<double> log_values;
+				log_values.reserve(log_components.size());
+				for (const auto& entry : log_components) {
+					log_values.emplace_back(entry.second);
+				}
+
+				double normalizer = vem_detail::log_sum_exp(log_values);
+				std::vector<std::pair<std::string, double>> posterior;
+				posterior.reserve(log_components.size());
+
+				for (const auto& entry : log_components) {
+					double q = std::exp(entry.second - normalizer);
+					posterior.emplace_back(entry.first, q);
+					local_expected[entry.first] += q;
+				}
+
+				destination.posteriors = std::move(posterior);
 			}
 		}
 
-		for (const auto& pair : expected_counts) {
-			sum_counts += pair.second;
+		std::unordered_map<std::string, double> expected_counts;
+		double sum_expected = 0.0;
+		for (auto& local : thread_expected) {
+			for (const auto& [taxid, value] : local) {
+				double& slot = expected_counts[taxid];
+				slot += value;
+				sum_expected += value;
+			}
+		}
+
+		double denominator = options.alpha * static_cast<double>(taxid_list.size()) + sum_expected;
+		if (denominator <= 0.0) {
+			denominator = 1.0;
 		}
 
 		double diff = 0.0;
-
-#pragma omp parallel for reduction(+:diff)
-		for (size_t i = 0; i < expected_counts.size(); ++i) {
-			auto it = expected_counts.begin();
-			std::advance(it, i);
-			const std::string& taxid = it->first;
-			double new_prob = it->second / sum_counts;
-			diff += std::abs(model_probs[taxid] - new_prob);
-			model_probs[taxid] = new_prob;
+		for (const auto& taxid : taxid_list) {
+			double expected = 0.0;
+			auto it = expected_counts.find(taxid);
+			if (it != expected_counts.end()) {
+				expected = it->second;
+			}
+			double updated = (expected + options.alpha) / denominator;
+			diff += std::abs(pi[taxid] - updated);
+			pi[taxid] = updated;
+			prior_counts[taxid] = expected;
 		}
 
-		// Check convergence based on ELBO
-		if (std::abs(elbo - prev_elbo) <= threshold) {
+		if (diff < tol) {
 			break;
 		}
-		prev_elbo = elbo;
 
-		em_iter_cnt++;
+		++iteration;
 	}
 
-	// Update classification results
-	std::vector<classifyResult> updatedClassifyResults(classifyResults.size());
-
-#pragma omp parallel for
-	for (size_t i = 0; i < classifyResults.size(); ++i) {
-		const auto& result = classifyResults[i];
-		const auto& q = variational_params[i];
-		std::string top_taxid = getTopMatch(q);
-		updatedClassifyResults[i] = { result.id, {{top_taxid, 1}} };
-	}
-
-	return updatedClassifyResults;
+	return { results, pi };
 }
+
+} // namespace ChimeraClassify

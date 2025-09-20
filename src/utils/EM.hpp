@@ -1,162 +1,208 @@
 /*
  * -----------------------------------------------------------------------------
- * Filename:      EM.cpp
- *
- * Author:        Qinzhong Tian
- *
- * Email:         tianqinzhong@qq.com
- *
- * Created Date:  2024-09-19
- *
- * Last Modified: 2024-10-20
- *
- * Description:
- * Expectation-Maximization algorithm for Chimera (Parallelized Version with OpenMP)
- *
- * Version:
- *  1.2
+ * Filename:      EM.hpp
  * -----------------------------------------------------------------------------
  */
-#include <iostream>
-#include <vector>
-#include <robin_hood.h>
-#include <string>
+#pragma once
+
+#include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
 #include <classifyConfig.hpp>
-#include <omp.h>  
-using namespace ChimeraClassify;
 
-/*
-* @brief Get the top match taxid based on probabilities
-*
-* @param matches A vector of taxid-count pairs
-* @param prob A map of taxid-probability pairs
-*/
-inline std::string getTopMatch(const std::vector<std::pair<std::string, size_t>>& matches,
-	const robin_hood::unordered_map<std::string, double>& prob) {
-	std::string top_taxid = matches[0].first;
-	double max_prob = 0.0;
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
-	for (const auto& m : matches) {
-		const std::string& taxid = m.first;
-		auto it = prob.find(taxid);
-		if (it != prob.end() && it->second > max_prob) {
-			max_prob = it->second;
-			top_taxid = taxid;
-		}
+namespace ChimeraClassify {
+
+struct EMOptions {
+	double eps = 1e-9;
+	double alpha = 1e-6;
+	double temp = 1.0;
+};
+
+namespace detail {
+	constexpr const char* kUnclassifiedTaxid = "unclassified";
+
+	inline bool is_unclassified(const std::string& taxid) {
+		return taxid == kUnclassifiedTaxid;
 	}
-	return top_taxid;
+
+	inline double log_sum_exp(const std::vector<double>& values) {
+		double max_val = -std::numeric_limits<double>::infinity();
+		for (double v : values) {
+			max_val = std::max(max_val, v);
+		}
+		if (!std::isfinite(max_val)) {
+			return max_val;
+		}
+		double sum = 0.0;
+		for (double v : values) {
+			sum += std::exp(v - max_val);
+		}
+		return max_val + std::log(sum);
+	}
 }
 
-/*
-* @brief Initialize the probabilities uniformly for all taxids
-*
-* @param classifyResults A vector of classifyResult objects
-* @param prob A map of taxid-probability pairs
-*/
-inline void initializeProbabilities(const std::vector<classifyResult>& classifyResults,
-	robin_hood::unordered_map<std::string, double>& prob) {
-	robin_hood::unordered_set<std::string> taxid_set;
-	for (const auto& result : classifyResults) {
-		for (const auto& pair : result.taxidCount) {
-			taxid_set.insert(pair.first);
+inline std::pair<std::vector<classifyResult>, std::unordered_map<std::string, double>>
+EMAlgorithm(const std::vector<classifyResult>& input,
+	size_t max_iter,
+	double tol,
+	const EMOptions& options) {
+	std::vector<classifyResult> results = input;
+	std::unordered_set<std::string> taxid_set;
+	for (const auto& record : results) {
+		for (const auto& [taxid, count] : record.taxidCount) {
+			if (detail::is_unclassified(taxid)) {
+				continue;
+			}
+			taxid_set.insert(taxid);
 		}
 	}
-	double initial_prob = 1.0 / taxid_set.size();
+
+	std::vector<std::string> taxid_list;
+	taxid_list.reserve(taxid_set.size());
 	for (const auto& taxid : taxid_set) {
-		prob[taxid] = initial_prob;
+		taxid_list.emplace_back(taxid);
 	}
-}
 
-/*
-* @brief Expectation-Maximization algorithm for Chimera with OpenMP parallelization
-*
-* @param classifyResults A vector of classifyResult objects
-* @param max_iter Maximum number of iterations
-* @param threshold Convergence threshold
-*/
-inline std::vector<classifyResult> EMAlgorithm(std::vector<classifyResult>& classifyResults,
-	size_t max_iter = 100, double threshold = 0.001) {
-	robin_hood::unordered_map<std::string, double> prob;  // Store the probability of each taxid
-	size_t total_weight = classifyResults.size();          // Total number of sequences
+	std::unordered_map<std::string, double> pi;
+	if (taxid_list.empty()) {
+		return { results, pi };
+	}
 
-	initializeProbabilities(classifyResults, prob);
+	double uniform = 1.0 / static_cast<double>(taxid_list.size());
+	for (const auto& taxid : taxid_list) {
+		pi[taxid] = uniform;
+	}
 
-	size_t em_iter_cnt = 0;
-	while (em_iter_cnt < max_iter) {
-		robin_hood::unordered_map<std::string, double> expected_counts;
-
+	size_t iteration = 0;
+	while (iteration < max_iter) {
+#ifdef _OPENMP
 		int num_threads = omp_get_max_threads();
-		std::vector<robin_hood::unordered_map<std::string, double>> thread_expected_counts(num_threads);
+#else
+		int num_threads = 1;
+#endif
+		std::vector<std::unordered_map<std::string, double>> thread_expected(num_threads);
 
+#ifdef _OPENMP
 #pragma omp parallel
+#endif
 		{
-			int thread_id = omp_get_thread_num();
-			auto& local_counts = thread_expected_counts[thread_id];
+#ifdef _OPENMP
+			int tid = omp_get_thread_num();
+#else
+			int tid = 0;
+#endif
+			auto& local_expected = thread_expected[tid];
 
-#pragma omp for nowait
-			for (size_t i = 0; i < classifyResults.size(); ++i) {
-				const auto& result = classifyResults[i];
-				double total_prob = 0.0;
-				for (const auto& pair : result.taxidCount) {
-					total_prob += prob[pair.first];
+#ifdef _OPENMP
+#pragma omp for schedule(static)
+#endif
+			for (size_t i = 0; i < results.size(); ++i) {
+				const auto& source = input[i];
+				auto& destination = results[i];
+				destination.posteriors.clear();
+
+				std::vector<std::pair<std::string, double>> candidates;
+				double max_count = 0.0;
+				for (const auto& [taxid, count] : source.taxidCount) {
+					if (detail::is_unclassified(taxid)) {
+						continue;
+					}
+					double c = static_cast<double>(count);
+					candidates.emplace_back(taxid, c);
+					max_count = std::max(max_count, c);
 				}
-				for (const auto& pair : result.taxidCount) {
-					const std::string& taxid = pair.first;
-					double weight = prob[taxid] / total_prob;
-					local_counts[taxid] += weight;
+
+				if (candidates.empty()) {
+					continue;
 				}
+
+				double denom = max_count + options.eps * static_cast<double>(candidates.size());
+				if (denom <= 0.0) {
+					denom = options.eps * static_cast<double>(candidates.size());
+				}
+
+				std::vector<std::pair<std::string, double>> log_components;
+				log_components.reserve(candidates.size());
+				for (const auto& [taxid, c] : candidates) {
+					auto it = pi.find(taxid);
+					if (it == pi.end()) {
+						continue;
+					}
+					double likelihood = (c + options.eps) / denom;
+					double log_likelihood = options.temp * std::log(std::max(likelihood, options.eps));
+					double prior = std::max(it->second, options.eps);
+					double log_prior = std::log(prior);
+					log_components.emplace_back(taxid, log_prior + log_likelihood);
+				}
+
+				if (log_components.empty()) {
+					continue;
+				}
+
+				std::vector<double> log_values;
+				log_values.reserve(log_components.size());
+				for (const auto& entry : log_components) {
+					log_values.emplace_back(entry.second);
+				}
+
+				double normalizer = detail::log_sum_exp(log_values);
+				std::vector<std::pair<std::string, double>> posterior;
+				posterior.reserve(log_components.size());
+
+				for (const auto& entry : log_components) {
+					double q = std::exp(entry.second - normalizer);
+					posterior.emplace_back(entry.first, q);
+					local_expected[entry.first] += q;
+				}
+
+				destination.posteriors = std::move(posterior);
 			}
 		}
 
-		for (const auto& local_counts : thread_expected_counts) {
-			for (const auto& entry : local_counts) {
-				expected_counts[entry.first] += entry.second;
+		std::unordered_map<std::string, double> expected_counts;
+		double sum_expected = 0.0;
+		for (auto& local : thread_expected) {
+			for (const auto& [taxid, value] : local) {
+				double& slot = expected_counts[taxid];
+				slot += value;
+				sum_expected += value;
 			}
 		}
 
-		// Maximization step: Update probabilities
-		double sum_counts = 0.0;
-		for (const auto& entry : expected_counts) {
-			sum_counts += entry.second;
+		double denominator = options.alpha * static_cast<double>(taxid_list.size()) + sum_expected;
+		if (denominator <= 0.0) {
+			denominator = 1.0;
 		}
 
 		double diff = 0.0;
-
-		std::vector<std::string> taxid_list;
-		for (const auto& entry : prob) {
-			taxid_list.push_back(entry.first);
-		}
-
-#pragma omp parallel for reduction(+:diff)
-		for (size_t i = 0; i < taxid_list.size(); ++i) {
-			const std::string& taxid = taxid_list[i];
-			double new_prob = 0.0;
+		for (const auto& taxid : taxid_list) {
+			double expected = 0.0;
 			auto it = expected_counts.find(taxid);
 			if (it != expected_counts.end()) {
-				new_prob = it->second / sum_counts;
+				expected = it->second;
 			}
-			diff += std::abs(prob[taxid] - new_prob);
-			prob[taxid] = new_prob;
+			double updated = (expected + options.alpha) / denominator;
+			diff += std::abs(pi[taxid] - updated);
+			pi[taxid] = updated;
 		}
 
-		// Check convergence condition
-		if (diff <= threshold) {
+		if (diff < tol) {
 			break;
 		}
 
-		em_iter_cnt++;
+		++iteration;
 	}
 
-	std::vector<classifyResult> updatedClassifyResults(classifyResults.size());
-
-#pragma omp parallel for
-	for (size_t i = 0; i < classifyResults.size(); ++i) {
-		const auto& result = classifyResults[i];
-		std::string top_taxid = getTopMatch(result.taxidCount, prob);
-		updatedClassifyResults[i] = { result.id, {{top_taxid, 1}} };
-	}
-
-	return updatedClassifyResults;
+	return { results, pi };
 }
+
+} // namespace ChimeraClassify

@@ -122,6 +122,18 @@ int main(int argc, char** argv)
 		->default_val(0.001);
 	classify->add_option("--em-iter", classifyConfig.emIter, "EM iteration")
 		->default_val(100);
+	classify->add_option("--post-thres", classifyConfig.post_thres, "Posterior acceptance threshold")
+		->default_val(0.9);
+	classify->add_option("--post-margin", classifyConfig.post_margin, "Minimum gap between top posteriors")
+		->default_val(0.2);
+	classify->add_option("--post-ratio", classifyConfig.post_ratio, "Minimum ratio between top1 and top2 posteriors");
+	classify->add_option("--post-pi-min", classifyConfig.post_pi_min, "Minimum global class weight")
+		->default_val(1e-4);
+	classify->add_flag("--lca-fallback", classifyConfig.lca_fallback, "Use LCA fallback when EM/VEM confidence is low");
+	classify->add_flag("--output-posterior,!--no-output-posterior", classifyConfig.output_posterior, "Write posterior probabilities to the TSV output")
+		->default_val("true");
+	classify->add_flag("--skip-postfilter,!--no-skip-postfilter", classifyConfig.skip_post_filter, "Skip legacy filtering steps when EM/VEM is enabled")
+		->default_val("true");
 	classify->add_flag("-q,--quiet", classifyConfig.verbose, "Quiet output")->default_val(true)->disable_flag_override();
 
 	if (argc == 1) {
