@@ -12,7 +12,7 @@ set( CMAKE_CXX_STANDARD_REQUIRED ON )
 set( CMAKE_CXX_EXTENSIONS OFF )
 set( CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR} )
 
-if( NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU" )
+if( NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" )
     message( FATAL_ERROR
         "Compiler id '${CMAKE_CXX_COMPILER_ID}' is not supported, please \
         check the documentation." )
@@ -63,6 +63,8 @@ include_directories(
     ${PROJECT_SOURCE_DIR}/libs/
     ${PROJECT_SOURCE_DIR}/libs/klib
     ${PROJECT_SOURCE_DIR}/libs/seqan3/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/cereal/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/sdsl-lite/include
     ${PROJECT_SOURCE_DIR}/src/build/filter
 )
 
@@ -76,6 +78,7 @@ file(GLOB_RECURSE SOURCES
 
 # 移除 CMake 生成的文件
 list(FILTER SOURCES EXCLUDE REGEX "CMakeFiles/")
+list(FILTER SOURCES EXCLUDE REGEX "/tests/")
 
 # 递归地查找头文件
 file(GLOB_RECURSE HEADERS
@@ -108,13 +111,49 @@ target_include_directories(Chimera
     ${PROJECT_SOURCE_DIR}/src/build
     ${PROJECT_SOURCE_DIR}/src/classify
     ${PROJECT_SOURCE_DIR}/src/utils
+    ${PROJECT_SOURCE_DIR}/libs
     ${PROJECT_SOURCE_DIR}/libs/klib
     ${PROJECT_SOURCE_DIR}/libs/seqan3/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/cereal/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/sdsl-lite/include
     ${PROJECT_SOURCE_DIR}/src/build/filter
 )
 
 
 
+
+# IMCF 单元测试可执行文件
+add_executable(imcf_filter_tests
+    tests/imcf/interleaved_merged_cuckoo_filter_test.cpp
+    libs/xxhash.c
+    libs/klib/kthread.c
+)
+
+# 复用与主程序相同的依赖与包含路径
+target_link_libraries(imcf_filter_tests
+    PRIVATE
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    pthread
+    BZip2::BZip2
+    ZLIB::ZLIB
+    seqan3::seqan3
+    Threads::Threads
+)
+
+target_include_directories(imcf_filter_tests
+    PUBLIC
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/src/build
+    ${PROJECT_SOURCE_DIR}/src/classify
+    ${PROJECT_SOURCE_DIR}/src/utils
+    ${PROJECT_SOURCE_DIR}/libs
+    ${PROJECT_SOURCE_DIR}/libs/klib
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/cereal/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/sdsl-lite/include
+    ${PROJECT_SOURCE_DIR}/src/build/filter
+)
 
 # 忽略 register 关键字警告
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")

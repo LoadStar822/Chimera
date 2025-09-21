@@ -57,3 +57,5 @@
 /poetry.lock
 genome_output/
 .cache/
+.clangd
+CMakePresets.json
