@@ -1240,6 +1240,9 @@ inline void processSequence(const std::vector<size_t> &hashs1,
   // Aggregate counts for each taxid
   for (int i = 0; i < indexToTaxid.size(); i++) {
     for (int j = 0; j < indexToTaxid[i].size(); j++) {
+      if (count[i][j] == 0) {
+        continue;
+      }
       taxidToCount[indexToTaxid[i][j]] += count[i][j];
     }
   }
@@ -1374,6 +1377,9 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
             batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector>();
         hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
       }
+      if (!hashs1.empty()) {
+        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
+      }
       processSequence(hashs1, imcfConfig, indexToTaxid, config, imcf,
                       batch.ids[i], classifyResults, fileInfo, lca);
     }
@@ -1385,6 +1391,9 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
         // Generate minimizer hash values for the sequence
         hashs1 =
             batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector>();
+      }
+      if (!hashs1.empty()) {
+        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
       // Process the hash values for classification
       processSequence(hashs1, imcfConfig, indexToTaxid, config, imcf,

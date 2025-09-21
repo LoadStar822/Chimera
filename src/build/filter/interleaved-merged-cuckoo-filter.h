@@ -29,10 +29,29 @@
 #include <xxhash.h>
 #include <simde/x86/avx2.h>
 #include <simde/x86/sse2.h>
+#include <random>
 #include <robin_hood.h>
 #include <queue>
 #include <buildConfig.hpp>
 #include <bitset>
+
+static inline size_t ceil_div_u64(uint64_t a, uint64_t b) {
+	return (size_t)((a + b - 1) / b);
+}
+
+static inline size_t next_pow2(size_t v) {
+	if (v <= 1) return 1;
+	v--;
+	v |= v >> 1;
+	v |= v >> 2;
+	v |= v >> 4;
+	v |= v >> 8;
+	v |= v >> 16;
+#if SIZE_MAX > 0xFFFFFFFFu
+	v |= v >> 32;
+#endif
+	return v + 1;
+}
 
 namespace chimera::imcf {
 	struct Group {
@@ -280,9 +299,15 @@ namespace chimera::imcf {
 				}
 			}
 			binNum = groups.size();
-			binSize = maxTotalHash / (config.loadFactor * tagNum);
-			data = sdsl::bit_vector(binNum * binSize * tagNum * 16, 0);
-			hashSize = binSize;
+
+			// 关键：向上取整 + 2 的幂，便于用按位掩码实现可逆备桶
+			size_t needBinSize = ceil_div_u64(maxTotalHash, (uint64_t)(config.loadFactor * (double)tagNum));
+			hashSize = next_pow2(std::max<size_t>(1, needBinSize));
+			binSize = hashSize;
+
+			// 保持旧布局：每桶 4×16bit，总位数 = binNum * binSize * tagNum * 16
+			data = sdsl::bit_vector((uint64_t)binNum * (uint64_t)binSize * (uint64_t)tagNum * 16ull, 0);
+
 			config.binNum = binNum;
 			config.binSize = binSize;
 		}
@@ -293,313 +318,141 @@ namespace chimera::imcf {
 		}
 
 		/**
-		 * @brief Computes the hash index for a given 64-bit value.
+		 * @brief 轻量主哈希索引。
 		 *
-		 * This function generates a 64-bit hash of the input value using the XXH64 hashing algorithm
-		 * and then maps the hash to an index within a predefined hash table size (`hashSize`) by
-		 * taking the modulus of the hash value.
-		 *
-		 * @param value The 64-bit unsigned integer value to be hashed.
-		 *
-		 * @return The computed hash index as a `size_t`, representing the position in the hash table.
-		 *
-		 * @details
-		 * - The function uses the XXH64 hashing algorithm, known for its speed and good distribution properties.
-		 * - The hash is generated with a seed value of 0, which can be adjusted if needed for different hash distributions.
-		 * - The final index is obtained by taking the modulus of the hash with `hashSize`, ensuring the index falls within
-		 *   the bounds of the hash table.
-		 *
-		 * @note
-		 * - Ensure that `hashSize` is properly defined and represents the size of the hash table to avoid out-of-bounds errors.
-		 * - The choice of seed value in XXH64 can be modified based on specific requirements or to achieve different hashing behaviors.
+		 * 使用若干位运算完成快速搅拌，并利用 `hashSize` 为 2 的幂这一前提直接按位掩码。
+		 * 相比重型哈希大幅减少运算量，同时仍保持良好的分布特性。
 		 */
 		inline size_t hashIndex(uint64_t value) {
-			uint64_t hash = XXH64(&value, sizeof(value), 0);
-			return hash % hashSize;
+			// 轻量搅拌 + 2^k 掩码（要求 hashSize 为 2 的幂；已在构造器中保证）
+			uint64_t x = value ^ (value >> 33) ^ (value >> 17) ^ (value >> 9);
+			return (size_t)x & (hashSize - 1);
 		}
 
 
 		/**
-		 * @brief Computes an alternative hash index based on a given hash value and fingerprint.
+		 * @brief 可逆备桶哈希。
 		 *
-		 * The primary function of this method is to enable two hash values to mutually compute each other under the same tag.
-		 * This is particularly useful for calculating backup positions during kick-out operations in Interleaved Merged Cuckoo Filters.
-		 *
-		 * This function combines a base hash value with a fingerprint to produce a new hash index. The fingerprint
-		 * is used to perturb the original hash value, providing a way to generate multiple hash indices from a single
-		 * base hash. The resulting value is then hashed using XXH64 and mapped to an index within the hash table size (`hashSize`)
-		 * by taking the modulus.
-		 *
-		 * @param hashValue The original hash value (typically obtained from a primary hash function).
-		 * @param fingerprint A 16-bit unsigned integer used to modify the original hash value, allowing for alternative hashing.
-		 *
-		 * @return The computed alternative hash index as a `size_t`, representing a secondary position in the hash table.
-		 *
-		 * @details
-		 * - The function first combines `hashValue` with the `fingerprint` by XOR-ing `hashValue` with `fingerprint` multiplied by a
-		 *   constant (0x5bd1e995). This mixing step ensures that different fingerprints result in distinct hash modifications.
-		 * - The mixed value (`data`) is then hashed using the XXH64 algorithm with a seed value of 0 to generate a new 64-bit hash.
-		 * - The final index is obtained by taking the modulus of the new hash with `hashSize`, ensuring the index falls within
-		 *   the bounds of the hash table.
-		 * - By enabling two hash values to compute each other under the same tag, `altHash` facilitates the calculation of
-		 *   backup positions during kick-out operations in Interleaved Merged Cuckoo Filters. This ensures efficient collision
-		 *   resolution and optimal placement of entries within the filter.
-		 *
-		 * @note
-		 * - Ensure that `hashSize` is properly defined and represents the size of the hash table to avoid out-of-bounds errors.
-		 * - The multiplication by the constant `0x5bd1e995` is intended to introduce a pseudo-random transformation to the fingerprint,
-		 *   enhancing the distribution of the resulting hash indices.
-		 * - This function is useful in scenarios where multiple hash indices are needed for a single key, such as in cuckoo hashing.
-		 * - Specifically, `altHash` enables two hash values to mutually compute each other under the same tag, facilitating the calculation of backup positions during kick-out operations in Interleaved Merged Cuckoo Filters.
+		 * 基于 fingerprint 乘黄金常数得到的扰动值与主桶索引 XOR，并依赖 2^k 大小做掩码，
+		 * 保证 `altHash(altHash(b, fp), fp) == b`，便于在踢出链中双向定位。
 		 */
-		inline size_t altHash(size_t hashValue, uint16_t fingerprint) {
-			uint64_t data = hashValue ^ (fingerprint * 0x5bd1e995);
-			uint64_t hash = XXH64(&data, sizeof(data), 0);
-			return hash % hashSize;
+		inline size_t altHash(size_t b, uint16_t fingerprint) {
+			// 对 fp 做一个短 hash（与 b 无关），再 XOR；最后做按位掩码
+			uint64_t h = (uint64_t)fingerprint * 0x9E3779B185EBCA87ull;
+			return (b ^ (size_t)h) & (hashSize - 1);
 		}
 
 
 		/**
-		 * @brief Reduces a hashed value to 12 bits and embeds a species index into the upper 4 bits.
+		 * @brief 组合 12 bit 指纹与物种索引。
 		 *
-		 * This function performs the following steps:
-		 * 1. Hashes the input `value` using the XXH64 hashing algorithm to produce a 64-bit hash.
-		 * 2. Reduces the 64-bit hash to a 12-bit value by applying a bitmask.
-		 * 3. Ensures that the reduced value is not zero by setting it to `1` if it is.
-		 * 4. Embeds the provided `index` into the upper 4 bits of the resulting 16-bit value.
+		 * 步骤：
+		 * 1. 调用 `reduceTo12bit` 生成非零的 12 bit 指纹。
+		 * 2. 将物种索引左移 12 位并与指纹按位或，构造完整标签。
 		 *
-		 * The final 16-bit `combined` value encodes both the species index and the reduced hash value, where:
-		 * - The upper 4 bits represent the `index` (allowing for up to 16 species).
-		 * - The lower 12 bits represent the reduced hash value (ranging from 1 to 4095).
+		 * @param value 用于生成指纹的值（通常是 minimizer 或 k-mer）。
+		 * @param index 需要编码进高 4 bit 的物种索引，取值范围 [0, 15]。
 		 *
-		 * @param value The input value to be hashed and reduced. Typically, this could be a k-mer or similar entity.
-		 * @param index The species index to be embedded into the upper 4 bits of the resulting value. Must be less than 16.
-		 *
-		 * @return A 16-bit unsigned integer combining the species index and the reduced hash value.
-		 *
-		 * @details
-		 * - Hashing: Utilizes the XXH64 algorithm for hashing, known for its speed and effective distribution.
-		 * - Reduction to 12 Bits:
-		 *   - Applies a bitmask (`0x0FFF`) to retain only the lower 12 bits of the hash.
-		 *   - If the reduced value is `0`, it is set to `1` to ensure a non-zero hash value.
-		 * - Embedding Species Index:
-		 *   - Shifts the `index` left by 12 bits to occupy the upper 4 bits of the 16-bit `combined` value.
-		 *   - Combines the shifted `index` with the reduced hash value using the bitwise OR operation.
-		 *
-		 * @note
-		 * - The `index` should be within the range [0, 15] to fit into 4 bits.
-		 * - Ensure that `hashSize` is appropriately defined elsewhere in the code to prevent overflow or unintended behavior.
+		 * @return 编码好物种索引与指纹的 16 bit 标签。
 		 */
 		inline uint16_t reduceTo12bitAndAddIndex(size_t value, size_t index)
 		{
-			uint64_t hash = XXH64(&value, sizeof(value), 0);
-			uint16_t reduced_value = static_cast<uint16_t>(hash & 0x0FFF);
-			reduced_value = reduced_value == 0 ? 1 : reduced_value;
+			uint16_t reduced_value = reduceTo12bit(value);
 			uint16_t combined = (index << 12) | reduced_value;
 			return combined;
 		}
 
 		/**
-		 * @brief Reduces a hashed value to 12 bits.
+		 * @brief 轻量 12 bit 指纹化。
 		 *
-		 * This function performs the following steps:
-		 * 1. Hashes the input `value` using the XXH64 hashing algorithm to produce a 64-bit hash.
-		 * 2. Reduces the 64-bit hash to a 12-bit value by applying a bitmask.
-		 * 3. Ensures that the reduced value is not zero by setting it to `1` if it is.
-		 *
-		 * The resulting 12-bit `reduced_value` ranges from 1 to 4095.
-		 *
-		 * @param value The input value to be hashed and reduced. Typically, this could be a k-mer or similar entity.
-		 *
-		 * @return A 16-bit unsigned integer containing the reduced 12-bit hash value.
-		 *
-		 * @details
-		 * - Hashing: Utilizes the XXH64 algorithm for hashing, known for its speed and effective distribution.
-		 * - Reduction to 12 Bits:
-		 *   - Applies a bitmask (`0x0FFF`) to retain only the lower 12 bits of the hash.
-		 *   - If the reduced value is `0`, it is set to `1` to ensure a non-zero hash value.
-		 *
-		 * @note
-		 * - Ensure that `hashSize` is appropriately defined elsewhere in the code to prevent overflow or unintended behavior.
-		 * - This function is useful when a compact representation of the hash value is required, such as in memory-constrained environments.
+		 * 复用主哈希的位混合策略，只截取低 12 bit，并保证不返回 0。
 		 */
 		inline uint16_t reduceTo12bit(size_t value)
 		{
-			uint64_t hash = XXH64(&value, sizeof(value), 0);
-			uint16_t reduced_value = static_cast<uint16_t>(hash & 0x0FFF);
-			reduced_value = reduced_value == 0 ? 1 : reduced_value;
-			return reduced_value;
+			uint64_t x = value ^ (value >> 33) ^ (value >> 17) ^ (value >> 9);
+			uint16_t v = static_cast<uint16_t>(x & 0x0FFFu);
+			return v ? v : 1;
 		}
 
 
 		/**
-		 * @brief Inserts a fingerprint into the Interleaved Merged Cuckoo Filter.
+		 * @brief 插入指纹。
 		 *
-		 * This function handles the insertion of a fingerprint into the Interleaved Merged Cuckoo Filter (IMCF).
-		 * The process involves:
-		 * 1. Reducing the computed minimizer hash to 12 bits and embedding the species index into the upper 4 bits
-		 *    to form a complete 16-bit fingerprint.
-		 * 2. Calculating the hash index to determine the appropriate position within the IMCF.
-		 * 3. Checking each of the four slots in the targeted bucket:
-		 *    - If a slot is empty, the fingerprint is inserted into that slot.
-		 *    - If a slot already contains the same fingerprint, the function acknowledges that the fingerprint
-		 *      is already present.
-		 * 4. If all four slots are occupied and none contain the fingerprint, the function initiates a kick-out
-		 *    operation to relocate existing fingerprints and make space for the new one.
-		 *
-		 * @param binIndex The index of the bin within the bucket where the fingerprint is to be inserted.
-		 * @param value The value (e.g., a k-mer) to be hashed and inserted as a fingerprint.
-		 * @param index The species index associated with the fingerprint, which will be embedded into the upper 4 bits
-		 *        of the fingerprint.
-		 *
-		 * @return Returns true if the fingerprint is successfully inserted or already exists in the filter.
-		 *         Returns false if the insertion fails due to the filter being full.
-		 *
-		 * @throws std::runtime_error Throws an exception if the filter is full and the fingerprint cannot be
-		 *         inserted after attempting a kick-out operation.
-		 *
-		 * @details
-		 * - Fingerprint Construction:
-		 *   The function first calls `reduceTo12bitAndAddIndex` with `value` and `index` to generate a 16-bit fingerprint (tag).
-		 *   The lower 12 bits of `tag` represent the reduced minimizer hash, while the upper 4 bits represent the species index.
-		 *
-		 * - Hash Calculation:
-		 *   The primary hash index (b) is computed using `hashIndex(value)`, and the exact bucket position is determined
-		 *   using `b * binNum + binIndex`.
-		 *
-		 * - Slot Inspection and Insertion:
-		 *   The function retrieves the current state of the four slots in the bucket and checks for an empty slot or
-		 *   a matching fingerprint. If an empty slot is found, the fingerprint is inserted; if the fingerprint is already
-		 *   present, the function returns true.
-		 *
-		 * - Kick-Out Operation:
-		 *   If all slots are full and none contain the fingerprint, a kick-out operation is performed to make space.
-		 *   If the kick-out fails, an exception is thrown.
-		 *
-		 * @note Ensure `index` is less than 16 to fit within the 4-bit limit. Proper thread synchronization should be
-		 *       maintained if the function is used concurrently.
+		 * 构造标签后先命中主桶，再跳到可逆备桶，两桶任意存在空位或已有指纹即视为成功；
+		 * 若均告满载则进入踢出流程。
 		 */
 		inline bool insertTag(size_t binIndex, size_t value, size_t index)
 		{
-			// Step 1: Reduce the minimizer hash to 12 bits and add the species index to form a complete 16-bit fingerprint
 			uint16_t tag = reduceTo12bitAndAddIndex(value, index);
-			// Step 2: Compute the primary hash index for the given value
-			size_t b = hashIndex(value); 
-			// Step 3: Determine the exact bucket position within the IMCF
-			size_t bucketPosition = b * binNum + binIndex; 
-			// Step 4: Calculate the starting index for the four slots in the bucket
-			size_t indexStart = bucketPosition * tagNum * 16; 
-			// Step 5: Retrieve the current state of the four slots in the bucket
-			uint64_t query = data.get_int(indexStart, 64); 
-			// Step 6: Iterate through each of the four slots to find an empty slot or a matching fingerprint
-			for (int i = 0; i < 4; i++)
-			{
-				// Extract the 16-bit chunk corresponding to the current slot
-				uint16_t chunk = (query >> (i << 4)) & 0xFFFF;
-				if (chunk == 0)
-				{
-					// If the slot is empty, insert the fingerprint by updating the corresponding bits
-					query &= ~((uint64_t)0xFFFF << (i << 4));
-					query |= ((uint64_t)tag << (i << 4));
-					data.set_int(indexStart, query, 64);
-					return true;
+			uint16_t fp = (uint16_t)(tag & 0x0FFFu);
+
+			size_t b1 = hashIndex(value);
+			size_t b2 = altHash(b1, fp);
+
+			auto try_insert_bucket = [&](size_t b) -> bool {
+				size_t bucketPosition = b * binNum + binIndex;
+				size_t indexStart = bucketPosition * tagNum * 16;
+				uint64_t q = data.get_int(indexStart, 64);
+				for (int i = 0; i < 4; ++i) {
+					uint16_t chunk = (uint16_t)((q >> (i * 16)) & 0xFFFFu);
+					if (chunk == 0u) {
+						q &= ~((uint64_t)0xFFFFu << (i * 16));
+						q |= ((uint64_t)tag << (i * 16));
+						data.set_int(indexStart, q, 64);
+						return true;
+					}
+					if (chunk == tag) return true;
 				}
-				else if (chunk == tag)
-				{
-					// If the fingerprint already exists in the slot, acknowledge its presence
-					return true;
-				}
-			}
-			// Step 7: If all slots are occupied and none contain the fingerprint, attempt a kick-out operation
-			if (!kickOut(binIndex, value, tag))
-			{
-				// If the kick-out operation fails, throw an exception indicating the filter is full
-				throw std::runtime_error("Filter is full. Cannot insert more tags.");
 				return false;
-			}
-			// If the kick-out operation succeeds, return true
-			return true;
+			};
+
+			if (try_insert_bucket(b1)) return true;
+			if (try_insert_bucket(b2)) return true;
+
+			return kickOut(binIndex, value, tag);
 		}
 
 
 		/**
-		 * @brief Attempts to insert a fingerprint into the Interleaved Merged Cuckoo Filter by kicking out existing entries.
+		 * @brief 踢出流程，只在两桶之间往返。
 		 *
-		 * This function handles cases where all slots in the target bucket are occupied during an insertion. It uses
-		 * an alternative hash to find a backup position and checks for an empty slot. If no empty slot is found,
-		 * a random slot is selected, and its fingerprint is evicted to make space for the new one. The evicted fingerprint
-		 * is then inserted in subsequent iterations, repeating this process up to `MaxCuckooCount` times. If an empty
-		 * slot is not found after these attempts, the function returns false to indicate that the filter is full.
-		 *
-		 * @param binIndex The index of the bin within the bucket where the operation starts.
-		 * @param value The original value (e.g., a k-mer) whose hash determines the starting position.
-		 * @param tag The 16-bit fingerprint to be inserted or relocated.
-		 *
-		 * @return Returns true if the fingerprint is successfully inserted or found. Returns false if the filter is
-		 *         full after the maximum number of kick-out attempts (`MaxCuckooCount`).
-		 *
-		 * @details
-		 * - The function calculates an alternative hash using `altHash` to find a backup bucket position.
-		 * - The function iterates through each slot in the backup bucket to check for an empty slot or matching fingerprint.
-		 * - If a slot is full, it randomly selects a slot to evict and inserts the new fingerprint. The evicted fingerprint
-		 *   is then used in the next iteration.
-		 * - If the function reaches `MaxCuckooCount` attempts without finding an empty slot, it returns false.
-		 *
-		 * @note Ensure `hashSize` is appropriately defined to map hash values correctly. Use proper synchronization if
-		 *       used in a multi-threaded environment.
+		 * 随机逐出当前桶一项换入新项，再借助可逆哈希跳往另一桶继续尝试，最多迭代 `MaxCuckooCount` 次。
 		 */
 		inline bool kickOut(size_t binIndex, size_t value, uint16_t tag)
 		{
-			// Step 1: Compute the primary hash index for the given value
+			uint16_t cur = tag;
+			uint16_t fp = (uint16_t)(cur & 0x0FFFu);
 			size_t b = hashIndex(value);
-			uint16_t oldTag = tag;
-			uint64_t query;
-			size_t bucketPosition;
-			size_t indexStart;
 
-			// Thread-local random number generator for selecting a random slot
-			static thread_local std::mt19937 gen(std::random_device{}());
-			std::uniform_int_distribution<> dis(0, tagNum - 1);
+			static thread_local std::mt19937_64 gen{ std::random_device{}() };
+			std::uniform_int_distribution<int> dis(0, (int)tagNum - 1);
 
-			// Step 2: Attempt to insert the fingerprint up to MaxCuckooCount times
-			for (int count = 0; count < MaxCuckooCount; count++)
-			{
-				// Compute an alternative hash to find a backup bucket position
-				bucketPosition = b * binNum + binIndex;
-				indexStart = bucketPosition * tagNum * 16;
-				query = data.get_int(indexStart, 64);
+			for (int cnt = 0; cnt < MaxCuckooCount; ++cnt) {
+				size_t bucketPosition = b * binNum + binIndex;
+				size_t indexStart = bucketPosition * tagNum * 16;
+				uint64_t q = data.get_int(indexStart, 64);
 
-				// Step 3: Check each slot for an empty space or a matching fingerprint
-				for (size_t i = 0; i < tagNum; i++)
-				{
-					uint16_t chunk = (query >> (i * 16)) & 0xFFFF;
-					if (chunk == 0)
-					{
-						// Insert the fingerprint into the empty slot and return true
-						query &= ~((uint64_t)0xFFFF << (i * 16));
-						query |= ((uint64_t)oldTag << (i * 16));
-						data.set_int(indexStart, query, 64);
+				for (int i = 0; i < 4; ++i) {
+					uint16_t chunk = (uint16_t)((q >> (i * 16)) & 0xFFFFu);
+					if (chunk == 0u) {
+						q &= ~((uint64_t)0xFFFFu << (i * 16));
+						q |= ((uint64_t)cur << (i * 16));
+						data.set_int(indexStart, q, 64);
 						return true;
 					}
-					else if (chunk == oldTag)
-					{
-						// Fingerprint is already present, return true
-						return true;
-					}
+					if (chunk == cur) return true;
 				}
 
-				// Step 4: Randomly evict a slot and insert the new fingerprint
-				size_t randPos = dis(gen);
-				uint16_t existingTag = (query >> (randPos * 16)) & 0xFFFF;
+				int rp = dis(gen);
+				uint16_t victim = (uint16_t)((q >> (rp * 16)) & 0xFFFFu);
+				q &= ~((uint64_t)0xFFFFu << (rp * 16));
+				q |= ((uint64_t)cur << (rp * 16));
+				data.set_int(indexStart, q, 64);
 
-				query &= ~((uint64_t)0xFFFF << (randPos * 16));
-				query |= ((uint64_t)oldTag << (randPos * 16));
-				data.set_int(indexStart, query, 64);
-				// Use the evicted fingerprint in the next iteration
-				oldTag = existingTag;
-				b = altHash(b, oldTag & 0x0FFF) % hashSize;
+				cur = victim;
+				fp = (uint16_t)(cur & 0x0FFFu);
+				b = altHash(b, fp);
 			}
-			// Return false if insertion fails after MaxCuckooCount attempts
 			return false;
 		}
 
