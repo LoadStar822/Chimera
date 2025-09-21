@@ -22,13 +22,14 @@
 #define CLASSIFYCONFIG_HPP
 #include <iostream>
 #include <vector>
+#include <unordered_set>
 #include <string>
 #include <cmath>
 #include <iomanip>
 #include <limits>
 #include <cstdint>
 #include <atomic>
-#include <robin_hood.h>
+#include "robin_hood.h"
 #include <optional>
 #include <seqan3/alphabet/nucleotide/dna4.hpp>
 #include <seqan3/core/debug_stream.hpp>

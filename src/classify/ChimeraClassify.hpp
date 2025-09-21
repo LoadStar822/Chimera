@@ -17,52 +17,48 @@
  *  1.3
  * -----------------------------------------------------------------------------
  */
-#include <classifyConfig.hpp>
-#include <iostream>
+#include "classifyConfig.hpp"
+#include "kthread.h"
+#include <EM.hpp>
+#include <LCA.hpp>
+#include <VEM.hpp>
+#include <buildConfig.hpp>
+#include <cereal/cereal.hpp>
+#include <cereal/types/utility.hpp>
 #include <chrono>
-#include <iomanip>
-#include <seqan3/contrib/stream/bgzf.hpp>
+#include <cmath>
+#include <concurrentqueue.h>
+#include <cstdint>
 #include <dna4_traits.hpp>
-#include <omp.h>
-#include <interleaved-cuckoo-filter.h>
-#include <iomanip>
-#include <fstream>
-#include <sstream>
-#include <omp.h>
-#include <robin_hood.h>
 #include <filesystem>
+#include <fstream>
+#include <functional>
+#include <future>
+#include <hierarchical-interleaved-cuckoo-filter.h>
+#include <interleaved-cuckoo-filter.h>
+#include <interleaved-merged-cuckoo-filter.h>
+#include <iomanip>
+#include <iostream>
+#include <mutex>
+#include <omp.h>
+#include <optional>
+#include <queue>
+#include <robin_hood.h>
 #include <seqan3/alphabet/nucleotide/dna4.hpp>
+#include <seqan3/contrib/stream/bgzf.hpp>
 #include <seqan3/core/debug_stream.hpp>
 #include <seqan3/search/views/kmer_hash.hpp>
 #include <seqan3/search/views/minimiser_hash.hpp>
 #include <seqan3/utility/views/chunk.hpp>
-#include <chrono>
-#include <dna4_traits.hpp>
-#include <cereal/cereal.hpp>
-#include <cereal/types/utility.hpp>
+#include <sstream>
 #include <thread>
-#include <vector>
-#include <mutex>
-#include <queue>
-#include <buildConfig.hpp>
-#include <cmath>
-#include <future>
-#include <cstdint>
-#include <functional>
-#include <optional>
 #include <unordered_map>
-#include <LCA.hpp>
-#include <concurrentqueue.h>
-#include <EM.hpp>
-#include "kthread.h"
-#include <VEM.hpp>
-#include <hierarchical-interleaved-cuckoo-filter.h>
-#include <interleaved-merged-cuckoo-filter.h>
+#include <vector>
 
 namespace ChimeraClassify {
-	void run(ClassifyConfig config);
-	void postEmDecision(std::vector<classifyResult>& results,
-		const DecisionConfig& decisionConfig,
-		const std::unordered_map<std::string, double>& classWeights,
-		std::optional<std::reference_wrapper<LCA>> lca = std::nullopt);
-}
+void run(ClassifyConfig config);
+void postEmDecision(
+    std::vector<classifyResult> &results, const DecisionConfig &decisionConfig,
+    const std::unordered_map<std::string, double> &classWeights,
+    std::optional<std::reference_wrapper<LCA>> lca = std::nullopt);
+} // namespace ChimeraClassify
