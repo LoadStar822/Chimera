@@ -28,6 +28,7 @@
 #include <cereal/types/vector.hpp>
 #include <xxhash.h>
 #include <simde/x86/avx2.h>
+#include <simde/x86/sse2.h>
 #include <robin_hood.h>
 #include <queue>
 #include <buildConfig.hpp>
@@ -639,11 +640,9 @@ namespace chimera::imcf {
 			size_t hash1 = hashIndex(value);
 			size_t hash2 = altHash(hash1, fingerprint);
 
-			// Step 3: Prepare SIMD vectors for comparison
-			simde__m256i fingerprint_vec = simde_mm256_set1_epi16(fingerprint);
-
-			simde__m256i fingerprint_mask = simde_mm256_set1_epi16(0x0FFF);
-
+			// Step 3: Prepare SIMD vectors for comparison (128-bit lanes for 8 entries)
+			simde__m128i fingerprint_vec = simde_mm_set1_epi16(fingerprint);
+			simde__m128i fingerprint_mask = simde_mm_set1_epi16(0x0FFF);
 			const int species_shift = 12;
 
 			// Step 4: Iterate over each bin index to check for matches
@@ -671,24 +670,29 @@ namespace chimera::imcf {
 				entries[6] = (bucketData2 >> 32) & 0xFFFF;
 				entries[7] = (bucketData2 >> 48) & 0xFFFF;
 
-				// Load data into SIMD vectors
-				simde__m256i bucket_vec = simde_mm256_loadu_si256(reinterpret_cast<const simde__m256i*>(entries));
+				// Load data into SIMD vectors (8 x 16-bit = 128 bits)
+				simde__m128i bucket_vec = simde_mm_loadu_si128(reinterpret_cast<const simde__m128i*>(entries));
 
 				// Step 5: Extract fingerprints and species indices
-				simde__m256i fingerprints = simde_mm256_and_si256(bucket_vec, fingerprint_mask);
-				simde__m256i species_indices = simde_mm256_srli_epi16(bucket_vec, species_shift);
+				simde__m128i fingerprints = simde_mm_and_si128(bucket_vec, fingerprint_mask);
+				simde__m128i species_indices = simde_mm_srli_epi16(bucket_vec, species_shift);
 
 				// Compare extracted fingerprints with the input fingerprint
-				simde__m256i cmp = simde_mm256_cmpeq_epi16(fingerprints, fingerprint_vec);
+				simde__m128i cmp = simde_mm_cmpeq_epi16(fingerprints, fingerprint_vec);
 
 				// Step 6: Update the result vector with matching species indices
+				// Store comparison results and species indices to arrays for variable indexing
+				uint16_t cmp_vals[8];
+				uint16_t species_vals[8];
+				simde_mm_storeu_si128(reinterpret_cast<simde__m128i*>(cmp_vals), cmp);
+				simde_mm_storeu_si128(reinterpret_cast<simde__m128i*>(species_vals), species_indices);
+
 				for (int i = 0; i < 8; ++i)
 				{
-					uint16_t cmp_result = simde_mm256_extract_epi16(cmp, i);
-					if (cmp_result == 0xFFFF)	// If a match is found
+					if (cmp_vals[i] == 0xFFFF)
 					{
-						uint16_t speciesIndex = simde_mm256_extract_epi16(species_indices, i);
-						result[binIndex].set(speciesIndex);	// Mark the matching species index
+						uint16_t speciesIndex = species_vals[i];
+						result[binIndex].set(speciesIndex);
 					}
 				}
 			}

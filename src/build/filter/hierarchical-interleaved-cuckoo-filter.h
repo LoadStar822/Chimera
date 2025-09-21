@@ -26,6 +26,11 @@
 #include <robin_hood.h>
 #include <atomic>
 #include <kvec.h>
+#include <interleaved-cuckoo-filter.h>
+#include <numeric>
+#include <random>
+#include <algorithm>
+#include <fstream>
 
 namespace chimera::hicf {
 	struct Layout
@@ -225,7 +230,7 @@ namespace chimera::hicf {
 		{
 			size_t const kmersPerBin = std::ceil(kmers.size() / binNum);
 			size_t chunkNum{};
-			for (auto chunk : kmers | seqan::std::views::chunk(kmersPerBin))
+			for (auto chunk : kmers | seqan3::views::chunk(kmersPerBin))
 			{
 				size_t Index = binIndex + chunkNum;
 				chunkNum++;
