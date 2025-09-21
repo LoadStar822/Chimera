@@ -19,6 +19,10 @@
  */
 #include "ChimeraClassify.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <numeric>
+
 namespace ChimeraClassify {
 /**
  * @brief Print the time taken for classification in a human-readable format.
@@ -1222,13 +1226,46 @@ inline void processSequence(const std::vector<size_t> &hashs1,
     threshold = 1;
   }
 
-  // Perform bulk count operation using the IMCF
-  std::vector<std::vector<size_t>> count;
-  count.resize(indexToTaxid.size());
-  for (int i = 0; i < count.size(); i++) {
-    count[i].resize(indexToTaxid[i].size(), 0);
+  const size_t S = std::min<size_t>(64, hashs1.size());
+  std::vector<size_t> sampleVals(hashs1.begin(), hashs1.begin() + S);
+
+  std::vector<std::vector<uint16_t>> sampleCount(indexToTaxid.size());
+  std::vector<std::pair<uint32_t, uint16_t>> touchedS;
+  touchedS.reserve(128);
+
+  imcf.bulkCount_sparse(sampleVals, sampleCount, &touchedS);
+
+  std::vector<uint32_t> groupScore(indexToTaxid.size(), 0);
+  for (auto [bi, sp] : touchedS) {
+    groupScore[bi] += sampleCount[bi][sp];
   }
-  imcf.bulkCount(hashs1, count);
+
+  size_t binNumAll = indexToTaxid.size();
+  size_t K = std::min<size_t>(64, std::max<size_t>(32, static_cast<size_t>(std::sqrt(static_cast<double>(binNumAll)))));
+  std::vector<uint32_t> topBins;
+  topBins.reserve(K);
+  uint64_t coarseTotal = std::accumulate(groupScore.begin(), groupScore.end(), uint64_t{0});
+  if (touchedS.empty() || coarseTotal == 0) {
+    topBins.clear();
+    topBins.reserve(binNumAll);
+    for (uint32_t idx = 0; idx < binNumAll; ++idx) {
+      topBins.push_back(idx);
+    }
+  } else {
+    std::vector<uint32_t> idx(binNumAll);
+    std::iota(idx.begin(), idx.end(), 0u);
+    auto mid = idx.begin() + std::min(K, binNumAll);
+    std::partial_sort(idx.begin(), mid, idx.end(), [&](uint32_t a, uint32_t b) {
+      return groupScore[a] > groupScore[b];
+    });
+    topBins.assign(idx.begin(), mid);
+  }
+
+  std::vector<std::vector<uint16_t>> count(indexToTaxid.size());
+  std::vector<std::pair<uint32_t, uint16_t>> touched;
+  touched.reserve(256);
+
+  imcf.bulkCount_sparse_subset(hashs1, topBins, count, &touched);
   classifyResult result;
   result.id = id;
 
@@ -1237,14 +1274,13 @@ inline void processSequence(const std::vector<size_t> &hashs1,
   std::pair<std::string, std::size_t> maxCount;
   robin_hood::unordered_flat_map<std::string, size_t> taxidToCount;
 
-  // Aggregate counts for each taxid
-  for (int i = 0; i < indexToTaxid.size(); i++) {
-    for (int j = 0; j < indexToTaxid[i].size(); j++) {
-      if (count[i][j] == 0) {
-        continue;
-      }
-      taxidToCount[indexToTaxid[i][j]] += count[i][j];
+  // Aggregate counts for each taxid，仅遍历本次命中的 (bin, species)
+  for (auto [i, j] : touched) {
+    size_t v = static_cast<size_t>(count[i][j]);
+    if (v == 0) {
+      continue;
     }
+    taxidToCount[indexToTaxid[i][j]] += v;
   }
 
   // Determine the maximum count observed

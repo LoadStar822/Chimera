@@ -34,6 +34,10 @@
 #include <queue>
 #include <buildConfig.hpp>
 #include <bitset>
+#include <cassert>
+#include <algorithm>
+#include <ranges>
+#include <utility>
 
 static inline size_t ceil_div_u64(uint64_t a, uint64_t b) {
 	return (size_t)((a + b - 1) / b);
@@ -357,6 +361,7 @@ namespace chimera::imcf {
 		 */
 		inline uint16_t reduceTo12bitAndAddIndex(size_t value, size_t index)
 		{
+			assert(index < 16);
 			uint16_t reduced_value = reduceTo12bit(value);
 			uint16_t combined = (index << 12) | reduced_value;
 			return combined;
@@ -580,38 +585,182 @@ namespace chimera::imcf {
 		template <std::ranges::range value_range_t>
 		inline void bulkCount(value_range_t&& values, std::vector<std::vector<size_t>>& result)
 		{
-			// Temporary storage for query results, one bitset per position in the result vector
-			std::vector<std::bitset<16>> tmpResult(result.size());
+			bulkCount_sparse_compat(std::forward<value_range_t>(values), result);
+		}
 
-			// Temporary storage for query results, one bitset per position in the result vector
-			for (auto value : values)
-			{
-				// Reset all bitsets for the current minimizer
-				for (auto& bitset : tmpResult)
-				{
-					bitset.reset();
+		template <class EmitFn>
+		inline void bulkContain_events(size_t value, EmitFn&& emit) {
+			uint16_t fingerprint = reduceTo12bit(value);
+			size_t hash1 = hashIndex(value);
+			size_t hash2 = altHash(hash1, fingerprint);
+
+			simde__m128i fingerprint_vec = simde_mm_set1_epi16(static_cast<int16_t>(fingerprint));
+			simde__m128i fingerprint_mask = simde_mm_set1_epi16(0x0FFF);
+			const int species_shift = 12;
+
+			constexpr size_t BLOCK = 16;
+
+			for (size_t base = 0; base < binNum; base += BLOCK) {
+				size_t end = std::min(binNum, base + BLOCK);
+
+				for (size_t binIndex = base; binIndex < end; ++binIndex) {
+					size_t pos1 = (hash1 * binNum + binIndex) * tagNum * 16;
+					uint64_t d1 = data.get_int(pos1, 64);
+					size_t pos2 = (hash2 * binNum + binIndex) * tagNum * 16;
+					uint64_t d2 = data.get_int(pos2, 64);
+
+					alignas(16) uint16_t entries[8];
+					entries[0] = static_cast<uint16_t>(d1 & 0xFFFFu);
+					entries[1] = static_cast<uint16_t>((d1 >> 16) & 0xFFFFu);
+					entries[2] = static_cast<uint16_t>((d1 >> 32) & 0xFFFFu);
+					entries[3] = static_cast<uint16_t>((d1 >> 48) & 0xFFFFu);
+					entries[4] = static_cast<uint16_t>(d2 & 0xFFFFu);
+					entries[5] = static_cast<uint16_t>((d2 >> 16) & 0xFFFFu);
+					entries[6] = static_cast<uint16_t>((d2 >> 32) & 0xFFFFu);
+					entries[7] = static_cast<uint16_t>((d2 >> 48) & 0xFFFFu);
+
+					simde__m128i bucket_vec = simde_mm_loadu_si128(reinterpret_cast<const simde__m128i*>(entries));
+					simde__m128i fingerprints = simde_mm_and_si128(bucket_vec, fingerprint_mask);
+					simde__m128i species_indices = simde_mm_srli_epi16(bucket_vec, species_shift);
+					simde__m128i cmp = simde_mm_cmpeq_epi16(fingerprints, fingerprint_vec);
+
+					uint32_t mask = static_cast<uint32_t>(simde_mm_movemask_epi8(cmp));
+					if (mask == 0) {
+						continue;
+					}
+
+					alignas(16) uint16_t species_lanes[8];
+					simde_mm_storeu_si128(reinterpret_cast<simde__m128i*>(species_lanes), species_indices);
+
+					while (mask) {
+						int bit = __builtin_ctz(mask);
+						int lane = bit >> 1;
+						uint32_t pair = (mask >> (lane * 2)) & 0x3u;
+						if (pair == 0x3u) {
+							emit(static_cast<uint32_t>(binIndex), species_lanes[lane]);
+						}
+						mask &= ~(0x3u << (lane * 2));
+					}
+				}
+			}
+		}
+
+		template <class EmitFn>
+		inline void bulkContain_events_subset(size_t value,
+			const std::vector<uint32_t>& binSubset,
+			EmitFn&& emit) {
+			uint16_t fingerprint = reduceTo12bit(value);
+			size_t hash1 = hashIndex(value);
+			size_t hash2 = altHash(hash1, fingerprint);
+
+			simde__m128i fingerprint_vec = simde_mm_set1_epi16(static_cast<int16_t>(fingerprint));
+			simde__m128i fingerprint_mask = simde_mm_set1_epi16(0x0FFF);
+			const int species_shift = 12;
+
+			for (uint32_t binIndex : binSubset) {
+				size_t pos1 = (hash1 * binNum + binIndex) * tagNum * 16;
+				uint64_t d1 = data.get_int(pos1, 64);
+				size_t pos2 = (hash2 * binNum + binIndex) * tagNum * 16;
+				uint64_t d2 = data.get_int(pos2, 64);
+
+				alignas(16) uint16_t entries[8];
+				entries[0] = static_cast<uint16_t>(d1 & 0xFFFFu);
+				entries[1] = static_cast<uint16_t>((d1 >> 16) & 0xFFFFu);
+				entries[2] = static_cast<uint16_t>((d1 >> 32) & 0xFFFFu);
+				entries[3] = static_cast<uint16_t>((d1 >> 48) & 0xFFFFu);
+				entries[4] = static_cast<uint16_t>(d2 & 0xFFFFu);
+				entries[5] = static_cast<uint16_t>((d2 >> 16) & 0xFFFFu);
+				entries[6] = static_cast<uint16_t>((d2 >> 32) & 0xFFFFu);
+				entries[7] = static_cast<uint16_t>((d2 >> 48) & 0xFFFFu);
+
+				simde__m128i bucket_vec = simde_mm_loadu_si128(reinterpret_cast<const simde__m128i*>(entries));
+				simde__m128i fingerprints = simde_mm_and_si128(bucket_vec, fingerprint_mask);
+				simde__m128i species_indices = simde_mm_srli_epi16(bucket_vec, species_shift);
+				simde__m128i cmp = simde_mm_cmpeq_epi16(fingerprints, fingerprint_vec);
+
+				uint32_t mask = static_cast<uint32_t>(simde_mm_movemask_epi8(cmp));
+				if (mask == 0) {
+					continue;
 				}
 
-				// Perform the bulk containment query for the current minimizer
-				bulkContain(value, tmpResult);
+				alignas(16) uint16_t species_lanes[8];
+				simde_mm_storeu_si128(reinterpret_cast<simde__m128i*>(species_lanes), species_indices);
 
-				// Update the result vector based on the positions where the minimizer is present
-				for (size_t i = 0; i < result.size(); ++i)
-				{
-					// Check if the j-th bit is set in the i-th bitset
-					for (size_t j = 0; j < 16; ++j)
-					{
-						// Resize the sub-vector if necessary to accommodate the current tag position
-						if (tmpResult[i].test(j))
-						{
-							if (result[i].size() <= j)
-							{
-								result[i].resize(j + 1, 0);
-							}
-							// Increment the count for the current tag at the current position
-							result[i][j]++;
-						}
+				while (mask) {
+					int bit = __builtin_ctz(mask);
+					int lane = bit >> 1;
+					uint32_t pair = (mask >> (lane * 2)) & 0x3u;
+					if (pair == 0x3u) {
+						emit(static_cast<uint32_t>(binIndex), species_lanes[lane]);
 					}
+					mask &= ~(0x3u << (lane * 2));
+				}
+			}
+		}
+
+		template <std::ranges::range value_range_t>
+		inline void bulkCount_sparse(value_range_t&& values,
+			std::vector<std::vector<uint16_t>>& result,
+			std::vector<std::pair<uint32_t, uint16_t>>* touched = nullptr)
+		{
+			for (auto value : values) {
+				bulkContain_events(value, [&](uint32_t bin, uint16_t sp) {
+					if (result.size() <= static_cast<size_t>(bin)) {
+						result.resize(static_cast<size_t>(bin) + 1);
+					}
+					if (result[bin].size() <= static_cast<size_t>(sp)) {
+						result[bin].resize(static_cast<size_t>(sp) + 1, 0);
+					}
+					uint16_t& ref = result[bin][sp];
+					if (ref == 0 && touched) {
+						touched->emplace_back(bin, sp);
+					}
+					++ref;
+				});
+			}
+		}
+
+		template <std::ranges::range value_range_t>
+		inline void bulkCount_sparse_subset(value_range_t&& values,
+			const std::vector<uint32_t>& binSubset,
+			std::vector<std::vector<uint16_t>>& result,
+			std::vector<std::pair<uint32_t, uint16_t>>* touched = nullptr)
+		{
+			for (auto value : values) {
+				bulkContain_events_subset(value, binSubset, [&](uint32_t bin, uint16_t sp) {
+					if (result.size() <= static_cast<size_t>(bin)) {
+						result.resize(static_cast<size_t>(bin) + 1);
+					}
+					if (result[bin].size() <= static_cast<size_t>(sp)) {
+						result[bin].resize(static_cast<size_t>(sp) + 1, 0);
+					}
+					uint16_t& ref = result[bin][sp];
+					if (ref == 0 && touched) {
+						touched->emplace_back(bin, sp);
+					}
+					++ref;
+				});
+			}
+		}
+
+		template <std::ranges::range value_range_t>
+		inline void bulkCount_sparse_compat(value_range_t&& values,
+			std::vector<std::vector<size_t>>& result)
+		{
+			std::vector<std::vector<uint16_t>> tmp(result.size());
+			for (size_t i = 0; i < result.size(); ++i) {
+				tmp[i].resize(result[i].size(), 0);
+			}
+			bulkCount_sparse(std::forward<value_range_t>(values), tmp, nullptr);
+			if (result.size() < tmp.size()) {
+				result.resize(tmp.size());
+			}
+			for (size_t i = 0; i < tmp.size(); ++i) {
+				if (result[i].size() < tmp[i].size()) {
+					result[i].resize(tmp[i].size(), 0);
+				}
+				for (size_t j = 0; j < tmp[i].size(); ++j) {
+					result[i][j] += static_cast<size_t>(tmp[i][j]);
 				}
 			}
 		}
