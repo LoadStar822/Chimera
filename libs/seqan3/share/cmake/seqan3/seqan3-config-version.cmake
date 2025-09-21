@@ -1,9 +1,6 @@
-# -----------------------------------------------------------------------------------------------------
-# Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-# Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-# This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-# shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-# -----------------------------------------------------------------------------------------------------
+# SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+# SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+# SPDX-License-Identifier: BSD-3-Clause
 
 # This file adds version support for `find_package(SEQAN3 3.1)`.
 # See https://cmake.org/cmake/help/v3.16/manual/cmake-packages.7.html#package-version-file for more information.
@@ -13,14 +10,12 @@
 
 # Note that seqan3-config.cmake can be standalone and thus SEQAN3_CLONE_DIR might be empty.
 find_path (SEQAN3_CLONE_DIR
-           NAMES build_system/seqan3-config.cmake
+           NAMES cmake/seqan3-config.cmake
            HINTS "${CMAKE_CURRENT_LIST_DIR}/..")
 find_path (SEQAN3_INCLUDE_DIR
            NAMES seqan3/version.hpp
            HINTS "${SEQAN3_CLONE_DIR}/include")
 
-
-message(STATUS "SEQAN3_INCLUDE_DIR is set to: ${SEQAN3_INCLUDE_DIR}")
 # extract version from seqan3/version.hpp header
 file (STRINGS "${SEQAN3_INCLUDE_DIR}/seqan3/version.hpp" SEQAN3_VERSION_HPP
       REGEX "#define SEQAN3_VERSION_(MAJOR|MINOR|PATCH)")

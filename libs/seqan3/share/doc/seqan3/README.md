@@ -1,5 +1,11 @@
 # SeqAn3 -- the modern C++ library for sequence analysis
 
+<!--
+    SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+    SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+    SPDX-License-Identifier: CC-BY-4.0
+-->
+
 [![build status][1]][2]
 [![codecov][3]][4]
 [![license][5]][6]
@@ -25,16 +31,16 @@
     The picture, or alternative text, should link to `[2]`.
 -->
 
-[1]: https://img.shields.io/github/actions/workflow/status/seqan/seqan3/ci_linux.yml?branch=master&style=flat&logo=github&label=SeqAn3%20CI "Open GitHub actions page"
-[2]: https://github.com/seqan/seqan3/actions?query=branch%3Amaster
-[3]: https://codecov.io/gh/seqan/seqan3/branch/master/graph/badge.svg?token=BH1FQiBBle "Open Codecov page"
+[1]: https://img.shields.io/github/actions/workflow/status/seqan/seqan3/ci_linux.yml?branch=main&style=flat&logo=github&label=SeqAn3%20CI "Open GitHub actions page"
+[2]: https://github.com/seqan/seqan3/actions?query=branch%3Amain
+[3]: https://codecov.io/gh/seqan/seqan3/branch/main/graph/badge.svg?token=BH1FQiBBle "Open Codecov page"
 [4]: https://codecov.io/gh/seqan/seqan3
 [5]: https://img.shields.io/badge/license-BSD-green.svg "Open Copyright page"
-[6]: https://docs.seqan.de/seqan/3-master-user/about_copyright.html
+[6]: https://docs.seqan.de/seqan3/main_user/about_copyright.html
 [7]: https://img.shields.io/github/release/seqan/seqan3.svg "Get the latest release"
 [8]: https://github.com/seqan/seqan3/releases/latest
 [9]: https://img.shields.io/badge/platform-linux%20%7C%20bsd%20%7C%20osx-informational.svg "Read more about our API"
-[10]: https://docs.seqan.de/seqan/3-master-user/about_api.html
+[10]: https://docs.seqan.de/seqan3/main_user/about_api.html
 [11]: https://img.shields.io/github/stars/seqan/seqan3.svg?style=social "See who starred us"
 [12]: https://github.com/seqan/seqan3/stargazers
 [13]: https://img.shields.io/twitter/follow/SeqAnLib.svg?label=follow&style=social "Follow us on Twitter"
@@ -51,7 +57,7 @@ for:
 
 By leveraging *Modern C++* it provides unprecedented ease-of-use without sacrificing performance.
 
-Please see the [online documentation](https://docs.seqan.de/seqan/3-master-user/) for more details.
+Please see the [online documentation](https://docs.seqan.de/seqan3/main_user/) for more details.
 
 ## Quick facts
 
@@ -66,9 +72,10 @@ Please see the [online documentation](https://docs.seqan.de/seqan/3-master-user/
 
 |                   | requirement                                          | version  | comment                                     |
 |-------------------|------------------------------------------------------|----------|---------------------------------------------|
-|**compiler**       | [GCC](https://gcc.gnu.org)                           | ≥ 11     | no other compiler is currently supported!   |
-|**build system**   | [CMake](https://cmake.org)                           | ≥ 3.4    | optional, but recommended                   |
-|**required libs**  | [SDSL](https://github.com/xxsds/sdsl-lite)           | ≥ 3.0.3  |                                             |
+|**compiler**       | [GCC](https://gcc.gnu.org)                           | ≥ 12     |                                             |
+|                   | [Clang](https://clang.llvm.org)                      | ≥ 17     | tested with `-stdlib=libc++`                |
+|                   | [IntelOneAPI]()                                      | ≥ 2024.0 |                                             |
+|**build system**   | [CMake](https://cmake.org)                           | ≥ 3.20   | optional, but recommended                   |
 |**optional libs**  | [cereal](https://github.com/USCiLab/cereal)          | ≥ 1.3.1  | required for serialisation and CTD support  |
 |                   | [zlib](https://github.com/madler/zlib)               | ≥ 1.2    | required for `*.gz` and `.bam` file support |
 |                   | [bzip2](https://www.sourceware.org/bzip2)            | ≥ 1.0    | required for `*.bz2` file support           |
@@ -77,30 +84,5 @@ Please see the [online documentation](https://docs.seqan.de/seqan/3-master-user/
 
 We recommend that you use CMake to build your project:
 
-  * [Setup-Tutorial](https://docs.seqan.de/seqan/3-master-user/setup.html)
+  * [Setup-Tutorial](https://docs.seqan.de/seqan3/main_user/setup.html)
   * Using CMake guarantees that all optional dependencies are automatically detected and activated.
-
-Quick-Setup without CMake:
-
-  * Clone the repository with submodules: `git clone --recurse-submodules https://github.com/seqan/seqan3.git`
-  * Add the following to your compiler invocation:
-    * the include directories of SeqAn and its dependencies
-    * C++20 mode
-    * Macros indicating the presence of zlib and bzip2 (set only if actually available in your paths!)
-  * The command could look like this:
-```sh
-g++-11 -O3 -DNDEBUG -Wall -Wextra                               \
-    -std=c++20                                                  \
-    -I       /path/to/seqan3/include                            \
-    -isystem /path/to/seqan3/submodules/sdsl-lite/include       \
-    -isystem /path/to/seqan3/submodules/cereal/include          \
-    -DSEQAN3_HAS_ZLIB=1 -DSEQAN3_HAS_BZIP2=1                    \
-    -lz -lbz2 -pthread                                          \
-  your_file.cpp
-```
-
-## Sponsorships
-
-[![Vercel](https://raw.githubusercontent.com/seqan/seqan3/master/test/documentation/.vercel/powered-by-vercel.svg)](https://vercel.com/?utm_source=seqan&utm_campaign=oss)
-
-Vercel is kind enough to sponsor our documentation preview-builds within our pull requests. Check them out!

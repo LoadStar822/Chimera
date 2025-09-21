@@ -1,12 +1,9 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan-std/blob/main/LICENSE
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
- * \brief Provides seqan::std::detail::adaptor_from_functor
+ * \brief Provides seqan::stl::detail::adaptor_from_functor
  * \author Hannes Hauswedell <hannes.hauswedell AT fu-berlin.de>
  */
 
@@ -16,7 +13,7 @@
 
 #include "adaptor_base.hpp"
 
-namespace seqan::std::detail
+namespace seqan::stl::detail
 {
 
 // ============================================================================
@@ -45,10 +42,10 @@ private:
      * \param[in] args           The arguments to the constructor.
      * \returns Whatever the wrapped functor returns, usually a view.
      */
-    template <::std::ranges::input_range urng_t>
+    template <std::ranges::input_range urng_t>
     constexpr auto impl(urng_t && urange, stored_args_ts... args) const
     {
-        return fun(::std::forward<urng_t>(urange), ::std::forward<stored_args_ts>(args)...);
+        return fun(std::forward<urng_t>(urange), std::forward<stored_args_ts>(args)...);
     }
 
 public:
@@ -64,12 +61,12 @@ public:
 
     //!\brief Construct from functor and possibly arguments.
     constexpr adaptor_from_functor(functor_type f, stored_args_ts... args) :
-        base_type{::std::forward<stored_args_ts>(args)...},
-        fun{::std::move(f)}
+        base_type{std::forward<stored_args_ts>(args)...},
+        fun{std::move(f)}
     {}
     //!\}
 };
 
-} // namespace seqan::std::detail
+} // namespace seqan::stl::detail
 
 #endif // SEQAN_STD_DETAIL_ADAPTOR_FROM_FUNCTOR

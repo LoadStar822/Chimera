@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::sequence_file_output_format and auxiliary classes.
@@ -75,19 +72,13 @@ concept sequence_file_output_format = requires (detail::sequence_file_output_for
                                                 std::string & id,
                                                 std::vector<phred42> & qual,
                                                 std::vector<dna5q> & seq_qual) {
-                                          t::file_extensions;
+    t::file_extensions;
 
-                                          {
-                                              v.write_sequence_record(f, options, seq, id, qual)
-                                              } -> std::same_as<void>;
-                                          {
-                                              v.write_sequence_record(f, options, std::ignore, id, std::ignore)
-                                              } -> std::same_as<void>;
-                                          {
-                                              v.write_sequence_record(f, options, std::ignore, std::ignore, std::ignore)
-                                              } -> std::same_as<void>;
-                                          // the last is required to be compile time valid, but should always throw at run-time.
-                                      };
+    { v.write_sequence_record(f, options, seq, id, qual) } -> std::same_as<void>;
+    { v.write_sequence_record(f, options, std::ignore, id, std::ignore) } -> std::same_as<void>;
+    // This one is required to be a valid call, but should always throw at run-time.
+    { v.write_sequence_record(f, options, std::ignore, std::ignore, std::ignore) } -> std::same_as<void>;
+};
 //!\endcond
 
 // Workaround for https://github.com/doxygen/doxygen/issues/9379

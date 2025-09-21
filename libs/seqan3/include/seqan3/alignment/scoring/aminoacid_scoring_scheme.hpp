@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::aminoacid_scoring_scheme.
@@ -292,14 +289,14 @@ private:
  */
 
 //!\brief Default constructed objects deduce to `int8_t`.
-aminoacid_scoring_scheme()->aminoacid_scoring_scheme<int8_t>;
+aminoacid_scoring_scheme() -> aminoacid_scoring_scheme<int8_t>;
 
 /*!\brief Attention: This guide does not actually deduce from the underlying type, but always defaults to `int8_t`.
  * To use a larger type, specify the template argument manually.
  */
 template <arithmetic score_arg_type>
-aminoacid_scoring_scheme(match_score<score_arg_type>, mismatch_score<score_arg_type>)
-    -> aminoacid_scoring_scheme<int8_t>;
+aminoacid_scoring_scheme(match_score<score_arg_type>,
+                         mismatch_score<score_arg_type>) -> aminoacid_scoring_scheme<int8_t>;
 
 //!\brief Deduce the score type from the provided matrix.
 template <arithmetic score_arg_type>
@@ -308,7 +305,7 @@ aminoacid_scoring_scheme(std::array<std::array<score_arg_type, 27>, 27>) -> amin
 /*!\brief Attention: This guide does not actually deduce from the underlying type, but always defaults to `int8_t`.
  * To use a larger type, specify the template argument manually.
  */
-aminoacid_scoring_scheme(aminoacid_similarity_matrix)->aminoacid_scoring_scheme<int8_t>;
+aminoacid_scoring_scheme(aminoacid_similarity_matrix) -> aminoacid_scoring_scheme<int8_t>;
 //!\}
 
 } // namespace seqan3

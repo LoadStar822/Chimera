@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Marcel Ehrhardt <marcel.ehrhardt AT fu-berlin.de>
@@ -86,10 +83,8 @@ template <typename builtin_simd_t>
 // NOTE: gcc throws a compile time error if builtin_simd_t is a pointer of an incomplete type. To tackle this we
 // short-circuit the requires with is_pointer_v. See builtin_simd_test.cpp for a test case for this.
     requires (!std::is_pointer_v<std::decay_t<builtin_simd_t>>) && requires (builtin_simd_t simd) {
-                                                                       {
-                                                                           simd[0]
-                                                                       };
-                                                                   }
+        { simd[0] };
+    }
 //!\endcond
 struct builtin_simd_traits_helper<builtin_simd_t>
 {
@@ -134,7 +129,7 @@ constexpr bool is_builtin_simd_v = is_builtin_simd<builtin_simd_t>::value;
  * seqan3::detail::builtin_simd types.
  */
 template <>
-constexpr auto default_simd_max_length<builtin_simd> = []()
+inline constexpr auto default_simd_max_length<builtin_simd> = []()
 {
 #if defined(__AVX512F__)
     return min_viable_uint_v<64u>;

@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Joerg Winkler <j.winkler AT fu-berlin.de>
@@ -393,10 +390,8 @@ namespace seqan3
  */
 template <typename alph_t>
     requires requires {
-                 {
-                     detail::adl_only::max_pseudoknot_depth_cpo<alph_t>{}()
-                 };
-             }
+        { detail::adl_only::max_pseudoknot_depth_cpo<alph_t>{}() };
+    }
 inline constexpr auto max_pseudoknot_depth = detail::adl_only::max_pseudoknot_depth_cpo<alph_t>{}();
 
 } // namespace seqan3
@@ -531,22 +526,14 @@ namespace seqan3
 //!\cond
 template <typename t>
 concept rna_structure_alphabet = seqan3::alphabet<t> && requires (t val) {
-                                                            {
-                                                                seqan3::is_pair_open(val)
-                                                            };
-                                                            {
-                                                                seqan3::is_pair_close(val)
-                                                            };
-                                                            {
-                                                                seqan3::is_unpaired(val)
-                                                            };
-                                                            {
-                                                                seqan3::pseudoknot_id(val)
-                                                            };
+    { seqan3::is_pair_open(val) };
+    { seqan3::is_pair_close(val) };
+    { seqan3::is_unpaired(val) };
+    { seqan3::pseudoknot_id(val) };
 
-                                                            // this is delegated to a static class variable, which must not be 0
-                                                            requires seqan3::max_pseudoknot_depth<t> > 0;
-                                                        };
+    // this is delegated to a static class variable, which must not be 0
+    requires seqan3::max_pseudoknot_depth<t> > 0;
+};
 //!\endcond
 
 } // namespace seqan3

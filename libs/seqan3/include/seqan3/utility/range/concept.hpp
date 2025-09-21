@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Additional non-standard concepts for ranges.
@@ -81,22 +78,20 @@ concept const_iterable_range =
  */
 //!\cond
 template <typename iterator_t>
-concept pseudo_random_access_iterator = std::forward_iterator<iterator_t> && !
-std::is_base_of_v<std::random_access_iterator_tag, typename std::iterator_traits<iterator_t>::iterator_category> &&
-    std::totally_ordered<iterator_t> &&
-        std::sized_sentinel_for<iterator_t, iterator_t> && requires (iterator_t i,
-                                                                     iterator_t const j,
-                                                                     std::iter_difference_t<iterator_t> const n) {
-                                                               requires std::same_as<decltype(i += n), iterator_t &>;
-                                                               requires std::same_as<decltype(j + n), iterator_t>;
-                                                               requires std::same_as<decltype(n + j), iterator_t>;
-                                                               requires std::same_as<decltype(--i), iterator_t &>;
-                                                               requires std::same_as<decltype(i--), iterator_t>;
-                                                               requires std::same_as<decltype(i -= n), iterator_t &>;
-                                                               requires std::same_as<decltype(j - n), iterator_t>;
-                                                               requires std::same_as<decltype(j[n]),
-                                                                                     std::iter_reference_t<iterator_t>>;
-                                                           };
+concept pseudo_random_access_iterator =
+    std::forward_iterator<iterator_t>
+    && !std::is_base_of_v<std::random_access_iterator_tag, typename std::iterator_traits<iterator_t>::iterator_category>
+    && std::totally_ordered<iterator_t> && std::sized_sentinel_for<iterator_t, iterator_t>
+    && requires (iterator_t i, iterator_t const j, std::iter_difference_t<iterator_t> const n) {
+           requires std::same_as<decltype(i += n), iterator_t &>;
+           requires std::same_as<decltype(j + n), iterator_t>;
+           requires std::same_as<decltype(n + j), iterator_t>;
+           requires std::same_as<decltype(--i), iterator_t &>;
+           requires std::same_as<decltype(i--), iterator_t>;
+           requires std::same_as<decltype(i -= n), iterator_t &>;
+           requires std::same_as<decltype(j - n), iterator_t>;
+           requires std::same_as<decltype(j[n]), std::iter_reference_t<iterator_t>>;
+       };
 //!\endcond
 
 /*!\interface seqan3::pseudo_random_access_range <>

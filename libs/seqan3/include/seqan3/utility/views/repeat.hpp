@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Svenja Mehringer <svenja.mehringer AT fu-berlin.de>
@@ -81,7 +78,7 @@ private:
     //!\}
 
     //!\brief Befriend the following class s.t. iterator and const_iterator can be defined for this type.
-    template <typename parent_type, typename crtp_base>
+    template <typename range_type, template <typename...> typename derived_t_template, typename... args_t>
     friend class detail::random_access_iterator_base;
 
 public:
@@ -239,8 +236,8 @@ public:
      * \param rhs a non-const version of basic_iterator to construct from.
      */
     template <typename parent_type2>
-        requires std::is_const_v<parent_type>
-              && (!std::is_const_v<parent_type2>) && std::is_same_v<std::remove_const_t<parent_type>, parent_type2>
+        requires std::is_const_v<parent_type> && (!std::is_const_v<parent_type2>)
+              && std::is_same_v<std::remove_const_t<parent_type>, parent_type2>
     constexpr basic_iterator(basic_iterator<parent_type2> const & rhs) noexcept : base_t{rhs}
     {}
     //!\}
@@ -248,10 +245,15 @@ public:
     /*!\name Comparison operators
      * \{
      */
-    //!\brief Inherit the equality comparison (same type) from base type.
-    using base_t::operator==;
-    //!\brief Inherit the inequality comparison (same type) from base type.
-    using base_t::operator!=;
+    constexpr bool operator==(basic_iterator const & rhs) const noexcept
+    {
+        return base_t::operator==(rhs);
+    }
+
+    constexpr bool operator!=(basic_iterator const & rhs) const noexcept
+    {
+        return !(*this == rhs);
+    }
 
     //!\brief Equality comparison to the sentinel always returns false on an infinite view.
     constexpr bool operator==(std::default_sentinel_t const &) const noexcept

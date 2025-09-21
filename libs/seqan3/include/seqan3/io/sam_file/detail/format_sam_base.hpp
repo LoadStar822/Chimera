@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides the seqan3::format_sam_base that can be inherited from.
@@ -269,9 +266,14 @@ inline void format_sam_base::read_arithmetic_field(std::string_view const & str,
  * Reading the header format is done according to the official
  * [SAM format specifications](https://samtools.github.io/hts-specs/SAMv1.pdf).
  *
- * The function throws a seqan3::format_error if any unknown tag was encountered. It will also fail if the format is
- * not in a correct state (e.g. required fields are not given), but throwing might occur downstream of the actual
- * error.
+ * The function throws a seqan3::format_error if the format is not in a correct state (e.g. required fields are not
+ * given), but throwing might occur downstream of the actual error.
+ *
+ * Any user-defined tags are not checked for correctness ([TAG]:[VALUE]) and are stored as strings:
+ * * HD: seqan3::sam_file_header::user_tags
+ * * SQ: seqan3::sam_file_header::ref_id_info
+ * * RG: seqan3::sam_file_header::read_groups
+ * * PG: seqan3::sam_file_header::program_infos / seqan3::sam_file_program_info_t::user_tags
  */
 template <typename stream_view_type, typename ref_ids_type, typename ref_seqs_type>
 inline void format_sam_base::read_header(stream_view_type && stream_view,
@@ -338,11 +340,6 @@ inline void format_sam_base::read_header(stream_view_type && stream_view,
         read_forward_range_field(string_buffer, value);
     };
 
-    auto print_cerr_of_unspported_tag = [&it](char const * const header_tag, std::array<char, 2> raw_tag)
-    {
-        std::cerr << "Unsupported SAM header tag in @" << header_tag << ": " << raw_tag[0] << raw_tag[1] << '\n';
-    };
-
     while (it != end && is_char<'@'>(*it))
     {
         ++it; // skip @
@@ -379,9 +376,9 @@ inline void format_sam_base::read_header(stream_view_type && stream_view,
                     header_entry = std::addressof(hdr.grouping);
                     break;
                 }
-                default: // unsupported header tag
+                default: // unknown/user tag
                 {
-                    print_cerr_of_unspported_tag("HD", raw_tag);
+                    parse_and_append_unhandled_tag_to_string(hdr.user_tags, raw_tag);
                 }
                 }
 
@@ -390,8 +387,6 @@ inline void format_sam_base::read_header(stream_view_type && stream_view,
                     copy_next_tag_value_into_buffer();
                     read_forward_range_field(string_buffer, *header_entry);
                 }
-                else
-                    skip_until_predicate(is_char<'\t'> || is_char<'\n'>);
             }
             ++it; // skip newline
 
@@ -555,7 +550,7 @@ inline void format_sam_base::read_header(stream_view_type && stream_view,
                 }
                 default: // unsupported header tag
                 {
-                    print_cerr_of_unspported_tag("PG", raw_tag);
+                    parse_and_append_unhandled_tag_to_string(tmp.user_tags, raw_tag);
                 }
                 }
 
@@ -564,8 +559,6 @@ inline void format_sam_base::read_header(stream_view_type && stream_view,
                     copy_next_tag_value_into_buffer();
                     read_forward_range_field(string_buffer, *program_info_entry);
                 }
-                else
-                    skip_until_predicate(is_char<'\t'> || is_char<'\n'>);
             }
             ++it; // skip newline
 
@@ -661,6 +654,9 @@ format_sam_base::write_header(stream_t & stream, sam_file_output_options const &
         if (!header.grouping.empty())
             stream << "\tGO:" << header.grouping;
 
+        if (!header.user_tags.empty())
+            stream << '\t' << header.user_tags;
+
         detail::write_eol(stream_it, options.add_carriage_return);
 
         // (@SQ) Write Reference Sequence Dictionary lines [required].
@@ -710,6 +706,9 @@ format_sam_base::write_header(stream_t & stream, sam_file_output_options const &
 
             if (!program.version.empty())
                 stream << "\tVN:" << program.version;
+
+            if (!program.user_tags.empty())
+                stream << '\t' << program.user_tags;
 
             detail::write_eol(stream_it, options.add_carriage_return);
         }

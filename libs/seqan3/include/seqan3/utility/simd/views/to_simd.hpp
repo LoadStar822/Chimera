@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::detail::to_simd view.
@@ -72,7 +69,7 @@ private:
     /*!\name Auxiliary types
      * \{
      */
-    using inner_range_type = std::ranges::range_value_t<urng_t>;        //!< The inner range type.
+    using inner_range_type = std::ranges::range_reference_t<urng_t>;    //!< The inner range type.
     using chunk_type = std::array<simd_t, simd_traits<simd_t>::length>; //!< The underlying type to hold the chunks.
     using scalar_type = typename simd_traits<simd_t>::scalar_type;      //!< The scalar type.
     //!\brief The SIMD type with maximal number of lanes for the current arch.
@@ -99,7 +96,7 @@ private:
     //!\}
 
     // Forward declare class' iterator type. See definition below.
-    struct iterator_type;
+    class iterator_type;
 
 public:
     /*!\name Constructors, destructor and assignment

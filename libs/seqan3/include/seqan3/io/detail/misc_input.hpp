@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides various utility functions required only for input.
@@ -21,15 +18,11 @@
 #include <string>
 #include <tuple>
 
-#if defined(SEQAN3_HAS_BZIP2)
-#    include <seqan3/contrib/stream/bz2_istream.hpp>
-#endif
-#if defined(SEQAN3_HAS_ZLIB)
-#    include <seqan3/contrib/stream/bgzf_istream.hpp>
-#    include <seqan3/contrib/stream/bgzf_stream_util.hpp>
-#    include <seqan3/contrib/stream/gz_istream.hpp>
-#endif
 #include <seqan3/contrib/stream/bgzf.hpp>
+#include <seqan3/contrib/stream/bgzf_istream.hpp>
+#include <seqan3/contrib/stream/bgzf_stream_util.hpp>
+#include <seqan3/contrib/stream/bz2_istream.hpp>
+#include <seqan3/contrib/stream/gz_istream.hpp>
 #include <seqan3/io/detail/magic_header.hpp>
 #include <seqan3/io/exception.hpp>
 #include <seqan3/utility/concept.hpp>
@@ -123,36 +116,36 @@ inline auto make_secondary_istream(std::basic_istream<char_t> & primary_stream, 
     // set return value appropriately
     if (read_chars == magic_number.size() && bgzf_compression::validate_header(std::span{magic_number})) // BGZF
     {
-#if defined(SEQAN3_HAS_ZLIB)
+#if SEQAN3_HAS_ZLIB
         if (contains_extension(gz_compression{}, extension) || contains_extension(bgzf_compression{}, extension))
             filename.replace_extension();
 
         return {new contrib::basic_bgzf_istream<char_t>{primary_stream}, stream_deleter_default};
 #else
         throw file_open_error{"Trying to read from a bgzf file, but no ZLIB available."};
-#endif
+#endif // SEQAN3_HAS_ZLIB
     }
     else if (starts_with(magic_number, gz_compression::magic_header)) // GZIP
     {
-#if defined(SEQAN3_HAS_ZLIB)
+#if SEQAN3_HAS_ZLIB
         if (contains_extension(gz_compression{}, extension) || contains_extension(bgzf_compression{}, extension))
             filename.replace_extension();
 
         return {new contrib::basic_gz_istream<char_t>{primary_stream}, stream_deleter_default};
 #else
         throw file_open_error{"Trying to read from a gzipped file, but no ZLIB available."};
-#endif
+#endif // SEQAN3_HAS_ZLIB
     }
     else if (starts_with(magic_number, bz2_compression::magic_header)) // BZip2
     {
-#if defined(SEQAN3_HAS_BZIP2)
+#if SEQAN3_HAS_BZIP2
         if (contains_extension(bz2_compression{}, extension))
             filename.replace_extension();
 
         return {new contrib::basic_bz2_istream<char_t>{primary_stream}, stream_deleter_default};
 #else
         throw file_open_error{"Trying to read from a bzipped file, but no libbz2 available."};
-#endif
+#endif // SEQAN3_HAS_BZIP2
     }
     else if (starts_with(magic_number, zstd_compression::magic_header)) // ZStd
     {

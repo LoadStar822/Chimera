@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::detail::search_configurator.
@@ -244,23 +241,20 @@ algorithm_t search_configurator::configure_hit_strategy(configuration_t const & 
         auto cfg_without_hit = cfg.template remove<search_cfg::hit>();
 
         // Apply the correct static configuration element.
-        return std::visit(multi_invocable{[&](search_cfg::hit_all_best)
-                                          {
-                                              return next_config_step(cfg_without_hit | search_cfg::hit_all_best{});
-                                          },
-                                          [&](search_cfg::hit_single_best)
-                                          {
-                                              return next_config_step(cfg_without_hit | search_cfg::hit_single_best{});
-                                          },
-                                          [&](search_cfg::hit_strata const & strata)
-                                          {
-                                              return next_config_step(cfg_without_hit | strata);
-                                          },
-                                          [&](auto)
-                                          {
-                                              return next_config_step(cfg_without_hit | search_cfg::hit_all{});
-                                          }},
-                          hit_variant);
+        if (std::holds_alternative<search_cfg::hit_all_best>(hit_variant))
+        {
+            return next_config_step(cfg_without_hit | search_cfg::hit_all_best{});
+        }
+        else if (std::holds_alternative<search_cfg::hit_single_best>(hit_variant))
+        {
+            return next_config_step(cfg_without_hit | search_cfg::hit_single_best{});
+        }
+        else if (std::holds_alternative<search_cfg::hit_strata>(hit_variant))
+        {
+            return next_config_step(cfg_without_hit | std::get<search_cfg::hit_strata>(hit_variant));
+        }
+        else
+            return next_config_step(cfg_without_hit | search_cfg::hit_all{});
     }
     else // Already statically configured.
     {

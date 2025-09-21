@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Svenja Mehringer <svenja.mehringer AT fu-berlin.de>
@@ -30,6 +27,8 @@
 #include <seqan3/argument_parser/detail/version_check.hpp>
 #include <seqan3/core/debug_stream/detail/to_string.hpp>
 #include <seqan3/core/detail/test_accessor.hpp>
+
+SEQAN3_DEPRECATED_HEADER("This header and its functionality is deprecated and will be removed in a future version of SeqAn. Please use the sharg-parser (url: https://github.com/seqan/sharg-parser) instead.");
 
 namespace seqan3
 {
@@ -150,11 +149,11 @@ public:
     /*!\name Constructors, destructor and assignment
      * \{
      */
-    argument_parser() = delete;                                     //!< Deleted.
-    argument_parser(argument_parser const &) = default;             //!< Defaulted.
-    argument_parser & operator=(argument_parser const &) = default; //!< Defaulted.
-    argument_parser(argument_parser &&) = default;                  //!< Defaulted.
-    argument_parser & operator=(argument_parser &&) = default;      //!< Defaulted.
+    argument_parser() = delete;                                    //!< Deleted.
+    argument_parser(argument_parser const &) = delete;             //!< Deleted. Holds std::future.
+    argument_parser & operator=(argument_parser const &) = delete; //!< Deleted. Holds std::future.
+    argument_parser(argument_parser &&) = default;                 //!< Defaulted.
+    argument_parser & operator=(argument_parser &&) = default;     //!< Defaulted.
 
     /*!\brief Initializes an seqan3::argument_parser object from the command line arguments.
      *
@@ -169,7 +168,7 @@ public:
      * The application name must only contain alpha-numeric characters, `_` or `-`,
      * i.e. the following regex must evaluate to true: `"^[a-zA-Z0-9_-]+$"`.
      *
-     * See the [argument parser tutorial](https://docs.seqan.de/seqan/3-master-dev/tutorial_argument_parser.html)
+     * See the [argument parser tutorial](https://docs.seqan.de/seqan3/main_dev/tutorial_argument_parser.html)
      * for more information about the version check functionality.
      */
     argument_parser(std::string const app_name,
@@ -473,8 +472,8 @@ public:
      *   via `seqan3::argument_parser::add_option()` calls beforehand.
      */
     template <typename id_type>
-        requires std::same_as<id_type, char> || std::constructible_from<std::string, id_type> bool
-    is_option_set(id_type const & id) const
+        requires std::same_as<id_type, char> || std::constructible_from<std::string, id_type>
+    bool is_option_set(id_type const & id) const
     {
         if (!parse_was_called)
             throw design_error{"You can only ask which options have been set after calling the function `parse()`."};
@@ -773,7 +772,7 @@ private:
                 {
                     if (argv_len <= i + 1)
                         throw too_few_arguments{"Option --export-help must be followed by a value."};
-                    export_format = {argv[i + 1]};
+                    export_format = argv[i + 1];
                 }
 
                 if (export_format == "html")

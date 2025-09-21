@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Hannes Hauswedell <hannes.hauswedell AT fu-berlin.de>
@@ -30,7 +27,7 @@ class rna5;
  * \ingroup alphabet_nucleotide
  * \implements seqan3::nucleotide_alphabet
  * \implements seqan3::writable_alphabet
- * \if DEV \implements seqan3::detail::writable_constexpr_alphabet \endif
+ * \implements seqan3::detail::writable_constexpr_alphabet
  * \implements seqan3::trivially_copyable
  * \implements seqan3::standard_layout
  * \implements std::regular
@@ -121,32 +118,28 @@ private:
         return char_to_rank_table[static_cast<index_t>(chr)];
     }
 
-    // clang-format off
     //!\copydoc seqan3::dna4::char_to_rank_table
-    static constexpr std::array<rank_type, 256> char_to_rank_table
-    {
-        []() constexpr {
-            std::array<rank_type, 256> ret{};
+    static constexpr std::array<rank_type, 256> char_to_rank_table{[]() constexpr
+                                                                   {
+                                                                       std::array<rank_type, 256> ret{};
 
-            ret.fill(3u); // initialize with UNKNOWN ('N')
+                                                                       ret.fill(3u); // initialize with UNKNOWN ('N')
 
-            // reverse mapping for characters and their lowercase
-            for (size_t rnk = 0u; rnk < alphabet_size; ++rnk)
-            {
-                ret[rank_to_char_table[rnk]] = rnk;
-                ret[to_lower(rank_to_char_table[rnk])] = rnk;
-            }
+                                                                       // reverse mapping for characters and their lowercase
+                                                                       for (size_t rnk = 0u; rnk < alphabet_size; ++rnk)
+                                                                       {
+                                                                           ret[rank_to_char_table[rnk]] = rnk;
+                                                                           ret[to_lower(rank_to_char_table[rnk])] = rnk;
+                                                                       }
 
-            // set U equal to T
-            ret['U'] = ret['T'];
-            ret['u'] = ret['t'];
+                                                                       // set U equal to T
+                                                                       ret['U'] = ret['T'];
+                                                                       ret['u'] = ret['t'];
 
-            // iupac characters are implicitly "UNKNOWN"
-            return ret;
-        }()
-    };
+                                                                       // iupac characters are implicitly "UNKNOWN"
+                                                                       return ret;
+                                                                   }()};
 };
-// clang-format on
 
 // ------------------------------------------------------------------
 // containers

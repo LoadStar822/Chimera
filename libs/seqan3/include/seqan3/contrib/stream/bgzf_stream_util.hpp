@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides stream compression utilities.
@@ -26,11 +23,7 @@
 #include <seqan3/io/exception.hpp>
 #include <seqan3/utility/detail/to_little_endian.hpp>
 
-#if !defined(SEQAN3_HAS_ZLIB) && !defined(SEQAN3_HEADER_TEST)
-#    error "This file cannot be used when building without GZip-support."
-#endif // !defined(SEQAN3_HAS_ZLIB) && !defined(SEQAN3_HEADER_TEST)
-
-#if defined(SEQAN3_HAS_ZLIB)
+#if SEQAN3_HAS_ZLIB
 // Zlib headers
 #    include <zlib.h>
 
@@ -178,8 +171,8 @@ inline TDestCapacity _compressBlock(TDestValue * dstBegin,
                                     TSourceLength srcLength,
                                     CompressionContext<detail::bgzf_compression> & ctx)
 {
-    const size_t BLOCK_HEADER_LENGTH = DefaultPageSize<detail::bgzf_compression>::BLOCK_HEADER_LENGTH;
-    const size_t BLOCK_FOOTER_LENGTH = DefaultPageSize<detail::bgzf_compression>::BLOCK_FOOTER_LENGTH;
+    size_t const BLOCK_HEADER_LENGTH = DefaultPageSize<detail::bgzf_compression>::BLOCK_HEADER_LENGTH;
+    size_t const BLOCK_FOOTER_LENGTH = DefaultPageSize<detail::bgzf_compression>::BLOCK_FOOTER_LENGTH;
 
     assert(dstCapacity > BLOCK_HEADER_LENGTH + BLOCK_FOOTER_LENGTH);
     assert(sizeof(TDestValue) == 1u);
@@ -256,8 +249,8 @@ inline TDestCapacity _decompressBlock(TDestValue * dstBegin,
                                       TSourceLength srcLength,
                                       CompressionContext<detail::bgzf_compression> & ctx)
 {
-    const size_t BLOCK_HEADER_LENGTH = DefaultPageSize<detail::bgzf_compression>::BLOCK_HEADER_LENGTH;
-    const size_t BLOCK_FOOTER_LENGTH = DefaultPageSize<detail::bgzf_compression>::BLOCK_FOOTER_LENGTH;
+    size_t const BLOCK_HEADER_LENGTH = DefaultPageSize<detail::bgzf_compression>::BLOCK_HEADER_LENGTH;
+    size_t const BLOCK_FOOTER_LENGTH = DefaultPageSize<detail::bgzf_compression>::BLOCK_FOOTER_LENGTH;
 
     assert(sizeof(TSourceValue) == 1u);
     assert(sizeof(unsigned) == 4u);
@@ -311,4 +304,4 @@ inline TDestCapacity _decompressBlock(TDestValue * dstBegin,
 
 } // namespace seqan3::contrib
 
-#endif // defined(SEQAN3_HAS_ZLIB)
+#endif // SEQAN3_HAS_ZLIB

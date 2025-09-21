@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Core alphabet concept and free function/type trait wrappers.
@@ -168,10 +165,8 @@ inline constexpr auto to_rank = detail::adl_only::to_rank_cpo{};
  */
 template <typename semi_alphabet_type>
     requires requires {
-                 {
-                     seqan3::to_rank(std::declval<semi_alphabet_type>())
-                 };
-             }
+        { seqan3::to_rank(std::declval<semi_alphabet_type>()) };
+    }
 using alphabet_rank_t = decltype(seqan3::to_rank(std::declval<semi_alphabet_type>()));
 
 } // namespace seqan3
@@ -411,10 +406,8 @@ inline constexpr auto to_char = detail::adl_only::to_char_cpo{};
  */
 template <typename alphabet_type>
     requires requires (alphabet_type const a) {
-                 {
-                     seqan3::to_char(a)
-                 };
-             }
+        { seqan3::to_char(a) };
+    }
 using alphabet_char_t = decltype(seqan3::to_char(std::declval<alphabet_type const>()));
 
 } // namespace seqan3
@@ -695,10 +688,8 @@ namespace seqan3
  */
 template <typename alph_t>
     requires requires {
-                 {
-                     to_char(std::declval<alph_t>())
-                 };
-             } // to_char() is required by some defs
+        { to_char(std::declval<alph_t>()) };
+    } // to_char() is required by some defs
 inline constexpr auto char_is_valid_for = detail::adl_only::char_is_valid_for_cpo<alph_t>{};
 //!\}
 } // namespace seqan3
@@ -718,13 +709,9 @@ struct assign_char_strictly_to_fn
     template <typename alphabet_t>
     constexpr decltype(auto) operator()(seqan3::alphabet_char_t<alphabet_t> const chr, alphabet_t && alphabet) const
         requires requires () {
-                     {
-                         seqan3::assign_char_to(chr, std::forward<alphabet_t>(alphabet))
-                         } -> std::convertible_to<alphabet_t>;
-                     {
-                         seqan3::char_is_valid_for<alphabet_t>(chr)
-                         } -> std::same_as<bool>;
-                 }
+            { seqan3::assign_char_to(chr, std::forward<alphabet_t>(alphabet)) } -> std::convertible_to<alphabet_t>;
+            { seqan3::char_is_valid_for<alphabet_t>(chr) } -> std::same_as<bool>;
+        }
     {
         if (!seqan3::char_is_valid_for<alphabet_t>(chr))
             throw seqan3::invalid_char_assignment{detail::type_name_as_string<alphabet_t>, chr};
@@ -880,10 +867,8 @@ namespace seqan3
  */
 template <typename alph_t>
     requires requires {
-                 {
-                     detail::adl_only::alphabet_size_cpo<alph_t>{}()
-                 };
-             }
+        { detail::adl_only::alphabet_size_cpo<alph_t>{}() };
+    }
 inline constexpr auto alphabet_size = detail::adl_only::alphabet_size_cpo<alph_t>{}();
 
 // ============================================================================
@@ -933,15 +918,11 @@ inline constexpr auto alphabet_size = detail::adl_only::alphabet_size_cpo<alph_t
  */
 //!\cond
 template <typename t>
-concept semialphabet = std::totally_ordered<t> && std::copy_constructible<t> && std::is_nothrow_copy_constructible_v<t>
-                    && requires (t v) {
-                           {
-                               seqan3::alphabet_size<t>
-                           };
-                           {
-                               seqan3::to_rank(v)
-                           };
-                       };
+concept semialphabet =
+    std::totally_ordered<t> && std::copy_constructible<t> && std::is_nothrow_copy_constructible_v<t> && requires (t v) {
+        { seqan3::alphabet_size<t> };
+        { seqan3::to_rank(v) };
+    };
 //!\endcond
 
 // ============================================================================
@@ -985,10 +966,8 @@ concept semialphabet = std::totally_ordered<t> && std::copy_constructible<t> && 
 //!\cond
 template <typename t>
 concept writable_semialphabet = semialphabet<t> && requires (t v, alphabet_rank_t<t> r) {
-                                                       {
-                                                           seqan3::assign_rank_to(r, v)
-                                                       };
-                                                   };
+    { seqan3::assign_rank_to(r, v) };
+};
 //!\endcond
 
 // ============================================================================
@@ -1025,10 +1004,8 @@ concept writable_semialphabet = semialphabet<t> && requires (t v, alphabet_rank_
 //!\cond
 template <typename t>
 concept alphabet = semialphabet<t> && requires (t v) {
-                                          {
-                                              seqan3::to_char(v)
-                                          };
-                                      };
+    { seqan3::to_char(v) };
+};
 //!\endcond
 
 // ============================================================================
@@ -1074,10 +1051,8 @@ concept alphabet = semialphabet<t> && requires (t v) {
 //!\cond
 template <typename t>
 concept writable_alphabet = alphabet<t> && writable_semialphabet<t> && requires (t v, alphabet_char_t<t> c) {
-                                                                           {
-                                                                               seqan3::assign_char_to(c, v)
-                                                                           };
-                                                                       };
+    { seqan3::assign_char_to(c, v) };
+};
 //!\endcond
 
 // ============================================================================
@@ -1090,8 +1065,7 @@ concept writable_alphabet = alphabet<t> && writable_semialphabet<t> && requires 
  *
  * \{
  */
-/*!
- * \brief Save an alphabet letter to stream.
+/*!\brief Save an alphabet letter to stream.
  * \tparam archive_t Must satisfy seqan3::cereal_output_archive.
  * \tparam alphabet_t Type of l; must satisfy seqan3::semialphabet.
  * \param l The alphabet letter.
@@ -1154,11 +1128,10 @@ namespace seqan3::detail
  */
 //!\cond
 template <typename t>
-concept constexpr_semialphabet =
-    semialphabet<t> && requires {
-                           // currently only tests rvalue interfaces, because we have no constexpr values in this scope to get references to
-                           requires SEQAN3_IS_CONSTEXPR(to_rank(std::remove_reference_t<t>{}));
-                       };
+concept constexpr_semialphabet = semialphabet<t> && requires {
+    // currently only tests rvalue interfaces, because we have no constexpr values in this scope to get references to
+    requires SEQAN3_IS_CONSTEXPR(to_rank(std::remove_reference_t<t>{}));
+};
 //!\endcond
 
 // ============================================================================
@@ -1176,12 +1149,10 @@ concept constexpr_semialphabet =
  */
 //!\cond
 template <typename t>
-concept writable_constexpr_semialphabet =
-    constexpr_semialphabet<t> && writable_semialphabet<t>
-    && requires {
-           // currently only tests rvalue interfaces, because we have no constexpr values in this scope to get references to
-           requires SEQAN3_IS_CONSTEXPR(seqan3::assign_rank_to(alphabet_rank_t<t>{}, std::remove_reference_t<t>{}));
-       };
+concept writable_constexpr_semialphabet = constexpr_semialphabet<t> && writable_semialphabet<t> && requires {
+    // currently only tests rvalue interfaces, because we have no constexpr values in this scope to get references to
+    requires SEQAN3_IS_CONSTEXPR(seqan3::assign_rank_to(alphabet_rank_t<t>{}, std::remove_reference_t<t>{}));
+};
 //!\endcond
 
 // ============================================================================
@@ -1199,11 +1170,10 @@ concept writable_constexpr_semialphabet =
  */
 //!\cond
 template <typename t>
-concept constexpr_alphabet =
-    constexpr_semialphabet<t> && alphabet<t> && requires {
-                                                    // currently only tests rvalue interfaces, because we have no constexpr values in this scope to get references to
-                                                    requires SEQAN3_IS_CONSTEXPR(to_char(std::remove_reference_t<t>{}));
-                                                };
+concept constexpr_alphabet = constexpr_semialphabet<t> && alphabet<t> && requires {
+    // currently only tests rvalue interfaces, because we have no constexpr values in this scope to get references to
+    requires SEQAN3_IS_CONSTEXPR(to_char(std::remove_reference_t<t>{}));
+};
 //!\endcond
 
 // ============================================================================
@@ -1223,11 +1193,10 @@ concept constexpr_alphabet =
 //!\cond
 template <typename t>
 concept writable_constexpr_alphabet =
-    constexpr_alphabet<t> && writable_constexpr_semialphabet<t> && writable_alphabet<t>
-    && requires {
-           // currently only tests rvalue interfaces, because we have no constexpr values in this scope to get references to
-           requires SEQAN3_IS_CONSTEXPR(seqan3::assign_char_to(alphabet_char_t<t>{}, std::remove_reference_t<t>{}));
-       };
+    constexpr_alphabet<t> && writable_constexpr_semialphabet<t> && writable_alphabet<t> && requires {
+        // currently only tests rvalue interfaces, because we have no constexpr values in this scope to get references to
+        requires SEQAN3_IS_CONSTEXPR(seqan3::assign_char_to(alphabet_char_t<t>{}, std::remove_reference_t<t>{}));
+    };
 //!\endcond
 
 } // namespace seqan3::detail

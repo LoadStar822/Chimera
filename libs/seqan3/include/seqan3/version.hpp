@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 #pragma once
 
@@ -18,7 +15,7 @@
 //!\brief The major version as MACRO.
 #define SEQAN3_VERSION_MAJOR 3
 //!\brief The minor version as MACRO.
-#define SEQAN3_VERSION_MINOR 3
+#define SEQAN3_VERSION_MINOR 4
 //!\brief The patch version as MACRO.
 #define SEQAN3_VERSION_PATCH 0
 //!\brief The release candidate number. 0 means stable release, >= 1 means release candidate.

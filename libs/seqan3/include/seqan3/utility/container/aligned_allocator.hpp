@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Marcel Ehrhardt <marcel.ehrhardt AT fu-berlin.de>
@@ -12,16 +9,12 @@
 
 #pragma once
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <type_traits>
 
 #include <seqan3/core/platform.hpp>
-
-// __cpp_aligned_new is a C++17 feature that we use in this allocator and we require it.
-#if __cpp_aligned_new < 201606
-#    pragma GCC warning "Non-C++17 compliant compiler! Please open an issue with your compiler and platform!"
-#endif // __cpp_aligned_new < 201606
 
 namespace seqan3
 {
@@ -181,23 +174,10 @@ public:
     {
         size_t bytes_to_deallocate = n * sizeof(value_type);
 
-        // Clang doesn't have __cpp_sized_deallocation defined by default even though this is a C++14! feature
-        // > In Clang 3.7 and later, sized deallocation is only enabled if the user passes the `-fsized-deallocation`
-        // > flag.
-        // see also https://clang.llvm.org/cxx_status.html#n3778
-#if __cpp_sized_deallocation >= 201309
-        // gcc
         if constexpr (alignment <= __STDCPP_DEFAULT_NEW_ALIGNMENT__)
             ::operator delete(p, bytes_to_deallocate);
         else // Use alignment aware deallocator function.
             ::operator delete(p, bytes_to_deallocate, static_cast<std::align_val_t>(alignment));
-#else  /*__cpp_sized_deallocation >= 201309*/
-        // e.g. clang++
-        if constexpr (alignment <= __STDCPP_DEFAULT_NEW_ALIGNMENT__)
-            ::operator delete(p);
-        else // Use alignment aware deallocator function.
-            ::operator delete(p, static_cast<std::align_val_t>(alignment));
-#endif // __cpp_sized_deallocation >= 201309
     }
 
     /*!\brief The aligned_allocator member template class aligned_allocator::rebind provides a way to obtain an

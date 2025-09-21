@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Hannes Hauswedell <hannes.hauswedell AT fu-berlin.de>
@@ -24,7 +21,7 @@ namespace seqan3
  * \tparam sequence_alphabet_t Type of the alphabet; must satisfy seqan3::writable_alphabet.
  * \tparam quality_alphabet_t  Type of the quality; must satisfy seqan3::writable_quality_alphabet.
  * \implements seqan3::writable_quality_alphabet
- * \if DEV \implements seqan3::detail::writable_constexpr_alphabet \endif
+ * \implements seqan3::detail::writable_constexpr_alphabet
  * \implements seqan3::trivially_copyable
  * \implements seqan3::standard_layout
  * \implements std::regular
@@ -195,44 +192,40 @@ private:
         return rank_to_char_table[rank];
     }
 
-    // clang-format off
     //!\copydoc seqan3::dna4::rank_to_char_table
-    static constexpr std::array<char_type, alphabet_size> rank_to_char_table
-    {
-        []() constexpr {
+    static constexpr std::array<char_type, alphabet_size> rank_to_char_table{
+        []() constexpr
+        {
             std::array<char_type, alphabet_size> ret{};
 
             for (size_t i = 0; i < alphabet_size; ++i)
             {
-                size_t const seq_rank = (i / base_type::cummulative_alph_sizes[0]) %
-                                        seqan3::alphabet_size<quality_alphabet_type>;
+                size_t const seq_rank =
+                    (i / base_type::cummulative_alph_sizes[0]) % seqan3::alphabet_size<quality_alphabet_type>;
 
                 ret[i] = seqan3::to_char(seqan3::assign_rank_to(seq_rank, sequence_alphabet_type{}));
             }
 
             return ret;
-        }()
-    };
+        }()};
 
     //!\brief Rank to Phred conversion table.
-    static constexpr std::array<char_type, alphabet_size> rank_to_phred
-    {
-        []() constexpr {
+    static constexpr std::array<char_type, alphabet_size> rank_to_phred{
+        []() constexpr
+        {
             std::array<char_type, alphabet_size> ret{};
 
             for (size_t i = 0; i < alphabet_size; ++i)
             {
-                size_t qual_rank = (i / base_type::cummulative_alph_sizes[1]) %
-                                seqan3::alphabet_size<quality_alphabet_type>;
+                size_t qual_rank =
+                    (i / base_type::cummulative_alph_sizes[1]) % seqan3::alphabet_size<quality_alphabet_type>;
 
                 ret[i] = seqan3::to_phred(seqan3::assign_rank_to(qual_rank, quality_alphabet_type{}));
             }
 
             return ret;
-        }()
-    };
+        }()};
 };
-// clang-format on
 
 /*!\brief Type deduction guide enables usage of qualified without specifying template args.
  * \relates qualified

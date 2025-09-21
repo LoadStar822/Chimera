@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Hannes Hauswedell <hannes.hauswedell AT fu-berlin.de>
@@ -15,6 +12,7 @@
 #include <tuple>
 #include <type_traits>
 
+#include <seqan3/utility/concept.hpp>
 #include <seqan3/utility/type_pack/traits.hpp>
 
 namespace seqan3
@@ -39,9 +37,7 @@ struct pod_tuple
  * actually enforces this on all types in the tuple (if you want to add non POD types, just use
  * std::tuple instead).
  *
- * It (only) supports [aggregate initialization](https://en.cppreference.com/w/cpp/language/aggregate_initialization),
- * i.e. you must use brace-initializiers and cannot
- * use paranthesis. You can use seqan3::get or std::get and also
+ * You can use seqan3::get or std::get and also
  * [structured bindings](https://en.cppreference.com/w/cpp/language/declarations#Structured_binding_declaration)
  * to access the elements in the tuple.
  *
@@ -51,12 +47,23 @@ struct pod_tuple
 template <typename type0, typename... types>
 struct pod_tuple<type0, types...>
 {
-    static_assert(std::is_standard_layout_v<type0> && std::is_trivial_v<type0>, SEQAN_NOT_POD);
+    static_assert(std::is_standard_layout_v<type0> && seqan3::trivial<type0>, SEQAN_NOT_POD);
     //!\cond DEV
     //!\brief The first element as member.
     type0 _head;
     //!\brief The rest of the elements defined as a "recursive member".
     pod_tuple<types...> _tail;
+
+    constexpr pod_tuple() noexcept = default;                              //!< Defaulted.
+    constexpr pod_tuple(pod_tuple const &) noexcept = default;             //!< Defaulted.
+    constexpr pod_tuple & operator=(pod_tuple const &) noexcept = default; //!< Defaulted.
+    constexpr pod_tuple(pod_tuple &&) noexcept = default;                  //!< Defaulted.
+    constexpr pod_tuple & operator=(pod_tuple &&) noexcept = default;      //!< Defaulted.
+    constexpr ~pod_tuple() noexcept = default;                             //!< Defaulted.
+
+    //!\brief Construct from arguments.
+    constexpr pod_tuple(type0 v0, types... args) noexcept : _head{v0}, _tail{args...}
+    {}
     //!\endcond
 
     /*!\name Comparison operators
@@ -108,7 +115,7 @@ struct pod_tuple<type0, types...>
 template <typename type0>
 struct pod_tuple<type0>
 {
-    static_assert(std::is_standard_layout_v<type0> && std::is_trivial_v<type0>, SEQAN_NOT_POD);
+    static_assert(std::is_standard_layout_v<type0> && seqan3::trivial<type0>, SEQAN_NOT_POD);
     //!\cond DEV
     //!\brief The first element as member.
     type0 _head;

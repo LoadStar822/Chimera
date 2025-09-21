@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::detail::algorithm_executor_blocking.
@@ -200,13 +197,14 @@ public:
         }
         while (status == fill_status::empty_buffer);
 
+        std::optional<algorithm_result_t> result{std::nullopt};
         if (status == fill_status::end_of_resource)
-            return {std::nullopt};
+            return result;
 
         assert(status == fill_status::non_empty_buffer);
         assert(bucket_it != buffer_it->end());
 
-        std::optional<algorithm_result_t> result = std::ranges::iter_move(bucket_it);
+        result = std::ranges::iter_move(bucket_it);
         go_to_next_result(); // Go to next buffered result.
         return result;
     }

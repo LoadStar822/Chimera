@@ -1,12 +1,9 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan-std/blob/main/LICENSE
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
- * \brief Provides seqan::std::detail::adaptor_for_view_without_args
+ * \brief Provides seqan::stl::detail::adaptor_for_view_without_args
  * \author Hannes Hauswedell <hannes.hauswedell AT fu-berlin.de>
  */
 
@@ -16,7 +13,7 @@
 
 #include "adaptor_base.hpp"
 
-namespace seqan::std::detail
+namespace seqan::stl::detail
 {
 
 // ============================================================================
@@ -43,7 +40,7 @@ private:
     template <typename... arg_types>
     static auto impl(arg_types &&... args)
     {
-        return view_type{::std::forward<arg_types>(args)...};
+        return view_type{std::forward<arg_types>(args)...};
     }
 
 public:
@@ -68,6 +65,6 @@ public:
     //!\}
 };
 
-} // namespace seqan::std::detail
+} // namespace seqan::stl::detail
 
 #endif // SEQAN_STD_DETAIL_ADAPTOR_FOR_VIEW_WITHOUT_ARGS

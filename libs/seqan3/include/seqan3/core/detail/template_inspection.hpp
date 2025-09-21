@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Hannes Hauswedell <hannes.hauswedell AT fu-berlin.de>
@@ -138,11 +135,8 @@ struct is_type_specialisation_of : public std::false_type
 {};
 
 //!\overload
-template <typename source_t, template <typename...> typename target_template>
-    requires (
-        !std::same_as<transformation_trait_or_t<transfer_template_args_onto<source_t, target_template>, void>, void>)
-struct is_type_specialisation_of<source_t, target_template> :
-    std::is_same<source_t, transfer_template_args_onto_t<source_t, target_template>>
+template <template <typename...> typename source_t, typename... source_args>
+struct is_type_specialisation_of<source_t<source_args...>, source_t> : public std::true_type
 {};
 
 /*!\brief Helper variable template for seqan3::detail::is_type_specialisation_of (unary_type_trait shortcut).
@@ -172,11 +166,8 @@ struct is_value_specialisation_of : std::false_type
  * \see seqan3::detail::is_type_specialisation_of
  * \see seqan3::detail::is_value_specialisation_of_v
  */
-template <typename source_t, template <auto...> typename target_template>
-    requires (
-        !std::same_as<transformation_trait_or_t<transfer_template_vargs_onto<source_t, target_template>, void>, void>)
-struct is_value_specialisation_of<source_t, target_template> :
-    std::is_same<source_t, transfer_template_vargs_onto_t<source_t, target_template>>
+template <template <auto...> typename source_t, auto... source_args>
+struct is_value_specialisation_of<source_t<source_args...>, source_t> : public std::true_type
 {};
 
 /*!\brief Helper variable template for seqan3::detail::is_value_specialisation_of (unary_type_trait shortcut).

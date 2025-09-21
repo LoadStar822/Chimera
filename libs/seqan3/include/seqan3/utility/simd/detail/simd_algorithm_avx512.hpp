@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides specific algorithm implementations for AVX512 instruction set.
@@ -273,7 +270,7 @@ constexpr simd_t extract_eighth_avx512(simd_t const & src)
 
     // for uneven index exchange higher 64 bits with lower 64 bits for each 128 bit lane.
     if constexpr (index % 2 == 1)
-        tmp = _mm512_shuffle_epi32(tmp, 0b0100'1110); // := [1, 0, 3, 2].
+        tmp = _mm512_shuffle_epi32(tmp, static_cast<_MM_PERM_ENUM>(0b0100'1110)); // := [1, 0, 3, 2].
 
     return reinterpret_cast<simd_t>(_mm512_castsi128_si512(_mm512_extracti64x2_epi64(tmp, index / 2)));
 }

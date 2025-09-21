@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Svenja Mehringer <svenja.mehringer AT fu-berlin.de>
@@ -11,6 +8,8 @@
  */
 
 #pragma once
+
+#include <istream>
 
 #include <seqan3/utility/container/small_vector.hpp>
 
@@ -149,7 +148,8 @@ public:
     {
         static_assert(N <= capacity_ + 1, "Length of string literal exceeds capacity of small_string.");
         assert(_lit[N - 1] == '\0');
-        assign(&_lit[0], &_lit[N - 1]);
+        base_t::assign(&_lit[0], &_lit[N - 1]);
+        data_[sz] = '\0';
     }
 
     /*!\brief Assign from pair of iterators.
@@ -471,7 +471,7 @@ small_string(std::array<char, N> const &) -> small_string<N>;
   * \details
   * \experimentalapi{Experimental since version 3.1.}
   */
-small_string(char const)->small_string<1>;
+small_string(char const) -> small_string<1>;
 //!\}
 
 } // namespace seqan3

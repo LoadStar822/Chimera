@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides the seqan3::sam_tag_dictionary class and auxiliaries.
@@ -70,22 +67,9 @@ inline namespace literals
  * The purpose of those tags is to fill or query the seqan3::sam_tag_dictionary for a specific key (tag_id) and
  * retrieve the corresponding value.
  */
-
-#ifdef __cpp_nontype_template_parameter_class
 template <small_string<2> str> // TODO: better handling if too large string is provided?
 constexpr uint16_t operator""_tag()
 {
-#else // GCC/Clang extension
-#    pragma GCC diagnostic push
-#    pragma GCC diagnostic ignored "-Wpedantic"
-template <typename char_t, char_t... s>
-constexpr uint16_t operator""_tag()
-{
-    static_assert(std::same_as<char_t, char>, "Illegal SAM tag: Type must be char.");
-    constexpr small_string<sizeof...(s)> str{std::array<char, sizeof...(s)>{s...}};
-#    pragma GCC diagnostic pop
-#endif
-
     static_assert(str.size() == 2, "Illegal SAM tag: Exactly two characters must be given.");
 
     constexpr char char0 = str[0];

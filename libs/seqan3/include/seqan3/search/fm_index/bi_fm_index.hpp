@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Christopher Pockrandt <christopher.pockrandt AT fu-berlin.de>
@@ -67,12 +64,13 @@ private:
     using sdsl_index_type = sdsl_index_type_;
 
     //!\brief The type of the underlying SDSL index for the reversed text.
-    using rev_sdsl_index_type = sdsl::csa_wt<sdsl_wt_index_type::wavelet_tree_type, // Wavelet tree type
-                                             10'000'000,                            // Sampling rate of the suffix array
-                                             10'000'000,                   // Sampling rate of the inverse suffix array
-                                             sdsl::sa_order_sa_sampling<>, // Text or SA based sampling for SA
-                                             sdsl::isa_sampling<>,         // Text or ISA based sampling for ISA
-                                             sdsl_wt_index_type::alphabet_type>; // How to represent the alphabet
+    using rev_sdsl_index_type =
+        seqan3::contrib::sdsl::csa_wt<sdsl_wt_index_type::wavelet_tree_type, // Wavelet tree type
+                                      10'000'000,                            // Sampling rate of the suffix array
+                                      10'000'000, // Sampling rate of the inverse suffix array
+                                      seqan3::contrib::sdsl::sa_order_sa_sampling<>, // Text or SA based sampling for SA
+                                      seqan3::contrib::sdsl::isa_sampling<>, // Text or ISA based sampling for ISA
+                                      sdsl_wt_index_type::alphabet_type>;    // How to represent the alphabet
 
     /*!\brief The type of the reduced alphabet type. (The reduced alphabet might be smaller than the original alphabet
      *        in case not all possible characters occur in the indexed text.)

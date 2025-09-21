@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Enrico Seiler <enrico.seiler AT fu-berlin.de>
@@ -52,6 +49,33 @@ private:
     template <bool const_range>
     class basic_iterator;
 
+    //!\brief The maximum shape count for the given alphabet.
+    static inline int max_shape_count = 64 / std::log2(alphabet_size<std::ranges::range_reference_t<urng_t>>);
+
+    //!\brief Throws the exception for validate_shape().
+    [[noreturn]] void shape_too_long_error() const
+    {
+        std::string message{"The shape is too long for the given alphabet.\n"};
+        message += "Alphabet: ";
+        // Note: Since we want the alphabet type name, std::ranges::range_value_t is the better choice.
+        // For seqan3::bitpacked_sequence<seqan3::dna4>:
+        // reference_t: seqan3::bitpacked_sequence<seqan3::dna4>::reference_proxy_type
+        // value_t: seqan3::dna4
+        message += detail::type_name_as_string<std::remove_cvref_t<std::ranges::range_value_t<urng_t>>>;
+        message += "\nMaximum shape count: ";
+        message += std::to_string(max_shape_count);
+        message += "\nGiven shape count: ";
+        message += std::to_string(shape_.count());
+        throw std::invalid_argument{message};
+    }
+
+    //!\brief Checks that the shape is not too long for the given alphabet.
+    inline void validate_shape() const
+    {
+        if (shape_.count() > max_shape_count)
+            shape_too_long_error();
+    }
+
 public:
     /*!\name Constructors, destructor and assignment
      * \{
@@ -71,11 +95,7 @@ public:
      */
     explicit kmer_hash_view(urng_t urange_, shape const & s_) : urange{std::move(urange_)}, shape_{s_}
     {
-        if (shape_.count() > (64 / std::log2(alphabet_size<std::ranges::range_reference_t<urng_t>>)))
-        {
-            throw std::invalid_argument{"The chosen shape/alphabet combination is not valid. "
-                                        "The alphabet or shape size must be reduced."};
-        }
+        validate_shape();
     }
 
     /*!\brief Construct from a non-view that can be view-wrapped and a given shape.
@@ -89,11 +109,7 @@ public:
         urange{std::views::all(std::forward<rng_t>(urange_))},
         shape_{s_}
     {
-        if (shape_.count() > (64 / std::log2(alphabet_size<std::ranges::range_reference_t<urng_t>>)))
-        {
-            throw std::invalid_argument{"The chosen shape/alphabet combination is not valid. "
-                                        "The alphabet or shape size must be reduced."};
-        }
+        validate_shape();
     }
     //!\}
 
@@ -712,7 +728,7 @@ namespace seqan3::views
  *
  * \attention
  * For the alphabet size \f$\sigma\f$ of the alphabet of `urange` and the number of 1s \f$s\f$ of `shape` it must hold
- * that \f$s>\frac{64}{\log_2\sigma}\f$, i.e. hashes resulting from the shape/alphabet combination can be represented
+ * that \f$s \le \frac{64}{\log_2\sigma}\f$, i.e. hashes resulting from the shape/alphabet combination can be represented
  * in an `uint64_t`.
  *
  * ### View properties

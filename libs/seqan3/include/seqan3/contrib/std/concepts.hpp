@@ -1,13 +1,10 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan-std/blob/main/LICENSE
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Enrico Seiler <enrico.seiler AT fu-berlin.de>
- * \brief Provides seqan::std concepts.
+ * \brief Provides seqan::stl concepts.
  */
 
 // File might be included from multiple libraries.
@@ -17,27 +14,27 @@
 #include <ranges>
 
 #if __cpp_lib_ranges >= 202110L
-namespace seqan::std::ranges
+namespace seqan::stl::ranges
 {
 
-using ::std::ranges::viewable_range;
+using std::ranges::viewable_range;
 
 }
 #else
 #    include "detail/exposition_only.hpp"
-namespace seqan::std::ranges
+namespace seqan::stl::ranges
 {
 
 template <class T>
-concept viewable_range = ::std::ranges::range<T>
-                      && ((::std::ranges::view<::std::remove_cvref_t<T>>
-                           && ::std::constructible_from<::std::remove_cvref_t<T>, T>)
-                          || (!::std::ranges::view<::std::remove_cvref_t<T>>
-                              && (::std::is_lvalue_reference_v<T>
-                                  || (::std::movable<::std::remove_reference_t<T>>
-                                      && !seqan::std::detail::is_initializer_list<::std::remove_cvref_t<T>>))));
+concept viewable_range =
+    std::ranges::range<T>
+    && ((std::ranges::view<std::remove_cvref_t<T>> && std::constructible_from<std::remove_cvref_t<T>, T>)
+        || (!std::ranges::view<std::remove_cvref_t<T>>
+            && (std::is_lvalue_reference_v<T>
+                || (std::movable<std::remove_reference_t<T>>
+                    && !seqan::stl::detail::is_initializer_list<std::remove_cvref_t<T>>))));
 
-} // namespace seqan::std::ranges
+} // namespace seqan::stl::ranges
 
 #endif
 

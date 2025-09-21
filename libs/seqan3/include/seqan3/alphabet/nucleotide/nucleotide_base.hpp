@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Hannes Hauswedell <hannes.hauswedell AT fu-berlin.de>
@@ -13,6 +10,7 @@
 #pragma once
 
 #include <seqan3/alphabet/alphabet_base.hpp>
+#include <seqan3/alphabet/detail/concept.hpp>
 #include <seqan3/alphabet/detail/convert.hpp>
 #include <seqan3/alphabet/nucleotide/concept.hpp>
 #include <seqan3/utility/char_operations/transform.hpp>
@@ -78,8 +76,9 @@ public:
      * \experimentalapi{Experimental since version 3.1.}
      */
     template <typename other_nucl_type>
-        requires (!std::same_as<nucleotide_base, other_nucl_type>)
-              && (!std::same_as<derived_type, other_nucl_type>) && nucleotide_alphabet<other_nucl_type>
+        requires (!std::same_as<nucleotide_base, other_nucl_type>) && (!std::same_as<derived_type, other_nucl_type>)
+              && nucleotide_alphabet<other_nucl_type>
+              && detail::convertable_to_through_char_representation<other_nucl_type, derived_type>
     explicit constexpr nucleotide_base(other_nucl_type const & other) noexcept
     {
         static_cast<derived_type &>(*this) =
@@ -142,11 +141,10 @@ public:
     }
 
 private:
-    // clang-format off
     //!\brief Implementation of seqan3::nucleotide_base::char_is_valid().
-    static constexpr std::array<bool, 256> valid_char_table
-    {
-        []() constexpr {
+    static constexpr std::array<bool, 256> valid_char_table{
+        []() constexpr
+        {
             std::array<bool, 256> ret{};
 
             // Value-initialisation of std::array does usually initialise. `fill` is explicit.
@@ -167,9 +165,7 @@ private:
             ret['t'] = true;
 
             return ret;
-        }()
-    };
+        }()};
 };
-    // clang-format off
 
 } // namespace seqan3

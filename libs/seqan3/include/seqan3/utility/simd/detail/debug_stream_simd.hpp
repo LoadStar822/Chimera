@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::debug_stream overload for seqan3::simd::simd_type.
@@ -20,26 +17,30 @@
 namespace seqan3
 {
 
-/*!\brief Overload for debug_stream for simd types.
+/*!\brief Prints simd types.
+ * \tparam simd_t The simd type to print.
  * \ingroup utility_simd
- * \private
- * \todo Make this public again. We made this documentation internal-documentation only for the 3.0.0 release, because
- * the API was not in shape yet. Remove the `private` and `todo` commands and remove `seqan3::simd` from
- * SEQAN3_DOXYGEN_EXCLUDE_SYMBOLS in `seqan3-doxygen.cmake`.
  */
-template <typename char_t, typename simd_t>
-    requires simd::simd_concept<std::remove_cvref_t<simd_t>>
-inline debug_stream_type<char_t> & operator<<(debug_stream_type<char_t> & s, simd_t && simd)
+template <simd::simd_concept simd_t>
+struct simd_printer<simd_t>
 {
-    using simd_type = std::remove_cvref_t<simd_t>;
-    constexpr size_t length = simd::simd_traits<simd_type>::length;
-    using scalar_type = typename simd::simd_traits<simd_type>::scalar_type;
+    /*!\brief Prints the simd value.
+     * \tparam stream_t The type of the stream.
+     * \tparam arg_t The type of the argument.
+     * \param[in,out] stream The output stream.
+     * \param[in] arg The simd type to print.
+     */
+    template <typename stream_t, typename arg_t>
+    constexpr void operator()(stream_t & stream, arg_t && arg) const
+    {
+        constexpr size_t length = simd::simd_traits<simd_t>::length;
+        using scalar_type = typename simd::simd_traits<simd_t>::scalar_type;
 
-    std::array<scalar_type, length> array{};
-    for (size_t i = 0; i < length; ++i)
-        array[i] = simd[i];
-    s << array;
-    return s;
-}
+        std::array<scalar_type, length> array{};
+        for (size_t i = 0; i < length; ++i)
+            array[i] = arg[i];
+        stream << array;
+    }
+};
 
 } // namespace seqan3

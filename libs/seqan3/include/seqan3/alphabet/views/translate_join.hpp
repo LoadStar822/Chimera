@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::views::translate_join.
@@ -68,7 +65,7 @@ private:
     //!\}
 
     //!\brief Befriend the following class s.t. iterator and const_iterator can be defined for this type.
-    template <typename, template <typename...> typename>
+    template <typename range_type, template <typename...> typename derived_t_template, typename... args_t>
     friend class detail::random_access_iterator_base;
 
 public:
@@ -254,8 +251,8 @@ public:
 
 //!\brief Class template argument deduction for view_translate_join.
 template <typename urng_t>
-view_translate_join(urng_t &&, translation_frames const = translation_frames{})
-    -> view_translate_join<std::views::all_t<urng_t>>;
+view_translate_join(urng_t &&,
+                    translation_frames const = translation_frames{}) -> view_translate_join<std::views::all_t<urng_t>>;
 
 // ============================================================================
 //  translate_fn (adaptor definition for both views)

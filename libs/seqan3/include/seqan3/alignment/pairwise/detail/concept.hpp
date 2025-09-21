@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides concepts needed internally for the alignment algorithms.
@@ -36,13 +33,13 @@ namespace seqan3::detail
 //!\cond
 template <typename t>
 concept sequence_pair = requires () {
-                            requires tuple_like<t>;
-                            requires std::tuple_size_v<t> == 2;
-                            requires std::ranges::forward_range<std::tuple_element_t<0, t>>;
-                            requires std::ranges::forward_range<std::tuple_element_t<1, t>>;
-                            requires semialphabet<std::ranges::range_value_t<std::tuple_element_t<0, t>>>;
-                            requires semialphabet<std::ranges::range_value_t<std::tuple_element_t<1, t>>>;
-                        };
+    requires tuple_like<t>;
+    requires std::tuple_size_v<t> == 2;
+    requires std::ranges::forward_range<std::tuple_element_t<0, t>>;
+    requires std::ranges::forward_range<std::tuple_element_t<1, t>>;
+    requires semialphabet<std::ranges::range_value_t<std::tuple_element_t<0, t>>>;
+    requires semialphabet<std::ranges::range_value_t<std::tuple_element_t<1, t>>>;
+};
 //!\endcond
 
 /*!\interface seqan3::detail::sequence_pair_range <>
@@ -80,13 +77,12 @@ concept sequence_pair_range = std::ranges::forward_range<t> && sequence_pair<std
  */
 //!\cond
 template <typename t>
-concept indexed_sequence_pair_range =
-    std::ranges::forward_range<t> && requires (std::ranges::range_value_t<t> value) {
-                                         requires tuple_like<decltype(value)>;
-                                         requires std::tuple_size_v<decltype(value)> == 2;
-                                         requires sequence_pair<std::tuple_element_t<0, decltype(value)>>;
-                                         requires std::copy_constructible<std::tuple_element_t<1, decltype(value)>>;
-                                     };
+concept indexed_sequence_pair_range = std::ranges::forward_range<t> && requires (std::ranges::range_value_t<t> value) {
+    requires tuple_like<decltype(value)>;
+    requires std::tuple_size_v<decltype(value)> == 2;
+    requires sequence_pair<std::tuple_element_t<0, decltype(value)>>;
+    requires std::copy_constructible<std::tuple_element_t<1, decltype(value)>>;
+};
 //!\endcond
 
 /*!\interface seqan3::detail::align_pairwise_single_input <>
@@ -105,7 +101,7 @@ concept indexed_sequence_pair_range =
 //!\cond
 template <typename t>
 concept align_pairwise_single_input =
-    sequence_pair<std::remove_reference_t<t>> && std::is_lvalue_reference_v<t>
+    (sequence_pair<std::remove_reference_t<t>> && std::is_lvalue_reference_v<t>)
     || (std::ranges::viewable_range<std::tuple_element_t<0, std::remove_reference_t<t>>>
         && std::ranges::viewable_range<std::tuple_element_t<1, std::remove_reference_t<t>>>);
 //!\endcond
@@ -125,7 +121,7 @@ concept align_pairwise_single_input =
  * a) An lvalue range, whose reference type is a tuple like lvalue reference,
  * b) A range, whose reference type is a tuple over viewable ranges.
  * This covers also transforming and non-transforming views (e.g. views::zip, or views::take).
- * Only a temporary non-view range piped with seqan3::detail::all can't be handled securely.
+ * Only a temporary non-view range piped with std::views::all can't be handled securely.
  */
 //!\cond
 template <typename t>

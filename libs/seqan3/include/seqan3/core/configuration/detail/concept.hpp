@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides concepts for the configuration classes.
@@ -50,7 +47,7 @@ inline constexpr std::array<std::array<void *, 0>, 0> compatibility_table{};
  * \brief Concept for an algorithm configuration element.
  * \ingroup core_configuration
  *
- * \extends std::copyable
+ * \extends std::movable
  * \implements seqan3::pipeable_config_element
  */
 
@@ -66,12 +63,10 @@ inline constexpr std::array<std::array<void *, 0>, 0> compatibility_table{};
 //!\cond
 template <typename config_t>
 concept config_element = requires {
-                             requires std::is_base_of_v<seqan3::pipeable_config_element, config_t>;
-                             requires std::copyable<config_t>;
-                             {
-                                 config_t::id
-                             };
-                         };
+    requires std::is_base_of_v<seqan3::pipeable_config_element, config_t>;
+    requires std::movable<config_t>;
+    { config_t::id };
+};
 //!\endcond
 
 /*!\interface seqan3::detail::config_element_pipeable_with <>
@@ -94,8 +89,8 @@ template <typename config1_t, typename config2_t>
 concept config_element_pipeable_with =
     config_element<config1_t> && config_element<config2_t>
     && std::same_as<std::remove_cvref_t<decltype(config1_t::id)>, std::remove_cvref_t<decltype(config2_t::id)>>
-    && compatibility_table<std::remove_cvref_t<decltype(config1_t::id)>>
-[static_cast<int32_t>(config1_t::id)][static_cast<int32_t>(config2_t::id)];
+    && compatibility_table<std::remove_cvref_t<decltype(config1_t::id)>>[static_cast<int32_t>(config1_t::id)]
+                                                                        [static_cast<int32_t>(config2_t::id)];
 //!\endcond
 
 } // namespace seqan3::detail

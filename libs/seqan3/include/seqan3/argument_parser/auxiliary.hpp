@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Svenja Mehringer <svenja.mehringer AT fu-berlin.de>
@@ -21,6 +18,8 @@
 #include <seqan3/core/debug_stream/debug_stream_type.hpp>
 #include <seqan3/core/detail/customisation_point.hpp>
 #include <seqan3/io/stream/concept.hpp>
+
+SEQAN3_DEPRECATED_HEADER("This header and its functionality is deprecated and will be removed in a future version of SeqAn. Please use the sharg-parser (url: https://github.com/seqan/sharg-parser) instead.");
 
 namespace seqan3::custom
 {
@@ -162,10 +161,8 @@ namespace seqan3
  */
 template <typename option_type>
     requires requires {
-                 {
-                     detail::adl_only::enumeration_names_cpo<option_type>{}()
-                 };
-             }
+        { detail::adl_only::enumeration_names_cpo<option_type>{}() };
+    }
 inline auto const enumeration_names = detail::adl_only::enumeration_names_cpo<option_type>{}();
 //!\}
 
@@ -184,10 +181,8 @@ inline auto const enumeration_names = detail::adl_only::enumeration_names_cpo<op
 //!\cond
 template <typename option_type>
 concept named_enumeration = requires {
-                                {
-                                    seqan3::enumeration_names<option_type>
-                                };
-                            };
+    { seqan3::enumeration_names<option_type> };
+};
 //!\endcond
 
 /*!\interface seqan3::argument_parser_compatible_option <>
@@ -208,33 +203,39 @@ concept argument_parser_compatible_option =
     input_stream_over<std::istringstream, option_type> || named_enumeration<option_type>;
 //!\endcond
 
-/*!\name Formatted output overloads
- * \{
- */
 /*!\brief A type (e.g. an enum) can be made debug streamable by customizing the seqan3::enumeration_names.
- * \tparam option_type Type of the enum to be printed.
- * \param s  The seqan3::debug_stream.
- * \param op The value to print.
- * \relates seqan3::debug_stream_type
- *
- * \details
  *
  * This searches the seqan3::enumeration_names of the respective type for the value \p op and prints the
  * respective string if found or '\<UNKNOWN_VALUE\>' if the value cannot be found in the map.
+ *
+ * \tparam enum_t Type of the enum to be printed; must model seqan3::named_enumeration.
+ * \ingroup argument_parser
  */
-template <typename char_t, typename option_type>
-    requires named_enumeration<std::remove_cvref_t<option_type>>
-inline debug_stream_type<char_t> & operator<<(debug_stream_type<char_t> & s, option_type && op)
+template <named_enumeration enum_t>
+struct enumeration_printer<enum_t>
 {
-    for (auto & [key, value] : enumeration_names<option_type>)
+    /*!\brief Prints the associated label of the given enum value.
+     * \tparam stream_t The type of the stream.
+     * \param[in,out] stream The output stream.
+     * \param[in] arg The enum value to print.
+     *
+     * If for the given enumeration value no enumeration name can be found, "<UNKNOWN_VALUE>" is printed.
+     */
+    template <typename stream_t>
+    constexpr void operator()(stream_t & stream, enum_t const arg) const
     {
-        if (op == value)
-            return s << key;
-    }
+        for (auto & [label, enumerator] : enumeration_names<enum_t>)
+        {
+            if (arg == enumerator)
+            {
+                stream << label;
+                return;
+            }
+        }
 
-    return s << "<UNKNOWN_VALUE>";
-}
-//!\}
+        stream << "<UNKNOWN_VALUE>";
+    }
+};
 
 /*!\brief Used to further specify argument_parser options/flags.
  * \ingroup argument_parser

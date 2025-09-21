@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::detail::counted_simd_iterator and seqan3::views::iota_simd.
@@ -275,7 +272,6 @@ inline constexpr detail::iota_simd_view_fn<index_simd_t> iota_simd{};
 
 } // namespace seqan3::views
 
-#ifdef __cpp_lib_ranges
 namespace std::ranges
 {
 //!\cond
@@ -283,4 +279,3 @@ template <seqan3::simd_concept index_simd_t>
 inline constexpr bool enable_borrowed_range<seqan3::detail::iota_simd_view<index_simd_t>> = true;
 //!\endcond
 } // namespace std::ranges
-#endif // __cpp_lib_ranges

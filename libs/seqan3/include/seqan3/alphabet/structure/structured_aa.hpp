@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Joerg Winkler <j.winkler AT fu-berlin.de>
@@ -23,7 +20,7 @@ namespace seqan3
 /*!\brief A seqan3::alphabet_tuple_base that joins an aminoacid alphabet with a protein structure alphabet.
  * \ingroup alphabet_structure
  * \implements seqan3::writable_alphabet
- * \if DEV \implements seqan3::detail::writable_constexpr_alphabet \endif
+ * \implements seqan3::detail::writable_constexpr_alphabet
  * \implements seqan3::trivially_copyable
  * \implements seqan3::standard_layout
  * \tparam sequence_alphabet_t Type of the first aminoacid letter; must model seqan3::writable_alphabet,

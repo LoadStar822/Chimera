@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Mitra Darvish <mitra.darvish AT fu-berlin.de>
@@ -478,8 +475,9 @@ minimiser_view(rng1_t &&, size_t const window_size) -> minimiser_view<std::views
 
 //!\brief A deduction guide for the view class template.
 template <std::ranges::viewable_range rng1_t, std::ranges::viewable_range rng2_t>
-minimiser_view(rng1_t &&, rng2_t &&, size_t const window_size)
-    -> minimiser_view<std::views::all_t<rng1_t>, std::views::all_t<rng2_t>>;
+minimiser_view(rng1_t &&,
+               rng2_t &&,
+               size_t const window_size) -> minimiser_view<std::views::all_t<rng1_t>, std::views::all_t<rng2_t>>;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // minimiser_fn (adaptor definition)

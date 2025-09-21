@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides specific algorithm implementations for AVX2 instruction set.
@@ -111,7 +108,7 @@ inline void transpose_matrix_avx2(std::array<simd_t, simd_traits<simd_t>::length
     };
 
     // A look-up table to reverse the lowest 4 bits in order to permute the transposed rows.
-    static const uint8_t bit_rev[] = {0,  8,  4,  12, 2,  10, 6,  14, 1,  9,  5,  13, 3,  11, 7,  15,
+    static uint8_t const bit_rev[] = {0,  8,  4,  12, 2,  10, 6,  14, 1,  9,  5,  13, 3,  11, 7,  15,
                                       16, 24, 20, 28, 18, 26, 22, 30, 17, 25, 21, 29, 19, 27, 23, 31};
 
     // transpose a 32x32 byte matrix
@@ -210,8 +207,8 @@ constexpr simd_t extract_half_avx2(simd_t const & src)
 template <uint8_t index, simd::simd_concept simd_t>
 constexpr simd_t extract_quarter_avx2(simd_t const & src)
 {
-    return reinterpret_cast<simd_t>(_mm256_castsi128_si256(
-        _mm_cvtsi64x_si128(_mm256_extract_epi64(reinterpret_cast<__m256i const &>(src), index))));
+    return reinterpret_cast<simd_t>(
+        _mm256_castsi128_si256(_mm_cvtsi64_si128(_mm256_extract_epi64(reinterpret_cast<__m256i const &>(src), index))));
 }
 
 template <uint8_t index, simd::simd_concept simd_t>

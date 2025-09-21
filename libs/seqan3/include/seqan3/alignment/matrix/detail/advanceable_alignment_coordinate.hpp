@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Marcel Ehrhardt <marcel.ehrhardt AT fu-berlin.de>
@@ -297,23 +294,26 @@ public:
 namespace seqan3
 {
 
-/*!\brief A seqan3::detail::advanceable_alignment_coordinate can be printed to the seqan3::debug_stream.
- * \tparam    coordinate_type The alignment coordinate type.
- * \param[in] s               The seqan3::debug_stream.
- * \param[in] c               The alignment coordinate to print.
- * \relates seqan3::debug_stream_type
+/*!\brief The printer for seqan3::detail::advanceable_alignment_coordinate.
  *
- * \details
+ * Prints the alignment coordinate as a tuple of the column and row index.
  *
- * Prints the alignment coordinate as a tuple.
+ * \tparam state_t The state of the detail::advanceable_alignment_coordinate.
+ * \ingroup alignment_matrix
  */
-template <typename char_t, typename coordinate_type>
-    requires detail::is_value_specialisation_of_v<std::remove_cvref_t<coordinate_type>,
-                                                  detail::advanceable_alignment_coordinate>
-inline debug_stream_type<char_t> & operator<<(debug_stream_type<char_t> & s, coordinate_type && c)
+template <auto state_t>
+struct advanceable_alignment_coordinate_printer<detail::advanceable_alignment_coordinate<state_t>>
 {
-    s << std::tie(c.first, c.second);
-    return s;
-}
+    /*!\brief The function call operator that prints the coordinate to the given stream.
+     * \tparam stream_t The type of the stream.
+     * \param[in,out] stream The stream to print to.
+     * \param[in] arg The alignment coordinate to print.
+     */
+    template <typename stream_t>
+    constexpr void operator()(stream_t & stream, detail::advanceable_alignment_coordinate<state_t> const arg) const
+    {
+        stream << std::tie(arg.first, arg.second);
+    }
+};
 
 } // namespace seqan3

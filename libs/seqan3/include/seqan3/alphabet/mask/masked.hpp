@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Extends a given alphabet with the mask alphabet.
@@ -22,7 +19,7 @@ namespace seqan3
 /*!\brief Implementation of a masked composite, which extends a given alphabet with a mask.
  * \ingroup alphabet_mask
  * \implements seqan3::writable_alphabet
- * \if DEV \implements seqan3::detail::writable_constexpr_alphabet \endif
+ * \implements seqan3::detail::writable_constexpr_alphabet
  *
  * \tparam sequence_alphabet_t Type of the first letter; must satisfy seqan3::writable_alphabet and std::regular.
  *
@@ -108,11 +105,10 @@ public:
     //!\}
 
 protected:
-    // clang-format off
     //!\brief Rank to char conversion table.
-    static constexpr std::array<char_type, alphabet_size> rank_to_char
-    {
-        []() constexpr {
+    static constexpr std::array<char_type, alphabet_size> rank_to_char{
+        []() constexpr
+        {
             std::array<char_type, alphabet_size> ret{};
 
             for (size_t i = 0; i < alphabet_size; ++i)
@@ -123,13 +119,12 @@ protected:
             }
 
             return ret;
-        }()
-    };
+        }()};
 
     //!\brief Char to rank conversion table.
-    static constexpr std::array<rank_type, detail::size_in_values_v<char_type>> char_to_rank
-    {
-        []() constexpr {
+    static constexpr std::array<rank_type, detail::size_in_values_v<char_type>> char_to_rank{
+        []() constexpr
+        {
             std::array<rank_type, detail::size_in_values_v<char_type>> ret{};
 
             for (size_t i = 0; i < 256; ++i)
@@ -141,10 +136,8 @@ protected:
             }
 
             return ret;
-        }()
-    };
+        }()};
 };
-// clang-format on
 
 //!\brief Type deduction guide enables usage of masked without specifying template args.
 //!\relates masked

@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::tuple_like.
@@ -32,10 +29,8 @@ namespace seqan3::detail
 //!\cond
 template <typename tuple_t>
 concept tuple_size = requires (tuple_t v) {
-                         {
-                             std::tuple_size<tuple_t>::value
-                             } -> std::convertible_to<size_t>;
-                     };
+    { std::tuple_size<tuple_t>::value } -> std::convertible_to<size_t>;
+};
 //!\endcond
 
 /*!\interface seqan3::detail::tuple_get <>
@@ -45,29 +40,20 @@ concept tuple_size = requires (tuple_t v) {
  */
 //!\cond
 template <typename tuple_t>
-concept tuple_get =
-    requires (tuple_t & v, tuple_t const & v_c) {
-        requires std::tuple_size_v<tuple_t> > 0;
+concept tuple_get = requires (tuple_t & v, tuple_t const & v_c) {
+    requires std::tuple_size_v<tuple_t> > 0;
 
-        typename std::tuple_element<0, tuple_t>::type;
+    typename std::tuple_element<0, tuple_t>::type;
 
-        {
-            get<0>(v)
-            } -> std::convertible_to<typename std::tuple_element<0, tuple_t>::type>;
-        //     requires weakly_assignable_from<decltype(get<0>(v)), typename std::tuple_element<0, tuple_t>::type>;
-        //TODO check that the previous returns something that can be assigned to
-        // unfortunately std::assignable_from requires lvalue-reference, but we want to accept xvalues too (returned
-        // proxies)
-        {
-            get<0>(v_c)
-            } -> std::convertible_to<typename std::tuple_element<0, tuple_t>::type>;
-        {
-            get<0>(std::move(v))
-            } -> std::convertible_to<typename std::tuple_element<0, tuple_t>::type>;
-        {
-            get<0>(std::move(v_c))
-            } -> std::convertible_to<typename std::tuple_element<0, tuple_t>::type const &&>;
-    };
+    { get<0>(v) } -> std::convertible_to<typename std::tuple_element<0, tuple_t>::type>;
+    //     requires weakly_assignable_from<decltype(get<0>(v)), typename std::tuple_element<0, tuple_t>::type>;
+    //TODO check that the previous returns something that can be assigned to
+    // unfortunately std::assignable_from requires lvalue-reference, but we want to accept xvalues too (returned
+    // proxies)
+    { get<0>(v_c) } -> std::convertible_to<typename std::tuple_element<0, tuple_t>::type>;
+    { get<0>(std::move(v)) } -> std::convertible_to<typename std::tuple_element<0, tuple_t>::type>;
+    { get<0>(std::move(v_c)) } -> std::convertible_to<typename std::tuple_element<0, tuple_t>::type const &&>;
+};
 //!\endcond
 
 /*!\brief Transformation trait to expose the tuple element types as seqan3::type_list
@@ -114,10 +100,8 @@ inline constexpr auto all_elements_model_totally_ordered(seqan3::type_list<eleme
  */
 template <typename tuple_t>
     requires requires () {
-                 {
-                     detail::all_elements_model_totally_ordered(tuple_type_list_t<tuple_t>{})
-                 };
-             }
+        { detail::all_elements_model_totally_ordered(tuple_type_list_t<tuple_t>{}) };
+    }
 static constexpr bool all_elements_model_totally_ordered_v =
     decltype(detail::all_elements_model_totally_ordered(tuple_type_list_t<tuple_t>{}))::value;
 } // namespace seqan3::detail
@@ -179,20 +163,18 @@ namespace seqan3
 //!\}
 //!\cond
 template <typename t>
-concept tuple_like =
-    detail::tuple_size<std::remove_reference_t<t>>
-    && requires (t v) {
-           typename detail::tuple_type_list<std::remove_cvref_t<t>>::type;
+concept tuple_like = detail::tuple_size<std::remove_reference_t<t>> && requires (t v) {
+    typename detail::tuple_type_list<std::remove_cvref_t<t>>::type;
 
-           // NOTE(rrahn): To check the full tuple_concept including the get interface and the std::totally_ordered
-           //              we need to make some assumptions. In general these checks can only be executed if the tuple is not
-           //              empty. Furthermore, the std::totally_ordered can only be checked if all elements in the
-           //              tuple are strict_totally_ordered. This is done, by the fold expression in the second part.
-           requires (std::tuple_size<std::remove_reference_t<t>>::value == 0)
-                        || (detail::tuple_get<std::remove_cvref_t<t>>
-                            && (!detail::all_elements_model_totally_ordered_v<std::remove_cvref_t<t>>
-                                || std::totally_ordered<std::remove_cvref_t<t>>));
-       };
+    // NOTE(rrahn): To check the full tuple_concept including the get interface and the std::totally_ordered
+    //              we need to make some assumptions. In general these checks can only be executed if the tuple is not
+    //              empty. Furthermore, the std::totally_ordered can only be checked if all elements in the
+    //              tuple are strict_totally_ordered. This is done, by the fold expression in the second part.
+    requires (std::tuple_size<std::remove_reference_t<t>>::value == 0)
+                 || (detail::tuple_get<std::remove_cvref_t<t>>
+                     && (!detail::all_elements_model_totally_ordered_v<std::remove_cvref_t<t>>
+                         || std::totally_ordered<std::remove_cvref_t<t>>));
+};
 //!\endcond
 
 /*!\interface seqan3::pair_like

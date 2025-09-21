@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Create a mask composite which can be applied with another alphabet.
@@ -21,7 +18,7 @@ namespace seqan3
 /*!\brief Implementation of a masked alphabet to be used for tuple composites.
  * \ingroup alphabet_mask
  * \implements seqan3::writable_semialphabet
- * \if DEV \implements seqan3::detail::writable_constexpr_alphabet \endif
+ * \implements seqan3::detail::writable_constexpr_alphabet
  *
  * \details
  *
@@ -65,13 +62,13 @@ public:
      * \details
      * \stableapi{Since version 3.1.}
      */
-    static const mask unmasked;
+    static mask const unmasked;
 
     /*!\brief Member for masked.
      * \details
      * \stableapi{Since version 3.1.}
      */
-    static const mask masked;
+    static mask const masked;
     //!\}
 };
 

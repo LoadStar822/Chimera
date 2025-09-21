@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Svenja Mehringer <svenja.mehringer AT fu-berlin.de>
@@ -193,7 +190,7 @@ public:
         // build up command for server call
         std::string command = program + // no user defined input
                               " " + out_file.string() + " "
-                            + std::string{"http://seqan-update.informatik.uni-tuebingen.de/check/SeqAn3_"} +
+                            + std::string{"https://seqan-update.cs.uni-tuebingen.de/check/SeqAn3_"} +
 #ifdef __linux
                               "Linux" +
 #elif __APPLE__
@@ -348,10 +345,10 @@ public:
  This app can look for updates automatically in the background,
  do you want to do that?
 
-    [a] Always perform version checks for this app (the default).
+    [a] Always perform version checks for this app.
     [n] Never perform version checks for this app.
     [y] Yes, perform a version check now, and ask again tomorrow.
-    [s] Skip the version check now, but ask again tomorrow.
+    [s] Skip the version check now, but ask again tomorrow (the default).
 
  Please enter one of [a, n, y, s] and press [RETURN].
 
@@ -363,7 +360,7 @@ public:
 )";
             std::string line{};
             std::getline(std::cin, line);
-            line.resize(1); // ignore everything but the first char or resizes the empty string to the default
+            line.resize(1, 's'); // ignore everything but the first char or resizes the empty string to the default
 
             switch (line[0])
             {
@@ -371,9 +368,10 @@ public:
             {
                 return true;
             }
-            case 's':
+            case 'a':
             {
-                return false;
+                write_cookie(std::string{"ALWAYS"}); // overwrite cookie
+                return true;
             }
             case 'n':
             {
@@ -382,8 +380,7 @@ public:
             }
             default:
             {
-                write_cookie(std::string{"ALWAYS"}); // overwrite cookie
-                return true;
+                return false;
             }
             }
         }
@@ -427,8 +424,7 @@ public:
     /*Might be extended if a url is given on construction.*/
 
     //!\brief The environment name of the home environment used by getenv()
-    static constexpr char const * home_env_name
-    {
+    static constexpr char const * home_env_name{
 #if defined(_WIN32)
         "UserProfile"
 #else

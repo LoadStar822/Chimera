@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Svenja Mehringer <svenja.mehringer AT fu-berlin.de>
@@ -64,10 +61,9 @@ public:
     ~format_parse() = default;                                   //!< Defaulted.
 
     /*!\brief The constructor of the parse format.
-     * \param[in] argc_ The number of command line arguments.
      * \param[in] argv_ The command line arguments to parse.
      */
-    format_parse(int const argc_, std::vector<std::string> argv_) : argc{argc_ - 1}, argv{std::move(argv_)}
+    format_parse(int const, std::vector<std::string> argv_) : argv{std::move(argv_)}
     {}
     //!\}
 
@@ -378,10 +374,8 @@ private:
         requires requires (format_parse_t fp,
                            typename container_option_t::value_type & container_value,
                            std::string const & in) {
-                     {
-                         fp.parse_option_value(container_value, in)
-                         } -> std::same_as<option_parse_result>;
-                 }
+            { fp.parse_option_value(container_value, in) } -> std::same_as<option_parse_result>;
+        }
     option_parse_result parse_option_value(container_option_t & value, std::string const & in)
     {
         typename container_option_t::value_type tmp{};
@@ -822,8 +816,6 @@ private:
     std::vector<std::function<void()>> positional_option_calls;
     //!\brief Keeps track of the number of specified positional options.
     unsigned positional_option_count{0};
-    //!\brief Number of command line arguments.
-    int argc;
     //!\brief Vector of command line arguments.
     std::vector<std::string> argv;
     //!\brief Artificial end of argv if \-- was seen.

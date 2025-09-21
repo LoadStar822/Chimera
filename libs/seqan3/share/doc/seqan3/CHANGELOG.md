@@ -1,17 +1,23 @@
 # Changelog {#about_changelog}
 
+<!--
+    SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+    SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+    SPDX-License-Identifier: CC-BY-4.0
+-->
+
 [TOC]
 
 This changelog contains a top-level entry for each release with sections on new features, API changes and notable
 bug-fixes (not all bug-fixes will be listed).
 
-Get to know SeqAn3 with our [tutorials](https://docs.seqan.de/seqan/3-master-user/usergroup1.html).
+Get to know SeqAn3 with our [tutorials](https://docs.seqan.de/seqan3/main_user/usergroup1.html).
 
 Please see the release announcement: https://www.seqan.de/announcing-seqan3/
 
-See the porting guide for some help on porting: https://docs.seqan.de/seqan/3-master-user/howto_porting.html
+See the porting guide for some help on porting: https://docs.seqan.de/seqan3/main_user/howto_porting.html
 
-See the documentation on [API stability](https://docs.seqan.de/seqan/3-master-user/about_api.html) to learn about
+See the documentation on [API stability](https://docs.seqan.de/seqan3/main_user/about_api.html) to learn about
 when API changes are allowed.
 
 <!--
@@ -23,6 +29,41 @@ The following API changes should be documented as such:
 
 If possible, provide tooling that performs the changes, e.g. a shell-script.
 -->
+
+# 3.4.0
+
+## New features
+
+#### I/O
+  * `seqan3::sam_file_input` now accepts user-defined tags ([\#3256](https://github.com/seqan/seqan3/pull/3256)).
+
+## Notable Bug-fixes
+
+#### Alphabet
+  * Resolved an issue that prevented proper conversion, most notably in conjunction with `seqan3::bitpacked_sequence`
+    ([\#3268](https://github.com/seqan/seqan3/pull/3268)).
+
+#### Alignment
+  * Fixed an issue that caused incorrect begin and end positions for banded alignments
+    ([\#3269](https://github.com/seqan/seqan3/pull/3269)).
+
+#### I/O
+  * `seqan3::sam_file_output` now takes ownership of the given reference information
+    ([\#3300](https://github.com/seqan/seqan3/pull/3300)).
+
+## API changes
+
+#### Compiler
+  * Supported compiler:
+    * GCC 12, 13, 14
+    * Clang 17, 18, 19
+    * IntelOneAPI/IntelLLVM 2024.0
+
+#### Dependencies
+  * We now use Doxygen version 1.9.8 to build our documentation ([\#3197](https://github.com/seqan/seqan3/pull/3197)).
+  * We bumped the minimal CMake version to 3.20 ([\#3314](https://github.com/seqan/seqan3/pull/3314)).
+  * Dependencies are now managed via CPM instead of submodules ([\#3328](https://github.com/seqan/seqan3/pull/3328)).
+  * The `build_system` directory was renamed to `cmake` ([\#3292](https://github.com/seqan/seqan3/pull/3292)).
 
 # 3.3.0
 
@@ -308,14 +349,14 @@ Note that 3.1.0 will be the first API stable release and interfaces in this rele
   * The order of tags within the header may be arbitrary. Before, necessary tags where required to be first.
   * Unknown tags will emit a warning. Before, a error was raised.
 
-## API changes
-<a name="api303"></a>
+## API changes {#api303}
+
 Most of our API or header file changes will trigger a deprecation warning to let you know if something changed and, if
 applicable, when it will be removed. We recommend upgrading version-by-version to check whether you need to change code.
 You can either directly check the reported code or verify with our documentation how the new API should be used.
 
 For a complete list of behavioural changes in our public and internal API, you can consult our API stability
-regression test suite and patches at https://github.com/seqan/seqan3/tree/master/test/api_stability/3.0.2.
+regression test suite and patches at https://github.com/seqan/seqan3/tree/main/test/api_stability/3.0.2.
 
 #### Alignment
 

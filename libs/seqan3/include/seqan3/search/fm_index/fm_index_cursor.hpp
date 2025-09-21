@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Christopher Pockrandt <christopher.pockrandt AT fu-berlin.de>
@@ -16,10 +13,9 @@
 #include <ranges>
 #include <type_traits>
 
-#include <sdsl/suffix_trees.hpp>
-
 #include <seqan3/alphabet/adaptation/char.hpp>
 #include <seqan3/alphabet/concept.hpp>
+#include <seqan3/contrib/sdsl-lite.hpp>
 #include <seqan3/core/range/type_traits.hpp>
 #include <seqan3/search/fm_index/concept.hpp>
 #include <seqan3/search/fm_index/detail/fm_index_cursor.hpp>
@@ -145,7 +141,7 @@ private:
         size_type _l, _r;
 
         size_type cc = c;
-        if constexpr (!std::same_as<index_alphabet_type, sdsl::plain_byte_alphabet>)
+        if constexpr (!std::same_as<index_alphabet_type, seqan3::contrib::sdsl::plain_byte_alphabet>)
         {
             cc = csa.char2comp[c];
             if (cc == 0 && c > 0) // [[unlikely]]
@@ -263,7 +259,7 @@ public:
         // store all cursors at once in a private std::array of cursors
         assert(index != nullptr);
 
-        sdsl_char_type c = 1; // NOTE: start with 0 or 1 depending on implicit_sentintel
+        sdsl_sigma_type c = 1; // NOTE: start with 0 or 1 depending on implicit_sentintel
         size_type _lb = node.lb, _rb = node.rb;
         while (c < sigma && !backward_search(index->index, index->index.comp2char[c], _lb, _rb))
         {
@@ -274,7 +270,8 @@ public:
         {
             parent_lb = node.lb;
             parent_rb = node.rb;
-            node = {_lb, _rb, node.depth + 1, c};
+            assert(c <= std::numeric_limits<sdsl_char_type>::max());
+            node = {_lb, _rb, node.depth + 1, static_cast<sdsl_char_type>(c)};
             return true;
         }
         return false;
@@ -294,8 +291,8 @@ public:
      * No-throw guarantee.
      */
     template <typename char_t>
-        requires std::convertible_to<char_t, index_alphabet_type> bool
-    extend_right(char_t const c) noexcept
+        requires std::convertible_to<char_t, index_alphabet_type>
+    bool extend_right(char_t const c) noexcept
     {
         assert(index != nullptr);
         // The rank cannot exceed 255 for single text and 254 for text collections as they are reserved as sentinels
@@ -319,8 +316,8 @@ public:
 
     //!\overload
     template <typename char_type>
-        requires detail::is_char_adaptation_v<char_type> bool
-    extend_right(char_type const * cstring) noexcept
+        requires detail::is_char_adaptation_v<char_type>
+    bool extend_right(char_type const * cstring) noexcept
     {
         return extend_right(std::basic_string_view<char_type>{cstring});
     }
@@ -409,7 +406,7 @@ public:
         // parent_lb > parent_rb --> invalid interval
         assert(parent_lb <= parent_rb);
 
-        sdsl_char_type c = node.last_char + 1;
+        sdsl_sigma_type c = node.last_char + 1;
         size_type _lb = parent_lb, _rb = parent_rb;
 
         while (c < sigma && !backward_search(index->index, index->index.comp2char[c], _lb, _rb))
@@ -419,7 +416,8 @@ public:
 
         if (c != sigma) // Collection has additional sentinel as delimiter
         {
-            node = {_lb, _rb, node.depth, c};
+            assert(c <= std::numeric_limits<sdsl_char_type>::max());
+            node = {_lb, _rb, node.depth, static_cast<sdsl_char_type>(c)};
             return true;
         }
         return false;

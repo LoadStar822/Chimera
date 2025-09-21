@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::detail::affine_gap_policy.
@@ -185,7 +182,7 @@ private:
     constexpr void initialise_alignment_state(alignment_configuration_t const & config) noexcept
     {
         auto scheme =
-            config.get_or(align_cfg::gap_cost_affine{align_cfg::open_score{-10}, align_cfg::extension_score{-1}});
+            config.get_or(align_cfg::gap_cost_affine{align_cfg::open_score{0}, align_cfg::extension_score{-1}});
 
         alignment_state.gap_extension_score = static_cast<score_t>(scheme.extension_score);
         alignment_state.gap_open_score = static_cast<score_t>(scheme.extension_score + scheme.open_score);

@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::sam_file_input_format and auxiliary classes.
@@ -94,52 +91,52 @@ concept sam_file_input_format = requires (detail::sam_file_input_format_exposer<
                                           sam_tag_dictionary & tag_dict,
                                           double & e_value,
                                           double & bit_score) {
-                                    t::file_extensions;
-                                    // std::same_as<decltype(t::file_extensions), std::vector<std::string>>;
+    t::file_extensions;
+    // std::same_as<decltype(t::file_extensions), std::vector<std::string>>;
 
-                                    {
-                                        v.read_alignment_record(stream,
-                                                                options,
-                                                                ref_sequences,
-                                                                header,
-                                                                position_buffer,
-                                                                seq,
-                                                                qual,
-                                                                id,
-                                                                ref_seq,
-                                                                ref_id,
-                                                                ref_offset,
-                                                                cigar,
-                                                                flag,
-                                                                mapq,
-                                                                mate,
-                                                                tag_dict,
-                                                                e_value,
-                                                                bit_score)
-                                    };
+    {
+        v.read_alignment_record(stream,
+                                options,
+                                ref_sequences,
+                                header,
+                                position_buffer,
+                                seq,
+                                qual,
+                                id,
+                                ref_seq,
+                                ref_id,
+                                ref_offset,
+                                cigar,
+                                flag,
+                                mapq,
+                                mate,
+                                tag_dict,
+                                e_value,
+                                bit_score)
+    };
 
-                                    {
-                                        v.read_alignment_record(stream,
-                                                                options,
-                                                                std::ignore,
-                                                                header,
-                                                                position_buffer,
-                                                                std::ignore,
-                                                                std::ignore,
-                                                                std::ignore,
-                                                                std::ignore,
-                                                                std::ignore,
-                                                                std::ignore,
-                                                                std::ignore,
-                                                                std::ignore,
-                                                                std::ignore,
-                                                                std::ignore,
-                                                                std::ignore,
-                                                                std::ignore,
-                                                                std::ignore,
-                                                                std::ignore)
-                                    };
-                                };
+    {
+        v.read_alignment_record(stream,
+                                options,
+                                std::ignore,
+                                header,
+                                position_buffer,
+                                std::ignore,
+                                std::ignore,
+                                std::ignore,
+                                std::ignore,
+                                std::ignore,
+                                std::ignore,
+                                std::ignore,
+                                std::ignore,
+                                std::ignore,
+                                std::ignore,
+                                std::ignore,
+                                std::ignore,
+                                std::ignore,
+                                std::ignore)
+    };
+};
 //!\endcond
 
 // Workaround for https://github.com/doxygen/doxygen/issues/9379

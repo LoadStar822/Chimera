@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Svenja Mehringer <svenja.mehringer AT fu-berlin.de>
@@ -15,9 +12,9 @@
 #include <array>
 #include <type_traits>
 
-#if SEQAN3_WITH_CEREAL
+#if SEQAN3_HAS_CEREAL
 #    include <cereal/types/array.hpp>
-#endif // SEQAN3_WITH_CEREAL
+#endif // SEQAN3_HAS_CEREAL
 
 #include <seqan3/core/concept/cereal.hpp>
 #include <seqan3/core/detail/template_inspection.hpp>
@@ -738,14 +735,9 @@ public:
         for (size_type i = sz + length - 1; i > pos_as_num + length - 1; --i)
             data_[i] = data_[i - length];
 
-#if SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY
-#    pragma GCC diagnostic push
-#    pragma GCC diagnostic ignored "-Wstringop-overflow"
-#endif // SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY
+        SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY_START(-Wstringop-overflow)
         std::ranges::copy(begin_it, end_it, &data_[pos_as_num]);
-#if SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY
-#    pragma GCC diagnostic pop
-#endif // SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY
+        SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY_STOP
         sz += length;
         return begin() + pos_as_num;
     }

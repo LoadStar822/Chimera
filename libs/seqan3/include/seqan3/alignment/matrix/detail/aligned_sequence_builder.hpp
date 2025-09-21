@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::detail::aligned_sequence_builder.
@@ -254,7 +251,7 @@ private:
  */
 //!\brief Deduces the type from the passed constructor arguments.
 template <std::ranges::viewable_range fst_sequence_t, std::ranges::viewable_range sec_sequence_t>
-aligned_sequence_builder(fst_sequence_t &&, sec_sequence_t &&)
-    -> aligned_sequence_builder<fst_sequence_t, sec_sequence_t>;
+aligned_sequence_builder(fst_sequence_t &&,
+                         sec_sequence_t &&) -> aligned_sequence_builder<fst_sequence_t, sec_sequence_t>;
 //!\}
 } // namespace seqan3::detail

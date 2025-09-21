@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::detail::matrix_index, seqan3::detail::matrix_coordinate and associated strong types.
@@ -160,13 +157,13 @@ struct matrix_index
  * \{
  */
 //!\brief Deduces the default index type to std::ptrdiff_t.
-matrix_index()->matrix_index<std::ptrdiff_t>;
+matrix_index() -> matrix_index<std::ptrdiff_t>;
 
 //!\brief Deduces the index type from the common type of both index types.
 template <std::integral row_index_t, std::integral col_index_t>
     requires std::common_with<row_index_t, col_index_t>
-matrix_index(row_index_type<row_index_t>, column_index_type<col_index_t>)
-    -> matrix_index<std::common_type_t<row_index_t, col_index_t>>;
+matrix_index(row_index_type<row_index_t>,
+             column_index_type<col_index_t>) -> matrix_index<std::common_type_t<row_index_t, col_index_t>>;
 
 //!\brief Deduces the index type from the simd vector index type.
 template <simd_index index_t>

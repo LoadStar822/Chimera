@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides basic data structure for strong types.
@@ -66,7 +63,7 @@ namespace seqan3
 //!\ingroup core
 //!\sa seqan3::enum_bitwise_operators enables combining enum values.
 template <>
-constexpr bool add_enum_bitwise_operators<seqan3::detail::strong_type_skill> = true;
+inline constexpr bool add_enum_bitwise_operators<seqan3::detail::strong_type_skill> = true;
 //!\endcond
 } // namespace seqan3
 
@@ -101,21 +98,18 @@ class strong_type;
  */
 //!\cond
 template <typename strong_type_t>
-concept derived_from_strong_type =
-    requires (strong_type_t && obj) {
-        typename std::remove_reference_t<strong_type_t>::value_type;
+concept derived_from_strong_type = requires (strong_type_t && obj) {
+    typename std::remove_reference_t<strong_type_t>::value_type;
 
-        {
-            std::remove_reference_t<strong_type_t>::skills
-        };
+    { std::remove_reference_t<strong_type_t>::skills };
 
-        requires std::same_as<decltype(std::remove_reference_t<strong_type_t>::skills), strong_type_skill const>;
+    requires std::same_as<decltype(std::remove_reference_t<strong_type_t>::skills), strong_type_skill const>;
 
-        requires std::derived_from<std::remove_cvref_t<strong_type_t>,
-                                   strong_type<typename std::remove_reference_t<strong_type_t>::value_type,
-                                               std::remove_cvref_t<strong_type_t>,
-                                               std::remove_reference_t<strong_type_t>::skills>>;
-    };
+    requires std::derived_from<std::remove_cvref_t<strong_type_t>,
+                               strong_type<typename std::remove_reference_t<strong_type_t>::value_type,
+                                           std::remove_cvref_t<strong_type_t>,
+                                           std::remove_reference_t<strong_type_t>::skills>>;
+};
 //!\endcond
 
 //------------------------------------------------------------------------------
@@ -453,34 +447,27 @@ private:
     value_t value;
 };
 
-//------------------------------------------------------------------------------
-// related functions
-//------------------------------------------------------------------------------
-
-/*!\name Formatted output
- * \relates seqan3::detail::strong_type
- * \{
- */
-
-/*!\brief Formatted output to a seqan3::detail::debug_stream_type.
- * \tparam char_t The char type of the seqan3::detail::debug_stream_type.
- * \tparam strong_type_t The strong type to print; must model seqan3::detail::derived_from_strong_type.
- *
- * \param[in,out] stream The output stream.
- * \param[in] value The strong typed value to print.
- *
- * \details
- *
- * Prints the stored value of the given strong type.
- *
- * \returns `stream_t &` A reference to the given stream.
- */
-template <typename char_t, derived_from_strong_type strong_type_t>
-debug_stream_type<char_t> & operator<<(debug_stream_type<char_t> & stream, strong_type_t && value)
-{
-    stream << value.get();
-    return stream;
-}
-//!\}
-
 } // namespace seqan3::detail
+
+namespace seqan3
+{
+/*!\brief A strong type can be printed by printing its underlying value.
+ * \tparam strong_type_t The type of the strong type; must be derived from seqan3::detail::strong_type.
+ * \ingroup core_debug_stream
+ */
+template <detail::derived_from_strong_type strong_type_t>
+struct strong_type_printer<strong_type_t>
+{
+    /*!\brief Prints the stored value of the given strong type.
+     * \tparam stream_t The type of the stream.
+     * \tparam arg_t The type of the argument.
+     * \param[in,out] stream The output stream.
+     * \param[in] arg The strong typed value to print.
+     */
+    template <typename stream_t, typename arg_t>
+    constexpr void operator()(stream_t & stream, arg_t && arg) const
+    {
+        stream << arg.get();
+    }
+};
+} // namespace seqan3

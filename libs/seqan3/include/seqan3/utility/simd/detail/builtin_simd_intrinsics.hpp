@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides intrinsics include for builtin simd.
@@ -20,11 +17,17 @@
 //
 // See the following link for a full description of the x86intrin.h header on powerpc
 // https://github.com/gcc-mirror/gcc/blob/41d6b10e96a1de98e90a7c0378437c3255814b16/gcc/config/rs6000/xmmintrin.h#L27-L55
-#if __has_include(<x86intrin.h>) && !(defined(__powerpc__) || defined(__ppc__) || defined(__PPC__))
+//
+// We also exclude clang with libc++ on any non-x86 platform.
+// `x86intrin.h` includes `immintrin.h`, which will error:
+// https://github.com/llvm/llvm-project/blob/9886788a8a500a1b429a6db64397c849b112251c/clang/lib/Headers/immintrin.h#L14
+#if __has_include(<x86intrin.h>) && \
+    !(defined(__powerpc__) || defined(__ppc__) || defined(__PPC__)) && \
+    !(defined(__clang__) && defined(_LIBCPP_VERSION) && !defined(__i386__) && !defined(__x86_64__))
 #    include <x86intrin.h> // x86 intrinsics (linux)
 #endif
 
-#if __has_include(<intrin.h>)
+#if defined(_WIN32) && __has_include(<intrin.h>)
 #    include <intrin.h> // x86 intrinsics (windows)
 #endif
 

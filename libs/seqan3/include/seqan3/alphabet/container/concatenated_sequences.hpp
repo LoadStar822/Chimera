@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::concatenated_sequences.
@@ -22,9 +19,9 @@
 #include <seqan3/utility/views/repeat_n.hpp>
 #include <seqan3/utility/views/slice.hpp>
 
-#if SEQAN3_WITH_CEREAL
+#if SEQAN3_HAS_CEREAL
 #    include <cereal/types/vector.hpp>
-#endif
+#endif // SEQAN3_HAS_CEREAL
 
 namespace seqan3
 {
@@ -559,7 +556,9 @@ public:
     reference operator[](size_type const i)
     {
         assert(i < size());
+        SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY_START(-Warray-bounds)
         return data_values | views::slice(data_delimiters[i], data_delimiters[i + 1]);
+        SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY_STOP
     }
 
     //!\copydoc operator[]()
@@ -980,9 +979,11 @@ public:
         auto placeholder =
             views::repeat_n(std::ranges::range_value_t<rng_type>{}, count * value_len) | std::views::common;
         // insert placeholder so the tail is moved once:
+        SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY_START(-Wstringop-overread, -Wstringop-overflow)
         data_values.insert(data_values.begin() + data_delimiters[pos_as_num],
                            std::ranges::begin(placeholder),
                            std::ranges::end(placeholder));
+        SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY_STOP
 
         // assign the actual values to the placeholder:
         size_t i = data_delimiters[pos_as_num];

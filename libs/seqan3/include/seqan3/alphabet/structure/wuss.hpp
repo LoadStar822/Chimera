@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Joerg Winkler <j.winkler AT fu-berlin.de>
@@ -32,7 +29,7 @@ namespace seqan3
  *              It determines the allowed pseudoknot depth by adding characters AaBb..Zz to the alphabet.
  * \implements seqan3::rna_structure_alphabet
  * \implements seqan3::writable_alphabet
- * \if DEV \implements seqan3::detail::writable_constexpr_alphabet \endif
+ * \implements seqan3::detail::writable_constexpr_alphabet
  * \implements seqan3::trivially_copyable
  * \implements seqan3::standard_layout
  * \implements std::regular
@@ -162,13 +159,12 @@ private:
         return char_to_rank_table[static_cast<index_t>(chr)];
     }
 
-    // clang-format off
     //!\copydoc seqan3::dna4::rank_to_char_table
-    static constexpr std::array<char_type, alphabet_size> rank_to_char_table
-    {
-        []() constexpr {
-            std::array<char_type, alphabet_size> chars{'.', ':', ',', '-', '_', '~', ';', '<', '(', '[', '{', '>', ')',
-                                                       ']', '}'};
+    static constexpr std::array<char_type, alphabet_size> rank_to_char_table{
+        []() constexpr
+        {
+            std::array<char_type, alphabet_size>
+                chars{'.', ':', ',', '-', '_', '~', ';', '<', '(', '[', '{', '>', ')', ']', '}'};
 
             // pseudoknot letters
             for (rank_type rnk = 15u; rnk + 1u < alphabet_size; rnk += 2u)
@@ -179,33 +175,31 @@ private:
             }
 
             return chars;
-        }()
-    };
+        }()};
 
     //!\copydoc seqan3::dna4::char_to_rank_table
-    static constexpr std::array<rank_type, 256> char_to_rank_table
-    {
-        []() constexpr {
-            std::array<rank_type, 256> rank_table{};
+    static constexpr std::array<rank_type, 256> char_to_rank_table{[]() constexpr
+                                                                   {
+                                                                       std::array<rank_type, 256> rank_table{};
 
-            rank_table.fill(6u);
+                                                                       rank_table.fill(6u);
 
-            // set alphabet values
-            for (rank_type rnk = 0u; rnk < alphabet_size; ++rnk)
-                rank_table[rank_to_char_table[rnk]] = rnk;
+                                                                       // set alphabet values
+                                                                       for (rank_type rnk = 0u; rnk < alphabet_size;
+                                                                            ++rnk)
+                                                                           rank_table[rank_to_char_table[rnk]] = rnk;
 
-            return rank_table;
-        }()
-    };
+                                                                       return rank_table;
+                                                                   }()};
 
     /*!\brief Lookup table for interactions: unpaired (0), pair-open (< 0), pair-close (> 0).
      * Paired brackets have the same absolute value.
      */
-    static constexpr std::array<int8_t, SIZE> interaction_tab
-    {
-        []() constexpr {
+    static constexpr std::array<int8_t, SIZE> interaction_tab{
+        []() constexpr
+        {
             static_assert(static_cast<int16_t>(std::numeric_limits<int8_t>::max()) >= SIZE);
-            static_assert(- static_cast<int16_t>(std::numeric_limits<int8_t>::min()) >= SIZE);
+            static_assert(-static_cast<int16_t>(std::numeric_limits<int8_t>::min()) >= SIZE);
 
             std::array<int8_t, alphabet_size> interaction_table{};
             int8_t cnt_open = 0;
@@ -227,10 +221,8 @@ private:
             }
 
             return interaction_table;
-        }()
-    };
+        }()};
 };
-// clang-format on
 
 /*!\brief Alias for the default type wuss51.
  * \relates seqan3::wuss

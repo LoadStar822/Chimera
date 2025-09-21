@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides concepts that do not have equivalents in C++20.
@@ -137,7 +134,7 @@ concept trivially_copyable = std::copyable<t> && std::is_trivially_copyable_v<t>
  */
 //!\cond
 template <typename t>
-concept trivial = trivially_copyable<t> && trivially_destructible<t> && std::is_trivial_v<t>;
+concept trivial = trivially_copyable<t> && trivially_destructible<t> && std::is_trivially_default_constructible_v<t>;
 //!\endcond
 
 /*!\interface seqan3::standard_layout

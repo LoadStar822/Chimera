@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides helper data structures for the seqan3::sam_file_output.
@@ -94,19 +91,25 @@ enum class sam_flag : uint16_t
 //!\ingroup io_sam_file
 //!\sa seqan3::enum_bitwise_operators enables combining enum values.
 template <>
-constexpr bool add_enum_bitwise_operators<sam_flag> = true;
+inline constexpr bool add_enum_bitwise_operators<sam_flag> = true;
 //!\endcond
 
-/*!\brief Overload for the seqan3::sam_flags.
- * \tparam char_t Type char type of the debug_stream.
- * \param stream The seqan3::debug_stream.
- * \param flag The flag to print.
- * \relates seqan3::debug_stream_type
+/*!\brief A sam_flag can be printed as an integer value.
+ * \ingroup io_sam_file
  */
-template <typename char_t>
-inline debug_stream_type<char_t> & operator<<(debug_stream_type<char_t> & stream, sam_flag const flag)
+template <>
+struct sam_flag_printer<sam_flag>
 {
-    return stream << static_cast<int16_t>(flag);
-}
+    /*!\brief Prints the sam flag.
+     * \tparam stream_t The output stream type.
+     * \param[in,out] stream The output stream.
+     * \param[in] arg The sam flag to print.
+     */
+    template <typename stream_t>
+    constexpr void operator()(stream_t & stream, sam_flag const arg) const
+    {
+        stream << static_cast<int16_t>(arg);
+    }
+};
 
 } // namespace seqan3

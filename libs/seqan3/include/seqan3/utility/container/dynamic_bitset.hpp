@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Enrico Seiler <enrico.seiler@fu-berlin.de>
@@ -13,6 +10,8 @@
 #pragma once
 
 #include <bit>
+#include <istream>
+#include <vector>
 
 #include <seqan3/core/concept/cereal.hpp>
 #include <seqan3/core/debug_stream/debug_stream_type.hpp>
@@ -1928,26 +1927,6 @@ public:
         return is;
     }
 
-    /*!\brief Formatted debug output for the `seqan3::dynamic_bitset`.
-     * \param[in,out] s   The `seqan3::debug_stream` to write to.
-     * \param[in]     arg The `seqan3::dynamic_bitset` to read from.
-     * \returns `s`.
-     *
-     * \details
-     *
-     * Internally calls \ref to_string() "arg.to_string()" and inserts a <code>'</code> at every fourth position.
-     *
-     * \experimentalapi{Experimental since version 3.1.}
-     */
-    template <typename char_t>
-    friend debug_stream_type<char_t> & operator<<(debug_stream_type<char_t> & s, dynamic_bitset arg)
-    {
-        s << (std::string_view{arg.to_string()} | views::interleave(4, std::string_view{"'"})
-              | ranges::to<std::string>());
-        return s;
-    }
-    //!\}
-
     //!\cond DEV
     /*!\brief Serialisation support function.
      * \tparam archive_t Type of `archive`; must satisfy seqan3::cereal_archive.
@@ -1971,6 +1950,27 @@ public:
         data.bits = bits;
     }
     //!\endcond
+};
+
+/*!\brief Prints seqan3::dynamic_bitset.
+ * \ingroup utility_container
+ * \experimentalapi{Experimental since version 3.1.}
+ */
+template <size_t bit_capacity>
+struct dynamic_bitset_printer<dynamic_bitset<bit_capacity>>
+{
+    /*!\brief Prints the dynamic bitset.
+     * \tparam stream_t The type of the stream.
+     * \tparam arg_t The type of the argument.
+     * \param[in,out] stream The output stream.
+     * \param[in] arg The dynamic bitset to print.
+     */
+    template <typename stream_t, typename arg_t>
+    constexpr void operator()(stream_t & stream, arg_t && arg) const
+    {
+        stream << (std::string_view{arg.to_string()} | views::interleave(4, std::string_view{"'"})
+                   | ranges::to<std::string>());
+    }
 };
 
 } // namespace seqan3

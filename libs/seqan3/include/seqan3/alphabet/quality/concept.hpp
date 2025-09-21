@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Marie Hoffmann <marie.hoffmann AT fu-berlin.de>
@@ -113,10 +110,8 @@ inline constexpr auto to_phred = detail::adl_only::to_phred_cpo{};
  */
 template <typename alphabet_type>
     requires requires {
-                 {
-                     seqan3::to_phred(std::declval<alphabet_type>())
-                 };
-             }
+        { seqan3::to_phred(std::declval<alphabet_type>()) };
+    }
 using alphabet_phred_t = decltype(seqan3::to_phred(std::declval<alphabet_type>()));
 
 } // namespace seqan3
@@ -283,10 +278,8 @@ namespace seqan3
 //!\cond
 template <typename t>
 concept quality_alphabet = alphabet<t> && requires (t qual) {
-                                              {
-                                                  seqan3::to_phred(qual)
-                                              };
-                                          };
+    { seqan3::to_phred(qual) };
+};
 //!\endcond
 
 // ============================================================================
@@ -325,10 +318,8 @@ concept quality_alphabet = alphabet<t> && requires (t qual) {
 template <typename t>
 concept writable_quality_alphabet =
     writable_alphabet<t> && quality_alphabet<t> && requires (t v, alphabet_phred_t<t> c) {
-                                                       {
-                                                           seqan3::assign_phred_to(c, v)
-                                                       };
-                                                   };
+        { seqan3::assign_phred_to(c, v) };
+    };
 //!\endcond
 
 } // namespace seqan3

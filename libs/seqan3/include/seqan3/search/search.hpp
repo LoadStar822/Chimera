@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides the public interface for search algorithms.
@@ -18,7 +15,6 @@
 #include <seqan3/core/algorithm/algorithm_result_generator_range.hpp>
 #include <seqan3/core/algorithm/detail/algorithm_executor_blocking.hpp>
 #include <seqan3/core/configuration/configuration.hpp>
-#include <seqan3/core/detail/all_view.hpp>
 #include <seqan3/search/configuration/default_configuration.hpp>
 #include <seqan3/search/configuration/on_result.hpp>
 #include <seqan3/search/configuration/parallel.hpp>
@@ -218,7 +214,7 @@ inline auto search(std::initializer_list<char const * const> const & queries,
                           {
                               query.push_back(std::string_view{q});
                           });
-    return search(std::move(query) | seqan3::detail::all, index, cfg);
+    return search(std::move(query) | std::views::all, index, cfg);
 }
 //!\endcond
 

@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::phred42 quality scores.
@@ -81,8 +78,8 @@ public:
      * \experimentalapi{Experimental since version 3.1.}
      */
     template <typename other_qual_type>
-        requires (!std::same_as<phred_base, other_qual_type>)
-              && (!std::same_as<derived_type, other_qual_type>) && quality_alphabet<other_qual_type>
+        requires (!std::same_as<phred_base, other_qual_type>) && (!std::same_as<derived_type, other_qual_type>)
+              && quality_alphabet<other_qual_type>
     explicit constexpr phred_base(other_qual_type const & other) noexcept
     {
         assign_phred_to(seqan3::to_phred(other), static_cast<derived_type &>(*this));
@@ -143,15 +140,13 @@ private:
         return rank + derived_type::offset_char;
     }
 
-    // clang-format off
     //!\brief Phred to rank conversion table.
-    static constexpr std::array<rank_type, 256> phred_to_rank
-    {
-        []() constexpr {
+    static constexpr std::array<rank_type, 256> phred_to_rank{
+        []() constexpr
+        {
             std::array<rank_type, 256> ret{};
 
-            for (int64_t i = std::numeric_limits<phred_type>::lowest();
-                 i <= std::numeric_limits<phred_type>::max();
+            for (int64_t i = std::numeric_limits<phred_type>::lowest(); i <= std::numeric_limits<phred_type>::max();
                  ++i)
             {
                 if (i < derived_type::offset_phred) // map too-small to smallest possible
@@ -163,22 +158,19 @@ private:
             }
 
             return ret;
-        }()
-    };
+        }()};
 
     //!\brief Rank to phred conversion table.
-    static constexpr std::array<phred_type, alphabet_size> rank_to_phred
-    {
-        []() constexpr {
+    static constexpr std::array<phred_type, alphabet_size> rank_to_phred{
+        []() constexpr
+        {
             std::array<phred_type, alphabet_size> ret{};
 
             for (size_t i = 0; i < alphabet_size; ++i)
                 ret[i] = i + derived_type::offset_phred;
 
             return ret;
-        }()
-    };
+        }()};
 };
-// clang-format on
 
 } // namespace seqan3

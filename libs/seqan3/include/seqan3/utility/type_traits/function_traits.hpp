@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides various type traits for use on functions.
@@ -62,10 +59,8 @@ struct function_traits<std::function<return_t(args_t...)>>
 // Overload for all function types.
 template <typename function_t>
     requires requires (function_t fn) {
-                 {
-                     std::function{fn}
-                 };
-             }
+        { std::function{fn} };
+    }
 struct function_traits<function_t> : function_traits<decltype(std::function{std::declval<function_t>()})>
 {};
 //!\endcond

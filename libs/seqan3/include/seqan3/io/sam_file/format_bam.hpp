@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides the seqan3::format_bam.
@@ -21,6 +18,7 @@
 
 #include <seqan3/alphabet/nucleotide/dna16sam.hpp>
 #include <seqan3/core/debug_stream/optional.hpp>
+#include <seqan3/core/debug_stream/tuple.hpp>
 #include <seqan3/io/sam_file/detail/cigar.hpp>
 #include <seqan3/io/sam_file/detail/format_sam_base.hpp>
 #include <seqan3/io/sam_file/header.hpp>
@@ -161,29 +159,25 @@ private:
 
     static_assert(sizeof(alignment_record_core) == 36);
 
-    // clang-format off
     //!\brief Converts a cigar op character to the rank according to the official BAM specifications.
-    static constexpr std::array<uint8_t, 256> char_to_sam_rank
-    {
-        []() constexpr {
-            std::array<uint8_t, 256> ret{};
+    static constexpr std::array<uint8_t, 256> char_to_sam_rank{[]() constexpr
+                                                               {
+                                                                   std::array<uint8_t, 256> ret{};
 
-            using index_t = std::make_unsigned_t<char>;
+                                                                   using index_t = std::make_unsigned_t<char>;
 
-            // ret['M'] = 0; set anyway by initialization
-            ret[static_cast<index_t>('I')] = 1;
-            ret[static_cast<index_t>('D')] = 2;
-            ret[static_cast<index_t>('N')] = 3;
-            ret[static_cast<index_t>('S')] = 4;
-            ret[static_cast<index_t>('H')] = 5;
-            ret[static_cast<index_t>('P')] = 6;
-            ret[static_cast<index_t>('=')] = 7;
-            ret[static_cast<index_t>('X')] = 8;
+                                                                   // ret['M'] = 0; set anyway by initialization
+                                                                   ret[static_cast<index_t>('I')] = 1;
+                                                                   ret[static_cast<index_t>('D')] = 2;
+                                                                   ret[static_cast<index_t>('N')] = 3;
+                                                                   ret[static_cast<index_t>('S')] = 4;
+                                                                   ret[static_cast<index_t>('H')] = 5;
+                                                                   ret[static_cast<index_t>('P')] = 6;
+                                                                   ret[static_cast<index_t>('=')] = 7;
+                                                                   ret[static_cast<index_t>('X')] = 8;
 
-            return ret;
-        }()
-    };
-    // clang-format on
+                                                                   return ret;
+                                                               }()};
 
     //!\brief Computes the bin number for a given region [beg, end), copied from the official SAM specifications.
     static uint16_t reg2bin(int32_t beg, int32_t end) noexcept
@@ -401,8 +395,8 @@ format_bam::read_alignment_record(stream_type & stream,
         ref_id = core.refID; // field::ref_id
     }
 
-    flag = core.flag; // field::flag
-    mapq = core.mapq; // field::mapq
+    flag = core.flag;                       // field::flag
+    mapq = static_cast<uint8_t>(core.mapq); // field::mapq
 
     if (core.pos > -1)         // [[likely]]
         ref_offset = core.pos; // field::ref_offset
@@ -583,12 +577,10 @@ inline void format_bam::write_alignment_record([[maybe_unused]] stream_type & st
     static_assert(
         ((std::ranges::forward_range<decltype(std::get<0>(mate))>
           || std::integral<std::remove_cvref_t<decltype(std::get<0>(mate))>>
-          || detail::is_type_specialisation_of_v<
-              std::remove_cvref_t<decltype(std::get<0>(mate))>,
-              std::optional>)&&(std::integral<std::remove_cvref_t<decltype(std::get<1>(mate))>>
-                                || detail::is_type_specialisation_of_v<
-                                    std::remove_cvref_t<decltype(std::get<1>(mate))>,
-                                    std::optional>)&&std::integral<std::remove_cvref_t<decltype(std::get<2>(mate))>>),
+          || detail::is_type_specialisation_of_v<std::remove_cvref_t<decltype(std::get<0>(mate))>, std::optional>)
+         && (std::integral<std::remove_cvref_t<decltype(std::get<1>(mate))>>
+             || detail::is_type_specialisation_of_v<std::remove_cvref_t<decltype(std::get<1>(mate))>, std::optional>)
+         && std::integral<std::remove_cvref_t<decltype(std::get<2>(mate))>>),
         "The mate object must be a std::tuple of size 3 with "
         "1) a std::ranges::forward_range with a value_type modelling seqan3::alphabet, "
         "2) a std::integral or std::optional<std::integral>, and "

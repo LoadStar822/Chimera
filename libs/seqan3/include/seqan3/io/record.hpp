@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides the seqan3::record template and the seqan3::field enum.
@@ -191,6 +188,10 @@ struct fields
 template <typename field_types, typename field_ids>
 struct record : detail::transfer_template_args_onto_t<field_types, std::tuple>
 {
+public:
+    //!\brief A specialisation of std::tuple.
+    using base_type = detail::transfer_template_args_onto_t<field_types, std::tuple>;
+
 private:
     //!\brief Auxiliary functions for clear().
     template <typename t>
@@ -213,10 +214,13 @@ private:
         (clear_element(args), ...);
     };
 
-public:
-    //!\brief A specialisation of std::tuple.
-    using base_type = detail::transfer_template_args_onto_t<field_types, std::tuple>;
+    //!\brief Returns the tuple as the underlying std::tuple type.
+    base_type & as_base() noexcept
+    {
+        return *this;
+    }
 
+public:
     /*!\name Constructors, destructor and assignment
      * \{
      */
@@ -235,9 +239,12 @@ public:
                   "You must give as many IDs as types to seqan3::record.");
 
     //!\brief Clears containers that provide `.clear()` and (re-)initialises all other elements with `= {}`.
-    void clear() noexcept(noexcept(std::apply(expander, std::declval<record &>())))
+    void clear() noexcept(noexcept(std::apply(expander, std::declval<record &>().as_base())))
     {
-        std::apply(expander, *this);
+        // PR2165 / __cpp_lib_tuple_like (C++23): std::apply requires tuple-like.
+        // In C++23, this means std::array, std::pair, std::tuple, and std::ranges::subranges. Nothing else.
+        // https://en.cppreference.com/w/cpp/utility/tuple/tuple-like
+        std::apply(expander, as_base());
     }
 
 protected:

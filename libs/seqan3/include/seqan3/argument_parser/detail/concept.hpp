@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Svenja Mehringer <svenja.mehringer AT fu-berlin.de>
@@ -40,14 +37,11 @@ namespace seqan3::detail
  */
 //!\cond
 template <typename option_type>
-concept is_container_option = !
-std::is_same_v<std::remove_cvref_t<option_type>, std::string> && requires (
-    option_type container,
-    typename std::remove_reference_t<option_type>::value_type value) {
-                                                                     {
-                                                                         container.push_back(value)
-                                                                     };
-                                                                 };
+concept is_container_option =
+    !std::is_same_v<std::remove_cvref_t<option_type>, std::string>
+    && requires (option_type container, typename std::remove_reference_t<option_type>::value_type value) {
+           { container.push_back(value) };
+       };
 //!\endcond
 
 } // namespace seqan3::detail

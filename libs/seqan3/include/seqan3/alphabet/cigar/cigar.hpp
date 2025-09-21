@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides the seqan3::cigar alphabet.
@@ -210,13 +207,26 @@ public:
     //!\}
 };
 
-//!\brief Overload for the seqan3::debug_stream's operator.
-template <typename char_t>
-inline debug_stream_type<char_t> & operator<<(debug_stream_type<char_t> & s, cigar const c)
+/*!\brief The printer used for formatted output of the cigar alphabets.
+ *
+ * The type of the printer must be a seqan3::cigar type.
+ *
+ * \ingroup alphabet_cigar
+ */
+template <>
+struct cigar_printer<cigar>
 {
-    s << c.to_string();
-    return s;
-}
+    /*!\brief Prints the formatted output of the cigar symbol to the stream.
+     * \tparam stream_t The type of the stream.
+     * \param[in,out] stream The output stream.
+     * \param[in] arg The cigar symbol to print.
+     */
+    template <typename stream_t>
+    constexpr void operator()(stream_t & stream, cigar const arg) const noexcept
+    {
+        stream << arg.to_string();
+    }
+};
 
 inline namespace literals
 {

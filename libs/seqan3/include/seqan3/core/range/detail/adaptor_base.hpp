@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::detail::adaptor_base and seqan3::detail::combined_adaptor
@@ -115,8 +112,8 @@ public:
     ~adaptor_base() noexcept = default;                                          //!< Defaulted.
 
     //!\brief Constructor with possible arguments; becomes a default constructor for adaptors without args.
-    constexpr adaptor_base(stored_args_ts... args) noexcept(noexcept(std::tuple<stored_args_ts...>{
-        std::forward<stored_args_ts>(args)...})) :
+    constexpr adaptor_base(stored_args_ts... args)
+        noexcept(noexcept(std::tuple<stored_args_ts...>{std::forward<stored_args_ts>(args)...})) :
         arguments{std::forward<stored_args_ts>(args)...}
     {}
     //!\}

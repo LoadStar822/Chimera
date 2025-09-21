@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Marcel Ehrhardt <marcel.ehrhardt AT fu-berlin.de>
@@ -34,24 +31,18 @@ constexpr score_type matrix_inf = std::numeric_limits<score_type>::max();
 //!\cond
 template <typename matrix_t>
 concept matrix = requires (std::remove_cvref_t<matrix_t> m) {
-                     typename std::remove_cvref_t<matrix_t>::value_type;
+    typename std::remove_cvref_t<matrix_t>::value_type;
 
-                     typename std::remove_cvref_t<matrix_t>::reference;
+    typename std::remove_cvref_t<matrix_t>::reference;
 
-                     typename std::remove_cvref_t<matrix_t>::size_type;
+    typename std::remove_cvref_t<matrix_t>::size_type;
 
-                     {
-                         m.cols()
-                         } -> std::same_as<typename std::remove_cvref_t<matrix_t>::size_type>;
+    { m.cols() } -> std::same_as<typename std::remove_cvref_t<matrix_t>::size_type>;
 
-                     {
-                         m.rows()
-                         } -> std::same_as<typename std::remove_cvref_t<matrix_t>::size_type>;
+    { m.rows() } -> std::same_as<typename std::remove_cvref_t<matrix_t>::size_type>;
 
-                     {
-                         m.at(matrix_coordinate{})
-                         } -> std::same_as<typename std::remove_cvref_t<matrix_t>::reference>;
-                 };
+    { m.at(matrix_coordinate{}) } -> std::same_as<typename std::remove_cvref_t<matrix_t>::reference>;
+};
 //!\endcond
 
 // Workaround for https://github.com/doxygen/doxygen/issues/9379

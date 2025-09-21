@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Sara Hetzel <sara.hetzel AT fu-berlin.de>
@@ -71,8 +68,9 @@ public:
      * \details
      * \stableapi{Since version 3.1.}
      */
-    template <semialphabet other_alph_t>
-        requires (alphabet_size<other_alph_t> == size)
+    template <typename other_alph_t>
+        requires (!std::same_as<other_alph_t, semialphabet_any>)
+              && semialphabet<other_alph_t> && (alphabet_size<other_alph_t> == size)
     explicit semialphabet_any(other_alph_t const other)
     {
         assign_rank(seqan3::to_rank(other));
@@ -83,8 +81,9 @@ public:
      * \details
      * \stableapi{Since version 3.1.}
      */
-    template <semialphabet other_alph_t>
-        requires ((alphabet_size<other_alph_t> == size) && std::regular<other_alph_t>)
+    template <typename other_alph_t>
+        requires (!std::same_as<other_alph_t, semialphabet_any>)
+              && semialphabet<other_alph_t> && (alphabet_size<other_alph_t> == size) && std::regular<other_alph_t>
     explicit operator other_alph_t() const
     {
         other_alph_t other{};

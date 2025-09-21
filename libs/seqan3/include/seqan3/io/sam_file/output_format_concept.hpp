@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::sam_file_output_format and auxiliary classes.
@@ -98,27 +95,27 @@ concept sam_file_output_format = requires (detail::sam_file_output_format_expose
                                            sam_tag_dictionary & tag_dict,
                                            double & e_value,
                                            double & bit_score) {
-                                     t::file_extensions;
+    t::file_extensions;
 
-                                     {
-                                         v.write_alignment_record(stream,
-                                                                  options,
-                                                                  header,
-                                                                  seq,
-                                                                  qual,
-                                                                  id,
-                                                                  ref_seq,
-                                                                  ref_id,
-                                                                  ref_offset,
-                                                                  cigar,
-                                                                  flag,
-                                                                  mapq,
-                                                                  mate,
-                                                                  tag_dict,
-                                                                  e_value,
-                                                                  bit_score)
-                                         } -> std::same_as<void>;
-                                 };
+    {
+        v.write_alignment_record(stream,
+                                 options,
+                                 header,
+                                 seq,
+                                 qual,
+                                 id,
+                                 ref_seq,
+                                 ref_id,
+                                 ref_offset,
+                                 cigar,
+                                 flag,
+                                 mapq,
+                                 mate,
+                                 tag_dict,
+                                 e_value,
+                                 bit_score)
+    } -> std::same_as<void>;
+};
 //!\endcond
 
 // Workaround for https://github.com/doxygen/doxygen/issues/9379

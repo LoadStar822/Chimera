@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides the seqan3::format_vienna.
@@ -203,8 +200,14 @@ protected:
                 using alph_type = typename std::ranges::range_value_t<structure_type>::structure_alphabet_type;
                 // We need the structure_length parameter to count the length of the structure while reading
                 // because we cannot infer it from the (already resized) structure_seq object.
-                auto res = std::ranges::copy(read_structure<alph_type>(stream_view), std::ranges::begin(structure));
+                auto range = read_structure<alph_type>(stream_view);
+                // Use std::views::take to avoid going out of bounds if the structure is longer than the sequence.
+                auto res = std::ranges::copy(range | std::views::take(std::ranges::distance(seq)),
+                                             std::ranges::begin(structure));
                 structure_length = std::ranges::distance(std::ranges::begin(structure), res.out);
+                // If the structure is longer than the sequence, there are characters left.
+                // std::ranges::distance will also consume the characters in the stream.
+                structure_length += std::ranges::distance(range);
 
                 if constexpr (!detail::decays_to_ignore_v<bpp_type>)
                     detail::bpp_from_rna_structure<alph_type>(bpp, structure);

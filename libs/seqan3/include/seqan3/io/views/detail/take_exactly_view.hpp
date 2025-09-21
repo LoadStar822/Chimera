@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Hannes Hauswedell <hannes.hauswedell AT fu-berlin.de>
@@ -322,8 +319,8 @@ public:
     }
 
     //!\brief Returns an iterator decremented by one.
-    constexpr basic_iterator operator--(int) noexcept(noexcept(--std::declval<basic_iterator &>())
-                                                      && std::is_nothrow_copy_constructible_v<basic_iterator>)
+    constexpr basic_iterator operator--(int)
+        noexcept(noexcept(--std::declval<basic_iterator &>()) && std::is_nothrow_copy_constructible_v<basic_iterator>)
         requires std::bidirectional_iterator<base_base_t>
     {
         basic_iterator cpy{*this};
@@ -332,8 +329,8 @@ public:
     }
 
     //!\brief Advances the iterator by skip positions.
-    constexpr basic_iterator & operator+=(difference_type const skip) noexcept(noexcept(std::declval<base_t &>() +=
-                                                                                        skip))
+    constexpr basic_iterator & operator+=(difference_type const skip)
+        noexcept(noexcept(std::declval<base_t &>() += skip))
         requires std::random_access_iterator<base_base_t>
     {
         base_t::operator+=(skip);
@@ -342,8 +339,8 @@ public:
     }
 
     //!\brief Advances the iterator by -skip positions.
-    constexpr basic_iterator & operator-=(difference_type const skip) noexcept(noexcept(std::declval<base_t &>() -=
-                                                                                        skip))
+    constexpr basic_iterator & operator-=(difference_type const skip)
+        noexcept(noexcept(std::declval<base_t &>() -= skip))
         requires std::random_access_iterator<base_base_t>
     {
         base_t::operator-=(skip);
@@ -386,8 +383,8 @@ public:
     }
 
     //!\brief Checks whether `lhs` is equal to `rhs`.
-    constexpr friend bool operator==(sentinel_type const & lhs,
-                                     basic_iterator const & rhs) noexcept(noexcept(rhs == lhs))
+    constexpr friend bool operator==(sentinel_type const & lhs, basic_iterator const & rhs)
+        noexcept(noexcept(rhs == lhs))
     {
         return rhs == lhs;
     }
@@ -408,8 +405,8 @@ public:
     }
 
     //!\brief Checks whether `lhs` is not equal to `rhs`.
-    constexpr friend bool operator!=(sentinel_type const & lhs,
-                                     basic_iterator const & rhs) noexcept(noexcept(rhs != lhs))
+    constexpr friend bool operator!=(sentinel_type const & lhs, basic_iterator const & rhs)
+        noexcept(noexcept(rhs != lhs))
     {
         return rhs != lhs;
     }
@@ -552,6 +549,7 @@ namespace seqan3::detail
  * | std::ranges::sized_range         |                                       | ***guaranteed***                                   |
  * | std::ranges::common_range        |                                       | *preserved*                                        |
  * | std::ranges::output_range        |                                       | *preserved* except if `urng_t` is std::basic_string|
+ * | std::ranges::borrowed_range      |                                       | *preserved*                                        |
  * | seqan3::const_iterable_range     |                                       | *preserved*                                        |
  * |                                  |                                       |                                                    |
  * | std::ranges::range_reference_t   |                                       | std::ranges::range_reference_t<urng_t>             |
@@ -589,3 +587,12 @@ inline constexpr auto take_exactly = take_exactly_fn<false>{};
  */
 inline constexpr auto take_exactly_or_throw = take_exactly_fn<true>{};
 } // namespace seqan3::detail
+
+namespace std::ranges
+{
+//!\cond
+template <std::ranges::view urng_t, bool or_throw>
+inline constexpr bool enable_borrowed_range<seqan3::detail::view_take_exactly<urng_t, or_throw>> =
+    enable_borrowed_range<urng_t>;
+//!\endcond
+} // namespace std::ranges

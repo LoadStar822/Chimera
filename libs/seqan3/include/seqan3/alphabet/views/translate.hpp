@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::views::translate and seqan3::views::translate_single.
@@ -78,7 +75,7 @@ enum class translation_frames : uint8_t
 //!\brief Enable bitwise operators for enum translation_frames.
 //!\sa seqan3::enum_bitwise_operators enables combining enum values.
 template <>
-constexpr bool add_enum_bitwise_operators<translation_frames> = true;
+inline constexpr bool add_enum_bitwise_operators<translation_frames> = true;
 //!\endcond
 
 } // namespace seqan3
@@ -742,8 +739,8 @@ public:
 //!\brief Class template argument deduction for view_translate.
 template <typename urng_t>
     requires std::ranges::sized_range<urng_t> && std::ranges::random_access_range<urng_t>
-          && nucleotide_alphabet<std::ranges::range_reference_t<urng_t>>
-             view_translate(urng_t &&, translation_frames const) -> view_translate<std::views::all_t<urng_t>>;
+              && nucleotide_alphabet<std::ranges::range_reference_t<urng_t>>
+view_translate(urng_t &&, translation_frames const) -> view_translate<std::views::all_t<urng_t>>;
 } // namespace seqan3::detail
 
 // ============================================================================

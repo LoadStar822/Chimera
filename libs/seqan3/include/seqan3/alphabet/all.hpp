@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Hannes Hauswedell <hannes.hauswedell AT fu-berlin.de>
@@ -156,7 +153,7 @@
  *
  * In SeqAn it is recommended you use the STL container classes like std::vector for storing sequence data,
  * but you can use other class templates if they satisfy the respective seqan3::container, e.g. `std::deque` or
- * <a href="https://github.com/facebook/folly/blob/master/folly/docs/FBVector.md" target="_blank">
+ * <a href="https://github.com/facebook/folly/blob/main/folly/docs/FBVector.md" target="_blank">
  * <tt>folly::fbvector</tt></a> or even <a href="https://doc.qt.io/qt-5/qvector.html" target="_blank">
  * <tt>Qt::QVector</tt></a>.
  *

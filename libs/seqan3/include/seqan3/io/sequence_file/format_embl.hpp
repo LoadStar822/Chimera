@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * brief Provides the seqan3::format_embl.
@@ -105,11 +102,13 @@ protected:
                               id_type & id,
                               qual_type & SEQAN3_DOXYGEN_ONLY(qualities))
     {
+        // Store current position in buffer
+        // Must happen before constructing the view.
+        // With libc++, tellg invalidates the I/O buffer.
+        position_buffer = stream.tellg();
+
         auto stream_view = detail::istreambuf(stream);
         auto stream_it = std::ranges::begin(stream_view);
-
-        // Store current position in buffer.
-        position_buffer = stream.tellg();
 
         std::string idbuffer;
         std::ranges::copy(stream_view | detail::take_until_or_throw(is_cntrl || is_blank),
@@ -195,12 +194,10 @@ protected:
         }
         else
         {
-            detail::consume(stream_view | detail::take_until(is_end));
+            detail::consume(stream_view | detail::take_until_or_throw(is_end)); // consume until "//"
         }
-        //Jump over // and cntrl
-        ++stream_it;
-        ++stream_it;
-        ++stream_it;
+
+        std::ranges::advance(stream_it, 3u, std::ranges::end(stream_view)); // Skip `//` and potentially '\n'
     }
 
     //!\copydoc sequence_file_output_format::write_sequence_record

@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Hannes Hauswedell <hannes.hauswedell AT fu-berlin.de>
@@ -14,6 +11,7 @@
 
 #include <iostream>
 
+#include <seqan3/alignment/aligned_sequence/debug_stream_alignment.hpp>
 #include <seqan3/alphabet/detail/debug_stream_alphabet.hpp>
 #include <seqan3/core/debug_stream/all.hpp>
 
@@ -21,7 +19,10 @@
 //!\cond
 namespace std
 {
+namespace
+{
 extern ostream cerr;
+}
 } // namespace std
 //!\endcond
 

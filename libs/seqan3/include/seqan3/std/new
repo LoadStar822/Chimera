@@ -1,10 +1,6 @@
-// -*- C++ -*-
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief The [\<new\> header](https://en.cppreference.com/w/cpp/header/new) from C++17's standard library.
@@ -18,6 +14,30 @@
 #include <new>
 
 #ifndef __cpp_lib_hardware_interference_size
+
+/*!\defgroup std std
+ * \brief A subset of the C++20 standard library made available in pre-C++20 contexts.
+ *
+ * \details
+ *
+ * This module provides many parts of the C++20 standard library (and some parts of the C++17 standard library
+ * not available in GCC). They are only defined if not found in the compiler's standard library and are called exactly
+ * like the originals so they can be used interchangeably.
+ *
+ * \attention All of this sub-module is subject to change!
+ *
+ * In particular:
+ *
+ *   * We do not provide all C++20 library features, only those that are used by SeqAn.
+ *   * All of these might change or be removed once C++20 is published.
+ *   * The documentation of this module will likely be removed entirely in favour of links to
+ *     https://en.cppreference.com
+ *
+ * It is best you consider every entity in this module as:
+ *
+ * \noapi
+ *
+ */
 
 /*!\defgroup std_new new
  * \ingroup std

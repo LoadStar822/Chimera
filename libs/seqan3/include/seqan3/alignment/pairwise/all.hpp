@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Meta-header for the \link alignment_pairwise Alignment / Pairwise submodule \endlink.
@@ -29,9 +26,10 @@
  *
  * \include doc/tutorial/08_pairwise_alignment/pairwise_alignment_first_global.cpp
  *
- * In this snippet a global alignment over two nucleotide sequences is computed. Here the helper function std::tie
- * is used to pass the two sequences as a tuple to the alignment algorithm. The special interface of std::tie allows
- * to forward the two sequences as lvalue references such that no copy of the data is involved.
+ * In this snippet a global alignment over two nucleotide sequences using an edit scoring scheme is computed.
+ * Here the helper function std::tie is used to pass the two sequences as a tuple to the alignment algorithm.
+ * The special interface of std::tie allows to forward the two sequences as lvalue references such that no copy of the
+ * data is involved.
  *
  * There are a lot of applications that need to compute many pairwise sequence alignments. Accordingly, the
  * seqan3::align_pairwise interface offers an overload for ranges over sequence pairs. The following snippet shows

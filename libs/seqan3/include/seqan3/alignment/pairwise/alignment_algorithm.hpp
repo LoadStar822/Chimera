@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::detail::alignment_algorithm.
@@ -62,8 +59,8 @@ namespace seqan3::detail
  * using SIMD operations or scalar operations, computing the traceback or only the score etc.. These configurations
  * are inherited using so-called `alignment policies`. An alignment policy is a type that implements a specific
  * functionality through a common interface that is used by the alignment algorithm. These policies are also
- * the customisation points of the algorithm which will be used to implement a specific behaviour. You can read more
- * about the policies in \ref alignment_pairwise_policy.
+ * the customisation points of the algorithm which will be used to implement a specific behaviour. \if DEV You can read
+ * more about the policies in \ref alignment_pairwise_policy. \endif
  *
  * Since some of the policies are augmented with traits to further refine the policy execution during the configuration,
  * it is necessary to defer the template instantiation of the policies, which are modelled as CRTP-base classes.
@@ -622,7 +619,11 @@ private:
                                                        row_index_type{this->alignment_state.optimum.row_index}};
             // At some point this needs to be refactored so that it is not necessary to adapt the coordinate.
             if constexpr (traits_t::is_banded)
+            {
                 res.end_positions.second += res.end_positions.first - this->trace_matrix.band_col_index;
+                res.end_positions.first = this->to_original_sequence1_position(res.end_positions.first);
+                res.end_positions.second = this->to_original_sequence2_position(res.end_positions.second);
+            }
         }
 
         if constexpr (traits_t::compute_begin_positions)
@@ -634,8 +635,10 @@ private:
                 detail::row_index_type{this->alignment_state.optimum.row_index},
                 detail::column_index_type{this->alignment_state.optimum.column_index}};
             auto trace_res = builder(this->trace_matrix.trace_path(optimum_coordinate));
-            res.begin_positions.first = trace_res.first_sequence_slice_positions.first;
-            res.begin_positions.second = trace_res.second_sequence_slice_positions.first;
+            res.begin_positions.first =
+                this->to_original_sequence1_position(trace_res.first_sequence_slice_positions.first);
+            res.begin_positions.second =
+                this->to_original_sequence2_position(trace_res.second_sequence_slice_positions.first);
 
             if constexpr (traits_t::compute_sequence_alignment)
                 res.alignment = std::move(trace_res.alignment);
@@ -700,8 +703,10 @@ private:
 
             if constexpr (traits_t::compute_end_positions)
             {
-                res.end_positions.first = this->alignment_state.optimum.column_index[simd_index];
-                res.end_positions.second = this->alignment_state.optimum.row_index[simd_index];
+                res.end_positions.first =
+                    this->to_original_sequence1_position(this->alignment_state.optimum.column_index[simd_index]);
+                res.end_positions.second =
+                    this->to_original_sequence2_position(this->alignment_state.optimum.row_index[simd_index]);
             }
 
             callback(std::move(res));
@@ -742,7 +747,6 @@ private:
         // if traceback is enabled.
         if constexpr (traits_t::compute_sequence_alignment)
         {
-            auto trace_matrix_it = trace_debug_matrix.begin() + offset;
             std::ranges::copy(
                 column
                     | std::views::transform(

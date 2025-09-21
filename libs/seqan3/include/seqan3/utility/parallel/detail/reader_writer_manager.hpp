@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::detail::reader_writer_manager.
@@ -80,11 +77,11 @@ private:
          * \brief Not default constructible nor copyable or movable.
          * \{
          */
-        scoped_writer_type() = delete;                                        //!< Deleted.
-        scoped_writer_type(scoped_writer_type const &) = default;             //!< Deleted.
-        scoped_writer_type(scoped_writer_type &&) = default;                  //!< Defaulted.
-        scoped_writer_type & operator=(scoped_writer_type const &) = default; //!< Deleted.
-        scoped_writer_type & operator=(scoped_writer_type &&) = default;      //!< Defaulted.
+        scoped_writer_type() = delete;                                       //!< Deleted.
+        scoped_writer_type(scoped_writer_type const &) = default;            //!< Deleted.
+        scoped_writer_type(scoped_writer_type &&) = default;                 //!< Defaulted.
+        scoped_writer_type & operator=(scoped_writer_type const &) = delete; //!< Deleted. Class holds a reference.
+        scoped_writer_type & operator=(scoped_writer_type &&) = delete;      //!< Deleted. Class holds a reference.
 
         /*!\brief Constructs the scoped writer with the associated manager.
          * \param _manager The seqan3::detail::reader_writer_manager.
@@ -110,11 +107,11 @@ private:
         /*!\name Constructors, destructor and assignment
          * \{
          */
-        scoped_reader_type() = delete;                                        //!< Deleted.
-        scoped_reader_type(scoped_reader_type const &) = default;             //!< Deleted.
-        scoped_reader_type(scoped_reader_type &&) = default;                  //!< Defaulted.
-        scoped_reader_type & operator=(scoped_reader_type const &) = default; //!< Deleted.
-        scoped_reader_type & operator=(scoped_reader_type &&) = default;      //!< Defaulted.
+        scoped_reader_type() = delete;                                       //!< Deleted.
+        scoped_reader_type(scoped_reader_type const &) = default;            //!< Deleted.
+        scoped_reader_type(scoped_reader_type &&) = default;                 //!< Defaulted.
+        scoped_reader_type & operator=(scoped_reader_type const &) = delete; //!< Deleted. Class holds a reference.
+        scoped_reader_type & operator=(scoped_reader_type &&) = delete;      //!< Deleted. Class holds a reference.
 
         /*!\brief Constructs the scoped reader with the associated manager.
          * \param _manager The seqan3::detail::reader_writer_manager.

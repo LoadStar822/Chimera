@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::detail::algorithm_result_generator_range.
@@ -81,9 +78,11 @@ public:
      *
      * Constructs a new algorithm range by taking ownership over the passed algorithm buffer.
      */
+    SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY_START(-Warray-bounds)
     explicit algorithm_result_generator_range(algorithm_executor_type && algorithm_executor) :
         algorithm_executor_ptr{std::make_unique<algorithm_executor_type>(std::move(algorithm_executor))}
     {}
+    SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY_STOP
     //!\}
 
     /*!\name Iterators

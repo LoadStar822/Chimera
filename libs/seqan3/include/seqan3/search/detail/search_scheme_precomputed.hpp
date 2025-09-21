@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Christopher Pockrandt <christopher.pockrandt AT fu-berlin.de>
@@ -27,7 +24,7 @@ template <uint8_t nbr_blocks>
 struct search
 {
     //!\brief Type for storing the length of blocks
-    typedef std::array<size_t, nbr_blocks> blocks_length_type;
+    using blocks_length_type = std::array<size_t, nbr_blocks>;
 
     //!\brief Order of blocks
     std::array<uint8_t, nbr_blocks> pi;
@@ -49,7 +46,7 @@ struct search
 struct search_dyn
 {
     //!\brief Type for storing the length of blocks
-    typedef std::vector<size_t> blocks_length_type;
+    using blocks_length_type = std::vector<size_t>;
 
     //!\brief Order of blocks
     std::vector<uint8_t> pi;
@@ -114,10 +111,10 @@ inline constexpr search_scheme_type<3, 4> optimum_search_scheme<2, 2>{{{{4, 3, 2
                                                                        {{2, 3, 4, 1}, {0, 0, 0, 2}, {0, 1, 1, 2}},
                                                                        {{1, 2, 3, 4}, {0, 0, 0, 2}, {0, 1, 2, 2}}}};
 
+// TODO: benchmark whether the first search is really the fastest one (see \details of optimum_search_scheme)
 template <>
 inline constexpr search_scheme_type<4, 5> optimum_search_scheme<0, 3>{
-    {// TODO: benchmark whether the first search is really the fastest one (see \details of optimum_search_scheme)
-     {{5, 4, 3, 2, 1}, {0, 0, 0, 0, 0}, {0, 0, 3, 3, 3}},
+    {{{5, 4, 3, 2, 1}, {0, 0, 0, 0, 0}, {0, 0, 3, 3, 3}},
      {{3, 4, 5, 2, 1}, {0, 0, 1, 1, 1}, {0, 1, 1, 2, 3}},
      {{2, 3, 4, 5, 1}, {0, 0, 0, 2, 2}, {0, 1, 2, 2, 3}},
      {{1, 2, 3, 4, 5}, {0, 0, 0, 0, 3}, {0, 2, 2, 3, 3}}}};

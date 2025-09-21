@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides platform and dependency checks.
@@ -12,9 +9,7 @@
 
 #pragma once
 
-#include <cinttypes>
-#include <ciso646> // makes _LIBCPP_VERSION available
-#include <cstddef> // makes __GLIBCXX__ available
+#include <version>
 
 // macro cruft
 //!\cond
@@ -45,7 +40,7 @@
  *
  * \sa https://sourceforge.net/p/predef/wiki/Compilers
  */
-#if defined(__GNUC__) && !defined(__llvm__) && !defined(__INTEL_COMPILER)
+#if defined(__GNUC__) && !defined(__llvm__) && !defined(__INTEL_COMPILER) && !defined(__INTEL_LLVM_COMPILER)
 #    define SEQAN3_COMPILER_IS_GCC 1
 #else
 #    define SEQAN3_COMPILER_IS_GCC 0
@@ -57,56 +52,43 @@
 #endif // SEQAN3_DOXYGEN_ONLY(1)0
 
 // ============================================================================
-//  Compiler support GCC
+//  Compiler support
 // ============================================================================
 
-#if SEQAN3_COMPILER_IS_GCC
-#    if (__GNUC__ < 11)
-#        error                                                                                                         \
-            "SeqAn 3.1.x is the last version that supports GCC 7, 8, and 9. SeqAn 3.2.x is the latest version that support GCC 10. Please upgrade your compiler or use 3.1.x./3.2.x."
-#    endif // (__GNUC__ < 11)
+#if SEQAN3_COMPILER_IS_GCC && (__GNUC__ < 12)
+#    error "At least GCC 12 is needed."
+#endif
 
-#    if (__GNUC__ == 11 && __GNUC_MINOR__ <= 3)
-#        pragma GCC warning "Be aware that GCC < 11.4 might have bugs that cause SeqAn3 fail to compile."
-#    endif // (__GNUC__ == 11 && __GNUC_MINOR__ <= 2)
+// clang-format off
+#if defined(__INTEL_LLVM_COMPILER) && (__INTEL_LLVM_COMPILER < 20240000)
+#    error "At least Intel OneAPI 2024 is needed."
+#endif
+// clang-format on
 
-#    if (__GNUC__ == 12 && __GNUC_MINOR__ <= 2)
-#        pragma GCC warning "Be aware that GCC < 12.3 might have bugs that cause SeqAn3 fail to compile."
-#    endif // (__GNUC__ == 12 && __GNUC_MINOR__ <= 1)
-
-#    if SEQAN3_DOXYGEN_ONLY(1) 0
-//!\brief This disables the warning you would get if your compiler is newer than the latest supported version.
-#        define SEQAN3_DISABLE_NEWER_COMPILER_DIAGNOSTIC
-#    endif // SEQAN3_DOXYGEN_ONLY(1)0
-
-#    ifndef SEQAN3_DISABLE_NEWER_COMPILER_DIAGNOSTIC
-#        if (__GNUC__ > 13)
-#            pragma message                                                                                            \
-                "Your compiler is newer than the latest supported compiler of this SeqAn version (gcc-13). It might be that SeqAn does not compile due to this. You can disable this warning by setting -DSEQAN3_DISABLE_NEWER_COMPILER_DIAGNOSTIC."
-#        endif // (__GNUC__ > 13)
-#    endif     // SEQAN3_DISABLE_NEWER_COMPILER_DIAGNOSTIC
+#if defined(__clang__) && defined(__clang_major__) && (__clang_major__ < 17)
+#    error "At least Clang 17 is needed."
+#endif
 
 // ============================================================================
-//  Compiler support other
+//  Standard library support
 // ============================================================================
 
-#elif !defined(SEQAN3_DISABLE_COMPILER_CHECK)
-#    error                                                                                                             \
-        "Your compiler is not supported. Currently, only GCC is known to work. You can disable this error by setting -DSEQAN3_DISABLE_COMPILER_CHECK."
-#endif // SEQAN3_COMPILER_IS_GCC
+#if defined(_LIBCPP_VERSION) && (_LIBCPP_VERSION < 170000)
+#    error "At least libc++ 17 is required."
+#endif
+
+#if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE < 12)
+#    error "At least libstdc++ 12 is needed."
+#endif
 
 // ============================================================================
 //  C++ standard and features
 // ============================================================================
 
-#if __has_include(<version>)
-#    include <version>
-#endif
-
 // C++ standard [required]
 #ifdef __cplusplus
-#    if (__cplusplus < 202002L)
-#        error "SeqAn3 requires C++20, make sure that you have set -std=c++20."
+#    if (__cplusplus < 202100)
+#        error "SeqAn3 requires C++23, make sure that you have set -std=c++23."
 #    endif
 #else
 #    error "This is not a C++ compiler."
@@ -123,33 +105,47 @@
 #    error SeqAn3 include directory not set correctly. Forgot to add -I ${INSTALLDIR}/include to your CXXFLAGS?
 #endif
 
-// SDSL [required]
-#if __has_include(<sdsl/version.hpp>)
-#    include <sdsl/version.hpp>
-static_assert(sdsl::sdsl_version_major == 3, "Only version 3 of the SDSL is supported by SeqAn3.");
-#else
-#    error The sdsl library was not included correctly. Forgot to add -I ${INSTALLDIR}/include to your CXXFLAGS?
+// zlib [optional]
+/*!\def SEQAN3_HAS_ZLIB
+ * \brief Whether ZLIB support is available or not.
+ * \ingroup core
+ */
+#ifndef SEQAN3_HAS_ZLIB
+#    if __has_include(<zlib.h>)
+#        define SEQAN3_HAS_ZLIB 1
+#    else
+#        define SEQAN3_HAS_ZLIB 0
+#    endif
+#endif
+
+// bzip2 [optional]
+/*!\def SEQAN3_HAS_BZIP2
+ * \brief Whether BZIP2 support is available or not.
+ * \ingroup core
+ */
+#ifndef SEQAN3_HAS_BZIP2
+#    if SEQAN3_HAS_ZLIB && __has_include(<bzlib.h>)
+#        define SEQAN3_HAS_BZIP2 1
+#    else
+#        define SEQAN3_HAS_BZIP2 0
+#    endif
 #endif
 
 // Cereal [optional]
-/*!\def SEQAN3_WITH_CEREAL
+/*!\def SEQAN3_HAS_CEREAL
  * \brief Whether CEREAL support is available or not.
  * \ingroup core
  */
-#ifndef SEQAN3_WITH_CEREAL
+#ifndef SEQAN3_HAS_CEREAL
 #    if __has_include(<cereal/cereal.hpp>)
-#        define SEQAN3_WITH_CEREAL 1
+#        define SEQAN3_HAS_CEREAL 1
 #    else
-#        define SEQAN3_WITH_CEREAL 0
-#    endif
-#elif SEQAN3_WITH_CEREAL != 0
-#    if !__has_include(<cereal/cereal.hpp>)
-#        error Cereal was marked as required, but not found!
+#        define SEQAN3_HAS_CEREAL 0
 #    endif
 #endif
 
 //!\cond DEV
-#if !SEQAN3_WITH_CEREAL
+#if !SEQAN3_HAS_CEREAL
 /*!\name Cereal function macros
  * \ingroup core
  * \brief These can be changed by apps so we used the macros instead of the values internally.
@@ -194,6 +190,27 @@ static_assert(sdsl::sdsl_version_major == 3, "Only version 3 of the SDSL is supp
 #    endif
 #endif
 
+//!\cond
+// clang-format off
+#if defined(SEQAN3_WITH_CEREAL) && defined(SEQAN3_HAS_CEREAL) && SEQAN3_WITH_CEREAL != SEQAN3_HAS_CEREAL
+#    error "SEQAN3_WITH_CEREAL is deprecated and has been replaced by SEQAN3_HAS_CEREAL. These two macros do not expand to the same value. Please use SEQAN3_HAS_CEREAL."
+#endif
+#ifndef SEQAN3_DISABLE_DEPRECATED_WARNINGS
+#    ifdef SEQAN3_WITH_CEREAL
+#        pragma GCC warning "SEQAN3_WITH_CEREAL is deprecated and will be removed in the next version; please use SEQAN3_HAS_CEREAL instead."
+#    else
+#        define SEQAN3_WITH_CEREAL                                                                                     \
+            SEQAN3_PRAGMA(GCC warning "SEQAN3_WITH_CEREAL is deprecated and will be removed in the next version; please use SEQAN3_HAS_CEREAL instead.") \
+            SEQAN3_HAS_CEREAL
+#    endif
+#else
+#    ifndef SEQAN3_WITH_CEREAL
+#        define SEQAN3_WITH_CEREAL SEQAN3_HAS_CEREAL
+#    endif
+#endif
+// clang-format on
+//!\endcond
+
 // ============================================================================
 //  Workarounds
 // ============================================================================
@@ -203,33 +220,62 @@ static_assert(sdsl::sdsl_version_major == 3, "Only version 3 of the SDSL is supp
 #    define SEQAN3_WORKAROUND_VIEW_PERFORMANCE 1
 #endif
 
-//!\brief A view does not need to be default constructible. This change is first implemented in gcc12.
-#ifndef SEQAN3_WORKAROUND_DEFAULT_CONSTRUCTIBLE_VIEW
-#    if SEQAN3_COMPILER_IS_GCC && (__GNUC__ < 12)
-#        define SEQAN3_WORKAROUND_DEFAULT_CONSTRUCTIBLE_VIEW 1
-#    else
-#        define SEQAN3_WORKAROUND_DEFAULT_CONSTRUCTIBLE_VIEW 0
-#    endif
-#endif
-
-//!\brief See https://gcc.gnu.org/bugzilla/show_bug.cgi?id=100139
-//!       std::views::{take, drop} do not type-erase. This is a defect within the standard lib (fixed in gcc12).
-#ifndef SEQAN3_WORKAROUND_GCC_100139
-#    if SEQAN3_COMPILER_IS_GCC && (__GNUC__ < 12)
-#        define SEQAN3_WORKAROUND_GCC_100139 1
-#    else
-#        define SEQAN3_WORKAROUND_GCC_100139 0
-#    endif
-#endif
-
-/*!\brief Workaround bogus memcpy errors in GCC 12 and 13. (Wrestrict and Wstringop-overflow)
- * \see https://gcc.gnu.org/bugzilla/show_bug.cgi?id=105545
- */
 #ifndef SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY
-#    if SEQAN3_COMPILER_IS_GCC && (__GNUC__ == 12 || __GNUC__ == 13)
+#    if SEQAN3_COMPILER_IS_GCC
+// For checking whether workaround applies, e.g., in search_scheme_test
 #        define SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY 1
+// The goal is to create _Pragma("GCC diagnostic ignored \"-Wrestrict\"")
+// The outer quotes are added by SEQAN3_PRAGMA, so we need SEQAN3_PRAGMA(GCC diagnostic ignored "-Wrestrict")
+// SEQAN3_CONCAT_STRING(GCC diagnostic ignored, -Wrestrict) -> SEQAN3_PRAGMA(GCC diagnostic ignored "-Wrestrict")
+#        define SEQAN3_CONCAT_STRING(x, y) SEQAN3_PRAGMA(x #y)
+#        define SEQAN3_GCC_DIAGNOSTIC_IGNORE1(x, ...)                                                                  \
+            SEQAN3_PRAGMA(GCC diagnostic push)                                                                         \
+            SEQAN3_CONCAT_STRING(GCC diagnostic ignored, x)
+#        define SEQAN3_GCC_DIAGNOSTIC_IGNORE2(x, y)                                                                    \
+            SEQAN3_PRAGMA(GCC diagnostic push)                                                                         \
+            SEQAN3_CONCAT_STRING(GCC diagnostic ignored, x)                                                            \
+            SEQAN3_CONCAT_STRING(GCC diagnostic ignored, y)
+// A helper that enables SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY_START to take one or two arguments
+// SEQAN3_GCC_DIAGNOSTIC_IGNORE(-Wrestict, 2, 1) -> SEQAN3_GCC_DIAGNOSTIC_IGNORE1(-Wrestict, 2)
+// SEQAN3_GCC_DIAGNOSTIC_IGNORE(-Wrestict, -Warray-bounds, 2, 1) -> SEQAN3_GCC_DIAGNOSTIC_IGNORE2(-Wrestict, -Warray-bounds)
+#        define SEQAN3_GCC_DIAGNOSTIC_IGNORE(x, y, n, ...) SEQAN3_GCC_DIAGNOSTIC_IGNORE##n(x, y)
+// SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY_START(-Wrestrict) -> SEQAN3_GCC_DIAGNOSTIC_IGNORE(-Wrestict, 2, 1)
+// SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY_START(-Wrestrict, -Warray-bounds) -> SEQAN3_GCC_DIAGNOSTIC_IGNORE(-Wrestict, -Warray-bounds, 2, 1)
+#        define SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY_START(x, ...) SEQAN3_GCC_DIAGNOSTIC_IGNORE(x, ##__VA_ARGS__, 2, 1)
+#        define SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY_STOP SEQAN3_PRAGMA(GCC diagnostic pop)
 #    else
+/*!\name Workaround for bogus memcopy/memmove warnings on GCC
+     * \{
+     */
+//!\brief Indicates whether the workaround is active. `1` for GCC, `0` for other compilers.
 #        define SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY 0
+/*!\brief Denotes the start of a block where diagnostics are ignored.
+ * \details
+ * If SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY is 0, this macro has no effect.
+ * Otherwise, the macro takes one or two arguments and will expand to a preprocessor directive equivalent to:
+ * ### Input
+ * ```cpp
+ * // The macro accepts one or two arguments.
+ * SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY_START(-Wrestrict, -Warray-bounds)
+ * ```
+ * ### Output
+ * ```cpp
+ * #pragma GCC diagnostic push
+ * #pragma GCC diagnostic ignored "-Wrestrict"
+ * #pragma GCC diagnostic ignored "-Warray-bounds"
+ * ```
+ */
+#        define SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY_START(...)
+/*!\brief Denotes the end of a block where diagnostics are ignored.
+ * \details
+ * If SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY is 0, this macro has no effect.
+ * Otherwise, the macro will expand to a preprocessor directive equivalent to:
+ * ```cpp
+ * #pragma GCC diagnostic pop
+ * ```
+ */
+#        define SEQAN3_WORKAROUND_GCC_BOGUS_MEMCPY_STOP
+//!\}
 #    endif
 #endif
 
@@ -251,8 +297,14 @@ static_assert(sdsl::sdsl_version_major == 3, "Only version 3 of the SDSL is supp
 #    endif
 #endif
 
-//!\brief Our char literals returning std::vector should be constexpr if constexpr std::vector is supported.
-#if defined(__cpp_lib_constexpr_vector) && __cpp_lib_constexpr_vector >= 201907L
+/*!\brief Our char literals returning std::vector should be constexpr if constexpr std::vector is supported.
+ *
+ * The _GLIBCXX_DEBUG statement is a workaround for a libstdc++ bug
+ * \see https://gcc.gnu.org/bugzilla/show_bug.cgi?id=104748
+ * \see https://github.com/seqan/seqan3/issues/3221
+ * \see https://godbolt.org/z/159n8xrdo
+ **/
+#if __cpp_lib_constexpr_vector >= 201907L && (defined(_LIBCPP_VERSION) || !defined(_GLIBCXX_DEBUG))
 #    define SEQAN3_WORKAROUND_LITERAL constexpr
 #else
 #    define SEQAN3_WORKAROUND_LITERAL inline
@@ -266,7 +318,7 @@ static_assert(sdsl::sdsl_version_major == 3, "Only version 3 of the SDSL is supp
 #if defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI == 0
 #    ifndef SEQAN3_DISABLE_LEGACY_STD_DIAGNOSTIC
 #        pragma message                                                                                                \
-            "We do not actively support compiler that have -D_GLIBCXX_USE_CXX11_ABI=0 set, and it might be that SeqAn does not compile due to this. It is known that all compiler of CentOS 7 / RHEL 7 set this flag by default (and that it cannot be overridden!). Note that these versions of the OSes are community-supported (see https://docs.seqan.de/seqan/3-master-user/about_api.html#platform_stability for more details). You can disable this warning by setting -DSEQAN3_DISABLE_LEGACY_STD_DIAGNOSTIC."
+            "We do not actively support compiler that have -D_GLIBCXX_USE_CXX11_ABI=0 set, and it might be that SeqAn does not compile due to this. It is known that all compiler of CentOS 7 / RHEL 7 set this flag by default (and that it cannot be overridden!). Note that these versions of the OSes are community-supported (see https://docs.seqan.de/seqan3/main_user/about_api.html#platform_stability for more details). You can disable this warning by setting -DSEQAN3_DISABLE_LEGACY_STD_DIAGNOSTIC."
 #    endif // SEQAN3_DISABLE_LEGACY_STD_DIAGNOSTIC
 #endif     // _GLIBCXX_USE_CXX11_ABI == 0
 

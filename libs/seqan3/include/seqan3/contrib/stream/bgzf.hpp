@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::contrib::bgzf_thread_count.
@@ -14,10 +11,12 @@
 
 #include <cstdint>
 
+#include <seqan3/core/platform.hpp>
+
 namespace seqan3::contrib
 {
 
-/*!\brief A static variable indicating the number of threads to use for the bgzf-streams. Defaults to 4.
+/*!\brief A global variable indicating the number of threads to use for the bgzf-streams. Defaults to 4.
  */
 [[maybe_unused]] inline uint64_t bgzf_thread_count = 4;
 

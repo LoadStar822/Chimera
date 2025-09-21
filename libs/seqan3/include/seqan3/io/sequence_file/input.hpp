@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::sequence_file_input and corresponding traits classes.
@@ -95,20 +92,19 @@ namespace seqan3
 //!\}
 //!\cond
 template <typename t>
-concept sequence_file_input_traits =
-    requires (t v) {
-        requires writable_alphabet<typename t::sequence_alphabet>;
-        requires writable_alphabet<typename t::sequence_legal_alphabet>;
-        requires detail::is_char_adaptation_v<typename t::sequence_alphabet>
-                     || explicitly_convertible_to<typename t::sequence_legal_alphabet, typename t::sequence_alphabet>;
-        requires sequence_container<typename t::template sequence_container<typename t::sequence_alphabet>>;
+concept sequence_file_input_traits = requires (t v) {
+    requires writable_alphabet<typename t::sequence_alphabet>;
+    requires writable_alphabet<typename t::sequence_legal_alphabet>;
+    requires detail::is_char_adaptation_v<typename t::sequence_alphabet>
+                 || explicitly_convertible_to<typename t::sequence_legal_alphabet, typename t::sequence_alphabet>;
+    requires sequence_container<typename t::template sequence_container<typename t::sequence_alphabet>>;
 
-        requires writable_alphabet<typename t::id_alphabet>;
-        requires sequence_container<typename t::template id_container<typename t::id_alphabet>>;
+    requires writable_alphabet<typename t::id_alphabet>;
+    requires sequence_container<typename t::template id_container<typename t::id_alphabet>>;
 
-        requires writable_quality_alphabet<typename t::quality_alphabet>;
-        requires sequence_container<typename t::template quality_container<typename t::quality_alphabet>>;
-    };
+    requires writable_quality_alphabet<typename t::quality_alphabet>;
+    requires sequence_container<typename t::template quality_container<typename t::quality_alphabet>>;
+};
 //!\endcond
 
 // ----------------------------------------------------------------------------

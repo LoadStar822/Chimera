@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::sequence_file_output and corresponding traits classes.
@@ -502,14 +499,16 @@ sequence_file_output(stream_t &&,
 template <output_stream stream_t,
           sequence_file_output_format file_format,
           detail::fields_specialisation selected_field_ids>
-sequence_file_output(stream_t &&, file_format const &, selected_field_ids const &)
-    -> sequence_file_output<selected_field_ids, type_list<file_format>>;
+sequence_file_output(stream_t &&,
+                     file_format const &,
+                     selected_field_ids const &) -> sequence_file_output<selected_field_ids, type_list<file_format>>;
 
 //!\overload
 template <output_stream stream_t,
           sequence_file_output_format file_format,
           detail::fields_specialisation selected_field_ids>
-sequence_file_output(stream_t &, file_format const &, selected_field_ids const &)
-    -> sequence_file_output<selected_field_ids, type_list<file_format>>;
+sequence_file_output(stream_t &,
+                     file_format const &,
+                     selected_field_ids const &) -> sequence_file_output<selected_field_ids, type_list<file_format>>;
 //!\}
 } // namespace seqan3

@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides the seqan3::format_sam.
@@ -111,12 +108,12 @@ public:
      * \{
      */
     // construction cannot be noexcept because this class has a std::string variable as a quality string buffer.
-    format_sam() = default;                               //!< Defaulted.
-    format_sam(format_sam const &) = default;             //!< Defaulted.
-    format_sam & operator=(format_sam const &) = default; //!< Defaulted.
-    format_sam(format_sam &&) = default;                  //!< Defaulted.
-    format_sam & operator=(format_sam &&) = default;      //!< Defaulted.
-    ~format_sam() = default;                              //!< Defaulted.
+    format_sam() = default;                              //!< Defaulted.
+    format_sam(format_sam const &) = delete;             //!< Deleted. Header holds a unique_ptr.
+    format_sam & operator=(format_sam const &) = delete; //!< Deleted. Header holds a unique_ptr.
+    format_sam(format_sam &&) = default;                 //!< Defaulted.
+    format_sam & operator=(format_sam &&) = default;     //!< Defaulted.
+    ~format_sam() = default;                             //!< Defaulted.
 
     //!\}
 
@@ -224,9 +221,6 @@ private:
     //!\brief The default header for the alignment format.
     sam_file_header<> default_header{};
 
-    //!\brief Tracks whether reference information (\@SR tag) were found in the SAM header
-    bool ref_info_present_in_header{false};
-
     //!\brief A buffer to store a raw record pointing into the stream buffer of the input.
     std::array<std::string_view, 11> raw_record{};
 
@@ -301,11 +295,12 @@ inline void format_sam::read_sequence_record(stream_type & stream,
         if (std::ranges::distance(sequence) == 0)
             throw parse_error{"The sequence information must not be empty."};
     if constexpr (!detail::decays_to_ignore_v<id_type>)
+    {
         if (std::ranges::distance(id) == 0)
             throw parse_error{"The id information must not be empty."};
-
-    if (options.truncate_ids)
-        id = id | detail::take_until_and_consume(is_space) | ranges::to<id_type>();
+        if (options.truncate_ids)
+            id = id | detail::take_until_and_consume(is_space) | ranges::to<id_type>();
+    }
 }
 
 //!\copydoc sequence_file_output_format::write_sequence_record
@@ -621,12 +616,10 @@ inline void format_sam::write_alignment_record(stream_type & stream,
     static_assert(
         ((std::ranges::forward_range<decltype(std::get<0>(mate))>
           || std::integral<std::remove_cvref_t<decltype(std::get<0>(mate))>>
-          || detail::is_type_specialisation_of_v<
-              std::remove_cvref_t<decltype(std::get<0>(mate))>,
-              std::optional>)&&(std::integral<std::remove_cvref_t<decltype(std::get<1>(mate))>>
-                                || detail::is_type_specialisation_of_v<
-                                    std::remove_cvref_t<decltype(std::get<1>(mate))>,
-                                    std::optional>)&&std::integral<std::remove_cvref_t<decltype(std::get<2>(mate))>>),
+          || detail::is_type_specialisation_of_v<std::remove_cvref_t<decltype(std::get<0>(mate))>, std::optional>)
+         && (std::integral<std::remove_cvref_t<decltype(std::get<1>(mate))>>
+             || detail::is_type_specialisation_of_v<std::remove_cvref_t<decltype(std::get<1>(mate))>, std::optional>)
+         && std::integral<std::remove_cvref_t<decltype(std::get<2>(mate))>>),
         "The mate object must be a std::tuple of size 3 with "
         "1) a std::ranges::forward_range with a value_type modelling seqan3::alphabet, "
         "2) a std::integral or std::optional<std::integral>, and "

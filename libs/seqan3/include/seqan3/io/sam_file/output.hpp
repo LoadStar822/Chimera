@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::sam_file_output and corresponding traits classes.
@@ -158,7 +155,10 @@ public:
     //!\brief The destructor will write the header if it has not been written before.
     ~sam_file_output()
     {
-        if (header_has_been_written)
+        // !primary_stream indicates moved-from object
+        // unique_ptr holds a nullptr after being moved from
+        // See https://eel.is/c++draft/unique.ptr#single.ctor-18
+        if (header_has_been_written || !primary_stream)
             return;
 
         assert(!format.valueless_by_exception());
@@ -774,10 +774,11 @@ sam_file_output(std::filesystem::path const &, ref_ids_type &&, ref_lengths_type
 
 //!\brief Deduces ref_ids_type from input. Valid formats, and selected_field_ids are set to the default.
 template <std::ranges::forward_range ref_ids_type, std::ranges::forward_range ref_lengths_type>
-sam_file_output(std::filesystem::path const &, ref_ids_type &&, ref_lengths_type &&)
-    -> sam_file_output<typename sam_file_output<>::selected_field_ids,
-                       typename sam_file_output<>::valid_formats,
-                       std::remove_reference_t<ref_ids_type>>;
+sam_file_output(std::filesystem::path const &,
+                ref_ids_type &&,
+                ref_lengths_type &&) -> sam_file_output<typename sam_file_output<>::selected_field_ids,
+                                                        typename sam_file_output<>::valid_formats,
+                                                        std::remove_reference_t<ref_ids_type>>;
 
 //!\brief Deduces selected_field_ids, the valid format, and the ref_ids_type from input.
 template <output_stream stream_type,

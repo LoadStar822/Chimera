@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides seqan3::add_enum_bitwise_operators.
@@ -89,7 +86,7 @@ namespace seqan3
  * \include test/snippet/core/add_enum_bitwise_operators.cpp
  */
 template <typename t>
-constexpr bool add_enum_bitwise_operators = false;
+inline constexpr bool add_enum_bitwise_operators = false;
 
 /*!\name Binary operators for scoped enums
  * \brief Perform binary operations like on ints or weak enums. These overloads are available if

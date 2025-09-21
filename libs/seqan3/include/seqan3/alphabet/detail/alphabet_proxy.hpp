@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Hannes Hauswedell <hannes.hauswedell AT fu-berlin.de>
@@ -253,32 +250,32 @@ private:
 public:
     //!\brief Allow (in-)equality comparison with types that the emulated type is comparable with.
     template <typename t>
-    friend constexpr auto operator==(derived_type const lhs, t const rhs) noexcept
-        -> std::enable_if_t<is_alphabet_comparable_with<t>, bool>
+    friend constexpr auto operator==(derived_type const lhs,
+                                     t const rhs) noexcept -> std::enable_if_t<is_alphabet_comparable_with<t>, bool>
     {
         return (lhs.operator alphabet_type() == rhs);
     }
 
     //!\brief Allow (in-)equality comparison with types that the emulated type is comparable with.
     template <typename t>
-    friend constexpr auto operator==(t const lhs, derived_type const rhs) noexcept
-        -> std::enable_if_t<is_alphabet_comparable_with<t>, bool>
+    friend constexpr auto
+    operator==(t const lhs, derived_type const rhs) noexcept -> std::enable_if_t<is_alphabet_comparable_with<t>, bool>
     {
         return (rhs == lhs);
     }
 
     //!\brief Allow (in-)equality comparison with types that the emulated type is comparable with.
     template <typename t>
-    friend constexpr auto operator!=(derived_type const lhs, t const rhs) noexcept
-        -> std::enable_if_t<is_alphabet_comparable_with<t>, bool>
+    friend constexpr auto operator!=(derived_type const lhs,
+                                     t const rhs) noexcept -> std::enable_if_t<is_alphabet_comparable_with<t>, bool>
     {
         return !(lhs == rhs);
     }
 
     //!\brief Allow (in-)equality comparison with types that the emulated type is comparable with.
     template <typename t>
-    friend constexpr auto operator!=(t const lhs, derived_type const rhs) noexcept
-        -> std::enable_if_t<is_alphabet_comparable_with<t>, bool>
+    friend constexpr auto
+    operator!=(t const lhs, derived_type const rhs) noexcept -> std::enable_if_t<is_alphabet_comparable_with<t>, bool>
     {
         return (rhs != lhs);
     }

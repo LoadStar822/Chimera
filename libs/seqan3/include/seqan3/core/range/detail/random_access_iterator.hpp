@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides the seqan3::detail::random_access_iterator class.
@@ -96,8 +93,8 @@ public:
 
     //!\brief Constructor for const version from non-const version.
     template <typename range_type2>
-        requires std::is_const_v<range_type>
-                  && (!std::is_const_v<range_type2>) && std::is_same_v<std::remove_const_t<range_type>, range_type2>
+        requires std::is_const_v<range_type> && (!std::is_const_v<range_type2>)
+                  && std::is_same_v<std::remove_const_t<range_type>, range_type2>
     constexpr random_access_iterator_base(
         random_access_iterator_base<range_type2, derived_t_template> const & rhs) noexcept :
         host{rhs.host},

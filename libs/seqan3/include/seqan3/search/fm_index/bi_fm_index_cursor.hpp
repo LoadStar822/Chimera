@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Christopher Pockrandt <christopher.pockrandt AT fu-berlin.de>
@@ -15,11 +12,10 @@
 #include <array>
 #include <ranges>
 
-#include <sdsl/suffix_trees.hpp>
-
 #include <seqan3/alphabet/adaptation/char.hpp>
 #include <seqan3/alphabet/adaptation/uint.hpp>
 #include <seqan3/alphabet/concept.hpp>
+#include <seqan3/contrib/sdsl-lite.hpp>
 #include <seqan3/core/range/type_traits.hpp>
 #include <seqan3/search/fm_index/fm_index.hpp>
 #include <seqan3/search/fm_index/fm_index_cursor.hpp>
@@ -145,13 +141,13 @@ private:
     //!\brief Optimized bidirectional search without alphabet mapping
     template <typename csa_t>
         requires (std::same_as<csa_t, typename index_type::sdsl_index_type>
-                  || std::same_as<csa_t, typename index_type::rev_sdsl_index_type>) bool
-    bidirectional_search(csa_t const & csa,
-                         sdsl_char_type const c,
-                         size_type & l_fwd,
-                         size_type & r_fwd,
-                         size_type & l_bwd,
-                         size_type & r_bwd) const noexcept
+                  || std::same_as<csa_t, typename index_type::rev_sdsl_index_type>)
+    bool bidirectional_search(csa_t const & csa,
+                              sdsl_char_type const c,
+                              size_type & l_fwd,
+                              size_type & r_fwd,
+                              size_type & l_bwd,
+                              size_type & r_bwd) const noexcept
     {
         assert((l_fwd <= r_fwd) && (r_fwd < csa.size()));
         assert(r_fwd + 1 >= l_fwd);
@@ -160,7 +156,7 @@ private:
         size_type _l_fwd, _r_fwd, _l_bwd, _r_bwd;
 
         size_type cc = c;
-        if constexpr (!std::same_as<index_alphabet_type, sdsl::plain_byte_alphabet>)
+        if constexpr (!std::same_as<index_alphabet_type, seqan3::contrib::sdsl::plain_byte_alphabet>)
         {
             cc = csa.char2comp[c];
             if (cc == 0 && c > 0) // [[unlikely]]
@@ -204,20 +200,20 @@ private:
     //!\brief Optimized bidirectional search for cycle_back() and cycle_front() without alphabet mapping
     template <typename csa_t>
         requires (std::same_as<csa_t, typename index_type::sdsl_index_type>
-                  || std::same_as<csa_t, typename index_type::rev_sdsl_index_type>) bool
-    bidirectional_search_cycle(csa_t const & csa,
-                               sdsl_char_type const c,
-                               size_type const l_parent,
-                               size_type const r_parent,
-                               size_type & l_fwd,
-                               size_type & r_fwd,
-                               size_type & l_bwd,
-                               size_type & r_bwd) const noexcept
+                  || std::same_as<csa_t, typename index_type::rev_sdsl_index_type>)
+    bool bidirectional_search_cycle(csa_t const & csa,
+                                    sdsl_char_type const c,
+                                    size_type const l_parent,
+                                    size_type const r_parent,
+                                    size_type & l_fwd,
+                                    size_type & r_fwd,
+                                    size_type & l_bwd,
+                                    size_type & r_bwd) const noexcept
     {
         assert((l_parent <= r_parent) && (r_parent < csa.size()));
 
         size_type c_begin;
-        if constexpr (std::same_as<index_alphabet_type, sdsl::plain_byte_alphabet>)
+        if constexpr (std::same_as<index_alphabet_type, seqan3::contrib::sdsl::plain_byte_alphabet>)
             c_begin = csa.C[c]; // TODO: check whether this can be removed
         else
             c_begin = csa.C[csa.char2comp[c]];
@@ -338,7 +334,7 @@ public:
 
         size_type new_parent_lb = fwd_lb, new_parent_rb = fwd_rb;
 
-        sdsl_char_type c = 1; // NOTE: start with 0 or 1 depending on implicit_sentintel
+        sdsl_sigma_type c = 1; // NOTE: start with 0 or 1 depending on implicit_sentintel
         while (c < sigma
                && !bidirectional_search(index->fwd_fm.index,
                                         index->fwd_fm.index.comp2char[c],
@@ -355,7 +351,8 @@ public:
             parent_lb = new_parent_lb;
             parent_rb = new_parent_rb;
 
-            _last_char = c;
+            assert(c <= std::numeric_limits<sdsl_char_type>::max());
+            _last_char = static_cast<sdsl_char_type>(c);
             ++depth;
 
             return true;
@@ -390,7 +387,7 @@ public:
 
         size_type new_parent_lb = rev_lb, new_parent_rb = rev_rb;
 
-        sdsl_char_type c = 1; // NOTE: start with 0 or 1 depending on implicit_sentintel
+        sdsl_sigma_type c = 1; // NOTE: start with 0 or 1 depending on implicit_sentintel
         while (c < sigma
                && !bidirectional_search(index->rev_fm.index,
                                         index->rev_fm.index.comp2char[c],
@@ -407,7 +404,8 @@ public:
             parent_lb = new_parent_lb;
             parent_rb = new_parent_rb;
 
-            _last_char = c;
+            assert(c <= std::numeric_limits<sdsl_char_type>::max());
+            _last_char = static_cast<sdsl_char_type>(c);
             ++depth;
 
             return true;
@@ -429,8 +427,8 @@ public:
      * No-throw guarantee.
      */
     template <typename char_t>
-        requires std::convertible_to<char_t, index_alphabet_type> bool
-    extend_right(char_t const c) noexcept
+        requires std::convertible_to<char_t, index_alphabet_type>
+    bool extend_right(char_t const c) noexcept
     {
 #ifndef NDEBUG
         fwd_cursor_last_used = true;
@@ -460,8 +458,8 @@ public:
 
     //!\overload
     template <typename char_type>
-        requires seqan3::detail::is_char_adaptation_v<char_type> bool
-    extend_right(char_type const * cstring) noexcept
+        requires seqan3::detail::is_char_adaptation_v<char_type>
+    bool extend_right(char_type const * cstring) noexcept
     {
         return extend_right(std::basic_string_view<char_type>{cstring});
     }
@@ -480,8 +478,8 @@ public:
      * No-throw guarantee.
      */
     template <typename char_t>
-        requires std::convertible_to<char_t, index_alphabet_type> bool
-    extend_left(char_t const c) noexcept
+        requires std::convertible_to<char_t, index_alphabet_type>
+    bool extend_left(char_t const c) noexcept
     {
 #ifndef NDEBUG
         fwd_cursor_last_used = false;
@@ -511,8 +509,8 @@ public:
 
     //!\overload
     template <typename char_type>
-        requires seqan3::detail::is_char_adaptation_v<char_type> bool
-    extend_left(char_type const * cstring) noexcept
+        requires seqan3::detail::is_char_adaptation_v<char_type>
+    bool extend_left(char_type const * cstring) noexcept
     {
         return extend_left(std::basic_string_view<char_type>{cstring});
     }
@@ -688,7 +686,7 @@ public:
 
         assert(index != nullptr && query_length() > 0);
 
-        sdsl_char_type c = _last_char + 1;
+        sdsl_sigma_type c = _last_char + 1;
 
         while (c < sigma
                && !bidirectional_search_cycle(index->fwd_fm.index,
@@ -705,7 +703,8 @@ public:
 
         if (c != sigma)
         {
-            _last_char = c;
+            assert(c <= std::numeric_limits<sdsl_char_type>::max());
+            _last_char = static_cast<sdsl_char_type>(c);
 
             return true;
         }
@@ -747,7 +746,7 @@ public:
 
         assert(index != nullptr && query_length() > 0);
 
-        sdsl_char_type c = _last_char + 1;
+        sdsl_sigma_type c = _last_char + 1;
         while (c < sigma
                && !bidirectional_search_cycle(index->rev_fm.index,
                                               index->rev_fm.index.comp2char[c],
@@ -763,7 +762,8 @@ public:
 
         if (c != sigma)
         {
-            _last_char = c;
+            assert(c <= std::numeric_limits<sdsl_char_type>::max());
+            _last_char = static_cast<sdsl_char_type>(c);
 
             return true;
         }

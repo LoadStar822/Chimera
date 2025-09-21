@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Christopher Pockrandt <christopher.pockrandt AT fu-berlin.de>
@@ -16,9 +13,8 @@
 #include <filesystem>
 #include <ranges>
 
-#include <sdsl/suffix_trees.hpp>
-
 #include <seqan3/alphabet/views/to_rank.hpp>
+#include <seqan3/contrib/sdsl-lite.hpp>
 #include <seqan3/core/range/type_traits.hpp>
 #include <seqan3/search/fm_index/concept.hpp>
 #include <seqan3/search/fm_index/detail/fm_index_cursor.hpp>
@@ -126,16 +122,16 @@ class reverse_fm_index;
  * \if DEV \todo Asymptotic space consumption: \endif
  *
  */
-using sdsl_wt_index_type =
-    sdsl::csa_wt<sdsl::wt_blcd<sdsl::bit_vector, // Wavelet tree type
-                               sdsl::rank_support_v<>,
-                               sdsl::select_support_scan<>,
-                               sdsl::select_support_scan<0>>,
-                 16,                           // Sampling rate of the suffix array
-                 10'000'000,                   // Sampling rate of the inverse suffix array
-                 sdsl::sa_order_sa_sampling<>, // How to sample positions in the suffix array (text VS SA sampling)
-                 sdsl::isa_sampling<>,         // How to sample positons in the inverse suffix array
-                 sdsl::plain_byte_alphabet>;   // How to represent the alphabet
+using sdsl_wt_index_type = seqan3::contrib::sdsl::csa_wt<
+    seqan3::contrib::sdsl::wt_blcd<seqan3::contrib::sdsl::bit_vector, // Wavelet tree type
+                                   seqan3::contrib::sdsl::rank_support_v<>,
+                                   seqan3::contrib::sdsl::select_support_scan<>,
+                                   seqan3::contrib::sdsl::select_support_scan<0>>,
+    16,                                            // Sampling rate of the suffix array
+    10'000'000,                                    // Sampling rate of the inverse suffix array
+    seqan3::contrib::sdsl::sa_order_sa_sampling<>, // How to sample positions in the suffix array (text VS SA sampling)
+    seqan3::contrib::sdsl::isa_sampling<>,         // How to sample positons in the inverse suffix array
+    seqan3::contrib::sdsl::plain_byte_alphabet>;   // How to represent the alphabet
 
 /*!\brief The default FM Index Configuration.
  * \ingroup search_fm_index
@@ -207,11 +203,11 @@ private:
     sdsl_index_type index;
 
     //!\brief Bitvector storing begin positions for collections.
-    sdsl::sd_vector<> text_begin;
+    seqan3::contrib::sdsl::sd_vector<> text_begin;
     //!\brief Select support for text_begin.
-    sdsl::select_support_sd<1> text_begin_ss;
+    seqan3::contrib::sdsl::select_support_sd<1> text_begin_ss;
     //!\brief Rank support for text_begin.
-    sdsl::rank_support_sd<1> text_begin_rs;
+    seqan3::contrib::sdsl::rank_support_sd<1> text_begin_rs;
 
     //!\brief Eagerly convert sequence into ranks, shift by one and copy them into output_it.
     template <typename output_it_t, typename sequence_t>
@@ -235,6 +231,8 @@ private:
                                           uint8_t const rank = seqan3::to_rank(chr);
                                           if constexpr (sigma >= max_sigma)
                                               warn_if_rank_out_of_range(rank);
+                                          else
+                                              (void)warn_if_rank_out_of_range;
                                           return rank + 1;
                                       })
             .out;
@@ -270,12 +268,12 @@ private:
         // * choose between in-memory/external and construction algorithms
         // * sdsl construction currently only works for int_vector, std::string and char *, not ranges in general
         // uint8_t largest_char = 0;
-        sdsl::int_vector<8> tmp_text(std::ranges::distance(text));
+        seqan3::contrib::sdsl::int_vector<8> tmp_text(std::ranges::distance(text));
 
         // copy ranks into tmp_text
         copy_sequence_ranks_shifted_by_one(std::ranges::begin(tmp_text), text | std::views::reverse);
 
-        sdsl::construct_im(index, tmp_text, 0);
+        seqan3::contrib::sdsl::construct_im(index, tmp_text, 0);
 
         // TODO: would be nice but doesn't work since it's private and the public member references are const
         // index.m_C.resize(largest_char);
@@ -308,7 +306,7 @@ private:
         // Instead of creating a bitvector of size `text_size`, setting the bits to 1 and then compressing it, we can
         // use the `sd_vector_builder(text_size, number_of_ones)` because we know the parameters and the 1s we want to
         // set are in a strictly increasing order. This inplace construction of the compressed vector saves memory.
-        sdsl::sd_vector_builder builder(text_size, number_of_texts);
+        seqan3::contrib::sdsl::sd_vector_builder builder(text_size, number_of_texts);
         size_t prefix_sum{0};
 
         for (auto && size : text_sizes)
@@ -317,12 +315,12 @@ private:
             prefix_sum += size + 1;
         }
 
-        text_begin = sdsl::sd_vector<>(builder);
-        text_begin_ss = sdsl::select_support_sd<1>(&text_begin);
-        text_begin_rs = sdsl::rank_support_sd<1>(&text_begin);
+        text_begin = seqan3::contrib::sdsl::sd_vector<>(builder);
+        text_begin_ss = seqan3::contrib::sdsl::select_support_sd<1>(&text_begin);
+        text_begin_rs = seqan3::contrib::sdsl::rank_support_sd<1>(&text_begin);
 
         // last text in collection needs no delimiter if we have more than one text in the collection
-        sdsl::int_vector<8> tmp_text(text_size - (number_of_texts > 1));
+        seqan3::contrib::sdsl::int_vector<8> tmp_text(text_size - (number_of_texts > 1));
 
         constexpr uint8_t delimiter = sigma >= 255 ? 255 : sigma + 1;
 
@@ -372,7 +370,7 @@ private:
             }
         }
 
-        sdsl::construct_im(index, tmp_text, 0);
+        seqan3::contrib::sdsl::construct_im(index, tmp_text, 0);
     }
 
 public:
@@ -397,7 +395,7 @@ public:
     friend class fm_index_cursor;
 
     template <typename fm_index_t>
-    friend class detail::fm_index_cursor_node;
+    friend struct detail::fm_index_cursor_node;
 
     /*!\name Constructors, destructor and assignment
      * \{

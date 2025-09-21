@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Tobias Loka <tobias.loka AT hpi.de>
@@ -12,7 +9,11 @@
 
 #pragma once
 
-#include <seqan3/search/dream_index/interleaved_bloom_filter.hpp>
+#include <seqan3/contrib/sdsl-lite.hpp>
+#include <seqan3/core/concept/cereal.hpp>
+//Todo: When removing search/dream_index/interleaved_bloom_filter.hpp, the contents of the following header can be
+// moved into this file
+#include <seqan3/utility/bloom_filter/bloom_filter_strong_types.hpp>
 
 namespace seqan3
 {
@@ -90,8 +91,9 @@ private:
     //!\endcond
 
     //!\brief The underlying datatype to use.
-    using data_type =
-        std::conditional_t<data_layout_mode_ == data_layout::uncompressed, sdsl::bit_vector, sdsl::sd_vector<>>;
+    using data_type = std::conditional_t<data_layout_mode_ == data_layout::uncompressed,
+                                         seqan3::contrib::sdsl::bit_vector,
+                                         seqan3::contrib::sdsl::sd_vector<>>;
 
     //!\brief The size of the underlying bit vector in bits.
     size_t size_in_bits{};
@@ -102,11 +104,11 @@ private:
     //!\brief The bitvector.
     data_type data{};
     //!\brief Precalculated seeds for multiplicative hashing. We use large irrational numbers for a uniform hashing.
-    static constexpr std::array<size_t, 5> hash_seeds{13572355802537770549ULL, // 2**64 / (e/2)
-                                                      13043817825332782213ULL, // 2**64 / sqrt(2)
-                                                      10650232656628343401ULL, // 2**64 / sqrt(3)
-                                                      16499269484942379435ULL, // 2**64 / (sqrt(5)/2)
-                                                      4893150838803335377ULL}; // 2**64 / (3*pi/5)
+    static constexpr std::array<size_t, 5> hash_seeds{13'572'355'802'537'770'549ULL, // 2**64 / (e/2)
+                                                      13'043'817'825'332'782'213ULL, // 2**64 / sqrt(2)
+                                                      10'650'232'656'628'343'401ULL, // 2**64 / sqrt(3)
+                                                      16'499'269'484'942'379'435ULL, // 2**64 / (sqrt(5)/2)
+                                                      4'893'150'838'803'335'377ULL}; // 2**64 / (3*pi/5)
 
     /*!\brief Perturbs a value and fits it into the vector.
      * \param h The value to process.
@@ -118,9 +120,9 @@ private:
     inline constexpr size_t hash_and_fit(size_t h, size_t const seed) const
     {
         h *= seed;
-        h ^= h >> hash_shift;         // XOR and shift higher bits into lower bits
-        h *= 11400714819323198485ULL; // = 2^64 / golden_ration, to expand h to 64 bit range
-                                      // Use fastrange (integer modulo without division) if possible.
+        h ^= h >> hash_shift;               // XOR and shift higher bits into lower bits
+        h *= 11'400'714'819'323'198'485ULL; // = 2^64 / golden_ration, to expand h to 64 bit range
+                                            // Use fastrange (integer modulo without division) if possible.
 #ifdef __SIZEOF_INT128__
         h = static_cast<uint64_t>((static_cast<__uint128_t>(h) * static_cast<__uint128_t>(size_in_bits)) >> 64);
 #else
@@ -167,7 +169,7 @@ public:
             throw std::logic_error{"The size of a bloom filter must be > 0."};
 
         hash_shift = std::countl_zero(size_in_bits);
-        data = sdsl::bit_vector(size_in_bits);
+        data = seqan3::contrib::sdsl::bit_vector(size_in_bits);
     }
 
     /*!\brief Construct a compressed Bloom Filter.
@@ -186,7 +188,7 @@ public:
     {
         std::tie(size_in_bits, hash_shift, hash_funs) = std::tie(bf.size_in_bits, bf.hash_shift, bf.hash_funs);
 
-        data = sdsl::sd_vector<>{bf.data};
+        data = seqan3::contrib::sdsl::sd_vector<>{bf.data};
     }
     //!\}
 
@@ -230,7 +232,7 @@ public:
     void reset() noexcept
         requires (data_layout_mode == data_layout::uncompressed)
     {
-        sdsl::util::_set_zero_bits(data);
+        seqan3::contrib::sdsl::util::_set_zero_bits(data);
     }
     //!\}
 

@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Svenja Mehringer <svenja.mehringer AT fu-berlin.de>
@@ -14,6 +11,7 @@
 
 #include <algorithm>
 #include <concepts>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <ranges>
@@ -30,6 +28,8 @@
 #include <seqan3/utility/type_pack/traits.hpp>
 #include <seqan3/utility/type_traits/basic.hpp>
 #include <seqan3/utility/views/join_with.hpp>
+
+SEQAN3_DEPRECATED_HEADER("This header and its functionality is deprecated and will be removed in a future version of SeqAn. Please use the sharg-parser (url: https://github.com/seqan/sharg-parser) instead.");
 
 namespace seqan3
 {
@@ -99,12 +99,8 @@ concept validator =
     && requires (validator_type validator, typename std::remove_reference_t<validator_type>::option_value_type value) {
            typename std::remove_reference_t<validator_type>::option_value_type;
 
-           {
-               validator(value)
-               } -> std::same_as<void>;
-           {
-               validator.get_help_page_message()
-               } -> std::same_as<std::string>;
+           { validator(value) } -> std::same_as<void>;
+           { validator.get_help_page_message() } -> std::same_as<std::string>;
        };
 //!\endcond
 

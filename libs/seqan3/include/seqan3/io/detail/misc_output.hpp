@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides various utility functions required only for output.
@@ -18,14 +15,10 @@
 #include <string>
 #include <tuple>
 
-#if defined(SEQAN3_HAS_BZIP2)
-#    include <seqan3/contrib/stream/bz2_ostream.hpp>
-#endif
-#if defined(SEQAN3_HAS_ZLIB)
-#    include <seqan3/contrib/stream/bgzf_ostream.hpp>
-#    include <seqan3/contrib/stream/gz_ostream.hpp>
-#endif
 #include <seqan3/contrib/stream/bgzf.hpp>
+#include <seqan3/contrib/stream/bgzf_ostream.hpp>
+#include <seqan3/contrib/stream/bz2_ostream.hpp>
+#include <seqan3/contrib/stream/gz_ostream.hpp>
 #include <seqan3/io/exception.hpp>
 #include <seqan3/utility/concept.hpp>
 
@@ -55,32 +48,32 @@ inline auto make_secondary_ostream(std::basic_ostream<char_t> & primary_stream, 
 
     if (extension == ".gz")
     {
-#if defined(SEQAN3_HAS_ZLIB)
+#if SEQAN3_HAS_ZLIB
         filename.replace_extension("");
         return {new contrib::basic_gz_ostream<char_t>{primary_stream}, stream_deleter_default};
 #else
         throw file_open_error{"Trying to write a gzipped file, but no ZLIB available."};
-#endif
+#endif // SEQAN3_HAS_ZLIB
     }
     else if ((extension == ".bgzf") || (extension == ".bam"))
     {
-#if defined(SEQAN3_HAS_ZLIB)
+#if SEQAN3_HAS_ZLIB
         if (extension != ".bam") // remove extension except for bam
             filename.replace_extension("");
 
         return {new contrib::basic_bgzf_ostream<char_t>{primary_stream}, stream_deleter_default};
 #else
         throw file_open_error{"Trying to write a bgzf'ed file, but no ZLIB available."};
-#endif
+#endif // SEQAN3_HAS_ZLIB
     }
     else if (extension == ".bz2")
     {
-#if defined(SEQAN3_HAS_BZIP2)
+#if SEQAN3_HAS_BZIP2
         filename.replace_extension("");
         return {new contrib::basic_bz2_ostream<char_t>{primary_stream}, stream_deleter_default};
 #else
         throw file_open_error{"Trying to write a bzipped file, but no libbz2 available."};
-#endif
+#endif // SEQAN3_HAS_BZIP2
     }
     else if (extension == ".zst")
     {

@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \author Hannes Hauswedell <hannes.hauswedell AT fu-berlin.de>
@@ -18,7 +15,7 @@
 #include <ranges>
 #include <type_traits>
 
-#include <seqan3/core/detail/copyable_wrapper.hpp>
+#include <seqan3/contrib/std/detail/movable_box.hpp>
 #include <seqan3/core/detail/iterator_traits.hpp>
 #include <seqan3/core/range/detail/adaptor_from_functor.hpp>
 #include <seqan3/core/range/detail/inherited_iterator_base.hpp>
@@ -54,14 +51,14 @@ private:
     static_assert(std::invocable<fun_t, std::ranges::range_reference_t<urng_t>>,
                   "The functor type for detail::take_until must model"
                   "std::invocable<fun_t, std::ranges::range_reference_t<urng_t>>.");
-    static_assert(std::convertible_to<std::result_of_t<fun_t && (std::ranges::range_reference_t<urng_t>)>, bool>,
+    static_assert(std::convertible_to<std::invoke_result_t<fun_t &&, std::ranges::range_reference_t<urng_t>>, bool>,
                   "The result type of the functor for detail::take_until must be a boolean.");
 
     //!\brief The underlying range.
     urng_t urange;
 
     //!\brief The functor.
-    copyable_wrapper_t<fun_t> fun;
+    seqan::stl::detail::movable_box_t<fun_t> fun;
 
     //!\brief Whether this view is const_iterable or not.
     static constexpr bool const_iterable =
@@ -204,7 +201,7 @@ private:
     using base_t = inherited_iterator_base<basic_consume_iterator, underlying_iterator_t>;
 
     //!\brief Pointer to the functor stored in the view.
-    copyable_wrapper_t<fun_t> const * fun{nullptr};
+    seqan::stl::detail::movable_box_t<fun_t> const * fun{nullptr};
 
     //!\brief The sentinel type is identical to that of the underlying range.
     using underlying_sentinel_t = seqan3::detail::maybe_const_sentinel_t<const_range, urng_t>;
@@ -229,7 +226,7 @@ public:
 
     //!\brief Constructor that delegates to the CRTP layer and initialises the callable.
     basic_consume_iterator(underlying_iterator_t it,
-                           copyable_wrapper_t<fun_t> const & _fun,
+                           seqan::stl::detail::movable_box_t<fun_t> const & _fun,
                            underlying_sentinel_t sen) noexcept(noexcept(base_t{it})) :
         base_t{std::move(it)},
         fun{std::addressof(_fun)},
@@ -259,9 +256,10 @@ public:
      * \{
      */
     //!\brief Override pre-increment to implement consuming behaviour.
-    basic_consume_iterator & operator++() noexcept(noexcept(++std::declval<base_t &>()) && noexcept(
-        std::declval<underlying_iterator_t &>()
-        != std::declval<underlying_sentinel_t &>()) && noexcept(fun->operator()(std::declval<reference>())))
+    basic_consume_iterator & operator++()
+        noexcept(noexcept(++std::declval<base_t &>())
+                 && noexcept(std::declval<underlying_iterator_t &>() != std::declval<underlying_sentinel_t &>())
+                 && noexcept(fun->operator()(std::declval<reference>())))
     {
         base_t::operator++();
 
@@ -297,9 +295,10 @@ public:
      * \{
      */
     //!\brief Return the saved at_end state.
-    bool operator==(basic_consume_sentinel<const_range> const &) const noexcept(!or_throw && noexcept(
-        std::declval<underlying_iterator_t &>()
-        != std::declval<underlying_sentinel_t &>()) && noexcept(fun->operator()(std::declval<reference>())))
+    bool operator==(basic_consume_sentinel<const_range> const &) const
+        noexcept(!or_throw
+                 && noexcept(std::declval<underlying_iterator_t &>() != std::declval<underlying_sentinel_t &>())
+                 && noexcept(fun->operator()(std::declval<reference>())))
     {
         if (at_end_gracefully)
             return true;
@@ -316,8 +315,8 @@ public:
     }
 
     //!\brief Return the saved at_end state.
-    friend bool operator==(basic_consume_sentinel<const_range> const & lhs,
-                           basic_consume_iterator const & rhs) noexcept(noexcept(rhs == lhs))
+    friend bool operator==(basic_consume_sentinel<const_range> const & lhs, basic_consume_iterator const & rhs)
+        noexcept(noexcept(rhs == lhs))
     {
         return rhs == lhs;
     }
@@ -330,8 +329,8 @@ public:
     }
 
     //!\brief Return the saved at_end state.
-    friend bool operator!=(basic_consume_sentinel<const_range> const & lhs,
-                           basic_consume_iterator const & rhs) noexcept(noexcept(rhs != lhs))
+    friend bool operator!=(basic_consume_sentinel<const_range> const & lhs, basic_consume_iterator const & rhs)
+        noexcept(noexcept(rhs != lhs))
     {
         return rhs != lhs;
     }
@@ -350,7 +349,7 @@ private:
     underlying_sentinel_t underlying_sentinel{};
 
     //!\brief Pointer to the functor stored in the view.
-    copyable_wrapper_t<fun_t> const * fun{nullptr};
+    seqan::stl::detail::movable_box_t<fun_t> const * fun{nullptr};
 
 public:
     /*!\name Constructors, destructor and assignment
@@ -367,7 +366,8 @@ public:
      * \param[in] underlying_sentinel  The actual end of the underlying range.
      * \param[in] _fun                 Reference to the functor stored in the view.
      */
-    explicit basic_sentinel(underlying_sentinel_t underlying_sentinel, copyable_wrapper_t<fun_t> const & _fun) :
+    explicit basic_sentinel(underlying_sentinel_t underlying_sentinel,
+                            seqan::stl::detail::movable_box_t<fun_t> const & _fun) :
         underlying_sentinel{std::move(underlying_sentinel)},
         fun{std::addressof(_fun)}
     {}
@@ -531,6 +531,7 @@ namespace seqan3::detail
  * | std::ranges::sized_range         |                                       | *lost*                                             |
  * | std::ranges::common_range        |                                       | *lost*                                             |
  * | std::ranges::output_range        |                                       | *preserved*                                        |
+ * | std::ranges::borrowed_range      |                                       | *preserved*                                        |
  * | seqan3::const_iterable_range     |                                       | <i>preserved</i>¹                                  |
  * |                                  |                                       |                                                    |
  * | std::ranges::range_reference_t   |                                       | std::ranges::range_reference_t<urng_t>             |
@@ -602,3 +603,12 @@ inline constexpr auto take_until_and_consume = take_until_fn<false, true>{};
 inline constexpr auto take_until_or_throw_and_consume = take_until_fn<true, true>{};
 
 } // namespace seqan3::detail
+
+namespace std::ranges
+{
+//!\cond
+template <std::ranges::view urng_t, typename fun_t, bool or_throw, bool and_consume>
+inline constexpr bool enable_borrowed_range<seqan3::detail::view_take_until<urng_t, fun_t, or_throw, and_consume>> =
+    enable_borrowed_range<urng_t>;
+//!\endcond
+} // namespace std::ranges

@@ -1,9 +1,6 @@
-// -----------------------------------------------------------------------------------------------------
-// Copyright (c) 2006-2023, Knut Reinert & Freie Universität Berlin
-// Copyright (c) 2016-2023, Knut Reinert & MPI für molekulare Genetik
-// This file may be used, modified and/or redistributed under the terms of the 3-clause BSD-License
-// shipped with this file and also available at: https://github.com/seqan/seqan3/blob/master/LICENSE.md
-// -----------------------------------------------------------------------------------------------------
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
 
 /*!\file
  * \brief Provides traits to inspect some information of a type, for example its name.
@@ -16,6 +13,7 @@
 #    include <cxxabi.h>
 #endif // defined(__GNUC__) || defined(__clang__)
 
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <string>
@@ -59,12 +57,15 @@ inline std::string const type_name_as_string = []()
     // itself, since the type is directly given by the compiler. See https://github.com/seqan/seqan3/pull/2311.
     // LCOV_EXCL_START
     if (status != 0)
-        return std::string{typeid(type).name()} + " (abi::__cxa_demangle error status (" + std::to_string(status)
-             + "): "
-             + (status == -1 ? "A memory allocation failure occurred."
-                             : (status == -2 ? "mangled_name is not a valid name under the C++ ABI mangling rules."
-                                             : (status == -3 ? "One of the arguments is invalid." : "Unknown Error")))
-             + ")";
+    {
+        demangled_name =
+            std::string{typeid(type).name()} + " (abi::__cxa_demangle error status (" + std::to_string(status) + "): "
+            + (status == -1 ? "A memory allocation failure occurred."
+                            : (status == -2 ? "mangled_name is not a valid name under the C++ ABI mangling rules."
+                                            : (status == -3 ? "One of the arguments is invalid." : "Unknown Error")))
+            + ")";
+        return demangled_name;
+    }
     // LCOV_EXCL_STOP
 
     demangled_name = std::string{std::addressof(*demangled_name_ptr)};
