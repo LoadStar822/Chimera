@@ -1329,7 +1329,7 @@ inline void writeBucket64(size_t bucket, size_t bin, uint64_t value) {
 		}
 
 		inline bool hasActiveIndex() const {
-			return !activeGroups.empty();
+			return activeGroups.size() == hashSize && !activeGroups.empty();
 		}
 
 #ifdef IMCF_MIRROR64
@@ -1341,93 +1341,141 @@ inline void writeBucket64(size_t bucket, size_t bin, uint64_t value) {
 #endif
 
 		inline void buildActiveGroups() {
-			activeGroups.assign(hashSize, {});
-			for (size_t bucket = 0; bucket < hashSize; ++bucket) {
-				auto& groupList = activeGroups[bucket];
-				for (size_t bin = 0; bin < binNum; ++bin) {
-					uint64_t q = readBucket64(bucket, bin);
-					if (q != 0ULL) {
-						groupList.push_back(static_cast<uint32_t>(bin));
-					}
-				}
-			}
+			buildIndexes(false);
 		}
 
 		inline void buildRouterIndex() {
-			clearRouterIndex();
+			buildIndexes(true);
+		}
+
+		inline void buildIndexes(bool buildRouter) {
 			if (hashSize == 0 || binNum == 0) {
+				activeGroups.clear();
+				if (buildRouter) {
+					clearRouterIndex();
+				}
 				return;
 			}
 
-			routerBucketOffsets.assign(hashSize + 1, 0);
-			routerEntryOffsets.clear();
-			routerEntryOffsets.reserve(hashSize * 2);
-			routerEntryOffsets.push_back(0);
-			routerEntryFingerprints.clear();
-			routerEntryFingerprints.reserve(hashSize * 2);
-			routerPayload.clear();
+			activeGroups.assign(hashSize, {});
 
+			struct RouterBucketData {
+				std::vector<uint16_t> fingerprints;
+				std::vector<uint64_t> entryOffsets;
+				std::vector<uint8_t> payload;
+			};
+
+			std::vector<RouterBucketData> routerBuckets;
+			if (buildRouter) {
+				routerBuckets.resize(hashSize);
+				routerBucketOffsets.assign(hashSize + 1, 0);
+				routerEntryOffsets.clear();
+				routerEntryFingerprints.clear();
+				routerPayload.clear();
+			}
+
+#pragma omp parallel for schedule(dynamic, 32)
 			for (size_t bucket = 0; bucket < hashSize; ++bucket) {
-				robin_hood::unordered_flat_map<uint16_t, std::vector<uint32_t>> perFp;
-				perFp.reserve(32);
-				for (size_t bin = 0; bin < binNum; ++bin) {
+				auto& groupList = activeGroups[bucket];
+				groupList.clear();
+				groupList.reserve(16);
+
+				if (!buildRouter) {
+					for (uint32_t bin = 0; bin < binNum; ++bin) {
+						uint64_t q = readBucket64(bucket, bin);
+						if (q != 0ULL) {
+							groupList.push_back(static_cast<uint32_t>(bin));
+						}
+					}
+					continue;
+				}
+
+				RouterBucketData localData;
+				localData.fingerprints.reserve(32);
+				localData.entryOffsets.reserve(32);
+				localData.payload.reserve(128);
+				std::vector<std::pair<uint16_t, uint32_t>> entries;
+				entries.reserve(64);
+
+				for (uint32_t bin = 0; bin < binNum; ++bin) {
 					uint64_t q = readBucket64(bucket, bin);
 					if (q == 0ULL) {
 						continue;
 					}
+					groupList.push_back(static_cast<uint32_t>(bin));
 					for (int lane = 0; lane < static_cast<int>(tagNum); ++lane) {
 						uint16_t tag = static_cast<uint16_t>((q >> (lane * 16)) & 0xFFFFu);
 						if (tag == 0u) {
 							continue;
 						}
 						uint16_t fp = static_cast<uint16_t>(tag & 0x0FFFu);
-						perFp[fp].push_back(static_cast<uint32_t>(bin));
+						entries.emplace_back(fp, static_cast<uint32_t>(bin));
 					}
 				}
 
-				if (perFp.empty()) {
-					routerBucketOffsets[bucket + 1] = routerBucketOffsets[bucket];
-					continue;
-				}
+				if (!entries.empty()) {
+					std::sort(entries.begin(), entries.end(), [](const auto& lhs, const auto& rhs) {
+						if (lhs.first != rhs.first) {
+							return lhs.first < rhs.first;
+						}
+						return lhs.second < rhs.second;
+					});
 
-				std::vector<std::pair<uint16_t, std::vector<uint32_t>>> entries;
-				entries.reserve(perFp.size());
-				for (auto& kv : perFp) {
-					auto& bins = kv.second;
-					std::sort(bins.begin(), bins.end());
-					bins.erase(std::unique(bins.begin(), bins.end()), bins.end());
-					if (!bins.empty()) {
-						entries.emplace_back(kv.first, std::move(bins));
+					localData.entryOffsets.push_back(0);
+					size_t idx = 0;
+					while (idx < entries.size()) {
+						uint16_t fp = entries[idx].first;
+						localData.fingerprints.push_back(fp);
+						uint32_t prev = 0;
+						bool first = true;
+						while (idx < entries.size() && entries[idx].first == fp) {
+							uint32_t binVal = entries[idx].second;
+							if (first || binVal != prev) {
+								uint32_t delta = first ? binVal : (binVal - prev);
+								encodeVarint(localData.payload, delta);
+								prev = binVal;
+								first = false;
+							}
+							++idx;
+						}
+						localData.entryOffsets.push_back(static_cast<uint64_t>(localData.payload.size()));
 					}
 				}
 
-				if (entries.empty()) {
-					routerBucketOffsets[bucket + 1] = routerBucketOffsets[bucket];
-					continue;
-				}
-
-				std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
-					return a.first < b.first;
-				});
-
-				for (auto& [fp, bins] : entries) {
-					routerEntryFingerprints.push_back(fp);
-					uint32_t prev = 0;
-					bool first = true;
-					for (uint32_t bin : bins) {
-						uint32_t delta = first ? bin : (bin - prev);
-						first = false;
-						prev = bin;
-						encodeVarint(routerPayload, delta);
-					}
-					routerEntryOffsets.push_back(routerPayload.size());
-				}
-
-				routerBucketOffsets[bucket + 1] = routerEntryFingerprints.size();
+				routerBuckets[bucket] = std::move(localData);
 			}
 
-			if (routerEntryOffsets.size() != routerEntryFingerprints.size() + 1) {
-				clearRouterIndex();
+			if (buildRouter) {
+				size_t totalEntries = 0;
+				size_t totalPayload = 0;
+				for (const auto& data : routerBuckets) {
+					totalEntries += data.fingerprints.size();
+					totalPayload += data.payload.size();
+				}
+
+				routerEntryFingerprints.reserve(totalEntries);
+				routerEntryOffsets.reserve(totalEntries + 1);
+				routerPayload.reserve(totalPayload);
+				routerEntryOffsets.push_back(0);
+
+				size_t payloadOffset = 0;
+				for (size_t bucket = 0; bucket < hashSize; ++bucket) {
+					const auto& data = routerBuckets[bucket];
+					routerBucketOffsets[bucket + 1] = routerBucketOffsets[bucket] + data.fingerprints.size();
+					routerEntryFingerprints.insert(routerEntryFingerprints.end(), data.fingerprints.begin(), data.fingerprints.end());
+					for (size_t i = 1; i < data.entryOffsets.size(); ++i) {
+						routerEntryOffsets.push_back(payloadOffset + data.entryOffsets[i]);
+					}
+					routerPayload.insert(routerPayload.end(), data.payload.begin(), data.payload.end());
+					payloadOffset += data.payload.size();
+				}
+
+				routerBuckets.clear();
+				routerBuckets.shrink_to_fit();
+
+				if (routerEntryOffsets.size() != routerEntryFingerprints.size() + 1) {
+					clearRouterIndex();
+				}
 			}
 		}
 

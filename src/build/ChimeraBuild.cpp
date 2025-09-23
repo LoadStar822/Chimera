@@ -19,6 +19,11 @@
  */
 #include <ChimeraBuild.hpp>
 #include <limits>
+#include <future>
+#include <sstream>
+#include <iomanip>
+#include <string_view>
+#include <chrono>
 
 namespace ChimeraBuild {
 	/**
@@ -1413,35 +1418,111 @@ namespace ChimeraBuild {
 		std::vector<std::vector<std::string>>& indexToTaxid,
 		IMCFConfig& imcfConfig)
 	{
-		// Open the output file
-		std::ofstream os(output_file + ".imcf", std::ios::binary);
+	// Open the output file
+	std::ofstream os(output_file + ".imcf", std::ios::binary);
 
-		// Check if the file is successfully opened
-		if (!os.is_open()) {
-			throw std::runtime_error("Failed to open file: " + output_file);
+	// Check if the file is successfully opened
+	if (!os.is_open()) {
+		throw std::runtime_error("Failed to open file: " + output_file);
+	}
+
+	using Clock = std::chrono::steady_clock;
+	auto formatDuration = [](long long ms) {
+		if (ms >= 60000) {
+			std::ostringstream oss;
+			long long totalSeconds = ms / 1000;
+			long long hours = totalSeconds / 3600;
+			long long minutes = (totalSeconds % 3600) / 60;
+			long long seconds = totalSeconds % 60;
+			if (hours > 0) {
+				oss << hours << "h ";
+			}
+			if (minutes > 0 || hours > 0) {
+				oss << minutes << "min ";
+			}
+			oss << seconds << "s";
+			return oss.str();
 		}
+		if (ms >= 1000) {
+			std::ostringstream oss;
+			oss << std::fixed << std::setprecision(2) << (ms / 1000.0) << "s";
+			return oss.str();
+		}
+		return std::to_string(ms) + "ms";
+	};
 
-		// Create a cereal binary archive
+	auto logStep = [&](std::string_view title, auto&& work) {
+		std::cout << "  - " << title << "... " << std::flush;
+		auto start = Clock::now();
+		bool ok = work();
+		auto end = Clock::now();
+		auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+		std::cout << (ok ? "done" : "failed") << " (" << formatDuration(elapsed) << ")" << std::endl;
+		return ok;
+	};
+
+	bool runAsyncIndexBuild = false;
+#ifdef _OPENMP
+	if (omp_get_max_threads() > 1) {
+		runAsyncIndexBuild = true;
+	}
+#else
+	if (std::thread::hardware_concurrency() > 1) {
+		runAsyncIndexBuild = true;
+	}
+#endif
+
+	std::future<void> routerFuture;
+	Clock::time_point routerLaunchTime{};
+	if (runAsyncIndexBuild) {
+		routerLaunchTime = Clock::now();
+		routerFuture = std::async(std::launch::async, [&imcf]() {
+			imcf.buildRouterIndex();
+		});
+	}
+
+	logStep("Writing filter archive (.imcf)", [&]() {
 		cereal::BinaryOutputArchive archive(os);
-
-		// Serialize 
 		archive(imcf);
 		archive(indexToTaxid);
 		archive(imcfConfig);
-
 		os.close();
+		return true;
+	});
 
-		std::string idxPath = output_file + ".imcf.idx";
-		imcf.buildActiveGroups();
+	const char* indexTitle = runAsyncIndexBuild ? "Building index structures (.idx/.rtr) [async]" : "Building index structures (.idx/.rtr)";
+	std::cout << "  - " << indexTitle << "... " << std::flush;
+	long long indexElapsedMs = 0;
+	if (routerFuture.valid()) {
+		routerFuture.get();
+		auto end = Clock::now();
+		indexElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(end - routerLaunchTime).count();
+	}
+	else {
+		auto start = Clock::now();
+		imcf.buildRouterIndex();
+		auto end = Clock::now();
+		indexElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+	}
+	std::cout << "done (" << formatDuration(indexElapsedMs) << ")" << std::endl;
+
+	std::string idxPath = output_file + ".imcf.idx";
+	logStep("Writing active index (.imcf.idx)", [&]() {
 		if (!imcf.saveActiveIndex(idxPath)) {
 			std::cerr << "Warning: failed to write IMCF index file: " << idxPath << std::endl;
+			return false;
 		}
+		return true;
+	});
 
-		std::string routerPath = output_file + ".imcf.rtr";
-		imcf.buildRouterIndex();
+	std::string routerPath = output_file + ".imcf.rtr";
+	logStep("Writing router index (.imcf.rtr)", [&]() {
 		if (!imcf.saveRouterIndex(routerPath)) {
 			std::cerr << "Warning: failed to write IMCF router file: " << routerPath << std::endl;
+			return false;
 		}
+		return true;
+	});
 
 		// Get the file size
 		std::uintmax_t fileSize = std::filesystem::file_size(output_file + ".imcf");
