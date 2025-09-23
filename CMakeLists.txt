@@ -27,10 +27,10 @@ include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
 
 if(COMPILER_SUPPORTS_AVX2)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -fopenmp -DNDEBUG -mavx2 -flto")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -DNDEBUG -mavx2 -flto")
     message(STATUS "AVX2 instructions are supported and enabled.")
 else()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -fopenmp -DNDEBUG -flto")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -DNDEBUG -flto")
     message(WARNING "AVX2 instructions are not supported. Proceeding without AVX2 optimization.")
 endif()
 
@@ -52,6 +52,9 @@ else()
     message(FATAL_ERROR "OpenSSL not found")
 endif()
 find_package (seqan3 REQUIRED)
+
+# OpenMP（可选）
+find_package(OpenMP)
 
 
 # 包含目录
@@ -104,6 +107,11 @@ target_link_libraries(Chimera
     Threads::Threads
 )
 
+target_compile_definitions(Chimera
+    PRIVATE
+    IMCF_MIRROR64
+)
+
 # 设置包含目录
 target_include_directories(Chimera
     PUBLIC
@@ -140,6 +148,19 @@ target_link_libraries(imcf_filter_tests
     seqan3::seqan3
     Threads::Threads
 )
+
+target_compile_definitions(imcf_filter_tests
+    PRIVATE
+    IMCF_MIRROR64
+)
+
+if (OpenMP_CXX_FOUND)
+    target_link_libraries(Chimera PRIVATE OpenMP::OpenMP_CXX)
+    target_link_libraries(imcf_filter_tests PRIVATE OpenMP::OpenMP_CXX)
+    message(STATUS "OpenMP found: enabling parallel build.")
+else()
+    message(WARNING "OpenMP not found: building without parallelism.")
+endif()
 
 target_include_directories(imcf_filter_tests
     PUBLIC
