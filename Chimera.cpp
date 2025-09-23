@@ -116,7 +116,7 @@ int main(int argc, char** argv)
 	classify->add_flag("--lca", classifyConfig.lca, "Enable LCA mode");
 	classify->add_option("--tax-file", classifyConfig.taxFile, "Taxonomy file for LCA mode")
 		->check(CLI::ExistingFile);
-	auto emFlag = classify->add_flag("-e,--EM", classifyConfig.em, "Enable EM mode");
+	auto emFlag = classify->add_flag("-e,--EM", classifyConfig.em, "Enable EM mode (default)");
 	auto vemFlag = classify->add_flag("-V,--VEM", classifyConfig.vem, "Enable VEM mode")->excludes(emFlag);
 	classify->add_option("--em-threshold", classifyConfig.emThreshold, "EM threshold")
 		->default_val(0.001);

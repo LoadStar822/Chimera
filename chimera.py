@@ -110,8 +110,8 @@ def parse_arguments():
     group.add_argument("-l", "--lca", action="store_true", help="Use LCA algorithm for classification")
     classify_parser.add_argument("-T", "--tax-file", help="Taxonomy file for LCA classification")
 
-    group.add_argument("-e", "--em", action="store_true",  help="Use EM algorithm for classification")
-    group.add_argument("-V", "--vem", action="store_true", default=True, help="Use VEM algorithm for classification (default)")
+    group.add_argument("-e", "--em", action="store_true",  help="Use EM algorithm for classification (default)")
+    group.add_argument("-V", "--vem", action="store_true", help="Use VEM algorithm for classification")
     classify_parser.add_argument("--em-iter", type=int, default=100, help="Number of EM iterations")
     classify_parser.add_argument("--em-threshold", type=float, default=0.001, help="EM threshold")
 
@@ -129,7 +129,19 @@ def parse_arguments():
         parser.print_help(sys.stderr)
         sys.exit(1)
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.command == "classify":
+        algorithms = [
+            args.em,
+            args.vem,
+            args.lca,
+            getattr(args, "none", False),
+        ]
+        if not any(algorithms):
+            args.em = True
+
+    return args
 
 
 def run_chimera(args, chimera_path):
