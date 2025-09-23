@@ -18,6 +18,7 @@
  * -----------------------------------------------------------------------------
  */
 #include <ChimeraBuild.hpp>
+#include <limits>
 
 namespace ChimeraBuild {
 	/**
@@ -1430,6 +1431,18 @@ namespace ChimeraBuild {
 
 		os.close();
 
+		std::string idxPath = output_file + ".imcf.idx";
+		imcf.buildActiveGroups();
+		if (!imcf.saveActiveIndex(idxPath)) {
+			std::cerr << "Warning: failed to write IMCF index file: " << idxPath << std::endl;
+		}
+
+		std::string routerPath = output_file + ".imcf.rtr";
+		imcf.buildRouterIndex();
+		if (!imcf.saveRouterIndex(routerPath)) {
+			std::cerr << "Warning: failed to write IMCF router file: " << routerPath << std::endl;
+		}
+
 		// Get the file size
 		std::uintmax_t fileSize = std::filesystem::file_size(output_file + ".imcf");
 
@@ -1457,6 +1470,17 @@ namespace ChimeraBuild {
 	* @param config The build configuration.
 	*/
 	void run(BuildConfig config) {
+		if (config.threads == 0) {
+			unsigned int hardwareThreads = std::thread::hardware_concurrency();
+			if (hardwareThreads == 0) {
+				hardwareThreads = 1;
+			}
+			const auto maxThreads = static_cast<unsigned int>(std::numeric_limits<uint16_t>::max());
+			if (hardwareThreads > maxThreads) {
+				hardwareThreads = maxThreads;
+			}
+			config.threads = static_cast<uint16_t>(hardwareThreads);
+		}
 		if (config.verbose) {
 			std::cout << config << std::endl;
 		}

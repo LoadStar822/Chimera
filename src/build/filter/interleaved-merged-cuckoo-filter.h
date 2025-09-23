@@ -26,6 +26,7 @@
 #include <cereal/archives/binary.hpp>
 #include <cereal/types/memory.hpp>
 #include <cereal/types/vector.hpp>
+#include <cereal/details/helpers.hpp>
 #include <xxhash.h>
 #include <simde/x86/avx2.h>
 #include <simde/x86/sse2.h>
@@ -38,6 +39,13 @@
 #include <algorithm>
 #include <ranges>
 #include <utility>
+#include <fstream>
+#include <cstdint>
+#include <iterator>
+#include <stdexcept>
+#ifdef IMCF_MIRROR64
+#include <sys/mman.h>
+#endif
 
 static inline size_t ceil_div_u64(uint64_t a, uint64_t b) {
 	return (size_t)((a + b - 1) / b);
@@ -140,39 +148,55 @@ namespace chimera::imcf {
 			// Step 4: Create groups and assign chunks using a priority queue
 			size_t groupNum = (hashChunks.size() + maxTaxidsPerGroup - 1) / maxTaxidsPerGroup;
 			std::vector<Group> groups(groupNum);
+			std::vector<robin_hood::unordered_flat_set<std::string>> used(groupNum);
 
 			auto cmp = [&](const int a, const int b) -> bool {
 				return groups[a].totalHash > groups[b].totalHash;
-				};
+			};
 			std::priority_queue<int, std::vector<int>, decltype(cmp)> minHeap(cmp);
 			for (size_t i = 0; i < groupNum; ++i) {
 				minHeap.push(static_cast<int>(i));
 			}
 
-			// Assign each chunk to the group with the lowest total hash count
 			for (const auto& chunk : hashChunks) {
-				int groupIndex = minHeap.top();
-				minHeap.pop();
+				std::vector<int> popped;
+				int target = -1;
+				while (!minHeap.empty()) {
+					int cand = minHeap.top();
+					minHeap.pop();
+					if (groups[cand].taxids.size() >= static_cast<size_t>(maxTaxidsPerGroup) || used[cand].contains(chunk.taxid)) {
+						popped.push_back(cand);
+						continue;
+					}
+					target = cand;
+					break;
+				}
 
-				groups[groupIndex].taxids.push_back(chunk.taxid);
-				groups[groupIndex].totalHash += chunk.hashCount;
+				if (target == -1) {
+					for (int idx : popped) {
+						minHeap.push(idx);
+					}
+					groups.emplace_back();
+					used.emplace_back();
+					target = static_cast<int>(groups.size() - 1);
+				}
+				else {
+					for (int idx : popped) {
+						minHeap.push(idx);
+					}
+				}
 
-				minHeap.push(groupIndex);
+				if (groups[target].taxids.size() >= static_cast<size_t>(maxTaxidsPerGroup)) {
+					groups.emplace_back();
+					used.emplace_back();
+					target = static_cast<int>(groups.size() - 1);
+				}
+
+				groups[target].taxids.push_back(chunk.taxid);
+				groups[target].totalHash += chunk.hashCount;
+				used[target].insert(chunk.taxid);
+				minHeap.push(target);
 			}
-
-
-			//uint64_t maxTotalHash = 0;
-			//uint64_t minTotalHash = UINT64_MAX;
-			//for (const auto& group : groups) {
-			//	maxTotalHash = std::max(maxTotalHash, group.totalHash);
-			//	minTotalHash = std::min(minTotalHash, group.totalHash);
-			//}
-
-			//std::cout << "Difference between max and min totalHash: " << (maxTotalHash - minTotalHash) << std::endl;
-			//std::cout << "Filter size: " << (maxTotalHash * groups.size() * 16.0 / 0.95) / 8 / 1024 / 1024 / 1024 << " GB" << std::endl;
-			//std::cout << "Groups size: " << groups.size() << std::endl;
-			//std::cout << "Before Split Groups size: " << hashCount.size() / 16 << std::endl;
-
 
 			return groups;
 		}
@@ -275,12 +299,276 @@ namespace chimera::imcf {
 	class InterleavedMergedCuckooFilter {
 		typedef kvec_t(int) kvector;
 		typedef kvec_t(bool) kvectorBool;
-		sdsl::bit_vector data;
-		size_t binNum;
-		size_t binSize;
-		size_t tagNum{ 4 };
-		int MaxCuckooCount{ 500 };
-		size_t hashSize{};
+sdsl::bit_vector data;
+size_t binNum;
+size_t binSize;
+size_t tagNum{ 4 };
+int MaxCuckooCount{ 500 };
+size_t hashSize{};
+#ifdef IMCF_MIRROR64
+std::vector<uint64_t> bucketMirror;
+bool bitStorageReleased{ false };
+size_t segmentShift{ 20 };
+size_t segmentSizeBuckets{ 1ull << 20 };
+size_t segmentCount{ 0 };
+bool segmentAdviceEnabled{ false };
+
+struct SegmentPrefetch {
+    const InterleavedMergedCuckooFilter& parent;
+    size_t touched[2]{};
+    size_t count{ 0 };
+
+    SegmentPrefetch(const InterleavedMergedCuckooFilter& p, size_t h1, size_t h2)
+        : parent(p) {
+        request(h1);
+        if (h2 != h1) {
+            request(h2);
+        }
+    }
+
+    void request(size_t bucket) {
+        if (!parent.hasSegmentAdvice()) {
+            return;
+        }
+        size_t seg = parent.segmentIndex(bucket);
+        for (size_t i = 0; i < count; ++i) {
+            if (touched[i] == seg) {
+                return;
+            }
+        }
+        parent.adviseSegment(seg, MADV_WILLNEED);
+        if (count < 2) {
+            touched[count++] = seg;
+        }
+    }
+
+    ~SegmentPrefetch() {
+        if (!parent.hasSegmentAdvice()) {
+            return;
+        }
+        for (size_t i = 0; i < count; ++i) {
+            parent.adviseSegment(touched[i], MADV_DONTNEED);
+        }
+    }
+};
+#endif
+std::vector<std::vector<uint32_t>> activeGroups;
+std::vector<uint64_t> routerBucketOffsets;
+std::vector<uint16_t> routerEntryFingerprints;
+std::vector<uint64_t> routerEntryOffsets;
+	std::vector<uint8_t> routerPayload;
+
+	static inline void decodeVarintSequence(const std::vector<uint8_t>& dataBytes,
+		size_t start, size_t end, std::vector<uint32_t>& out) {
+		out.clear();
+		if (start >= end) {
+			return;
+		}
+		size_t offset = start;
+		uint32_t prev = 0;
+		while (offset < end) {
+			uint32_t delta = 0;
+			if (!decodeVarint(dataBytes, offset, delta)) {
+				out.clear();
+				return;
+			}
+			uint32_t value = prev + delta;
+			out.push_back(value);
+			prev = value;
+		}
+	}
+
+	inline size_t bucketLinearIndex(size_t bucket, size_t bin) const {
+		return bucket * binNum + bin;
+	}
+
+	inline size_t bucketBitOffset(size_t bucketLinear) const {
+		return bucketLinear * tagNum * 16;
+	}
+
+	inline uint64_t readBucketRaw(size_t bucketLinear) const {
+		return data.get_int(bucketBitOffset(bucketLinear), 64);
+	}
+
+	inline void writeBucketRaw(size_t bucketLinear, uint64_t value) {
+		data.set_int(bucketBitOffset(bucketLinear), value, 64);
+	}
+
+inline uint64_t readBucket64(size_t bucket, size_t bin) const {
+	size_t linear = bucketLinearIndex(bucket, bin);
+#ifdef IMCF_MIRROR64
+	return bucketMirror[linear];
+#else
+	return readBucketRaw(linear);
+#endif
+}
+
+inline void writeBucket64(size_t bucket, size_t bin, uint64_t value) {
+	size_t linear = bucketLinearIndex(bucket, bin);
+#ifdef IMCF_MIRROR64
+	bucketMirror[linear] = value;
+	if (!bitStorageReleased) {
+		writeBucketRaw(linear, value);
+	}
+#else
+	writeBucketRaw(linear, value);
+#endif
+}
+
+#ifdef IMCF_MIRROR64
+	inline size_t segmentIndex(size_t bucket) const {
+		return bucket >> segmentShift;
+	}
+
+	inline void prepareSegmentAdvice() {
+		if (segmentShift >= sizeof(size_t) * 8 - 1) {
+			segmentShift = static_cast<size_t>(sizeof(size_t) * 8 - 2);
+		}
+		segmentSizeBuckets = static_cast<size_t>(1) << segmentShift;
+		if (segmentSizeBuckets == 0) {
+			segmentSizeBuckets = 1ULL << 20;
+		}
+		if (bucketMirror.empty() || hashSize == 0) {
+			segmentAdviceEnabled = false;
+			segmentCount = 0;
+			return;
+		}
+		segmentCount = (hashSize + segmentSizeBuckets - 1) / segmentSizeBuckets;
+		segmentAdviceEnabled = segmentCount > 0;
+		if (segmentAdviceEnabled) {
+			void* ptr = const_cast<uint64_t*>(bucketMirror.data());
+			size_t bytes = bucketMirror.size() * sizeof(uint64_t);
+			::madvise(ptr, bytes, MADV_SEQUENTIAL);
+		}
+	}
+
+	inline void adviseSegment(size_t segment, int advice) const {
+		if (!segmentAdviceEnabled || segment >= segmentCount) {
+			return;
+		}
+		size_t startBucket = segment * segmentSizeBuckets;
+		if (startBucket >= hashSize) {
+			return;
+		}
+		size_t buckets = std::min(segmentSizeBuckets, hashSize - startBucket);
+		if (buckets == 0) {
+			return;
+		}
+		size_t elements = buckets * binNum;
+		void* ptr = const_cast<uint64_t*>(bucketMirror.data() + startBucket * binNum);
+		size_t bytes = elements * sizeof(uint64_t);
+		::madvise(ptr, bytes, advice);
+	}
+
+	inline bool hasSegmentAdvice() const {
+		return segmentAdviceEnabled;
+	}
+
+	inline void initializeMirrorStorage() {
+		bucketMirror.clear();
+		if (hashSize == 0 || binNum == 0) {
+			bitStorageReleased = false;
+			prepareSegmentAdvice();
+			return;
+		}
+		bucketMirror.assign(hashSize * binNum, 0);
+		bitStorageReleased = false;
+		prepareSegmentAdvice();
+	}
+
+	inline void rebuildMirrorFromBitVector() {
+		if (hashSize == 0 || binNum == 0) {
+			bucketMirror.clear();
+			bitStorageReleased = false;
+			prepareSegmentAdvice();
+			return;
+		}
+		bucketMirror.resize(hashSize * binNum);
+		for (size_t bucket = 0; bucket < hashSize; ++bucket) {
+			for (size_t bin = 0; bin < binNum; ++bin) {
+				size_t linear = bucketLinearIndex(bucket, bin);
+				bucketMirror[linear] = readBucketRaw(linear);
+			}
+		}
+		bitStorageReleased = false;
+		prepareSegmentAdvice();
+	}
+#endif
+
+	inline bool locateRouterEntry(size_t bucket, uint16_t fingerprint, size_t& entryIndex) const {
+		if (routerBucketOffsets.size() != hashSize + 1) {
+			return false;
+		}
+		if (bucket >= hashSize) {
+			return false;
+		}
+		size_t begin = static_cast<size_t>(routerBucketOffsets[bucket]);
+		size_t end = static_cast<size_t>(routerBucketOffsets[bucket + 1]);
+		if (begin >= end) {
+			return false;
+		}
+		size_t left = begin;
+		size_t right = end;
+		while (left < right) {
+			size_t mid = left + ((right - left) >> 1);
+			uint16_t midFp = routerEntryFingerprints[mid];
+			if (midFp < fingerprint) {
+				left = mid + 1;
+			}
+			else {
+				right = mid;
+			}
+		}
+		if (left >= end) {
+			return false;
+		}
+		if (routerEntryFingerprints[left] != fingerprint) {
+			return false;
+		}
+		entryIndex = left;
+		return true;
+	}
+
+	inline void fetchRouterBins(size_t bucket, uint16_t fingerprint, std::vector<uint32_t>& out) const {
+		size_t entryIndex = 0;
+		if (!locateRouterEntry(bucket, fingerprint, entryIndex)) {
+			out.clear();
+			return;
+		}
+		if (entryIndex + 1 >= routerEntryOffsets.size()) {
+			out.clear();
+			return;
+		}
+		size_t start = static_cast<size_t>(routerEntryOffsets[entryIndex]);
+		size_t end = static_cast<size_t>(routerEntryOffsets[entryIndex + 1]);
+		decodeVarintSequence(routerPayload, start, end, out);
+	}
+
+	static inline void encodeVarint(std::vector<uint8_t>& out, uint32_t value) {
+		while (value >= 0x80) {
+			out.push_back(static_cast<uint8_t>((value & 0x7F) | 0x80));
+			value >>= 7;
+		}
+		out.push_back(static_cast<uint8_t>(value));
+	}
+
+	static inline bool decodeVarint(const std::vector<uint8_t>& dataBytes, size_t& offset, uint32_t& value) {
+		uint32_t result = 0;
+		int shift = 0;
+		while (offset < dataBytes.size()) {
+			uint8_t byte = dataBytes[offset++];
+			result |= static_cast<uint32_t>(byte & 0x7F) << shift;
+			if ((byte & 0x80) == 0) {
+				value = result;
+				return true;
+			}
+			shift += 7;
+			if (shift > 28) {
+				return false;
+			}
+		}
+		return false;
+	}
 
 
 		friend std::ostream& operator<<(std::ostream& os, const InterleavedMergedCuckooFilter& filter)
@@ -314,11 +602,24 @@ namespace chimera::imcf {
 
 			config.binNum = binNum;
 			config.binSize = binSize;
+#ifdef IMCF_MIRROR64
+			initializeMirrorStorage();
+#endif
 		}
 
 		template <class Archive>
 		void serialize(Archive& ar) {
 			ar(data, binNum, binSize, tagNum, MaxCuckooCount, hashSize);
+#ifdef IMCF_MIRROR64
+			if constexpr (Archive::is_loading::value) {
+				rebuildMirrorFromBitVector();
+			}
+			else {
+				if (bitStorageReleased) {
+					throw std::runtime_error("IMCF mirror: bit-vector released, cannot serialize");
+				}
+			}
+#endif
 		}
 
 		/**
@@ -327,7 +628,7 @@ namespace chimera::imcf {
 		 * 使用若干位运算完成快速搅拌，并利用 `hashSize` 为 2 的幂这一前提直接按位掩码。
 		 * 相比重型哈希大幅减少运算量，同时仍保持良好的分布特性。
 		 */
-		inline size_t hashIndex(uint64_t value) {
+		inline size_t hashIndex(uint64_t value) const {
 			// 轻量搅拌 + 2^k 掩码（要求 hashSize 为 2 的幂；已在构造器中保证）
 			uint64_t x = value ^ (value >> 33) ^ (value >> 17) ^ (value >> 9);
 			return (size_t)x & (hashSize - 1);
@@ -340,7 +641,7 @@ namespace chimera::imcf {
 		 * 基于 fingerprint 乘黄金常数得到的扰动值与主桶索引 XOR，并依赖 2^k 大小做掩码，
 		 * 保证 `altHash(altHash(b, fp), fp) == b`，便于在踢出链中双向定位。
 		 */
-		inline size_t altHash(size_t b, uint16_t fingerprint) {
+		inline size_t altHash(size_t b, uint16_t fingerprint) const {
 			// 对 fp 做一个短 hash（与 b 无关），再 XOR；最后做按位掩码
 			uint64_t h = (uint64_t)fingerprint * 0x9E3779B185EBCA87ull;
 			return (b ^ (size_t)h) & (hashSize - 1);
@@ -359,7 +660,7 @@ namespace chimera::imcf {
 		 *
 		 * @return 编码好物种索引与指纹的 16 bit 标签。
 		 */
-		inline uint16_t reduceTo12bitAndAddIndex(size_t value, size_t index)
+		inline uint16_t reduceTo12bitAndAddIndex(size_t value, size_t index) const
 		{
 			assert(index < 16);
 			uint16_t reduced_value = reduceTo12bit(value);
@@ -372,11 +673,69 @@ namespace chimera::imcf {
 		 *
 		 * 复用主哈希的位混合策略，只截取低 12 bit，并保证不返回 0。
 		 */
-		inline uint16_t reduceTo12bit(size_t value)
+		inline uint16_t reduceTo12bit(size_t value) const
 		{
 			uint64_t x = value ^ (value >> 33) ^ (value >> 17) ^ (value >> 9);
 			uint16_t v = static_cast<uint16_t>(x & 0x0FFFu);
 			return v ? v : 1;
+		}
+
+		inline bool hasRouterIndex() const {
+			return routerBucketOffsets.size() == hashSize + 1 && routerEntryOffsets.size() == routerEntryFingerprints.size() + 1;
+		}
+
+		inline void clearRouterIndex() {
+			routerBucketOffsets.clear();
+			routerEntryFingerprints.clear();
+			routerEntryOffsets.clear();
+			routerPayload.clear();
+		}
+
+		inline void route(size_t value, std::vector<uint32_t>& bins) const {
+			bins.clear();
+			if (!hasRouterIndex()) {
+				return;
+			}
+
+			uint16_t fingerprint = reduceTo12bit(value);
+			size_t hash1 = hashIndex(value);
+			size_t hash2 = altHash(hash1, fingerprint);
+
+			static thread_local std::vector<uint32_t> routeBuf1;
+			static thread_local std::vector<uint32_t> routeBuf2;
+
+			fetchRouterBins(hash1, fingerprint, routeBuf1);
+			if (hash2 != hash1) {
+				fetchRouterBins(hash2, fingerprint, routeBuf2);
+			}
+			else {
+				routeBuf2.clear();
+			}
+
+			if (routeBuf1.empty() && routeBuf2.empty()) {
+				return;
+			}
+
+			bins.reserve(routeBuf1.size() + routeBuf2.size());
+			size_t i = 0;
+			size_t j = 0;
+			while (i < routeBuf1.size() || j < routeBuf2.size()) {
+				uint32_t valueOut;
+				if (j >= routeBuf2.size() || (i < routeBuf1.size() && routeBuf1[i] < routeBuf2[j])) {
+					valueOut = routeBuf1[i++];
+				}
+				else if (i >= routeBuf1.size() || routeBuf2[j] < routeBuf1[i]) {
+					valueOut = routeBuf2[j++];
+				}
+				else {
+					valueOut = routeBuf1[i];
+					++i;
+					++j;
+				}
+				if (bins.empty() || bins.back() != valueOut) {
+					bins.push_back(valueOut);
+				}
+			}
 		}
 
 
@@ -388,28 +747,30 @@ namespace chimera::imcf {
 		 */
 		inline bool insertTag(size_t binIndex, size_t value, size_t index)
 		{
+			if (index >= 16) {
+				assert(false && "IMCF group index overflow (taxids per group must be <=16)");
+				return false;
+			}
 			uint16_t tag = reduceTo12bitAndAddIndex(value, index);
 			uint16_t fp = (uint16_t)(tag & 0x0FFFu);
 
 			size_t b1 = hashIndex(value);
 			size_t b2 = altHash(b1, fp);
 
-			auto try_insert_bucket = [&](size_t b) -> bool {
-				size_t bucketPosition = b * binNum + binIndex;
-				size_t indexStart = bucketPosition * tagNum * 16;
-				uint64_t q = data.get_int(indexStart, 64);
-				for (int i = 0; i < 4; ++i) {
-					uint16_t chunk = (uint16_t)((q >> (i * 16)) & 0xFFFFu);
-					if (chunk == 0u) {
-						q &= ~((uint64_t)0xFFFFu << (i * 16));
-						q |= ((uint64_t)tag << (i * 16));
-						data.set_int(indexStart, q, 64);
-						return true;
-					}
-					if (chunk == tag) return true;
+		auto try_insert_bucket = [&](size_t b) -> bool {
+			uint64_t q = readBucket64(b, binIndex);
+			for (int i = 0; i < 4; ++i) {
+				uint16_t chunk = (uint16_t)((q >> (i * 16)) & 0xFFFFu);
+				if (chunk == 0u) {
+					q &= ~((uint64_t)0xFFFFu << (i * 16));
+					q |= ((uint64_t)tag << (i * 16));
+					writeBucket64(b, binIndex, q);
+					return true;
 				}
-				return false;
-			};
+				if (chunk == tag) return true;
+			}
+			return false;
+		};
 
 			if (try_insert_bucket(b1)) return true;
 			if (try_insert_bucket(b2)) return true;
@@ -432,32 +793,30 @@ namespace chimera::imcf {
 			static thread_local std::mt19937_64 gen{ std::random_device{}() };
 			std::uniform_int_distribution<int> dis(0, (int)tagNum - 1);
 
-			for (int cnt = 0; cnt < MaxCuckooCount; ++cnt) {
-				size_t bucketPosition = b * binNum + binIndex;
-				size_t indexStart = bucketPosition * tagNum * 16;
-				uint64_t q = data.get_int(indexStart, 64);
+		for (int cnt = 0; cnt < MaxCuckooCount; ++cnt) {
+			uint64_t q = readBucket64(b, binIndex);
 
-				for (int i = 0; i < 4; ++i) {
-					uint16_t chunk = (uint16_t)((q >> (i * 16)) & 0xFFFFu);
-					if (chunk == 0u) {
-						q &= ~((uint64_t)0xFFFFu << (i * 16));
-						q |= ((uint64_t)cur << (i * 16));
-						data.set_int(indexStart, q, 64);
-						return true;
-					}
-					if (chunk == cur) return true;
+			for (int i = 0; i < 4; ++i) {
+				uint16_t chunk = (uint16_t)((q >> (i * 16)) & 0xFFFFu);
+				if (chunk == 0u) {
+					q &= ~((uint64_t)0xFFFFu << (i * 16));
+					q |= ((uint64_t)cur << (i * 16));
+					writeBucket64(b, binIndex, q);
+					return true;
 				}
-
-				int rp = dis(gen);
-				uint16_t victim = (uint16_t)((q >> (rp * 16)) & 0xFFFFu);
-				q &= ~((uint64_t)0xFFFFu << (rp * 16));
-				q |= ((uint64_t)cur << (rp * 16));
-				data.set_int(indexStart, q, 64);
-
-				cur = victim;
-				fp = (uint16_t)(cur & 0x0FFFu);
-				b = altHash(b, fp);
+				if (chunk == cur) return true;
 			}
+
+			int rp = dis(gen);
+			uint16_t victim = (uint16_t)((q >> (rp * 16)) & 0xFFFFu);
+			q &= ~((uint64_t)0xFFFFu << (rp * 16));
+			q |= ((uint64_t)cur << (rp * 16));
+			writeBucket64(b, binIndex, q);
+
+			cur = victim;
+			fp = (uint16_t)(cur & 0x0FFFu);
+			b = altHash(b, fp);
+		}
 			return false;
 		}
 
@@ -506,15 +865,8 @@ namespace chimera::imcf {
 			// Step 4: Iterate over each bin index to check for matches
 			for (size_t binIndex = 0; binIndex < binNum; binIndex++)
 			{
-				// Retrieve data for the first hash position
-				size_t bucketPosition1 = hash1 * binNum + binIndex;
-				size_t indexStart1 = bucketPosition1 * tagNum * 16;
-				uint64_t bucketData1 = data.get_int(indexStart1, 64);
-
-				// Retrieve data for the second hash position
-				size_t bucketPosition2 = hash2 * binNum + binIndex;
-				size_t indexStart2 = bucketPosition2 * tagNum * 16;
-				uint64_t bucketData2 = data.get_int(indexStart2, 64);
+				uint64_t bucketData1 = readBucket64(hash1, binIndex);
+				uint64_t bucketData2 = readBucket64(hash2, binIndex);
 
 				// Load entries into an array for SIMD processing
 				uint16_t entries[8];
@@ -589,111 +941,291 @@ namespace chimera::imcf {
 		}
 
 		template <class EmitFn>
-		inline void bulkContain_events(size_t value, EmitFn&& emit) {
-			uint16_t fingerprint = reduceTo12bit(value);
-			size_t hash1 = hashIndex(value);
-			size_t hash2 = altHash(hash1, fingerprint);
+	inline void bulkContain_events(size_t value, EmitFn&& emit) {
+		uint16_t fingerprint = reduceTo12bit(value);
+		size_t hash1 = hashIndex(value);
+		size_t hash2 = altHash(hash1, fingerprint);
 
-			simde__m128i fingerprint_vec = simde_mm_set1_epi16(static_cast<int16_t>(fingerprint));
-			simde__m128i fingerprint_mask = simde_mm_set1_epi16(0x0FFF);
-			const int species_shift = 12;
+#ifdef IMCF_MIRROR64
+		[[maybe_unused]] SegmentPrefetch segmentPrefetch(*this, hash1, hash2);
+#endif
+
+		const uint64_t fpBroadcast = static_cast<uint64_t>(fingerprint) * 0x0001000100010001ULL;
+		const uint64_t fpMask = 0x0FFF0FFF0FFF0FFFULL;
+		const uint64_t idxMask = 0x000F000F000F000FULL;
 
 			constexpr size_t BLOCK = 16;
+			constexpr size_t SUB_BATCH = 4;
 
-			for (size_t base = 0; base < binNum; base += BLOCK) {
-				size_t end = std::min(binNum, base + BLOCK);
-
-				for (size_t binIndex = base; binIndex < end; ++binIndex) {
-					size_t pos1 = (hash1 * binNum + binIndex) * tagNum * 16;
-					uint64_t d1 = data.get_int(pos1, 64);
-					size_t pos2 = (hash2 * binNum + binIndex) * tagNum * 16;
-					uint64_t d2 = data.get_int(pos2, 64);
-
-					alignas(16) uint16_t entries[8];
-					entries[0] = static_cast<uint16_t>(d1 & 0xFFFFu);
-					entries[1] = static_cast<uint16_t>((d1 >> 16) & 0xFFFFu);
-					entries[2] = static_cast<uint16_t>((d1 >> 32) & 0xFFFFu);
-					entries[3] = static_cast<uint16_t>((d1 >> 48) & 0xFFFFu);
-					entries[4] = static_cast<uint16_t>(d2 & 0xFFFFu);
-					entries[5] = static_cast<uint16_t>((d2 >> 16) & 0xFFFFu);
-					entries[6] = static_cast<uint16_t>((d2 >> 32) & 0xFFFFu);
-					entries[7] = static_cast<uint16_t>((d2 >> 48) & 0xFFFFu);
-
-					simde__m128i bucket_vec = simde_mm_loadu_si128(reinterpret_cast<const simde__m128i*>(entries));
-					simde__m128i fingerprints = simde_mm_and_si128(bucket_vec, fingerprint_mask);
-					simde__m128i species_indices = simde_mm_srli_epi16(bucket_vec, species_shift);
-					simde__m128i cmp = simde_mm_cmpeq_epi16(fingerprints, fingerprint_vec);
-
-					uint32_t mask = static_cast<uint32_t>(simde_mm_movemask_epi8(cmp));
-					if (mask == 0) {
-						continue;
-					}
-
-					alignas(16) uint16_t species_lanes[8];
-					simde_mm_storeu_si128(reinterpret_cast<simde__m128i*>(species_lanes), species_indices);
-
-					while (mask) {
-						int bit = __builtin_ctz(mask);
-						int lane = bit >> 1;
-						uint32_t pair = (mask >> (lane * 2)) & 0x3u;
-						if (pair == 0x3u) {
-							emit(static_cast<uint32_t>(binIndex), species_lanes[lane]);
-						}
-						mask &= ~(0x3u << (lane * 2));
+			auto process64 = [&](uint64_t q, uint32_t binIndex) {
+				uint64_t diff = (q ^ fpBroadcast) & fpMask;
+				uint64_t idxBits = (q >> 12) & idxMask;
+				for (int lane = 0; lane < 4; ++lane) {
+					if (((diff >> (lane * 16)) & 0x0FFFULL) == 0ULL) {
+						uint16_t speciesIndex = static_cast<uint16_t>((idxBits >> (lane * 16)) & 0xF);
+						emit(static_cast<uint32_t>(binIndex), speciesIndex);
 					}
 				}
+			};
+
+			if (activeGroups.empty()) {
+				for (size_t base = 0; base < binNum; base += BLOCK) {
+					size_t end = std::min(binNum, base + BLOCK);
+					for (size_t batchStart = base; batchStart < end; batchStart += SUB_BATCH) {
+						size_t batchEnd = std::min(end, batchStart + SUB_BATCH);
+						uint64_t q1[SUB_BATCH];
+						uint64_t q2[SUB_BATCH];
+						size_t bins[SUB_BATCH];
+						size_t cnt = 0;
+						for (size_t binIndex = batchStart; binIndex < batchEnd; ++binIndex) {
+							q1[cnt] = readBucket64(hash1, binIndex);
+
+							q2[cnt] = readBucket64(hash2, binIndex);
+							bins[cnt] = binIndex;
+							++cnt;
+						}
+
+						for (size_t i = 0; i < cnt; ++i) {
+							uint32_t bin = static_cast<uint32_t>(bins[i]);
+							if (q1[i] != 0) {
+								process64(q1[i], bin);
+							}
+							if (q2[i] != 0) {
+								process64(q2[i], bin);
+							}
+						}
+					}
+				}
+				return;
+			}
+
+			const auto& list1 = activeGroups[hash1];
+			const auto& list2 = activeGroups[hash2];
+			if (list1.empty() && list2.empty()) {
+				return;
+			}
+
+			size_t i = 0, j = 0;
+			uint32_t batchBins[SUB_BATCH];
+			bool active1[SUB_BATCH];
+			bool active2[SUB_BATCH];
+			size_t count = 0;
+
+			auto flush = [&]() {
+				for (size_t idx = 0; idx < count; ++idx) {
+					uint32_t bin = batchBins[idx];
+					uint64_t qPrimary = 0;
+					uint64_t qAlt = 0;
+					if (active1[idx]) {
+						qPrimary = readBucket64(hash1, bin);
+					}
+					if (active2[idx]) {
+						qAlt = readBucket64(hash2, bin);
+					}
+					if (qPrimary != 0) {
+						process64(qPrimary, bin);
+					}
+					if (qAlt != 0) {
+						process64(qAlt, bin);
+					}
+				}
+				count = 0;
+			};
+
+			while (i < list1.size() || j < list2.size()) {
+				uint32_t bin;
+				bool in1 = false;
+				bool in2 = false;
+				if (j >= list2.size() || (i < list1.size() && list1[i] <= list2[j])) {
+					bin = list1[i++];
+					in1 = true;
+					if (j < list2.size() && list2[j] == bin) {
+						in2 = true;
+						++j;
+					}
+				} else {
+					bin = list2[j++];
+					in2 = true;
+				}
+				batchBins[count] = bin;
+				active1[count] = in1;
+				active2[count] = in2;
+				++count;
+				if (count == SUB_BATCH) {
+					flush();
+				}
+			}
+			if (count) {
+				flush();
 			}
 		}
 
 		template <class EmitFn>
-		inline void bulkContain_events_subset(size_t value,
-			const std::vector<uint32_t>& binSubset,
-			EmitFn&& emit) {
-			uint16_t fingerprint = reduceTo12bit(value);
-			size_t hash1 = hashIndex(value);
-			size_t hash2 = altHash(hash1, fingerprint);
+	inline void bulkContain_events_subset(size_t value,
+		const std::vector<uint32_t>& binSubset,
+		EmitFn&& emit) {
+		uint16_t fingerprint = reduceTo12bit(value);
+		size_t hash1 = hashIndex(value);
+		size_t hash2 = altHash(hash1, fingerprint);
 
-			simde__m128i fingerprint_vec = simde_mm_set1_epi16(static_cast<int16_t>(fingerprint));
-			simde__m128i fingerprint_mask = simde_mm_set1_epi16(0x0FFF);
-			const int species_shift = 12;
+#ifdef IMCF_MIRROR64
+		[[maybe_unused]] SegmentPrefetch segmentPrefetch(*this, hash1, hash2);
+#endif
 
-			for (uint32_t binIndex : binSubset) {
-				size_t pos1 = (hash1 * binNum + binIndex) * tagNum * 16;
-				uint64_t d1 = data.get_int(pos1, 64);
-				size_t pos2 = (hash2 * binNum + binIndex) * tagNum * 16;
-				uint64_t d2 = data.get_int(pos2, 64);
+			const uint64_t fpBroadcast = static_cast<uint64_t>(fingerprint) * 0x0001000100010001ULL;
+			const uint64_t fpMask = 0x0FFF0FFF0FFF0FFFULL;
+			const uint64_t idxMask = 0x000F000F000F000FULL;
 
-				alignas(16) uint16_t entries[8];
-				entries[0] = static_cast<uint16_t>(d1 & 0xFFFFu);
-				entries[1] = static_cast<uint16_t>((d1 >> 16) & 0xFFFFu);
-				entries[2] = static_cast<uint16_t>((d1 >> 32) & 0xFFFFu);
-				entries[3] = static_cast<uint16_t>((d1 >> 48) & 0xFFFFu);
-				entries[4] = static_cast<uint16_t>(d2 & 0xFFFFu);
-				entries[5] = static_cast<uint16_t>((d2 >> 16) & 0xFFFFu);
-				entries[6] = static_cast<uint16_t>((d2 >> 32) & 0xFFFFu);
-				entries[7] = static_cast<uint16_t>((d2 >> 48) & 0xFFFFu);
+			constexpr size_t SUB_BATCH = 4;
 
-				simde__m128i bucket_vec = simde_mm_loadu_si128(reinterpret_cast<const simde__m128i*>(entries));
-				simde__m128i fingerprints = simde_mm_and_si128(bucket_vec, fingerprint_mask);
-				simde__m128i species_indices = simde_mm_srli_epi16(bucket_vec, species_shift);
-				simde__m128i cmp = simde_mm_cmpeq_epi16(fingerprints, fingerprint_vec);
+			auto process64 = [&](uint64_t q, uint32_t binIndex) {
+				uint64_t diff = (q ^ fpBroadcast) & fpMask;
+				uint64_t idxBits = (q >> 12) & idxMask;
+				for (int lane = 0; lane < 4; ++lane) {
+					if (((diff >> (lane * 16)) & 0x0FFFULL) == 0ULL) {
+						uint16_t speciesIndex = static_cast<uint16_t>((idxBits >> (lane * 16)) & 0xF);
+						emit(static_cast<uint32_t>(binIndex), speciesIndex);
+					}
+				}
+			};
 
-				uint32_t mask = static_cast<uint32_t>(simde_mm_movemask_epi8(cmp));
-				if (mask == 0) {
-					continue;
+			if (hasRouterIndex()) {
+				if (binSubset.empty()) {
+					return;
+				}
+				assert(std::is_sorted(binSubset.begin(), binSubset.end()));
+				static thread_local std::vector<uint32_t> routeBuf1;
+				static thread_local std::vector<uint32_t> routeBuf2;
+				static thread_local std::vector<uint32_t> mergedBins;
+				static thread_local std::vector<uint8_t> mergedMask;
+
+				fetchRouterBins(hash1, fingerprint, routeBuf1);
+				if (hash2 != hash1) {
+					fetchRouterBins(hash2, fingerprint, routeBuf2);
+				}
+				else {
+					routeBuf2.clear();
 				}
 
-				alignas(16) uint16_t species_lanes[8];
-				simde_mm_storeu_si128(reinterpret_cast<simde__m128i*>(species_lanes), species_indices);
+				if (routeBuf1.empty() && routeBuf2.empty()) {
+					return;
+				}
 
-				while (mask) {
-					int bit = __builtin_ctz(mask);
-					int lane = bit >> 1;
-					uint32_t pair = (mask >> (lane * 2)) & 0x3u;
-					if (pair == 0x3u) {
-						emit(static_cast<uint32_t>(binIndex), species_lanes[lane]);
+				mergedBins.clear();
+				mergedMask.clear();
+				mergedBins.reserve(routeBuf1.size() + routeBuf2.size());
+				mergedMask.reserve(routeBuf1.size() + routeBuf2.size());
+
+				size_t i = 0;
+				size_t j = 0;
+				while (i < routeBuf1.size() || j < routeBuf2.size()) {
+					uint32_t candidate;
+					uint8_t maskBits = 0;
+					if (j >= routeBuf2.size() || (i < routeBuf1.size() && routeBuf1[i] < routeBuf2[j])) {
+						candidate = routeBuf1[i++];
+						maskBits |= 0x1;
 					}
-					mask &= ~(0x3u << (lane * 2));
+					else if (i >= routeBuf1.size() || routeBuf2[j] < routeBuf1[i]) {
+						candidate = routeBuf2[j++];
+						maskBits |= 0x2;
+					}
+					else {
+						candidate = routeBuf1[i];
+						maskBits |= 0x3;
+						++i;
+						++j;
+					}
+					if (!mergedBins.empty() && mergedBins.back() == candidate) {
+						mergedMask.back() |= maskBits;
+					} else {
+						mergedBins.push_back(candidate);
+						mergedMask.push_back(maskBits);
+					}
+				}
+
+				for (size_t idx = 0; idx < mergedBins.size(); ++idx) {
+					uint32_t binIndex = mergedBins[idx];
+					if (!std::binary_search(binSubset.begin(), binSubset.end(), binIndex)) {
+						continue;
+					}
+					if (binIndex >= binNum) {
+						continue;
+					}
+					uint8_t maskBits = mergedMask[idx];
+					if (maskBits & 0x1) {
+						uint64_t q = readBucket64(hash1, binIndex);
+						if (q != 0ULL) {
+							process64(q, binIndex);
+						}
+					}
+					if ((maskBits & 0x2) && hash2 != hash1) {
+						uint64_t q = readBucket64(hash2, binIndex);
+						if (q != 0ULL) {
+							process64(q, binIndex);
+						}
+		}
+	}
+				return;
+			}
+
+			if (activeGroups.empty()) {
+				for (size_t offset = 0; offset < binSubset.size(); offset += SUB_BATCH) {
+					size_t batchEnd = std::min(binSubset.size(), offset + SUB_BATCH);
+					uint64_t q1[SUB_BATCH];
+					uint64_t q2[SUB_BATCH];
+					uint32_t bins[SUB_BATCH];
+					size_t cnt = 0;
+					for (size_t i = offset; i < batchEnd; ++i) {
+						uint32_t binIndex = binSubset[i];
+						if (binIndex >= binNum) continue;
+						bins[cnt] = binIndex;
+						q1[cnt] = readBucket64(hash1, binIndex);
+						q2[cnt] = readBucket64(hash2, binIndex);
+						++cnt;
+					}
+					for (size_t i = 0; i < cnt; ++i) {
+						if (q1[i] != 0) process64(q1[i], bins[i]);
+						if (q2[i] != 0) process64(q2[i], bins[i]);
+					}
+				}
+				return;
+			}
+
+			const auto& list1 = activeGroups[hash1];
+			const auto& list2 = activeGroups[hash2];
+
+			auto contains = [](const std::vector<uint32_t>& vec, uint32_t value) {
+				return !vec.empty() && std::binary_search(vec.begin(), vec.end(), value);
+			};
+
+			for (size_t offset = 0; offset < binSubset.size(); offset += SUB_BATCH) {
+				size_t batchEnd = std::min(binSubset.size(), offset + SUB_BATCH);
+				size_t cnt = 0;
+				uint32_t bins[SUB_BATCH];
+				bool use1[SUB_BATCH];
+				bool use2[SUB_BATCH];
+				for (size_t i = offset; i < batchEnd; ++i) {
+					uint32_t binIndex = binSubset[i];
+					if (binIndex >= binNum) continue;
+					bool in1 = contains(list1, binIndex);
+					bool in2 = contains(list2, binIndex);
+					if (!in1 && !in2) continue;
+					bins[cnt] = binIndex;
+					use1[cnt] = in1;
+					use2[cnt] = in2;
+					++cnt;
+				}
+				if (cnt == 0) continue;
+				for (size_t i = 0; i < cnt; ++i) {
+					uint32_t binIndex = bins[i];
+					if (use1[i]) {
+						uint64_t q = readBucket64(hash1, binIndex);
+						if (q != 0) process64(q, binIndex);
+					}
+					if (use2[i]) {
+						uint64_t q = readBucket64(hash2, binIndex);
+						if (q != 0) process64(q, binIndex);
+					}
 				}
 			}
 		}
@@ -741,6 +1273,358 @@ namespace chimera::imcf {
 					++ref;
 				});
 			}
+		}
+
+		inline void clearActiveGroups() {
+			activeGroups.clear();
+		}
+
+		inline bool hasActiveIndex() const {
+			return !activeGroups.empty();
+		}
+
+#ifdef IMCF_MIRROR64
+		inline void releaseBitStorage() {
+			sdsl::bit_vector empty;
+			empty.swap(data);
+			bitStorageReleased = true;
+		}
+#endif
+
+		inline void buildActiveGroups() {
+			activeGroups.assign(hashSize, {});
+			for (size_t bucket = 0; bucket < hashSize; ++bucket) {
+				auto& groupList = activeGroups[bucket];
+				for (size_t bin = 0; bin < binNum; ++bin) {
+					uint64_t q = readBucket64(bucket, bin);
+					if (q != 0ULL) {
+						groupList.push_back(static_cast<uint32_t>(bin));
+					}
+				}
+			}
+		}
+
+		inline void buildRouterIndex() {
+			clearRouterIndex();
+			if (hashSize == 0 || binNum == 0) {
+				return;
+			}
+
+			routerBucketOffsets.assign(hashSize + 1, 0);
+			routerEntryOffsets.clear();
+			routerEntryOffsets.reserve(hashSize * 2);
+			routerEntryOffsets.push_back(0);
+			routerEntryFingerprints.clear();
+			routerEntryFingerprints.reserve(hashSize * 2);
+			routerPayload.clear();
+
+			for (size_t bucket = 0; bucket < hashSize; ++bucket) {
+				robin_hood::unordered_flat_map<uint16_t, std::vector<uint32_t>> perFp;
+				perFp.reserve(32);
+				for (size_t bin = 0; bin < binNum; ++bin) {
+					uint64_t q = readBucket64(bucket, bin);
+					if (q == 0ULL) {
+						continue;
+					}
+					for (int lane = 0; lane < static_cast<int>(tagNum); ++lane) {
+						uint16_t tag = static_cast<uint16_t>((q >> (lane * 16)) & 0xFFFFu);
+						if (tag == 0u) {
+							continue;
+						}
+						uint16_t fp = static_cast<uint16_t>(tag & 0x0FFFu);
+						perFp[fp].push_back(static_cast<uint32_t>(bin));
+					}
+				}
+
+				if (perFp.empty()) {
+					routerBucketOffsets[bucket + 1] = routerBucketOffsets[bucket];
+					continue;
+				}
+
+				std::vector<std::pair<uint16_t, std::vector<uint32_t>>> entries;
+				entries.reserve(perFp.size());
+				for (auto& kv : perFp) {
+					auto& bins = kv.second;
+					std::sort(bins.begin(), bins.end());
+					bins.erase(std::unique(bins.begin(), bins.end()), bins.end());
+					if (!bins.empty()) {
+						entries.emplace_back(kv.first, std::move(bins));
+					}
+				}
+
+				if (entries.empty()) {
+					routerBucketOffsets[bucket + 1] = routerBucketOffsets[bucket];
+					continue;
+				}
+
+				std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+					return a.first < b.first;
+				});
+
+				for (auto& [fp, bins] : entries) {
+					routerEntryFingerprints.push_back(fp);
+					uint32_t prev = 0;
+					bool first = true;
+					for (uint32_t bin : bins) {
+						uint32_t delta = first ? bin : (bin - prev);
+						first = false;
+						prev = bin;
+						encodeVarint(routerPayload, delta);
+					}
+					routerEntryOffsets.push_back(routerPayload.size());
+				}
+
+				routerBucketOffsets[bucket + 1] = routerEntryFingerprints.size();
+			}
+
+			if (routerEntryOffsets.size() != routerEntryFingerprints.size() + 1) {
+				clearRouterIndex();
+			}
+		}
+
+		inline bool saveActiveIndex(const std::string& path) const {
+			if (hashSize == 0 || binNum == 0) {
+				return false;
+			}
+			if (activeGroups.empty()) {
+				return false;
+			}
+
+			struct IndexHeader {
+				uint32_t magic{ 0x494D4349u };// 'IMCI'
+				uint16_t version{ 1 };
+				uint16_t reserved{ 0 };
+				uint64_t binCount{ 0 };
+				uint64_t hashCount{ 0 };
+			};
+
+			std::ofstream out(path, std::ios::binary);
+			if (!out.is_open()) {
+				return false;
+			}
+
+			IndexHeader header;
+			header.binCount = static_cast<uint64_t>(binNum);
+			header.hashCount = static_cast<uint64_t>(hashSize);
+			out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+			if (!out) {
+				return false;
+			}
+
+			std::vector<uint64_t> offsets(hashSize + 1, 0);
+			std::vector<uint8_t> payload;
+			payload.reserve(activeGroups.size() * 4);
+
+			for (size_t bucket = 0; bucket < hashSize; ++bucket) {
+				offsets[bucket] = payload.size();
+				const auto& groupList = activeGroups[bucket];
+				uint32_t prev = 0;
+				bool first = true;
+				for (uint32_t bin : groupList) {
+					uint32_t delta = first ? bin : (bin - prev);
+					first = false;
+					prev = bin;
+					encodeVarint(payload, delta);
+				}
+			}
+			offsets[hashSize] = payload.size();
+
+			out.write(reinterpret_cast<const char*>(offsets.data()), offsets.size() * sizeof(uint64_t));
+			if (!out) {
+				return false;
+			}
+			if (!payload.empty()) {
+				out.write(reinterpret_cast<const char*>(payload.data()), payload.size());
+				if (!out) {
+					return false;
+				}
+			}
+			return true;
+		}
+
+		inline bool loadActiveIndex(const std::string& path) {
+			std::ifstream in(path, std::ios::binary);
+			if (!in.is_open()) {
+				return false;
+			}
+
+			struct IndexHeader {
+				uint32_t magic;
+				uint16_t version;
+				uint16_t reserved;
+				uint64_t binCount;
+				uint64_t hashCount;
+			};
+
+			IndexHeader header{};
+			in.read(reinterpret_cast<char*>(&header), sizeof(header));
+			if (!in) {
+				return false;
+			}
+			if (header.magic != 0x494D4349u || header.version != 1) {
+				return false;
+			}
+			if (header.binCount != static_cast<uint64_t>(binNum) || header.hashCount != static_cast<uint64_t>(hashSize)) {
+				return false;
+			}
+
+			std::vector<uint64_t> offsets(header.hashCount + 1, 0);
+			in.read(reinterpret_cast<char*>(offsets.data()), offsets.size() * sizeof(uint64_t));
+			if (!in) {
+				return false;
+			}
+
+			std::vector<uint8_t> payload((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+			if (payload.empty() && offsets.back() != 0) {
+				return false;
+			}
+			if (!payload.empty() && offsets.back() > payload.size()) {
+				return false;
+			}
+
+			activeGroups.assign(hashSize, {});
+			for (size_t bucket = 0; bucket < hashSize; ++bucket) {
+				uint64_t start = offsets[bucket];
+				uint64_t end = offsets[bucket + 1];
+				if (start > end || end > payload.size()) {
+					activeGroups.clear();
+					return false;
+				}
+				size_t offset = static_cast<size_t>(start);
+				uint32_t prev = 0;
+				while (offset < end) {
+					uint32_t delta = 0;
+					if (!decodeVarint(payload, offset, delta)) {
+						activeGroups.clear();
+						return false;
+					}
+					uint32_t bin = prev + delta;
+					prev = bin;
+					activeGroups[bucket].push_back(bin);
+				}
+			}
+			return true;
+		}
+
+		inline bool saveRouterIndex(const std::string& path) const {
+			if (!hasRouterIndex()) {
+				return false;
+			}
+
+			struct RouterHeader {
+				uint32_t magic{ 0x524D4349u }; // 'IMCR'
+				uint16_t version{ 1 };
+				uint16_t reserved{ 0 };
+				uint64_t binCount{ 0 };
+				uint64_t hashCount{ 0 };
+				uint64_t entryCount{ 0 };
+				uint64_t payloadBytes{ 0 };
+			};
+
+			std::ofstream out(path, std::ios::binary);
+			if (!out.is_open()) {
+				return false;
+			}
+
+			RouterHeader header;
+			header.binCount = static_cast<uint64_t>(binNum);
+			header.hashCount = static_cast<uint64_t>(hashSize);
+			header.entryCount = static_cast<uint64_t>(routerEntryFingerprints.size());
+			header.payloadBytes = static_cast<uint64_t>(routerPayload.size());
+			out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+			if (!out) {
+				return false;
+			}
+
+			out.write(reinterpret_cast<const char*>(routerBucketOffsets.data()), routerBucketOffsets.size() * sizeof(uint64_t));
+			if (!out) {
+				return false;
+			}
+
+			out.write(reinterpret_cast<const char*>(routerEntryOffsets.data()), routerEntryOffsets.size() * sizeof(uint64_t));
+			if (!out) {
+				return false;
+			}
+
+			out.write(reinterpret_cast<const char*>(routerEntryFingerprints.data()), routerEntryFingerprints.size() * sizeof(uint16_t));
+			if (!out) {
+				return false;
+			}
+
+			if (!routerPayload.empty()) {
+				out.write(reinterpret_cast<const char*>(routerPayload.data()), routerPayload.size());
+				if (!out) {
+					return false;
+				}
+			}
+
+			return true;
+		}
+
+		inline bool loadRouterIndex(const std::string& path) {
+			std::ifstream in(path, std::ios::binary);
+			if (!in.is_open()) {
+				return false;
+			}
+
+			struct RouterHeader {
+				uint32_t magic;
+				uint16_t version;
+				uint16_t reserved;
+				uint64_t binCount;
+				uint64_t hashCount;
+				uint64_t entryCount;
+				uint64_t payloadBytes;
+			};
+
+			RouterHeader header{};
+			in.read(reinterpret_cast<char*>(&header), sizeof(header));
+			if (!in) {
+				return false;
+			}
+			if (header.magic != 0x524D4349u || header.version != 1) {
+				return false;
+			}
+			if (header.binCount != static_cast<uint64_t>(binNum) || header.hashCount != static_cast<uint64_t>(hashSize)) {
+				return false;
+			}
+
+			routerBucketOffsets.resize(static_cast<size_t>(header.hashCount) + 1);
+			in.read(reinterpret_cast<char*>(routerBucketOffsets.data()), routerBucketOffsets.size() * sizeof(uint64_t));
+			if (!in) {
+				clearRouterIndex();
+				return false;
+			}
+
+			routerEntryOffsets.resize(static_cast<size_t>(header.entryCount) + 1);
+			in.read(reinterpret_cast<char*>(routerEntryOffsets.data()), routerEntryOffsets.size() * sizeof(uint64_t));
+			if (!in) {
+				clearRouterIndex();
+				return false;
+			}
+
+			routerEntryFingerprints.resize(static_cast<size_t>(header.entryCount));
+			in.read(reinterpret_cast<char*>(routerEntryFingerprints.data()), routerEntryFingerprints.size() * sizeof(uint16_t));
+			if (!in) {
+				clearRouterIndex();
+				return false;
+			}
+
+			routerPayload.resize(static_cast<size_t>(header.payloadBytes));
+			if (!routerPayload.empty()) {
+				in.read(reinterpret_cast<char*>(routerPayload.data()), routerPayload.size());
+				if (!in) {
+					clearRouterIndex();
+					return false;
+				}
+			}
+
+			if (routerBucketOffsets.size() != hashSize + 1 || routerEntryOffsets.size() != routerEntryFingerprints.size() + 1) {
+				clearRouterIndex();
+				return false;
+			}
+
+			return true;
 		}
 
 		template <std::ranges::range value_range_t>

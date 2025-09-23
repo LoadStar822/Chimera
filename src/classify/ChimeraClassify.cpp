@@ -20,10 +20,45 @@
 #include "ChimeraClassify.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <filesystem>
+#include <limits>
 #include <numeric>
+#include <queue>
 
 namespace ChimeraClassify {
+// --- fast taxid dictionary ---
+struct TaxDict {
+  std::vector<std::vector<uint32_t>> idx2id; // [bin][species] -> tid_id
+  std::vector<std::string> id2str;           // tid_id -> taxid string
+};
+
+static TaxDict
+build_tax_dict(const std::vector<std::vector<std::string>> &idx2tax) {
+  robin_hood::unordered_flat_map<std::string, uint32_t> dict;
+  dict.reserve(1ull << 20);
+
+  TaxDict td;
+  td.idx2id.resize(idx2tax.size());
+  for (size_t b = 0; b < idx2tax.size(); ++b) {
+    td.idx2id[b].resize(idx2tax[b].size());
+    for (size_t s = 0; s < idx2tax[b].size(); ++s) {
+      const std::string &t = idx2tax[b][s];
+      auto it = dict.find(t);
+      uint32_t id;
+      if (it == dict.end()) {
+        id = static_cast<uint32_t>(td.id2str.size());
+        dict.emplace(t, id);
+        td.id2str.push_back(t);
+      } else {
+        id = it->second;
+      }
+      td.idx2id[b][s] = id;
+    }
+  }
+  return td;
+}
 /**
  * @brief Print the time taken for classification in a human-readable format.
  *
@@ -307,10 +342,10 @@ inline void processSequence(
   classifyResult result;
   result.id = id;
 
-  size_t oldIndex = 0;
   size_t maxBinCount = 0;
   std::pair<std::string, std::size_t> maxCount;
   robin_hood::unordered_flat_map<std::string, size_t> taxidToCount;
+  size_t oldIndex = 0;
 
   // Iterate over the taxid bins and calculate the count for each bin based on
   // the bulk count result
@@ -371,7 +406,7 @@ inline void processSequence(
       //// Sort the taxidCount vector based on the count in descending order
       // std::sort(result.taxidCount.begin(), result.taxidCount.end(), [](const
       // auto& a, const auto& b) { 	return a.second > b.second;  // Sort in
-      //descending order
+      // descending order
     }
   } else {
     fileInfo.unclassifiedNum++;
@@ -977,7 +1012,7 @@ inline void processSequence(
       //// Sort the taxidCount vector based on the count in descending order
       // std::sort(result.taxidCount.begin(), result.taxidCount.end(), [](const
       // auto& a, const auto& b) { 	return a.second > b.second;  // Sort in
-      //descending order
+      // descending order
     }
   } else {
     fileInfo.unclassifiedNum++;
@@ -1151,6 +1186,56 @@ void loadFilter(const std::string &inputFile,
 
   // Close the file
   is.close();
+
+  namespace fs = std::filesystem;
+  std::string base = inputFile;
+  if (auto pos = base.rfind(".imcf"); pos != std::string::npos) {
+    base = base.substr(0, pos);
+  }
+
+  auto try_load = [](auto &&loader, const fs::path &path) {
+    return loader(path.string());
+  };
+
+  bool idx_ok = false;
+  fs::path idxPath = base + ".imcf.idx";
+  if (fs::exists(idxPath)) {
+    idx_ok = try_load(
+        [&](const std::string &p) { return imcf.loadActiveIndex(p); }, idxPath);
+  }
+  if (!idx_ok) {
+    fs::path legacyIdx = inputFile + ".idx";
+    if (fs::exists(legacyIdx)) {
+      idx_ok = try_load(
+          [&](const std::string &p) { return imcf.loadActiveIndex(p); },
+          legacyIdx);
+    }
+  }
+  if (!idx_ok) {
+    imcf.buildActiveGroups();
+  }
+
+  bool rtr_ok = false;
+  fs::path rtrPath = base + ".imcf.rtr";
+  if (fs::exists(rtrPath)) {
+    rtr_ok = try_load(
+        [&](const std::string &p) { return imcf.loadRouterIndex(p); }, rtrPath);
+  }
+  if (!rtr_ok) {
+    fs::path legacyRtr = inputFile + ".rtr";
+    if (fs::exists(legacyRtr)) {
+      rtr_ok = try_load(
+          [&](const std::string &p) { return imcf.loadRouterIndex(p); },
+          legacyRtr);
+    }
+  }
+  if (!rtr_ok) {
+    imcf.buildRouterIndex();
+  }
+
+#ifdef IMCF_MIRROR64
+  imcf.releaseBitStorage();
+#endif
 }
 
 /**
@@ -1210,10 +1295,47 @@ void loadFilter(const std::string &inputFile,
  * reads and ensures thread safety when adding results to the classifyResults
  * vector.
  */
+struct GroupHeat {
+  std::vector<uint32_t> score;
+  uint32_t decay_shift = 5;   // divide by 32
+  uint32_t decay_period = 64; // decay every 64 sequences
+  uint32_t counter = 0;
+
+  void ensure(size_t bins) {
+    if (score.size() < bins) {
+      score.resize(bins, 0);
+    }
+  }
+
+  void decay_if_needed() {
+    if (decay_period == 0) {
+      return;
+    }
+    ++counter;
+    if (counter >= decay_period) {
+      counter = 0;
+      for (auto &v : score) {
+        v -= (v >> decay_shift);
+      }
+    }
+  }
+
+  void boost(uint32_t bin, uint32_t delta) {
+    if (bin >= score.size()) {
+      score.resize(static_cast<size_t>(bin) + 1, 0);
+    }
+    uint64_t next =
+        static_cast<uint64_t>(score[bin]) + static_cast<uint64_t>(delta);
+    score[bin] = static_cast<uint32_t>(
+        std::min<uint64_t>(next, std::numeric_limits<uint32_t>::max()));
+  }
+};
+
 inline void processSequence(const std::vector<size_t> &hashs1,
                             ChimeraBuild::IMCFConfig &imcfConfig,
                             std::vector<std::vector<std::string>> &indexToTaxid,
-                            ClassifyConfig &config,
+                            const TaxDict &tax, ClassifyConfig &config,
+                            GroupHeat &heat,
                             chimera::imcf::InterleavedMergedCuckooFilter &imcf,
                             const std::string &id,
                             std::vector<classifyResult> &classifyResults,
@@ -1226,83 +1348,333 @@ inline void processSequence(const std::vector<size_t> &hashs1,
     threshold = 1;
   }
 
-  const size_t S = std::min<size_t>(64, hashs1.size());
-  std::vector<size_t> sampleVals(hashs1.begin(), hashs1.begin() + S);
+  const size_t binNumAll = indexToTaxid.size();
+  heat.ensure(binNumAll);
 
-  std::vector<std::vector<uint16_t>> sampleCount(indexToTaxid.size());
-  std::vector<std::pair<uint32_t, uint16_t>> touchedS;
-  touchedS.reserve(128);
-
-  imcf.bulkCount_sparse(sampleVals, sampleCount, &touchedS);
-
-  std::vector<uint32_t> groupScore(indexToTaxid.size(), 0);
-  for (auto [bi, sp] : touchedS) {
-    groupScore[bi] += sampleCount[bi][sp];
-  }
-
-  size_t binNumAll = indexToTaxid.size();
-  size_t K = std::min<size_t>(64, std::max<size_t>(32, static_cast<size_t>(std::sqrt(static_cast<double>(binNumAll)))));
-  std::vector<uint32_t> topBins;
-  topBins.reserve(K);
-  uint64_t coarseTotal = std::accumulate(groupScore.begin(), groupScore.end(), uint64_t{0});
-  if (touchedS.empty() || coarseTotal == 0) {
-    topBins.clear();
-    topBins.reserve(binNumAll);
-    for (uint32_t idx = 0; idx < binNumAll; ++idx) {
-      topBins.push_back(idx);
+  size_t targetSample = hashNum / 4;
+  targetSample = std::clamp<size_t>(targetSample, 16, 96);
+  const size_t sampleBudget = std::min<size_t>(targetSample, hashs1.size());
+  std::vector<size_t> sampleVals;
+  if (sampleBudget > 0) {
+    sampleVals.reserve(sampleBudget);
+    size_t step = std::max<size_t>(1, hashs1.size() / sampleBudget);
+    for (size_t i = 0; i < hashs1.size() && sampleVals.size() < sampleBudget;
+         i += step) {
+      sampleVals.push_back(hashs1[i]);
     }
-  } else {
-    std::vector<uint32_t> idx(binNumAll);
-    std::iota(idx.begin(), idx.end(), 0u);
-    auto mid = idx.begin() + std::min(K, binNumAll);
-    std::partial_sort(idx.begin(), mid, idx.end(), [&](uint32_t a, uint32_t b) {
-      return groupScore[a] > groupScore[b];
-    });
-    topBins.assign(idx.begin(), mid);
+    if (sampleVals.size() < sampleBudget && !hashs1.empty()) {
+      sampleVals.push_back(hashs1.back());
+    }
   }
 
-  std::vector<std::vector<uint16_t>> count(indexToTaxid.size());
-  std::vector<std::pair<uint32_t, uint16_t>> touched;
-  touched.reserve(256);
+  std::vector<std::vector<uint16_t>> sampleCount;
+  std::vector<std::pair<uint32_t, uint16_t>> touchedS;
+  touchedS.reserve(64);
+  robin_hood::unordered_flat_map<uint32_t, uint32_t> sampleBinScore;
+  uint64_t coarseTotal = 0;
 
-  imcf.bulkCount_sparse_subset(hashs1, topBins, count, &touched);
+  if (sampleBudget > 0) {
+    imcf.bulkCount_sparse(sampleVals, sampleCount, &touchedS);
+    sampleBinScore.reserve(touchedS.size());
+    for (auto [bi, sp] : touchedS) {
+      uint16_t contrib = sampleCount[bi][sp];
+      if (contrib == 0) {
+        continue;
+      }
+      coarseTotal += contrib;
+      sampleBinScore[bi] += contrib;
+    }
+  }
+
+  size_t sqrtBins = std::max<size_t>(
+      1, static_cast<size_t>(std::sqrt(static_cast<double>(binNumAll))));
+  size_t KmaxLimit = std::min<size_t>(128, binNumAll);
+  size_t desiredK = std::clamp<size_t>(sqrtBins, sqrtBins, KmaxLimit);
+  std::vector<uint32_t> topBins;
+  bool fallback_full = (coarseTotal == 0);
+
+  if (imcf.hasRouterIndex() && !sampleVals.empty()) {
+    robin_hood::unordered_flat_map<uint32_t, uint32_t> freq;
+    freq.reserve(256);
+    std::vector<uint32_t> routed;
+    for (auto v : sampleVals) {
+      routed.clear();
+      imcf.route(v, routed);
+      for (uint32_t b : routed) {
+        if (b < binNumAll) {
+          ++freq[b];
+        }
+      }
+    }
+    if (!freq.empty()) {
+      std::vector<std::pair<uint32_t, uint32_t>> ranked;
+      ranked.reserve(freq.size());
+      for (const auto &kv : freq) {
+        ranked.emplace_back(kv.first, kv.second);
+      }
+      std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) {
+        return a.second > b.second;
+      });
+      size_t take = std::min(desiredK, ranked.size());
+      topBins.reserve(take);
+      for (size_t i = 0; i < take; ++i) {
+        topBins.push_back(ranked[i].first);
+      }
+      fallback_full = false;
+    }
+  }
+
+  if (topBins.empty()) {
+    size_t adaptiveK = sqrtBins;
+    if (coarseTotal > 0 && !sampleBinScore.empty()) {
+      std::vector<std::pair<uint32_t, uint32_t>> scoreVec;
+      scoreVec.reserve(sampleBinScore.size());
+      for (const auto &kv : sampleBinScore) {
+        scoreVec.emplace_back(kv.first, kv.second);
+      }
+      std::sort(
+          scoreVec.begin(), scoreVec.end(),
+          [](const auto &a, const auto &b) { return a.second > b.second; });
+      adaptiveK = scoreVec.size();
+      for (size_t i = 1; i < scoreVec.size(); ++i) {
+        double ratio = static_cast<double>(scoreVec[i].second) /
+                       static_cast<double>(scoreVec[i - 1].second);
+        if (ratio <= 0.8) {
+          adaptiveK = i;
+          break;
+        }
+      }
+      adaptiveK = std::max<size_t>(adaptiveK, sqrtBins);
+      adaptiveK = std::min<size_t>(adaptiveK, KmaxLimit);
+    }
+    adaptiveK = std::clamp<size_t>(adaptiveK, sqrtBins, KmaxLimit);
+    size_t K = adaptiveK;
+
+    if (fallback_full) {
+      topBins.resize(binNumAll);
+      std::iota(topBins.begin(), topBins.end(), 0u);
+    } else {
+      robin_hood::unordered_flat_set<uint32_t> candidateSet;
+      candidateSet.reserve(K * 2 + sampleBinScore.size());
+      std::vector<uint32_t> candidateBins;
+      candidateBins.reserve(K * 2 + sampleBinScore.size());
+
+      auto push_candidate = [&](uint32_t idx) {
+        if (idx >= binNumAll) {
+          return;
+        }
+        if (candidateSet.insert(idx).second) {
+          candidateBins.push_back(idx);
+        }
+      };
+
+      size_t heatTake = std::min<size_t>(
+          binNumAll, std::max<size_t>(K / 2, static_cast<size_t>(1)));
+      using HeapNode = std::pair<uint32_t, uint32_t>;
+      auto cmpNode = [](const HeapNode &a, const HeapNode &b) {
+        return a.first > b.first;
+      };
+      std::priority_queue<HeapNode, std::vector<HeapNode>, decltype(cmpNode)>
+          heatHeap(cmpNode);
+      for (uint32_t idx = 0; idx < binNumAll; ++idx) {
+        uint32_t sc = heat.score[idx];
+        if (heatHeap.size() < heatTake) {
+          heatHeap.emplace(sc, idx);
+        } else if (sc > heatHeap.top().first) {
+          heatHeap.pop();
+          heatHeap.emplace(sc, idx);
+        }
+      }
+      std::vector<uint32_t> fromHeat;
+      fromHeat.reserve(heatHeap.size());
+      while (!heatHeap.empty()) {
+        fromHeat.push_back(heatHeap.top().second);
+        heatHeap.pop();
+      }
+      std::reverse(fromHeat.begin(), fromHeat.end());
+      for (auto idx : fromHeat) {
+        push_candidate(idx);
+      }
+
+      for (const auto &[bin, score] : sampleBinScore) {
+        (void)score;
+        push_candidate(bin);
+      }
+
+      size_t desired = std::min(K, binNumAll);
+      if (candidateBins.size() < desired) {
+        size_t need = desired - candidateBins.size();
+        if (need > 0) {
+          std::priority_queue<HeapNode, std::vector<HeapNode>,
+                              decltype(cmpNode)>
+              fillHeap(cmpNode);
+          for (uint32_t idx = 0; idx < binNumAll; ++idx) {
+            if (candidateSet.find(idx) != candidateSet.end()) {
+              continue;
+            }
+            uint32_t sc = heat.score[idx];
+            if (fillHeap.size() < need) {
+              fillHeap.emplace(sc, idx);
+            } else if (sc > fillHeap.top().first) {
+              fillHeap.pop();
+              fillHeap.emplace(sc, idx);
+            }
+          }
+          std::vector<uint32_t> extra;
+          extra.reserve(fillHeap.size());
+          while (!fillHeap.empty()) {
+            extra.push_back(fillHeap.top().second);
+            fillHeap.pop();
+          }
+          std::reverse(extra.begin(), extra.end());
+          for (auto idx : extra) {
+            push_candidate(idx);
+          }
+        }
+      }
+
+      desired = std::min(K, binNumAll);
+      std::priority_queue<HeapNode, std::vector<HeapNode>, decltype(cmpNode)>
+          finalHeap(cmpNode);
+      for (auto idx : candidateBins) {
+        uint32_t combined = heat.score[idx];
+        if (auto it = sampleBinScore.find(idx); it != sampleBinScore.end()) {
+          combined += it->second;
+        }
+        if (finalHeap.size() < desired) {
+          finalHeap.emplace(combined, idx);
+        } else if (combined > finalHeap.top().first) {
+          finalHeap.pop();
+          finalHeap.emplace(combined, idx);
+        }
+      }
+      while (!finalHeap.empty()) {
+        topBins.push_back(finalHeap.top().second);
+        finalHeap.pop();
+      }
+      std::reverse(topBins.begin(), topBins.end());
+
+      if (topBins.size() < desired) {
+        robin_hood::unordered_flat_set<uint32_t> topSet(topBins.begin(),
+                                                        topBins.end());
+        for (uint32_t idx = 0; idx < binNumAll && topBins.size() < desired;
+             ++idx) {
+          if (topSet.insert(idx).second) {
+            topBins.push_back(idx);
+          }
+        }
+      }
+
+      if (topBins.empty()) {
+        topBins.resize(binNumAll);
+        std::iota(topBins.begin(), topBins.end(), 0u);
+        fallback_full = true;
+      }
+    }
+  }
+
+  if (!fallback_full) {
+    for (auto bin : topBins) {
+      uint32_t delta = 1;
+      if (auto it = sampleBinScore.find(bin); it != sampleBinScore.end()) {
+        delta = std::max<uint32_t>(delta, it->second);
+      }
+      heat.boost(bin, delta);
+    }
+  }
+  heat.decay_if_needed();
+
+  if (!fallback_full && topBins.size() != binNumAll) {
+    std::sort(topBins.begin(), topBins.end());
+    topBins.erase(std::unique(topBins.begin(), topBins.end()), topBins.end());
+  }
+
+  robin_hood::unordered_flat_map<uint32_t, uint32_t> tidCount;
+  tidCount.reserve(128);
+
+  auto emit_to_tid = [&](uint32_t bin, uint16_t sp) {
+    if (bin >= tax.idx2id.size()) {
+      return;
+    }
+    const auto &speciesVec = tax.idx2id[bin];
+    if (sp >= speciesVec.size()) {
+      return;
+    }
+    uint32_t tid = speciesVec[sp];
+    if (tid >= tax.id2str.size()) {
+      return;
+    }
+    ++tidCount[tid];
+  };
+
+  size_t n0 = std::min<size_t>(64, hashs1.size());
+  for (size_t i = 0; i < n0; ++i) {
+    if (fallback_full || topBins.size() == binNumAll) {
+      imcf.bulkContain_events(hashs1[i], emit_to_tid);
+    } else {
+      imcf.bulkContain_events_subset(hashs1[i], topBins, emit_to_tid);
+    }
+  }
+
+  auto top2 = [&](uint32_t &bestTid, size_t &best, size_t &second) {
+    best = 0;
+    second = 0;
+    bestTid = std::numeric_limits<uint32_t>::max();
+    for (const auto &kv : tidCount) {
+      size_t c = kv.second;
+      if (c > best) {
+        second = best;
+        best = c;
+        bestTid = kv.first;
+      } else if (c > second) {
+        second = c;
+      }
+    }
+  };
+
+  [[maybe_unused]] uint32_t bestTid = std::numeric_limits<uint32_t>::max();
+  size_t best = 0;
+  size_t second = 0;
+  top2(bestTid, best, second);
+
+  double ratioBound = std::max<double>(
+      1.8 * static_cast<double>(std::max<size_t>(size_t(1), second)), 1.0);
+  bool confident =
+      (best >= threshold) && (static_cast<double>(best) >= ratioBound);
+
+  if (!confident && hashs1.size() > n0) {
+    size_t mask = (static_cast<size_t>(1) << 3) - 1; // sample 1/8
+    for (size_t i = n0; i < hashs1.size(); ++i) {
+      if ((hashs1[i] & mask) != 0) {
+        continue;
+      }
+      if (fallback_full || topBins.size() == binNumAll) {
+        imcf.bulkContain_events(hashs1[i], emit_to_tid);
+      } else {
+        imcf.bulkContain_events_subset(hashs1[i], topBins, emit_to_tid);
+      }
+    }
+    top2(bestTid, best, second);
+  }
+
   classifyResult result;
   result.id = id;
-
-  size_t oldIndex = 0;
-  size_t maxBinCount = 0;
   std::pair<std::string, std::size_t> maxCount;
-  robin_hood::unordered_flat_map<std::string, size_t> taxidToCount;
 
-  // Aggregate counts for each taxid，仅遍历本次命中的 (bin, species)
-  for (auto [i, j] : touched) {
-    size_t v = static_cast<size_t>(count[i][j]);
-    if (v == 0) {
-      continue;
-    }
-    taxidToCount[indexToTaxid[i][j]] += v;
-  }
-
-  // Determine the maximum count observed
-  for (auto &[taxid, binCount] : taxidToCount) {
-    if (binCount > hashNum) {
-      binCount = hashNum;
-    }
-    if (binCount > maxBinCount) {
-      maxBinCount = binCount;
-    }
-  }
-
-  // First filtering step: keep bins with counts >= 80% of maxBinCount and above
-  // the threshold
+  size_t maxBinCount = best;
   size_t thresholdCount =
       static_cast<size_t>(0.8 * static_cast<double>(maxBinCount));
-  for (const auto &[taxid, binCount] : taxidToCount) {
-    if (binCount >= thresholdCount && binCount >= threshold) {
-      result.taxidCount.emplace_back(taxid, binCount);
 
-      if (binCount == maxBinCount) {
-        maxCount = std::make_pair(taxid, binCount);
+  for (const auto &[tid_id, rawCount] : tidCount) {
+    size_t countVal = rawCount;
+    if (countVal > hashNum) {
+      countVal = hashNum;
+    }
+    if (countVal >= threshold && countVal >= thresholdCount) {
+      const std::string &taxid = tax.id2str[tid_id];
+      result.taxidCount.emplace_back(taxid, countVal);
+      if (countVal == maxBinCount) {
+        maxCount = std::make_pair(taxid, countVal);
       }
       fileInfo.taxidTotalMatches[taxid] += 1;
     }
@@ -1335,7 +1707,7 @@ inline void processSequence(const std::vector<size_t> &hashs1,
       //// Sort the taxidCount vector based on the count in descending order
       // std::sort(result.taxidCount.begin(), result.taxidCount.end(), [](const
       // auto& a, const auto& b) { 	return a.second > b.second;  // Sort in
-      //descending order
+      // descending order
       //  Leave result for further EM algorithm processing
     }
   } else {
@@ -1392,11 +1764,11 @@ inline void processSequence(const std::vector<size_t> &hashs1,
  */
 inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
                          std::vector<std::vector<std::string>> &indexToTaxid,
-                         ClassifyConfig &config,
+                         const TaxDict &tax, ClassifyConfig &config,
                          chimera::imcf::InterleavedMergedCuckooFilter &imcf,
                          std::vector<classifyResult> &classifyResults,
                          const auto &minimiser_view, FileInfo &fileInfo,
-                         LCA &lca) {
+                         LCA &lca, GroupHeat &heat) {
   // Process batch of reads
   std::vector<size_t> hashs1;
   if (!batch.seqs2.empty()) {
@@ -1413,10 +1785,11 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
             batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector>();
         hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
       }
-      if (!hashs1.empty()) {
+      if (hashs1.size() > 256) {
+        std::sort(hashs1.begin(), hashs1.end());
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
-      processSequence(hashs1, imcfConfig, indexToTaxid, config, imcf,
+      processSequence(hashs1, imcfConfig, indexToTaxid, tax, config, heat, imcf,
                       batch.ids[i], classifyResults, fileInfo, lca);
     }
   } else {
@@ -1428,13 +1801,84 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
         hashs1 =
             batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector>();
       }
-      if (!hashs1.empty()) {
+      if (hashs1.size() > 256) {
+        std::sort(hashs1.begin(), hashs1.end());
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
       // Process the hash values for classification
-      processSequence(hashs1, imcfConfig, indexToTaxid, config, imcf,
+      processSequence(hashs1, imcfConfig, indexToTaxid, tax, config, heat, imcf,
                       batch.ids[i], classifyResults, fileInfo, lca);
     }
+  }
+}
+
+/**
+ * @brief Classify reads while streaming batches from producer thread.
+ */
+void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
+                        moodycamel::ConcurrentQueue<batchReads> &readQueue,
+                        ClassifyConfig &config,
+                        chimera::imcf::InterleavedMergedCuckooFilter &imcf,
+                        std::vector<std::vector<std::string>> &indexToTaxid,
+                        const TaxDict &tax,
+                        std::vector<classifyResult> &classifyResults,
+                        FileInfo &fileInfo, std::atomic<bool> &producer_done) {
+  auto minimiser_view = seqan3::views::minimiser_hash(
+      seqan3::shape{seqan3::ungapped{imcfConfig.kmerSize}},
+      seqan3::window_size{imcfConfig.windowSize},
+      seqan3::seed{adjust_seed(imcfConfig.kmerSize)});
+
+  LCA lca;
+  if (config.lca) {
+    buildLCA(lca, config.taxFile);
+  }
+
+#pragma omp parallel
+  {
+    batchReads batch;
+    std::vector<classifyResult> localClassifyResults;
+    FileInfo localFileInfo;
+    GroupHeat heat;
+    heat.ensure(indexToTaxid.size());
+
+    for (;;) {
+      if (readQueue.try_dequeue(batch)) {
+        processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
+                     localClassifyResults, minimiser_view, localFileInfo, lca,
+                     heat);
+        continue;
+      }
+      if (producer_done.load(std::memory_order_acquire)) {
+        break;
+      }
+      std::this_thread::yield();
+    }
+
+#pragma omp critical
+    {
+      classifyResults.insert(classifyResults.end(),
+                             localClassifyResults.begin(),
+                             localClassifyResults.end());
+
+      fileInfo.classifiedNum += localFileInfo.classifiedNum;
+      fileInfo.unclassifiedNum += localFileInfo.unclassifiedNum;
+
+      fileInfo.uniqueTaxids.insert(localFileInfo.uniqueTaxids.begin(),
+                                   localFileInfo.uniqueTaxids.end());
+
+      for (const auto &[taxid, count] : localFileInfo.taxidTotalMatches) {
+        fileInfo.taxidTotalMatches[taxid] += count;
+      }
+
+      for (const auto &[taxid, count] : localFileInfo.taxidUniqueMatches) {
+        fileInfo.taxidUniqueMatches[taxid] += count;
+      }
+    }
+  }
+
+  if (!(config.em || config.vem) || !config.skip_post_filter) {
+    secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
+    thirdFilteringStep(classifyResults, fileInfo);
   }
 }
 
@@ -1489,7 +1933,7 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               ClassifyConfig &config,
               chimera::imcf::InterleavedMergedCuckooFilter &imcf,
               std::vector<std::vector<std::string>> &indexToTaxid,
-              std::vector<classifyResult> &classifyResults,
+              const TaxDict &tax, std::vector<classifyResult> &classifyResults,
               FileInfo &fileInfo) {
   // Create a minimiser hash view based on IMCF configuration
   auto minimiser_view = seqan3::views::minimiser_hash(
@@ -1509,10 +1953,13 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
     batchReads batch;
     std::vector<classifyResult> localClassifyResults;
     FileInfo localFileInfo;
+    GroupHeat heat;
+    heat.ensure(indexToTaxid.size());
     // Dequeue and process batches until the queue is empty
     while (readQueue.try_dequeue(batch)) {
-      processBatch(batch, imcfConfig, indexToTaxid, config, imcf,
-                   localClassifyResults, minimiser_view, localFileInfo, lca);
+      processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
+                   localClassifyResults, minimiser_view, localFileInfo, lca,
+                   heat);
     }
     // Critical section to merge local results into shared resources
 #pragma omp critical
@@ -1558,6 +2005,21 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
  * @param config The configuration for the classification process.
  */
 void run(ClassifyConfig config) {
+  if (config.threads == 0) {
+    unsigned int hardwareThreads = std::thread::hardware_concurrency();
+    if (hardwareThreads == 0) {
+      hardwareThreads = 1;
+    }
+    const auto maxThreads = static_cast<unsigned int>(std::numeric_limits<uint16_t>::max());
+    if (hardwareThreads > maxThreads) {
+      hardwareThreads = maxThreads;
+    }
+    config.threads = static_cast<uint16_t>(hardwareThreads);
+  }
+
+  if (!config.em && !config.vem && !config.lca) {
+    config.em = true;
+  }
   if ((config.em || config.lca || config.vem) && config.mode == "fast") {
     config.mode = "normal";
     std::cout << "Warning: The mode is changed to 'normal' for EM algorithm or "
@@ -1574,16 +2036,33 @@ void run(ClassifyConfig config) {
   FileInfo fileInfo;
   seqan3::contrib::bgzf_thread_count = config.threads;
   moodycamel::ConcurrentQueue<batchReads> readQueue;
-  parseReads(readQueue, config, fileInfo);
   std::vector<classifyResult> classifyResults;
   std::unordered_map<std::string, double> classWeights;
   bool posteriorModelUsed = false;
   if (config.filter == "imcf") {
+    std::atomic<bool> producer_done{false};
+    auto readEnd = readStart;
+    std::thread producer([&]() {
+      parseReads(readQueue, config, fileInfo);
+      readEnd = std::chrono::high_resolution_clock::now();
+      producer_done.store(true, std::memory_order_release);
+    });
+
     std::vector<std::vector<std::string>> indexToTaxid;
     chimera::imcf::InterleavedMergedCuckooFilter imcf;
     ChimeraBuild::IMCFConfig imcfConfig;
     loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid);
-    auto readEnd = std::chrono::high_resolution_clock::now();
+    const TaxDict tax = build_tax_dict(indexToTaxid);
+
+    auto classifyStart = std::chrono::high_resolution_clock::now();
+    std::cout << "Classifying sequences by imcf..." << std::endl;
+    classify_streaming(imcfConfig, readQueue, config, imcf, indexToTaxid, tax,
+                       classifyResults, fileInfo, producer_done);
+    auto classifyEnd = std::chrono::high_resolution_clock::now();
+    auto classifyDuration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd -
+                                                              classifyStart);
+    producer.join();
     auto readDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
         readEnd - readStart);
     if (config.verbose) {
@@ -1591,20 +2070,12 @@ void run(ClassifyConfig config) {
       print_classify_time(readDuration.count());
       std::cout << std::endl;
     }
-
-    auto classifyStart = std::chrono::high_resolution_clock::now();
-    std::cout << "Classifying sequences by imcf..." << std::endl;
-    classify(imcfConfig, readQueue, config, imcf, indexToTaxid, classifyResults,
-             fileInfo);
-    auto classifyEnd = std::chrono::high_resolution_clock::now();
-    auto classifyDuration =
-        std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd -
-                                                              classifyStart);
     if (config.verbose) {
       std::cout << "Classify time: ";
       print_classify_time(classifyDuration.count());
     }
   } else if (config.filter == "icf") {
+    parseReads(readQueue, config, fileInfo);
     std::vector<std::pair<std::string, std::size_t>> taxidBins;
     chimera::InterleavedCuckooFilter icf;
     ChimeraBuild::ICFConfig icfConfig;
@@ -1632,6 +2103,7 @@ void run(ClassifyConfig config) {
       print_classify_time(classifyDuration.count());
     }
   } else if (config.filter == "hicf") {
+    parseReads(readQueue, config, fileInfo);
     std::vector<std::string> indexToTaxid;
     chimera::hicf::HierarchicalInterleavedCuckooFilter hicf;
     ChimeraBuild::HICFConfig hicfConfig;
