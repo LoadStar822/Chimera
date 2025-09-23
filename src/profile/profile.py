@@ -1,5 +1,46 @@
-from multitax import NcbiTx
 import math
+import warnings
+from typing import Dict, Iterable, Optional
+
+from ete3 import NCBITaxa
+
+
+# 目标层级及其在 NCBI taxonomy 中可能出现的 rank 名称（统一转小写）
+LEVEL_ALIASES = {
+    "acellular root": ("acellular root",),
+    "realm": ("realm",),
+    "domain": ("domain", "superkingdom"),
+    "clade": ("clade",),
+    "phylum": ("phylum",),
+    "class": ("class",),
+    "order": ("order",),
+    "family": ("family",),
+    "genus": ("genus",),
+    "species": ("species",),
+    "strain": ("strain",),
+}
+
+UNCLASSIFIED = "unclassified"
+
+
+def _normalize_rank(rank: str) -> Optional[str]:
+    """将 NCBI rank 名称归一化到我们关注的层级。"""
+    rank_lower = rank.lower()
+    for level, aliases in LEVEL_ALIASES.items():
+        if rank_lower in aliases:
+            return level
+    return None
+
+
+def _should_mark_unclassified(level: str, has_level: Dict[str, bool]) -> bool:
+    """判断当前层级在没有命中时是否需要记为 unclassified。"""
+    if level == "domain":
+        return not has_level.get("acellular root", False)
+    if level == "realm":
+        return has_level.get("acellular root", False)
+    if level == "acellular root":
+        return has_level.get("realm", False) or not has_level.get("domain", False)
+    return True
 
 
 def calculate_shannon_index(taxon_dict):
@@ -25,22 +66,14 @@ def calculate_simpson_index(taxon_dict):
     return 1 - simpson_index
 
 
-def process_file(input_files, output_file):
-    # 初始化 NcbiTx 对象
-    tax = NcbiTx()
+def process_file(input_files: Iterable[str], output_file: str) -> None:
+    try:
+        tax = NCBITaxa()
+    except Exception as exc:  # pragma: no cover - 初始化失败极少发生
+        warnings.warn(f"无法初始化 NCBITaxa，所有条目将标记为未分类: {exc}")
+        tax = None
 
-    # 存储不同分类层级的计数，包括clade和unclassified
-    count_by_level = {
-        "superkingdom": {},  # 域
-        "clade": {},  # 进化枝
-        "phylum": {},  # 门
-        "class": {},  # 纲
-        "order": {},  # 目
-        "family": {},  # 科
-        "genus": {},  # 属
-        "species": {},  # 种
-        "strain": {},  # 菌株
-    }
+    count_by_level: Dict[str, Dict[str, int]] = {level: {} for level in LEVEL_ALIASES}
 
     # 处理每个输入文件
     for input_file in input_files:
@@ -49,48 +82,77 @@ def process_file(input_files, output_file):
                 # 按制表符分割
                 parts = line.strip().split('\t')
 
+                if len(parts) < 2:
+                    continue
+
                 # 获取第二列中的 taxid 信息
                 taxid_info = parts[1].split('\t')
 
                 for info in taxid_info:
-                    if info == "unclassified":
+                    if info == UNCLASSIFIED:
                         # 如果是未分类的，所有层级都加1
                         for level in count_by_level:
-                            count_by_level[level]["unclassified"] = count_by_level[level].get("unclassified", 0) + 1
+                            count_by_level[level][UNCLASSIFIED] = (
+                                count_by_level[level].get(UNCLASSIFIED, 0) + 1
+                            )
                     else:
-                        taxid = info.split(':')[0]  # 只取 taxid，忽略后面的数字
+                        taxid = info.split(':')[0]
 
-                        # 使用 NcbiTx 获取物种的层级信息
                         try:
-                            taxonomy_levels = tax.name_lineage(taxid)  # 获取名称层级
-                            rank_levels = tax.rank_lineage(taxid)  # 获取层级 rank 信息
-
-                            # 遍历 rank_levels，匹配到具体的分类等级
-                            has_level = {level: False for level in count_by_level}  # 跟踪每个层级是否有数据
-
-                            for name, rank in zip(taxonomy_levels, rank_levels):
-                                if rank == "no rank":
-                                    continue  # 跳过没有分类层级的条目
-                                if rank == "clade":
-                                    count_by_level["clade"][name] = count_by_level["clade"].get(name, 0) + 1
-                                    has_level["clade"] = True
-                                elif rank == "strain":
-                                    count_by_level["strain"][name] = count_by_level["strain"].get(name, 0) + 1
-                                    has_level["strain"] = True
-                                elif rank in count_by_level:
-                                    count_by_level[rank][name] = count_by_level[rank].get(name, 0) + 1
-                                    has_level[rank] = True
-
-                            # 对于没有分类信息的层级，记录为“unclassified”
-                            for level in has_level:
-                                if not has_level[level]:
-                                    count_by_level[level]["unclassified"] = count_by_level[level].get("unclassified",
-                                                                                                      0) + 1
-
-                        except:
-                            # 查询失败则归类为未分类
+                            taxid_int = int(taxid)
+                        except ValueError:
                             for level in count_by_level:
-                                count_by_level[level]["unclassified"] = count_by_level[level].get("unclassified", 0) + 1
+                                count_by_level[level][UNCLASSIFIED] = (
+                                    count_by_level[level].get(UNCLASSIFIED, 0) + 1
+                                )
+                            continue
+
+                        if tax is None:
+                            for level in count_by_level:
+                                count_by_level[level][UNCLASSIFIED] = (
+                                    count_by_level[level].get(UNCLASSIFIED, 0) + 1
+                                )
+                            continue
+
+                        try:
+                            lineage = tax.get_lineage(taxid_int)
+                            ranks = tax.get_rank(lineage)
+                            names = tax.get_taxid_translator(lineage)
+                        except Exception:
+                            for level in count_by_level:
+                                count_by_level[level][UNCLASSIFIED] = (
+                                    count_by_level[level].get(UNCLASSIFIED, 0) + 1
+                                )
+                            continue
+
+                        has_level = {level: False for level in count_by_level}
+
+                        for ancestor_taxid in lineage:
+                            rank = ranks.get(ancestor_taxid)
+                            if not rank or rank == "no rank":
+                                continue
+
+                            normalized = _normalize_rank(rank)
+                            if not normalized:
+                                continue
+
+                            name = names.get(ancestor_taxid)
+                            if not name:
+                                continue
+
+                            if normalized != "clade" and has_level[normalized]:
+                                continue
+
+                            count_by_level[normalized][name] = (
+                                count_by_level[normalized].get(name, 0) + 1
+                            )
+                            has_level[normalized] = True
+
+                        for level, seen in has_level.items():
+                            if not seen and _should_mark_unclassified(level, has_level):
+                                count_by_level[level][UNCLASSIFIED] = (
+                                    count_by_level[level].get(UNCLASSIFIED, 0) + 1
+                                )
 
     # 计算多样性指标及丰度，并输出
     total_counts_by_level = {level: sum(taxon_dict.values()) for level, taxon_dict in count_by_level.items()}
@@ -104,8 +166,12 @@ def process_file(input_files, output_file):
             simpson_index = calculate_simpson_index(taxon_dict)
             total_count = total_counts_by_level[level]
 
+            if total_count == 0:
+                continue
+
             # 输出层级标题
-            outfile.write(f"\n## {level.capitalize()} Level ##\n")
+            display_level = " ".join(part.capitalize() for part in level.split())
+            outfile.write(f"\n## {display_level} Level ##\n")
 
             # 按照计数从大到小排序，并将unclassified放在最后
             sorted_items = []
@@ -113,7 +179,7 @@ def process_file(input_files, output_file):
             
             # 分离unclassified和其他项
             for taxon, count in taxon_dict.items():
-                if taxon == "unclassified":
+                if taxon == UNCLASSIFIED:
                     unclassified_item = (taxon, count)
                 else:
                     sorted_items.append((taxon, count))

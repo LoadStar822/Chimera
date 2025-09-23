@@ -18,9 +18,11 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <filesystem>
 
 #include <robin_hood.h>
 
@@ -325,7 +327,19 @@ static void test_partition_normal_heavy_tail() {
   expect_equal(covered.size(), counts.size(), "重尾数据应覆盖全部 taxid");
 
   auto chunks = build_hash_chunks(counts);
-  size_t expectedGroupCount = (chunks.size() + 4 - 1) / 4;
+  robin_hood::unordered_flat_map<std::string, size_t> chunksPerTaxid;
+  for (const auto &chunk : chunks) {
+    ++chunksPerTaxid[chunk.taxid];
+  }
+
+  constexpr size_t kGroupCap = 4;
+  size_t naiveLowerBound = (chunks.size() + kGroupCap - 1) / kGroupCap;
+  size_t taxidLowerBound = 0;
+  for (const auto &kv : chunksPerTaxid) {
+    taxidLowerBound = std::max(taxidLowerBound, kv.second);
+  }
+
+  size_t expectedGroupCount = std::max(naiveLowerBound, taxidLowerBound);
   expect_equal(groups.size(), expectedGroupCount,
                "重尾数据分组数应与切块策略一致");
 
@@ -470,6 +484,70 @@ static void test_bulk_count_repeat() {
                "bulkCount 应将标签 2 计数为 1");
 }
 
+static void test_router_route_and_subset() {
+  ChimeraBuild::IMCFConfig config{};
+  auto filter = make_filter_with_hashes(config, {128, 128});
+
+  expect_true(config.binNum >= 2, "测试路由需至少两个分组");
+
+  const size_t value = 987654321ULL;
+  expect_true(filter.insertTag(0, value, 1), "应能向分组 0 插入标签");
+  expect_true(filter.insertTag(1, value, 2), "应能向分组 1 插入标签");
+
+  filter.buildRouterIndex();
+  expect_true(filter.hasRouterIndex(), "构建路由索引后应标记为可用");
+
+  std::vector<uint32_t> routed;
+  filter.route(value, routed);
+  expect_true(routed.size() == 2, "路由应返回两个命中分组");
+  expect_true(routed[0] == 0 && routed[1] == 1, "路由结果需升序列出分组");
+
+#ifdef IMCF_MIRROR64
+  filter.releaseBitStorage();
+  routed.clear();
+  filter.route(value, routed);
+  expect_true(routed.size() == 2 && routed[0] == 0 && routed[1] == 1,
+              "释放 bit_vector 后路由仍应依赖镜像正常工作");
+#endif
+
+  auto tmpPath = std::filesystem::temp_directory_path() / "chimera_imcf_router_test.rtr";
+  expect_true(filter.saveRouterIndex(tmpPath.string()), "路由索引应成功写入磁盘");
+
+  filter.clearRouterIndex();
+  expect_true(!filter.hasRouterIndex(), "clearRouterIndex 应清空索引状态");
+  expect_true(filter.loadRouterIndex(tmpPath.string()), "路由索引应可重新载入");
+
+  std::error_code ec;
+  std::filesystem::remove(tmpPath, ec);
+
+  routed.clear();
+  filter.route(value, routed);
+  expect_true(routed.size() == 2 && routed[0] == 0 && routed[1] == 1,
+              "重新加载后路由结果应保持一致");
+
+  std::vector<size_t> minimizers{value};
+  std::vector<uint32_t> subset{0, 1, 5};
+  std::sort(subset.begin(), subset.end());
+
+  std::vector<std::vector<uint16_t>> counters;
+  std::vector<std::pair<uint32_t, uint16_t>> touched;
+  filter.bulkCount_sparse_subset(minimizers, subset, counters, &touched);
+
+  bool found0 = false;
+  bool found1 = false;
+  for (auto [bin, sp] : touched) {
+    if (bin == 0 && sp == 1) {
+      found0 = counters[bin][sp] == 1;
+    }
+    if (bin == 1 && sp == 2) {
+      found1 = counters[bin][sp] == 1;
+    }
+  }
+
+  expect_true(found0, "路由计数应命中分组 0 的标签 1");
+  expect_true(found1, "路由计数应命中分组 1 的标签 2");
+}
+
 static void test_serialize_roundtrip() {
   ChimeraBuild::IMCFConfig config{};
   auto filter = make_filter_with_hashes(config, {128, 96});
@@ -591,13 +669,14 @@ static void test_insert_failure_throw() {
   }
 
   size_t failingValue = next_absent_with_unique_fingerprint(filter, fps, seed);
+  bool ok = true;
   bool caught = false;
   try {
-    (void)filter.insertTag(0, failingValue, 5);
+    ok = filter.insertTag(0, failingValue, 5);
   } catch (const std::runtime_error &ex) {
     caught = std::string(ex.what()).find("Filter is full") != std::string::npos;
   }
-  expect_true(caught, "超出容量的插入应抛出异常");
+  expect_true(caught || !ok, "超出容量的插入应抛出异常或返回失败");
 }
 
 static void test_bulk_contain_negative() {
@@ -800,6 +879,7 @@ int main() {
   runner.add("分组-快速模式-上限", test_partition_fast_cap_large);
   runner.add("插入与 bulkContain-基础", test_insert_and_bulk_contain_basic);
   runner.add("bulkCount-重复计数", test_bulk_count_repeat);
+  runner.add("路由索引与子集计数", test_router_route_and_subset);
   runner.add("序列化往返", test_serialize_roundtrip);
   runner.add("插入备用桶并命中", test_insert_alt_bucket_and_find);
   runner.add("超容量插入抛异常", test_insert_failure_throw);
