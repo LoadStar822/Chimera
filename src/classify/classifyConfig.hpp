@@ -52,6 +52,9 @@ namespace ChimeraClassify {
 		uint16_t threads;
 		std::string mode;
 		bool verbose = true;
+		bool progress = true;
+		size_t progressStep = 5000;
+		double progressInterval = 1.0;
 		size_t batchSize;
 		bool lca = false;
 		bool em = false;
@@ -98,6 +101,9 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "VEM:" << config.vem << std::endl
 			<< std::setw(20) << "Threads:" << config.threads << std::endl
 			<< std::setw(20) << "Verbose:" << config.verbose << std::endl
+			<< std::setw(20) << "Progress:" << config.progress << std::endl
+			<< std::setw(20) << "Progress step:" << config.progressStep << std::endl
+			<< std::setw(20) << "Progress interval:" << config.progressInterval << std::endl
 			<< std::setw(20) << "Posterior thres:" << config.post_thres << std::endl
 			<< std::setw(20) << "Posterior margin:" << config.post_margin << std::endl
 			<< std::setw(20) << "Posterior ratio:" << (std::isnan(config.post_ratio) ? std::string("nan") : std::to_string(config.post_ratio)) << std::endl

@@ -21,13 +21,179 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <iomanip>
 #include <limits>
+#include <mutex>
 #include <numeric>
 #include <queue>
+#include <sstream>
 
 namespace ChimeraClassify {
+
+namespace {
+class ProgressTracker {
+public:
+  ProgressTracker(bool enabled, std::string stage, size_t min_step,
+                  double min_interval_seconds)
+      : enabled_(enabled && min_step != 0),
+        stage_(std::move(stage)),
+        min_step_(std::max<size_t>(min_step, 1)),
+        interval_(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::duration<double>(std::max(0.0, min_interval_seconds)))),
+        start_time_(std::chrono::steady_clock::now()),
+        last_report_time_(start_time_) {}
+
+  bool enabled() const { return enabled_; }
+
+  void add_total(size_t value) {
+    if (!enabled_) {
+      return;
+    }
+    total_.fetch_add(value, std::memory_order_relaxed);
+  }
+
+  void mark_processed(size_t value) {
+    if (!enabled_) {
+      return;
+    }
+    size_t processed = processed_.fetch_add(value, std::memory_order_relaxed) + value;
+    maybe_report(processed, false);
+  }
+
+  void finish() {
+    if (!enabled_) {
+      return;
+    }
+    size_t processed = processed_.load(std::memory_order_relaxed);
+    size_t total = total_.load(std::memory_order_relaxed);
+    if (processed == 0 && total == 0) {
+      return;
+    }
+    maybe_report(processed, true);
+  }
+
+private:
+  std::string format_rate(double reads_per_second) const {
+    std::ostringstream oss;
+    oss.setf(std::ios::fixed);
+    if (reads_per_second >= 1'000'000.0) {
+      double rate = reads_per_second / 1'000'000.0;
+      oss << std::setprecision(rate >= 10.0 ? 0 : 1) << rate << "M reads/s";
+    } else if (reads_per_second >= 1'000.0) {
+      double rate = reads_per_second / 1'000.0;
+      oss << std::setprecision(rate >= 10.0 ? 0 : 1) << rate << "k reads/s";
+    } else {
+      oss << std::setprecision(reads_per_second >= 10.0 ? 0 : 1)
+          << reads_per_second << " reads/s";
+    }
+    return oss.str();
+  }
+
+  std::string format_duration(double seconds) const {
+    if (seconds < 0.0) {
+      seconds = 0.0;
+    }
+    long long total_seconds = static_cast<long long>(std::round(seconds));
+    long long hours = total_seconds / 3600;
+    long long minutes = (total_seconds % 3600) / 60;
+    long long secs = total_seconds % 60;
+
+    std::ostringstream oss;
+    if (hours > 0) {
+      oss << hours << "h";
+    }
+    if (minutes > 0 || hours > 0) {
+      if (hours > 0) {
+        oss << ' ';
+      }
+      oss << minutes << "min";
+    }
+    if (hours == 0) {
+      if (minutes > 0) {
+        oss << ' ';
+      }
+      oss << secs << 's';
+    }
+    if (oss.str().empty()) {
+      return "0s";
+    }
+    return oss.str();
+  }
+
+  void maybe_report(size_t processed, bool force) {
+    if (!enabled_) {
+      return;
+    }
+    size_t total = total_.load(std::memory_order_relaxed);
+    auto now = std::chrono::steady_clock::now();
+
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!force) {
+      bool reached_total = total > 0 && processed >= total;
+      bool step_ready = processed >= last_reported_ + min_step_;
+      bool interval_ready = interval_.count() == 0 ||
+                            now - last_report_time_ >= interval_;
+      if (!reached_total && !step_ready && !interval_ready) {
+        return;
+      }
+    }
+
+    last_report_time_ = now;
+    last_reported_ = processed;
+
+    double elapsed_ms = static_cast<double>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time_)
+            .count());
+    double rps = elapsed_ms > 0.0 ? processed * 1000.0 / elapsed_ms : 0.0;
+
+    std::ostringstream oss;
+    oss << '[' << stage_ << "] 已处理 " << processed;
+    if (total > 0) {
+      double pct = static_cast<double>(processed) /
+                   static_cast<double>(std::max<size_t>(total, 1));
+      pct = std::min(pct * 100.0, 100.0);
+      oss << '/' << total << " (" << std::fixed << std::setprecision(1) << pct
+          << "%)" << std::defaultfloat;
+    } else {
+      oss << " 条reads";
+    }
+    if (rps > 0.0) {
+      oss << "，速度 " << format_rate(rps);
+    }
+    if (total > 0 && processed < total && rps > 0.0) {
+      double remaining_seconds = static_cast<double>(total - processed) / rps;
+      oss << "，剩余约 " << format_duration(remaining_seconds);
+    }
+
+    std::string message = oss.str();
+    size_t padding = last_line_width_ > message.size()
+                         ? last_line_width_ - message.size()
+                         : 0;
+    last_line_width_ = std::max(last_line_width_, message.size());
+
+    std::cout << '\r' << message << std::string(padding, ' ') << std::flush;
+    if (force || (total > 0 && processed >= total)) {
+      std::cout << std::endl;
+      last_line_width_ = 0;
+    }
+  }
+
+  bool enabled_;
+  std::string stage_;
+  size_t min_step_;
+  std::chrono::milliseconds interval_;
+  std::atomic<size_t> total_{0};
+  std::atomic<size_t> processed_{0};
+  size_t last_reported_{0};
+  std::chrono::steady_clock::time_point start_time_;
+  std::chrono::steady_clock::time_point last_report_time_;
+  size_t last_line_width_{0};
+  std::mutex mutex_;
+};
+} // namespace
 // --- fast taxid dictionary ---
 struct TaxDict {
   std::vector<std::vector<uint32_t>> idx2id; // [bin][species] -> tid_id
@@ -103,7 +269,8 @@ void print_classify_time(long long milliseconds) {
  * @param fileInfo The information about the files and sequences.
  */
 void parseReads(moodycamel::ConcurrentQueue<batchReads> &readQueue,
-                ClassifyConfig config, FileInfo &fileInfo) {
+                ClassifyConfig config, FileInfo &fileInfo,
+                ProgressTracker *progress = nullptr) {
   size_t totalSequences = 0;
   size_t totalFiles = 0;
 
@@ -129,6 +296,9 @@ void parseReads(moodycamel::ConcurrentQueue<batchReads> &readQueue,
           for (auto &&r : rec) {
             batch.ids.emplace_back(std::move(r.id()));
             batch.seqs.emplace_back(std::move(r.sequence()));
+          }
+          if (progress) {
+            progress->add_total(batch.ids.size());
           }
           localSeq += batch.ids.size();
           localBatches.emplace_back(std::move(batch));
@@ -186,6 +356,9 @@ void parseReads(moodycamel::ConcurrentQueue<batchReads> &readQueue,
             batch.seqs2.emplace_back(std::move(r.sequence()));
           }
 
+          if (progress) {
+            progress->add_total(batch.ids.size());
+          }
           localSeq += batch.ids.size();
           localBatches.emplace_back(std::move(batch));
         }
@@ -328,7 +501,7 @@ inline void processSequence(
     const std::vector<std::pair<std::string, std::size_t>> &taxidBins,
     ClassifyConfig &config, chimera::InterleavedCuckooFilter &icf,
     const std::string &id, std::vector<classifyResult> &classifyResults,
-    FileInfo &fileInfo, LCA &lca) {
+    FileInfo &fileInfo, LCA &lca, ProgressTracker *progress) {
   // Calculate the number of hash values and the threshold for classification
   size_t hashNum = hashs1.size();
   auto thr_at_eval = [&](size_t n_eval_now) -> size_t {
@@ -421,6 +594,9 @@ inline void processSequence(
   // Lock the resultMutex to ensure thread safety and add the classifyResult
   // object to the classifyResults vector
   kv_destroy(count);
+  if (progress) {
+    progress->mark_processed(1);
+  }
   classifyResults.emplace_back(std::move(result));
 }
 
@@ -460,7 +636,8 @@ processBatch(batchReads batch, ChimeraBuild::ICFConfig &icfConfig,
              const std::vector<std::pair<std::string, std::size_t>> &taxidBins,
              ClassifyConfig &config, chimera::InterleavedCuckooFilter &icf,
              std::vector<classifyResult> &classifyResults,
-             const auto &minimiser_view, FileInfo &fileInfo, LCA &lca) {
+             const auto &minimiser_view, FileInfo &fileInfo, LCA &lca,
+             ProgressTracker *progress = nullptr) {
   // Process batch of reads
   std::vector<size_t> hashs1;
   if (!batch.seqs2.empty()) {
@@ -479,7 +656,7 @@ processBatch(batchReads batch, ChimeraBuild::ICFConfig &icfConfig,
         hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
       }
       processSequence(hashs1, icfConfig, taxidBins, config, icf, batch.ids[i],
-                      classifyResults, fileInfo, lca);
+                      classifyResults, fileInfo, lca, progress);
     }
   } else {
     // Process single-end reads
@@ -492,7 +669,7 @@ processBatch(batchReads batch, ChimeraBuild::ICFConfig &icfConfig,
       }
       // Process the hash values for classification
       processSequence(hashs1, icfConfig, taxidBins, config, icf, batch.ids[i],
-                      classifyResults, fileInfo, lca);
+                      classifyResults, fileInfo, lca, progress);
     }
   }
 }
@@ -698,8 +875,8 @@ void classify(ChimeraBuild::ICFConfig &icfConfig,
               moodycamel::ConcurrentQueue<batchReads> &readQueue,
               ClassifyConfig &config, chimera::InterleavedCuckooFilter &icf,
               std::vector<std::pair<std::string, std::size_t>> &taxidBins,
-              std::vector<classifyResult> &classifyResults,
-              FileInfo &fileInfo) {
+              std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
+              ProgressTracker *progress) {
   auto minimiser_view = seqan3::views::minimiser_hash(
       seqan3::shape{seqan3::ungapped{icfConfig.kmer_size}},
       seqan3::window_size{icfConfig.window_size},
@@ -722,16 +899,17 @@ void classify(ChimeraBuild::ICFConfig &icfConfig,
     LCA *lca;
     minimiser_view_t minimiser_view;
     std::vector<classifyResult> localClassifyResults;
+    ProgressTracker *progress;
 
     classify_thread_data(
         ChimeraBuild::ICFConfig *icfConfig,
         moodycamel::ConcurrentQueue<batchReads> *readQueue,
         ClassifyConfig *config, chimera::InterleavedCuckooFilter *icf,
         std::vector<std::pair<std::string, std::size_t>> *taxidBins, LCA *lca,
-        minimiser_view_t minimiser_view)
+        minimiser_view_t minimiser_view, ProgressTracker *progress)
         : icfConfig(icfConfig), readQueue(readQueue), config(config), icf(icf),
           taxidBins(taxidBins), lca(lca),
-          minimiser_view(std::move(minimiser_view)) {}
+          minimiser_view(std::move(minimiser_view)), progress(progress) {}
   };
 
   int num_threads = config.threads;
@@ -740,7 +918,7 @@ void classify(ChimeraBuild::ICFConfig &icfConfig,
 
   for (int i = 0; i < num_threads; ++i) {
     thread_data.emplace_back(&icfConfig, &readQueue, &config, &icf, &taxidBins,
-                             &lca, minimiser_view);
+                             &lca, minimiser_view, progress);
   }
 
   auto classify_worker = [](void *_data, long tid, int nthr) {
@@ -751,7 +929,7 @@ void classify(ChimeraBuild::ICFConfig &icfConfig,
     while (data.readQueue->try_dequeue(batch)) {
       processBatch(batch, *data.icfConfig, *data.taxidBins, *data.config,
                    *data.icf, data.localClassifyResults, data.minimiser_view,
-                   data.localFileInfo, *data.lca);
+                   data.localFileInfo, *data.lca, data.progress);
     }
   };
 
@@ -948,7 +1126,7 @@ inline void processSequence(
     const std::vector<std::string> &indexToTaxid, ClassifyConfig &config,
     chimera::hicf::HierarchicalInterleavedCuckooFilter &hicf,
     const std::string &id, std::vector<classifyResult> &classifyResults,
-    FileInfo &fileInfo, LCA &lca) {
+    FileInfo &fileInfo, LCA &lca, ProgressTracker *progress) {
   // Calculate the number of hash values and the threshold for classification
   size_t hashNum = hashs1.size();
   auto thr_at_eval = [&](size_t n_eval_now) -> size_t {
@@ -1030,6 +1208,9 @@ inline void processSequence(
   // Lock the resultMutex to ensure thread safety and add the classifyResult
   // object to the classifyResults vector
   kv_destroy(count);
+  if (progress) {
+    progress->mark_processed(1);
+  }
   classifyResults.emplace_back(std::move(result));
 }
 
@@ -1039,7 +1220,8 @@ processBatch(batchReads batch, ChimeraBuild::HICFConfig &hicfConfig,
              ClassifyConfig &config,
              chimera::hicf::HierarchicalInterleavedCuckooFilter &hicf,
              std::vector<classifyResult> &classifyResults,
-             const auto &minimiser_view, FileInfo &fileInfo, LCA &lca) {
+             const auto &minimiser_view, FileInfo &fileInfo, LCA &lca,
+             ProgressTracker *progress = nullptr) {
   // Process batch of reads
   std::vector<size_t> hashs1;
   if (!batch.seqs2.empty()) {
@@ -1057,7 +1239,7 @@ processBatch(batchReads batch, ChimeraBuild::HICFConfig &hicfConfig,
         hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
       }
       processSequence(hashs1, hicfConfig, indexToTaxid, config, hicf,
-                      batch.ids[i], classifyResults, fileInfo, lca);
+                      batch.ids[i], classifyResults, fileInfo, lca, progress);
     }
   } else {
     // Process single-end reads
@@ -1070,9 +1252,9 @@ processBatch(batchReads batch, ChimeraBuild::HICFConfig &hicfConfig,
       }
       // Process the hash values for classification
       processSequence(hashs1, hicfConfig, indexToTaxid, config, hicf,
-                      batch.ids[i], classifyResults, fileInfo, lca);
-    }
+                      batch.ids[i], classifyResults, fileInfo, lca, progress);
   }
+}
 }
 
 void classify(ChimeraBuild::HICFConfig &hicfConfig,
@@ -1081,7 +1263,7 @@ void classify(ChimeraBuild::HICFConfig &hicfConfig,
               chimera::hicf::HierarchicalInterleavedCuckooFilter &hicf,
               std::vector<std::string> &indexToTaxid,
               std::vector<classifyResult> &classifyResults,
-              FileInfo &fileInfo) {
+              FileInfo &fileInfo, ProgressTracker *progress) {
   auto minimiser_view = seqan3::views::minimiser_hash(
       seqan3::shape{seqan3::ungapped{hicfConfig.kmerSize}},
       seqan3::window_size{hicfConfig.windowSize},
@@ -1104,6 +1286,7 @@ void classify(ChimeraBuild::HICFConfig &hicfConfig,
     LCA *lca;
     minimiser_view_t minimiser_view;
     std::vector<classifyResult> localClassifyResults;
+    ProgressTracker *progress;
 
     classify_thread_data(
         ChimeraBuild::HICFConfig *hicfConfig,
@@ -1111,10 +1294,10 @@ void classify(ChimeraBuild::HICFConfig &hicfConfig,
         ClassifyConfig *config,
         chimera::hicf::HierarchicalInterleavedCuckooFilter *hicf,
         std::vector<std::string> *indexToTaxid, LCA *lca,
-        minimiser_view_t minimiser_view)
+        minimiser_view_t minimiser_view, ProgressTracker *progress)
         : hicfConfig(hicfConfig), readQueue(readQueue), config(config),
           hicf(hicf), indexToTaxid(indexToTaxid), lca(lca),
-          minimiser_view(std::move(minimiser_view)) {}
+          minimiser_view(std::move(minimiser_view)), progress(progress) {}
   };
 
   int num_threads = config.threads;
@@ -1123,7 +1306,7 @@ void classify(ChimeraBuild::HICFConfig &hicfConfig,
 
   for (int i = 0; i < num_threads; ++i) {
     thread_data.emplace_back(&hicfConfig, &readQueue, &config, &hicf,
-                             &indexToTaxid, &lca, minimiser_view);
+                             &indexToTaxid, &lca, minimiser_view, progress);
   }
 
   auto classify_worker = [](void *_data, long tid, int nthr) {
@@ -1134,7 +1317,7 @@ void classify(ChimeraBuild::HICFConfig &hicfConfig,
     while (data.readQueue->try_dequeue(batch)) {
       processBatch(batch, *data.hicfConfig, *data.indexToTaxid, *data.config,
                    *data.hicf, data.localClassifyResults, data.minimiser_view,
-                   data.localFileInfo, *data.lca);
+                   data.localFileInfo, *data.lca, data.progress);
     }
   };
 
@@ -1369,7 +1552,8 @@ inline void processSequence(const std::vector<size_t> &hashs1,
                             chimera::imcf::InterleavedMergedCuckooFilter &imcf,
                             const std::string &id,
                             std::vector<classifyResult> &classifyResults,
-                            FileInfo &fileInfo, LCA &lca) {
+                            FileInfo &fileInfo, LCA &lca,
+                            ProgressTracker *progress) {
   // Calculate the number of hash values and determine the threshold for
   // classification
   size_t hashNum = hashs1.size();
@@ -1788,7 +1972,7 @@ inline void processSequence(const std::vector<size_t> &hashs1,
     }
 
     fileInfo.classifiedNum++;
-    if (config.lca && result.taxidCount.size() > 1) {
+  if (config.lca && result.taxidCount.size() > 1) {
       std::vector<std::string> taxids;
       for (auto &[taxid, count] : result.taxidCount) {
         taxids.push_back(taxid);
@@ -1812,6 +1996,9 @@ inline void processSequence(const std::vector<size_t> &hashs1,
   }
 
   // Add the classifyResult to the shared classifyResults vector
+  if (progress) {
+    progress->mark_processed(1);
+  }
   classifyResults.emplace_back(std::move(result));
 }
 
@@ -1864,7 +2051,8 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
                          chimera::imcf::InterleavedMergedCuckooFilter &imcf,
                          std::vector<classifyResult> &classifyResults,
                          const auto &minimiser_view, FileInfo &fileInfo,
-                         LCA &lca, GroupHeat &heat) {
+                         LCA &lca, GroupHeat &heat,
+                         ProgressTracker *progress = nullptr) {
   // Process batch of reads
   std::vector<size_t> hashs1;
   if (!batch.seqs2.empty()) {
@@ -1886,7 +2074,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
       processSequence(hashs1, imcfConfig, indexToTaxid, tax, config, heat, imcf,
-                      batch.ids[i], classifyResults, fileInfo, lca);
+                      batch.ids[i], classifyResults, fileInfo, lca, progress);
     }
   } else {
     // Process single-end reads
@@ -1903,7 +2091,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
       }
       // Process the hash values for classification
       processSequence(hashs1, imcfConfig, indexToTaxid, tax, config, heat, imcf,
-                      batch.ids[i], classifyResults, fileInfo, lca);
+                      batch.ids[i], classifyResults, fileInfo, lca, progress);
     }
   }
 }
@@ -1918,7 +2106,8 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
                         std::vector<std::vector<std::string>> &indexToTaxid,
                         const TaxDict &tax,
                         std::vector<classifyResult> &classifyResults,
-                        FileInfo &fileInfo, std::atomic<bool> &producer_done) {
+                        FileInfo &fileInfo, std::atomic<bool> &producer_done,
+                        ProgressTracker *progress) {
   auto minimiser_view = seqan3::views::minimiser_hash(
       seqan3::shape{seqan3::ungapped{imcfConfig.kmerSize}},
       seqan3::window_size{imcfConfig.windowSize},
@@ -1941,7 +2130,7 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
       if (readQueue.try_dequeue(batch)) {
         processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
                      localClassifyResults, minimiser_view, localFileInfo, lca,
-                     heat);
+                     heat, progress);
         continue;
       }
       if (producer_done.load(std::memory_order_acquire)) {
@@ -2030,7 +2219,7 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               chimera::imcf::InterleavedMergedCuckooFilter &imcf,
               std::vector<std::vector<std::string>> &indexToTaxid,
               const TaxDict &tax, std::vector<classifyResult> &classifyResults,
-              FileInfo &fileInfo) {
+              FileInfo &fileInfo, ProgressTracker *progress) {
   // Create a minimiser hash view based on IMCF configuration
   auto minimiser_view = seqan3::views::minimiser_hash(
       seqan3::shape{seqan3::ungapped{imcfConfig.kmerSize}},
@@ -2055,7 +2244,7 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
     while (readQueue.try_dequeue(batch)) {
       processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
                    localClassifyResults, minimiser_view, localFileInfo, lca,
-                   heat);
+                   heat, progress);
     }
     // Critical section to merge local results into shared resources
 #pragma omp critical
@@ -2140,11 +2329,17 @@ void run(ClassifyConfig config) {
   bool posteriorModelUsed = false;
   long long rebuildActiveMs = 0;
   long long rebuildRouterMs = 0;
+
+  std::string progressLabel = config.filter.empty() ? "classify" : config.filter;
+  ProgressTracker progress(config.verbose && config.progress, progressLabel,
+                           config.progressStep, config.progressInterval);
+  ProgressTracker *progressPtr = progress.enabled() ? &progress : nullptr;
+
   if (config.filter == "imcf") {
     std::atomic<bool> producer_done{false};
     auto readEnd = readStart;
     std::thread producer([&]() {
-      parseReads(readQueue, config, fileInfo);
+      parseReads(readQueue, config, fileInfo, progressPtr);
       readEnd = std::chrono::high_resolution_clock::now();
       producer_done.store(true, std::memory_order_release);
     });
@@ -2170,12 +2365,16 @@ void run(ClassifyConfig config) {
     auto classifyStart = std::chrono::high_resolution_clock::now();
     std::cout << "Classifying sequences by imcf..." << std::endl;
     classify_streaming(imcfConfig, readQueue, config, imcf, indexToTaxid, tax,
-                       classifyResults, fileInfo, producer_done);
+                       classifyResults, fileInfo, producer_done,
+                       progressPtr);
     auto classifyEnd = std::chrono::high_resolution_clock::now();
     auto classifyDuration =
         std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd -
                                                               classifyStart);
     producer.join();
+    if (progressPtr) {
+      progress.finish();
+    }
     auto readDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
         readEnd - readStart);
     if (config.verbose) {
@@ -2186,9 +2385,17 @@ void run(ClassifyConfig config) {
     if (config.verbose) {
       std::cout << "Classify time: ";
       print_classify_time(classifyDuration.count());
+      if (classifyDuration.count() > 0 && fileInfo.sequenceNum > 0) {
+        double readsPerSec =
+            static_cast<double>(fileInfo.sequenceNum) /
+            (static_cast<double>(classifyDuration.count()) / 1000.0);
+        std::cout << "平均分类速度: " << std::fixed << std::setprecision(1)
+                  << readsPerSec << " reads/s" << std::defaultfloat
+                  << std::endl;
+      }
     }
   } else if (config.filter == "icf") {
-    parseReads(readQueue, config, fileInfo);
+    parseReads(readQueue, config, fileInfo, progressPtr);
     std::vector<std::pair<std::string, std::size_t>> taxidBins;
     chimera::InterleavedCuckooFilter icf;
     ChimeraBuild::ICFConfig icfConfig;
@@ -2206,17 +2413,28 @@ void run(ClassifyConfig config) {
     auto classifyStart = std::chrono::high_resolution_clock::now();
     std::cout << "Classifying sequences by icf..." << std::endl;
     classify(icfConfig, readQueue, config, icf, taxidBins, classifyResults,
-             fileInfo);
+             fileInfo, progressPtr);
     auto classifyEnd = std::chrono::high_resolution_clock::now();
     auto classifyDuration =
         std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd -
                                                               classifyStart);
+    if (progressPtr) {
+      progress.finish();
+    }
     if (config.verbose) {
       std::cout << "Classify time: ";
       print_classify_time(classifyDuration.count());
+      if (classifyDuration.count() > 0 && fileInfo.sequenceNum > 0) {
+        double readsPerSec =
+            static_cast<double>(fileInfo.sequenceNum) /
+            (static_cast<double>(classifyDuration.count()) / 1000.0);
+        std::cout << "平均分类速度: " << std::fixed << std::setprecision(1)
+                  << readsPerSec << " reads/s" << std::defaultfloat
+                  << std::endl;
+      }
     }
   } else if (config.filter == "hicf") {
-    parseReads(readQueue, config, fileInfo);
+    parseReads(readQueue, config, fileInfo, progressPtr);
     std::vector<std::string> indexToTaxid;
     chimera::hicf::HierarchicalInterleavedCuckooFilter hicf;
     ChimeraBuild::HICFConfig hicfConfig;
@@ -2234,14 +2452,25 @@ void run(ClassifyConfig config) {
     auto classifyStart = std::chrono::high_resolution_clock::now();
     std::cout << "Classifying sequences by hicf..." << std::endl;
     classify(hicfConfig, readQueue, config, hicf, indexToTaxid, classifyResults,
-             fileInfo);
+             fileInfo, progressPtr);
     auto classifyEnd = std::chrono::high_resolution_clock::now();
     auto classifyDuration =
         std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd -
                                                               classifyStart);
+    if (progressPtr) {
+      progress.finish();
+    }
     if (config.verbose) {
       std::cout << "Classify time: ";
       print_classify_time(classifyDuration.count());
+      if (classifyDuration.count() > 0 && fileInfo.sequenceNum > 0) {
+        double readsPerSec =
+            static_cast<double>(fileInfo.sequenceNum) /
+            (static_cast<double>(classifyDuration.count()) / 1000.0);
+        std::cout << "平均分类速度: " << std::fixed << std::setprecision(1)
+                  << readsPerSec << " reads/s" << std::defaultfloat
+                  << std::endl;
+      }
     }
   } else {
     throw std::runtime_error("Invalid filter type: " + config.filter);
