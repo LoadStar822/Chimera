@@ -43,6 +43,8 @@
 #include <cstdint>
 #include <iterator>
 #include <stdexcept>
+#include <limits>
+#include <type_traits>
 #ifdef IMCF_MIRROR64
 #include <sys/mman.h>
 #endif
@@ -109,6 +111,14 @@ namespace chimera::imcf {
 	 */
 	inline std::vector<Group> partitionHashCount(const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount, std::string mode, int maxTaxidsPerGroup = 16)
 	{
+		if (hashCount.empty()) {
+			return {};
+		}
+		if (maxTaxidsPerGroup <= 0) {
+			throw std::invalid_argument("IMCF partition: maxTaxidsPerGroup must be positive");
+		}
+		size_t maxTaxids = static_cast<size_t>(maxTaxidsPerGroup);
+
 		if (mode == "normal")
 		{
 			// Step 1: Calculate the median of the hash counts and set a threshold
@@ -121,17 +131,36 @@ namespace chimera::imcf {
 			std::sort(counts.begin(), counts.end());
 			uint64_t median = counts[counts.size() / 2];
 
-			uint64_t threshold = median * 64;
+			uint64_t threshold = 0;
+			if (median == 0) {
+				threshold = 1;
+			}
+			else if (median > std::numeric_limits<uint64_t>::max() / 64ull) {
+				threshold = std::numeric_limits<uint64_t>::max();
+			}
+			else {
+				threshold = median * 64ull;
+			}
+			if (threshold == 0) {
+				threshold = 1;
+			}
 
 			// Step 2: Create chunks for hash counts exceeding the threshold
 			std::vector<HashChunk> hashChunks;
 			for (const auto& [taxid, count] : hashCount) {
 				if (count > threshold) {
-					int numChunks = static_cast<int>(std::ceil(static_cast<double>(count) / threshold));
-					uint64_t chunkSize = count / numChunks;
-					for (int i = 0; i < numChunks; ++i) {
-						uint64_t currentChunkSize = (i == numChunks - 1) ? (count - chunkSize * (numChunks - 1)) : chunkSize;
-						hashChunks.push_back({ taxid, currentChunkSize });
+					uint64_t numChunks = count / threshold;
+					if (count % threshold != 0) {
+						++numChunks;
+					}
+					numChunks = std::max<uint64_t>(1, numChunks);
+					uint64_t chunkSize = numChunks ? count / numChunks : count;
+					for (uint64_t i = 0; i < numChunks; ++i) {
+						uint64_t current = chunkSize;
+						if (i == numChunks - 1) {
+							current = count - chunkSize * (numChunks - 1);
+						}
+						hashChunks.push_back({ taxid, current });
 					}
 				}
 				else {
@@ -146,7 +175,8 @@ namespace chimera::imcf {
 				});
 
 			// Step 4: Create groups and assign chunks using a priority queue
-			size_t groupNum = (hashChunks.size() + maxTaxidsPerGroup - 1) / maxTaxidsPerGroup;
+			size_t groupNum = (hashChunks.size() + maxTaxids - 1) / maxTaxids;
+			groupNum = std::max<size_t>(1, groupNum);
 			std::vector<Group> groups(groupNum);
 			std::vector<robin_hood::unordered_flat_set<std::string>> used(groupNum);
 
@@ -164,7 +194,7 @@ namespace chimera::imcf {
 				while (!minHeap.empty()) {
 					int cand = minHeap.top();
 					minHeap.pop();
-					if (groups[cand].taxids.size() >= static_cast<size_t>(maxTaxidsPerGroup) || used[cand].contains(chunk.taxid)) {
+				if (groups[cand].taxids.size() >= maxTaxids || used[cand].contains(chunk.taxid)) {
 						popped.push_back(cand);
 						continue;
 					}
@@ -186,7 +216,7 @@ namespace chimera::imcf {
 					}
 				}
 
-				if (groups[target].taxids.size() >= static_cast<size_t>(maxTaxidsPerGroup)) {
+				if (groups[target].taxids.size() >= maxTaxids) {
 					groups.emplace_back();
 					used.emplace_back();
 					target = static_cast<int>(groups.size() - 1);
@@ -214,9 +244,12 @@ namespace chimera::imcf {
 				});
 			// Calculate median and number of groups
 			size_t taxidNum = sortedHashCounts.size();
-			size_t median = sortedHashCounts[taxidNum / 2].second;
-			size_t groupNum = (taxidNum + maxTaxidsPerGroup) / maxTaxidsPerGroup;
-			uint64_t threshold = median * maxTaxidsPerGroup;
+			if (taxidNum == 0) {
+				return {};
+			}
+			uint64_t median = sortedHashCounts[taxidNum / 2].second;
+			size_t groupNum = (taxidNum + maxTaxids - 1) / maxTaxids;
+			groupNum = std::max<size_t>(1, groupNum);
 			// Initialize groups
 			std::vector<Group> groups;
 			groups.reserve(groupNum);
@@ -1230,47 +1263,63 @@ inline void writeBucket64(size_t bucket, size_t bin, uint64_t value) {
 			}
 		}
 
-		template <std::ranges::range value_range_t>
+		template <std::ranges::range value_range_t, class CounterMatrix>
 		inline void bulkCount_sparse(value_range_t&& values,
-			std::vector<std::vector<uint16_t>>& result,
+			CounterMatrix& result,
 			std::vector<std::pair<uint32_t, uint16_t>>* touched = nullptr)
 		{
+			using CounterRow = typename CounterMatrix::value_type;
+			using Counter = typename CounterRow::value_type;
+			static_assert(std::is_integral_v<Counter>, "IMCF counter type must be integral");
 			for (auto value : values) {
 				bulkContain_events(value, [&](uint32_t bin, uint16_t sp) {
-					if (result.size() <= static_cast<size_t>(bin)) {
-						result.resize(static_cast<size_t>(bin) + 1);
+					size_t binIdx = static_cast<size_t>(bin);
+					size_t spIdx = static_cast<size_t>(sp);
+					if (result.size() <= binIdx) {
+						result.resize(binIdx + 1);
 					}
-					if (result[bin].size() <= static_cast<size_t>(sp)) {
-						result[bin].resize(static_cast<size_t>(sp) + 1, 0);
+					auto& row = result[binIdx];
+					if (row.size() <= spIdx) {
+						row.resize(spIdx + 1, Counter{ 0 });
 					}
-					uint16_t& ref = result[bin][sp];
-					if (ref == 0 && touched) {
+					Counter& ref = row[spIdx];
+					if (ref == Counter{ 0 } && touched) {
 						touched->emplace_back(bin, sp);
 					}
-					++ref;
+					if (ref < std::numeric_limits<Counter>::max()) {
+						++ref;
+					}
 				});
 			}
 		}
 
-		template <std::ranges::range value_range_t>
+		template <std::ranges::range value_range_t, class CounterMatrix>
 		inline void bulkCount_sparse_subset(value_range_t&& values,
 			const std::vector<uint32_t>& binSubset,
-			std::vector<std::vector<uint16_t>>& result,
+			CounterMatrix& result,
 			std::vector<std::pair<uint32_t, uint16_t>>* touched = nullptr)
 		{
+			using CounterRow = typename CounterMatrix::value_type;
+			using Counter = typename CounterRow::value_type;
+			static_assert(std::is_integral_v<Counter>, "IMCF counter type must be integral");
 			for (auto value : values) {
 				bulkContain_events_subset(value, binSubset, [&](uint32_t bin, uint16_t sp) {
-					if (result.size() <= static_cast<size_t>(bin)) {
-						result.resize(static_cast<size_t>(bin) + 1);
+					size_t binIdx = static_cast<size_t>(bin);
+					size_t spIdx = static_cast<size_t>(sp);
+					if (result.size() <= binIdx) {
+						result.resize(binIdx + 1);
 					}
-					if (result[bin].size() <= static_cast<size_t>(sp)) {
-						result[bin].resize(static_cast<size_t>(sp) + 1, 0);
+					auto& row = result[binIdx];
+					if (row.size() <= spIdx) {
+						row.resize(spIdx + 1, Counter{ 0 });
 					}
-					uint16_t& ref = result[bin][sp];
-					if (ref == 0 && touched) {
+					Counter& ref = row[spIdx];
+					if (ref == Counter{ 0 } && touched) {
 						touched->emplace_back(bin, sp);
 					}
-					++ref;
+					if (ref < std::numeric_limits<Counter>::max()) {
+						++ref;
+					}
 				});
 			}
 		}
@@ -1631,7 +1680,7 @@ inline void writeBucket64(size_t bucket, size_t bin, uint64_t value) {
 		inline void bulkCount_sparse_compat(value_range_t&& values,
 			std::vector<std::vector<size_t>>& result)
 		{
-			std::vector<std::vector<uint16_t>> tmp(result.size());
+			std::vector<std::vector<uint32_t>> tmp(result.size());
 			for (size_t i = 0; i < result.size(); ++i) {
 				tmp[i].resize(result[i].size(), 0);
 			}

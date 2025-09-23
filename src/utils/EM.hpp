@@ -107,6 +107,9 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 #endif
 			for (size_t i = 0; i < results.size(); ++i) {
 				const auto& source = input[i];
+				if (source.evaluated <= 0.0) {
+					continue;
+				}
 				auto& destination = results[i];
 				destination.posteriors.clear();
 
@@ -116,7 +119,7 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 					if (detail::is_unclassified(taxid)) {
 						continue;
 					}
-					double c = static_cast<double>(count);
+					double c = static_cast<double>(count) / source.evaluated;
 					candidates.emplace_back(taxid, c);
 					max_count = std::max(max_count, c);
 				}

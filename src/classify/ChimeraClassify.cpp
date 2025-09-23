@@ -331,16 +331,20 @@ inline void processSequence(
     FileInfo &fileInfo, LCA &lca) {
   // Calculate the number of hash values and the threshold for classification
   size_t hashNum = hashs1.size();
-  size_t threshold = std::ceil(hashNum * config.shotThreshold);
-  if (threshold == 0) {
-    threshold = 1;
-  }
+  auto thr_at_eval = [&](size_t n_eval_now) -> size_t {
+    size_t base = config.adaptive_shot ? n_eval_now : hashNum;
+    double scaled = static_cast<double>(base) * config.shotThreshold;
+    size_t t = static_cast<size_t>(std::ceil(scaled));
+    return std::max<size_t>(t, 1);
+  };
 
   // Perform bulk count operation on the hash values using the Interleaved
   // Cuckoo Filter
   auto count = icf.bulk_count(hashs1);
   classifyResult result;
   result.id = id;
+  result.evaluated = static_cast<double>(hashNum);
+  result.evaluated = static_cast<double>(hashNum);
 
   size_t maxBinCount = 0;
   std::pair<std::string, std::size_t> maxCount;
@@ -368,6 +372,7 @@ inline void processSequence(
   // count
   size_t thresholdCount =
       static_cast<size_t>(0.8 * static_cast<double>(maxBinCount));
+  size_t threshold = thr_at_eval(hashNum);
   for (const auto &[taxid, binCount] : taxidToCount) {
     if (binCount >= thresholdCount && binCount >= threshold) {
       result.taxidCount.emplace_back(taxid, binCount);
@@ -946,13 +951,16 @@ inline void processSequence(
     FileInfo &fileInfo, LCA &lca) {
   // Calculate the number of hash values and the threshold for classification
   size_t hashNum = hashs1.size();
-  size_t threshold = std::ceil(hashNum * config.shotThreshold);
-  if (threshold == 0) {
-    threshold = 1;
-  }
+  auto thr_at_eval = [&](size_t n_eval_now) -> size_t {
+    size_t base = config.adaptive_shot ? n_eval_now : hashNum;
+    double scaled = static_cast<double>(base) * config.shotThreshold;
+    size_t t = static_cast<size_t>(std::ceil(scaled));
+    return std::max<size_t>(t, 1);
+  };
 
   // Perform bulk count operation on the hash values using the Interleaved
   // Cuckoo Filter
+  size_t threshold = thr_at_eval(hashNum);
   auto count = hicf.bulkCount(hashs1, threshold);
   classifyResult result;
   result.id = id;
@@ -1164,10 +1172,18 @@ void classify(ChimeraBuild::HICFConfig &hicfConfig,
   }
 }
 
-void loadFilter(const std::string &inputFile,
-                chimera::imcf::InterleavedMergedCuckooFilter &imcf,
-                ChimeraBuild::IMCFConfig &imcfConfig,
-                std::vector<std::vector<std::string>> &indexToTaxid) {
+struct IMCFIndexStatus {
+  bool builtActive{false};
+  bool builtRouter{false};
+  long long activeMs{0};
+  long long routerMs{0};
+};
+
+IMCFIndexStatus loadFilter(const std::string &inputFile,
+                          chimera::imcf::InterleavedMergedCuckooFilter &imcf,
+                          ChimeraBuild::IMCFConfig &imcfConfig,
+                          std::vector<std::vector<std::string>> &indexToTaxid) {
+  IMCFIndexStatus status;
   // Open the input file
   std::ifstream is(inputFile, std::ios::binary);
 
@@ -1212,7 +1228,13 @@ void loadFilter(const std::string &inputFile,
     }
   }
   if (!idx_ok) {
+    auto start = std::chrono::high_resolution_clock::now();
     imcf.buildActiveGroups();
+    auto end = std::chrono::high_resolution_clock::now();
+    status.builtActive = true;
+    status.activeMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+            .count();
   }
 
   bool rtr_ok = false;
@@ -1230,12 +1252,20 @@ void loadFilter(const std::string &inputFile,
     }
   }
   if (!rtr_ok) {
+    auto start = std::chrono::high_resolution_clock::now();
     imcf.buildRouterIndex();
+    auto end = std::chrono::high_resolution_clock::now();
+    status.builtRouter = true;
+    status.routerMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+            .count();
   }
 
 #ifdef IMCF_MIRROR64
   imcf.releaseBitStorage();
 #endif
+
+  return status;
 }
 
 /**
@@ -1343,10 +1373,12 @@ inline void processSequence(const std::vector<size_t> &hashs1,
   // Calculate the number of hash values and determine the threshold for
   // classification
   size_t hashNum = hashs1.size();
-  size_t threshold = std::ceil(hashNum * config.shotThreshold);
-  if (threshold == 0) {
-    threshold = 1;
-  }
+  auto thr_at_eval = [&](size_t n_eval_now) -> size_t {
+    size_t base = config.adaptive_shot ? n_eval_now : hashNum;
+    double scaled = static_cast<double>(base) * config.shotThreshold;
+    size_t t = static_cast<size_t>(std::ceil(scaled));
+    return std::max<size_t>(t, 1);
+  };
 
   const size_t binNumAll = indexToTaxid.size();
   heat.ensure(binNumAll);
@@ -1367,7 +1399,7 @@ inline void processSequence(const std::vector<size_t> &hashs1,
     }
   }
 
-  std::vector<std::vector<uint16_t>> sampleCount;
+  std::vector<std::vector<uint32_t>> sampleCount;
   std::vector<std::pair<uint32_t, uint16_t>> touchedS;
   touchedS.reserve(64);
   robin_hood::unordered_flat_map<uint32_t, uint32_t> sampleBinScore;
@@ -1377,7 +1409,7 @@ inline void processSequence(const std::vector<size_t> &hashs1,
     imcf.bulkCount_sparse(sampleVals, sampleCount, &touchedS);
     sampleBinScore.reserve(touchedS.size());
     for (auto [bi, sp] : touchedS) {
-      uint16_t contrib = sampleCount[bi][sp];
+      uint32_t contrib = sampleCount[bi][sp];
       if (contrib == 0) {
         continue;
       }
@@ -1607,6 +1639,7 @@ inline void processSequence(const std::vector<size_t> &hashs1,
     ++tidCount[tid];
   };
 
+  size_t n_eval = 0;
   size_t n0 = std::min<size_t>(64, hashs1.size());
   for (size_t i = 0; i < n0; ++i) {
     if (fallback_full || topBins.size() == binNumAll) {
@@ -1615,6 +1648,7 @@ inline void processSequence(const std::vector<size_t> &hashs1,
       imcf.bulkContain_events_subset(hashs1[i], topBins, emit_to_tid);
     }
   }
+  n_eval = n0;
 
   auto top2 = [&](uint32_t &bestTid, size_t &best, size_t &second) {
     best = 0;
@@ -1637,10 +1671,15 @@ inline void processSequence(const std::vector<size_t> &hashs1,
   size_t second = 0;
   top2(bestTid, best, second);
 
-  double ratioBound = std::max<double>(
-      1.8 * static_cast<double>(std::max<size_t>(size_t(1), second)), 1.0);
-  bool confident =
-      (best >= threshold) && (static_cast<double>(best) >= ratioBound);
+  size_t thr_conf = thr_at_eval(n_eval);
+  double best_ratio = std::numeric_limits<double>::infinity();
+  if (second > 0) {
+    best_ratio = static_cast<double>(best) /
+                 static_cast<double>(std::max<size_t>(second, size_t(1)));
+  } else if (best == 0) {
+    best_ratio = 0.0;
+  }
+  bool confident = (best >= thr_conf) && (best_ratio >= 1.8);
 
   if (!confident && hashs1.size() > n0) {
     size_t mask = (static_cast<size_t>(1) << 3) - 1; // sample 1/8
@@ -1653,6 +1692,7 @@ inline void processSequence(const std::vector<size_t> &hashs1,
       } else {
         imcf.bulkContain_events_subset(hashs1[i], topBins, emit_to_tid);
       }
+      ++n_eval;
     }
     top2(bestTid, best, second);
   }
@@ -1661,28 +1701,84 @@ inline void processSequence(const std::vector<size_t> &hashs1,
   result.id = id;
   std::pair<std::string, std::size_t> maxCount;
 
-  size_t maxBinCount = best;
-  size_t thresholdCount =
-      static_cast<size_t>(0.8 * static_cast<double>(maxBinCount));
+  bool use_em = (config.em || config.vem);
+
+  size_t maxBinCount = std::min(best, n_eval);
+  double beta = config.firstFilterBeta;
+  if (beta <= 0.0) {
+    beta = 0.8;
+  }
+  beta = std::clamp(beta, 0.0, 1.0);
+  if (use_em && beta > 0.6) {
+    beta = 0.6;
+  }
+  size_t thr_beta = static_cast<size_t>(
+      std::floor(beta * static_cast<double>(maxBinCount)));
+  size_t thr_eval = thr_at_eval(n_eval);
+  size_t thr_min_eval = (config.min_eval_count > 0) ? config.min_eval_count : 0;
+
+  size_t thr_final = 0;
+  if (use_em) {
+    thr_final = std::max(thr_beta, thr_min_eval);
+  } else {
+    uint64_t TOT = 0;
+    for (const auto &kv : tidCount) {
+      TOT += kv.second;
+    }
+
+    size_t M = 0;
+    if (!topBins.empty()) {
+      for (auto b : topBins) {
+        if (b < tax.idx2id.size()) {
+          M += tax.idx2id[b].size();
+        }
+      }
+    } else {
+      for (size_t b = 0; b < tax.idx2id.size(); ++b) {
+        M += tax.idx2id[b].size();
+      }
+    }
+    M = std::max<size_t>(M, 1);
+
+    double mu = static_cast<double>(TOT) / static_cast<double>(M);
+    double Z = (config.adaptive_fdr ? std::max(0.0, config.fdr_z) : 0.0);
+    size_t thr_fdr = (Z > 0.0)
+                         ? static_cast<size_t>(std::ceil(
+                               mu + Z * std::sqrt(std::max(mu, 1e-9))))
+                         : 1;
+
+    thr_final = std::max({thr_eval, thr_fdr, thr_beta, thr_min_eval});
+  }
 
   for (const auto &[tid_id, rawCount] : tidCount) {
-    size_t countVal = rawCount;
-    if (countVal > hashNum) {
-      countVal = hashNum;
-    }
-    if (countVal >= threshold && countVal >= thresholdCount) {
+    size_t countVal = std::min<size_t>(rawCount, n_eval);
+    if (countVal >= thr_final) {
       const std::string &taxid = tax.id2str[tid_id];
       result.taxidCount.emplace_back(taxid, countVal);
       if (countVal == maxBinCount) {
         maxCount = std::make_pair(taxid, countVal);
       }
-      fileInfo.taxidTotalMatches[taxid] += 1;
+    }
+  }
+
+  if (!result.taxidCount.empty() && (config.em || config.vem)) {
+    size_t K = config.preEmTopK > 0 ? config.preEmTopK : static_cast<size_t>(0);
+    if (K > 0 && result.taxidCount.size() > K) {
+      std::nth_element(
+          result.taxidCount.begin(), result.taxidCount.begin() + K,
+          result.taxidCount.end(),
+          [](const auto &a, const auto &b) { return a.second > b.second; });
+      result.taxidCount.resize(K);
     }
   }
 
   // Update classifyResult based on the number of remaining taxids and
   // classification mode
   if (!result.taxidCount.empty()) {
+
+    for (const auto &entry : result.taxidCount) {
+      fileInfo.taxidTotalMatches[entry.first] += 1;
+    }
 
     bool isUniqueMapping = (result.taxidCount.size() == 1);
     if (isUniqueMapping) {
@@ -2025,6 +2121,9 @@ void run(ClassifyConfig config) {
     std::cout << "Warning: The mode is changed to 'normal' for EM algorithm or "
                  "LCA classification\n";
   }
+  if (!(config.post_ratio > 0.0)) {
+    config.post_ratio = std::numeric_limits<double>::quiet_NaN();
+  }
   if (config.verbose) {
     std::cout << config << std::endl;
   }
@@ -2039,6 +2138,8 @@ void run(ClassifyConfig config) {
   std::vector<classifyResult> classifyResults;
   std::unordered_map<std::string, double> classWeights;
   bool posteriorModelUsed = false;
+  long long rebuildActiveMs = 0;
+  long long rebuildRouterMs = 0;
   if (config.filter == "imcf") {
     std::atomic<bool> producer_done{false};
     auto readEnd = readStart;
@@ -2051,7 +2152,19 @@ void run(ClassifyConfig config) {
     std::vector<std::vector<std::string>> indexToTaxid;
     chimera::imcf::InterleavedMergedCuckooFilter imcf;
     ChimeraBuild::IMCFConfig imcfConfig;
-    loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid);
+    auto indexStatus =
+        loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid);
+    if (indexStatus.builtActive) {
+      rebuildActiveMs = indexStatus.activeMs;
+      std::cout
+          << "IMCF index: active-group list missing, rebuilding in memory ("
+          << rebuildActiveMs << " ms)" << std::endl;
+    }
+    if (indexStatus.builtRouter) {
+      rebuildRouterMs = indexStatus.routerMs;
+      std::cout << "IMCF index: router table missing, rebuilding in memory ("
+                << rebuildRouterMs << " ms)" << std::endl;
+    }
     const TaxDict tax = build_tax_dict(indexToTaxid);
 
     auto classifyStart = std::chrono::high_resolution_clock::now();
@@ -2223,6 +2336,17 @@ void run(ClassifyConfig config) {
                     fileInfo.classifiedNum) *
                        100
                 << "%)" << std::endl;
+    }
+    if (rebuildActiveMs > 0 || rebuildRouterMs > 0) {
+      std::cout << "Index rebuild summary:" << std::endl;
+      if (rebuildActiveMs > 0) {
+        std::cout << "  Active index: ";
+        print_classify_time(rebuildActiveMs);
+      }
+      if (rebuildRouterMs > 0) {
+        std::cout << "  Router index: ";
+        print_classify_time(rebuildRouterMs);
+      }
     }
   }
 

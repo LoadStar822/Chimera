@@ -43,6 +43,12 @@ namespace ChimeraClassify {
 		std::string taxFile;
 		std::string filter{ "hicf" };
 		double shotThreshold;
+		bool adaptive_shot = true;
+		double firstFilterBeta = 0.8;
+		size_t preEmTopK = 24;
+		bool adaptive_fdr = true;
+		double fdr_z = 3.0;
+		size_t min_eval_count = 24;
 		uint16_t threads;
 		std::string mode;
 		bool verbose = true;
@@ -78,6 +84,12 @@ namespace ChimeraClassify {
 		os << std::setw(20) << "Output file:" << config.outputFile << std::endl
 			<< std::setw(20) << "Database file:" << config.dbFile << std::endl
 			<< std::setw(20) << "Shot threshold:" << config.shotThreshold << std::endl
+			<< std::setw(20) << "Adaptive shot:" << config.adaptive_shot << std::endl
+			<< std::setw(20) << "First filter beta:" << config.firstFilterBeta << std::endl
+			<< std::setw(20) << "Pre-EM topK:" << config.preEmTopK << std::endl
+			<< std::setw(20) << "Adaptive FDR:" << config.adaptive_fdr << std::endl
+			<< std::setw(20) << "FDR Z:" << config.fdr_z << std::endl
+			<< std::setw(20) << "Min eval count:" << config.min_eval_count << std::endl
 			<< std::setw(20) << "Mode:" << config.mode << std::endl
 			<< std::setw(20) << "Filter:" << config.filter << std::endl
 			<< std::setw(20) << "Batch size:" << config.batchSize << std::endl
@@ -124,6 +136,7 @@ namespace ChimeraClassify {
 		std::string id;
 		std::vector<std::pair<std::string, size_t>> taxidCount;
 		std::vector<std::pair<std::string, double>> posteriors;
+		double evaluated{ 0.0 }; // 实际参与判别的 minimizer 数，用于归一化
 	};
 
 	struct DecisionConfig {

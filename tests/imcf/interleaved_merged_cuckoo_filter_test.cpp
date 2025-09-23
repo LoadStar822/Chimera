@@ -529,7 +529,7 @@ static void test_router_route_and_subset() {
   std::vector<uint32_t> subset{0, 1, 5};
   std::sort(subset.begin(), subset.end());
 
-  std::vector<std::vector<uint16_t>> counters;
+  std::vector<std::vector<uint32_t>> counters;
   std::vector<std::pair<uint32_t, uint16_t>> touched;
   filter.bulkCount_sparse_subset(minimizers, subset, counters, &touched);
 
