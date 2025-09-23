@@ -8,6 +8,11 @@ from src.profile import profile
 from src.download import download as downloader
 
 
+def default_threads():
+    cpu = os.cpu_count()
+    return cpu if cpu and cpu > 0 else 1
+
+
 def get_chimera_path():
     # Use which command to find the chimera program path
     chimera_path = shutil.which("Chimera")
@@ -52,7 +57,7 @@ def parse_arguments():
                               help="Kmer size for building (must be between 1 and 31)")
     build_parser.add_argument("-w", "--window", type=int, default=31, help="Window size for building")
     build_parser.add_argument("-l", "--min-length", type=int, default=0, help="Minimum length sequence for building")
-    build_parser.add_argument("-t", "--threads", type=int, default=32, help="Number of threads for building")
+    build_parser.add_argument("-t", "--threads", type=int, default=default_threads(), help="Number of threads for building")
     build_parser.add_argument("--load-factor", type=float, default=0.58, help="Loading ratio of CF")
     build_parser.add_argument("-M", "--max-hashes", type=int, default=2000000, help="Maximum number of hashes per taxid")
     build_parser.add_argument("-a", "--alpha", type=float, default=1.2, help="Alpha value for HICF")
@@ -74,7 +79,7 @@ def parse_arguments():
     download_build_parser.add_argument("-w", "--window", type=int, default=31, help="Window size for building")
     download_build_parser.add_argument("-l", "--min-length", type=int, default=0,
                                        help="Minimum length sequence for building")
-    download_build_parser.add_argument("-t", "--threads", type=int, default=32, help="Number of threads for building")
+    download_build_parser.add_argument("-t", "--threads", type=int, default=default_threads(), help="Number of threads for building")
     download_build_parser.add_argument("--load-factor", type=float, default=0.58, help="Loading ratio of CF")
     download_build_parser.add_argument("-M", "--max-hashes", type=int, default=2000000, help="Maximum number of hashes per taxid")
     download_build_parser.add_argument("-a", "--alpha", type=float, default=1.2, help="Alpha value for HICF")
@@ -94,7 +99,7 @@ def parse_arguments():
     classify_parser.add_argument("-d", "--database", required=True, help="Database file for classifying")
     classify_parser.add_argument("-s", "--shot-threshold", type=float, default=0.7,
                                  help="Shot threshold for classifying")
-    classify_parser.add_argument("-t", "--threads", type=int, default=32, help="Number of threads for classifying")
+    classify_parser.add_argument("-t", "--threads", type=int, default=default_threads(), help="Number of threads for classifying")
     classify_parser.add_argument(
         "-m",
         "--mode",

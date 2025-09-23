@@ -26,6 +26,8 @@
 #include <vector>
 #include <string>
 #include <stdexcept>
+#include <thread>
+#include <limits>
 
 #ifdef CHIMERA_VERSION
 #define VERSION_INFO CHIMERA_VERSION
@@ -46,6 +48,16 @@ int main(int argc, char** argv)
 	auto build = app.add_subcommand("build", "Build a sequence database");
 	auto classify = app.add_subcommand("classify", "Classify sequences");
 
+	unsigned int hardware_threads = std::thread::hardware_concurrency();
+	if (hardware_threads == 0) {
+		hardware_threads = 1;
+	}
+	const auto max_threads = static_cast<unsigned int>(std::numeric_limits<uint16_t>::max());
+	if (hardware_threads > max_threads) {
+		hardware_threads = max_threads;
+	}
+	const auto default_threads = static_cast<uint16_t>(hardware_threads);
+
 	// Build
 	build->add_option("-i,--input", buildConfig.input_file, "Input file for building")
 		->required()
@@ -63,7 +75,7 @@ int main(int argc, char** argv)
 	build->add_option("-l,--min-length", buildConfig.min_length, "Minimum length sequence for building")
 		->default_val(0);
 	build->add_option("-t,--threads", buildConfig.threads, "Number of threads for building")
-		->default_val(32);
+		->default_val(default_threads);
 	build->add_option("--load-factor", buildConfig.load_factor, "Loading ratio of ICF")
 		->default_val(0.58);
 	build->add_option("-a,--alpha", buildConfig.alpha, "Alpha value for building")
@@ -104,7 +116,7 @@ int main(int argc, char** argv)
 	classify->add_option("-s,--shot-threshold", classifyConfig.shotThreshold, "Shot threshold for classifying")
 		->default_val(0.7);
 	classify->add_option("-t,--threads", classifyConfig.threads, "Number of threads for classifying")
-		->default_val(32);
+		->default_val(default_threads);
 	classify->add_option("-m,--mode", classifyConfig.mode, "Mode for classifying")
 		->check(CLI::IsMember({ "normal", "fast" }))
 		->default_val("normal");
