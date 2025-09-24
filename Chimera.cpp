@@ -22,6 +22,7 @@
 #include <ChimeraClassify.hpp>
 #include <buildConfig.hpp>
 #include <classifyConfig.hpp>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -29,11 +30,61 @@
 #include <thread>
 #include <vector>
 
+#if defined(__unix__) || defined(__APPLE__) || defined(__linux__)
+#include <sys/utsname.h>
+#endif
+
 #ifdef CHIMERA_VERSION
 #define VERSION_INFO CHIMERA_VERSION
 #else
 #define VERSION_INFO "unknown"
 #endif
+
+namespace {
+
+std::string detect_os() {
+#if defined(_WIN32)
+  return "Windows";
+#elif defined(__APPLE__)
+  struct utsname info {};
+  if (uname(&info) == 0) {
+    return std::string(info.sysname) + " " + info.release;
+  }
+  return "macOS";
+#elif defined(__linux__)
+  std::ifstream osrelease("/etc/os-release");
+  if (osrelease) {
+    std::string line;
+    while (std::getline(osrelease, line)) {
+      constexpr char key[] = "PRETTY_NAME=";
+      if (line.rfind(key, 0) == 0) {
+        std::string value = line.substr(sizeof(key) - 1);
+        if (!value.empty() && value.front() == '"' && value.back() == '"') {
+          value = value.substr(1, value.size() - 2);
+        }
+        if (!value.empty()) {
+          return value;
+        }
+      }
+    }
+  }
+  struct utsname info {};
+  if (uname(&info) == 0) {
+    return std::string(info.sysname) + " " + info.release;
+  }
+  return "Linux";
+#elif defined(__FreeBSD__)
+  struct utsname info {};
+  if (uname(&info) == 0) {
+    return std::string(info.sysname) + " " + info.release;
+  }
+  return "FreeBSD";
+#else
+  return "Unknown";
+#endif
+}
+
+} // namespace
 
 int main(int argc, char **argv) {
   // Create the main application object
@@ -68,9 +119,6 @@ int main(int argc, char **argv) {
       ->add_option("-o,--output", buildConfig.output_file,
                    "Output file for building")
       ->default_val("ChimeraDB");
-  build->add_option("-m,--mode", buildConfig.mode, "Mode for building")
-      ->check(CLI::IsMember({"normal", "fast"}))
-      ->default_val("normal");
   build
       ->add_option("-k,--kmer", buildConfig.kmer_size, "Kmer size for building")
       ->default_val(19)
@@ -89,14 +137,8 @@ int main(int argc, char **argv) {
       ->default_val(default_threads);
   build
       ->add_option("--load-factor", buildConfig.load_factor,
-                   "Loading ratio of ICF")
+                   "IMCF 滤器负载因子")
       ->default_val(0.9);
-  build->add_option("-a,--alpha", buildConfig.alpha, "Alpha value for building")
-      ->default_val(1.2);
-  build
-      ->add_option("--relaxed-load-factor", buildConfig.relaxedLoadFactor,
-                   "Relaxed loading ratio of ICF")
-      ->default_val(0.95);
   build
       ->add_option("-M,--max-hashes", buildConfig.max_hashes_per_taxid,
                    "Maximum number of hashes per taxid")
@@ -105,8 +147,8 @@ int main(int argc, char **argv) {
                     "Fixed cutoff for building (0 - 255)");
   build
       ->add_option("-f,--filter", buildConfig.filter,
-                   "Choose the filter for building (hicf, icf, imcf)")
-      ->check(CLI::IsMember({"hicf", "icf", "imcf"}))
+                   "构建使用的滤器类型 (imcf)")
+      ->check(CLI::IsMember({"imcf"}))
       ->default_val("imcf");
   build->add_flag("-q,--quiet", buildConfig.verbose, "Quiet output")
       ->default_val(true)
@@ -182,14 +224,11 @@ int main(int argc, char **argv) {
       ->add_option("-t,--threads", classifyConfig.threads,
                    "Number of threads for classifying")
       ->default_val(default_threads);
-  classify->add_option("-m,--mode", classifyConfig.mode, "Mode for classifying")
-      ->check(CLI::IsMember({"normal", "fast"}))
-      ->default_val("normal");
   classify
       ->add_option("-f,--filter", classifyConfig.filter,
-                   "Filter for classifying")
+                   "分类使用的滤器类型 (imcf)")
       ->default_val("imcf")
-      ->check(CLI::IsMember({"hicf", "icf", "imcf"}));
+      ->check(CLI::IsMember({"imcf"}));
   classify
       ->add_option("-b,--batch-size", classifyConfig.batchSize,
                    "Batch size for classifying")
@@ -252,8 +291,18 @@ int main(int argc, char **argv) {
     std::cout << "======================================" << std::endl;
     std::cout << "Version      : " << VERSION_INFO << std::endl;
     std::cout << "Build Date   : " << __DATE__ << " " << __TIME__ << std::endl;
-    std::cout << "Compiled with: " << "GCC " << __VERSION__ << std::endl;
-    std::cout << "OS           : Ubuntu 20.04" << std::endl;
+#ifdef __clang__
+    std::cout << "Compiled with: Clang " << __clang_major__ << '.'
+              << __clang_minor__ << '.' << __clang_patchlevel__ << std::endl;
+#elif defined(__GNUC__)
+    std::cout << "Compiled with: GCC " << __GNUC__ << '.' << __GNUC_MINOR__ << '.'
+              << __GNUC_PATCHLEVEL__ << std::endl;
+#elif defined(__VERSION__)
+    std::cout << "Compiled with: " << __VERSION__ << std::endl;
+#else
+    std::cout << "Compiled with: Unknown compiler" << std::endl;
+#endif
+    std::cout << "OS           : " << detect_os() << std::endl;
     std::cout << "======================================" << std::endl;
     std::cout << "Developed by : Qinzhong Tian" << std::endl;
     std::cout << "Team         : MalabZ" << std::endl;

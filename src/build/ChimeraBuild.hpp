@@ -21,7 +21,6 @@
 #include <buildConfig.hpp>
 #include <iostream>
 #include <chrono>
-#include <interleaved-cuckoo-filter.h>
 #include <iomanip>
 #include <fstream>
 #include <sstream>
@@ -43,14 +42,10 @@
 #include <execution>
 #include <HyperLogLog.hpp>
 #include <toolbox.hpp>
-#include <hierarchical-interleaved-cuckoo-filter.h>
 #include <interleaved-merged-cuckoo-filter.h>
 
 namespace fs = std::filesystem;
 
 namespace ChimeraBuild {
 	void run(BuildConfig config);
-	size_t computeLayoutHICF(HICFConfig& hicfConfig,
-		BuildConfig& config,
-		chimera::hicf::DataStore& data);
 }

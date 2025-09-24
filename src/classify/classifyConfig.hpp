@@ -41,7 +41,7 @@ namespace ChimeraClassify {
 		std::string outputFile;
 		std::string dbFile;
 		std::string taxFile;
-		std::string filter{ "hicf" };
+		std::string filter{ "imcf" };
 		double shotThreshold;
 		bool adaptive_shot = true;
 		double firstFilterBeta = 0.8;
@@ -50,7 +50,6 @@ namespace ChimeraClassify {
 		double fdr_z = 3.0;
 		size_t min_eval_count = 24;
 		uint16_t threads;
-		std::string mode;
 		bool verbose = true;
 		bool progress = true;
 		size_t progressStep = 5000;
@@ -93,7 +92,6 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Adaptive FDR:" << config.adaptive_fdr << std::endl
 			<< std::setw(20) << "FDR Z:" << config.fdr_z << std::endl
 			<< std::setw(20) << "Min eval count:" << config.min_eval_count << std::endl
-			<< std::setw(20) << "Mode:" << config.mode << std::endl
 			<< std::setw(20) << "Filter:" << config.filter << std::endl
 			<< std::setw(20) << "Batch size:" << config.batchSize << std::endl
 			<< std::setw(20) << "LCA:" << config.lca << std::endl

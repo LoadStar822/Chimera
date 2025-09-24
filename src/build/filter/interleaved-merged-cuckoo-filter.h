@@ -87,7 +87,6 @@ namespace chimera::imcf {
 	 * distribution for efficient processing within the IMCF.
 	 *
 	 * @param hashCount A map containing taxid strings as keys and their corresponding hash counts as values.
-	 * @param mode A string specifying the partitioning mode. Currently supports "normal" mode for partitioning logic.
 	 * @param maxTaxidsPerGroup The maximum number of taxids allowed in a single group. Default is 16.
 	 *
 	 * @return A vector of Group objects, where each Group contains a collection of taxids and the total hash count for that group.
@@ -109,7 +108,7 @@ namespace chimera::imcf {
 	 *   while `Group` should contain a `taxids` vector and `totalHash` field.
 	 * - The `minHeap` priority queue helps maintain the group with the smallest total hash count for efficient chunk assignment.
 	 */
-	inline std::vector<Group> partitionHashCount(const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount, std::string mode, int maxTaxidsPerGroup = 16)
+	inline std::vector<Group> partitionHashCount(const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount, int maxTaxidsPerGroup = 16)
 	{
 		if (hashCount.empty()) {
 			return {};
@@ -119,213 +118,114 @@ namespace chimera::imcf {
 		}
 		size_t maxTaxids = static_cast<size_t>(maxTaxidsPerGroup);
 
-		if (mode == "normal")
-		{
-			// Step 1: Calculate the median of the hash counts and set a threshold
-			std::vector<uint64_t> counts;
-			counts.reserve(hashCount.size());
-			for (const auto& [taxid, count] : hashCount) {
-				counts.push_back(count);
-			}
+		// Step 1: Calculate the median of the hash counts and set a threshold
+		std::vector<uint64_t> counts;
+		counts.reserve(hashCount.size());
+		for (const auto& [taxid, count] : hashCount) {
+			counts.push_back(count);
+		}
 
-			std::sort(counts.begin(), counts.end());
-			uint64_t median = counts[counts.size() / 2];
+		std::sort(counts.begin(), counts.end());
+		uint64_t median = counts[counts.size() / 2];
 
-			uint64_t threshold = 0;
-			if (median == 0) {
-				threshold = 1;
-			}
-			else if (median > std::numeric_limits<uint64_t>::max() / 64ull) {
-				threshold = std::numeric_limits<uint64_t>::max();
+		uint64_t threshold = 0;
+		if (median == 0) {
+			threshold = 1;
+		}
+		else if (median > std::numeric_limits<uint64_t>::max() / 64ull) {
+			threshold = std::numeric_limits<uint64_t>::max();
+		}
+		else {
+			threshold = median * 64ull;
+		}
+		if (threshold == 0) {
+			threshold = 1;
+		}
+
+		// Step 2: Create chunks for hash counts exceeding the threshold
+		std::vector<HashChunk> hashChunks;
+		for (const auto& [taxid, count] : hashCount) {
+			if (count > threshold) {
+				uint64_t numChunks = count / threshold;
+				if (count % threshold != 0) {
+					++numChunks;
+				}
+				numChunks = std::max<uint64_t>(1, numChunks);
+				uint64_t chunkSize = numChunks ? count / numChunks : count;
+				for (uint64_t i = 0; i < numChunks; ++i) {
+					uint64_t current = chunkSize;
+					if (i == numChunks - 1) {
+						current = count - chunkSize * (numChunks - 1);
+					}
+					hashChunks.push_back({ taxid, current });
+				}
 			}
 			else {
-				threshold = median * 64ull;
+				hashChunks.push_back({ taxid, count });
 			}
-			if (threshold == 0) {
-				threshold = 1;
-			}
-
-			// Step 2: Create chunks for hash counts exceeding the threshold
-			std::vector<HashChunk> hashChunks;
-			for (const auto& [taxid, count] : hashCount) {
-				if (count > threshold) {
-					uint64_t numChunks = count / threshold;
-					if (count % threshold != 0) {
-						++numChunks;
-					}
-					numChunks = std::max<uint64_t>(1, numChunks);
-					uint64_t chunkSize = numChunks ? count / numChunks : count;
-					for (uint64_t i = 0; i < numChunks; ++i) {
-						uint64_t current = chunkSize;
-						if (i == numChunks - 1) {
-							current = count - chunkSize * (numChunks - 1);
-						}
-						hashChunks.push_back({ taxid, current });
-					}
-				}
-				else {
-					hashChunks.push_back({ taxid, count });
-				}
-			}
-
-			// Step 3: Sort the chunks by hash count in descending order
-			std::sort(hashChunks.begin(), hashChunks.end(),
-				[](const HashChunk& a, const HashChunk& b) {
-					return a.hashCount > b.hashCount;
-				});
-
-			// Step 4: Create groups and assign chunks using a priority queue
-			size_t groupNum = (hashChunks.size() + maxTaxids - 1) / maxTaxids;
-			groupNum = std::max<size_t>(1, groupNum);
-			std::vector<Group> groups(groupNum);
-			std::vector<robin_hood::unordered_flat_set<std::string>> used(groupNum);
-
-			auto cmp = [&](const int a, const int b) -> bool {
-				return groups[a].totalHash > groups[b].totalHash;
-			};
-			std::priority_queue<int, std::vector<int>, decltype(cmp)> minHeap(cmp);
-			for (size_t i = 0; i < groupNum; ++i) {
-				minHeap.push(static_cast<int>(i));
-			}
-
-			for (const auto& chunk : hashChunks) {
-				std::vector<int> popped;
-				int target = -1;
-				while (!minHeap.empty()) {
-					int cand = minHeap.top();
-					minHeap.pop();
-				if (groups[cand].taxids.size() >= maxTaxids || used[cand].contains(chunk.taxid)) {
-						popped.push_back(cand);
-						continue;
-					}
-					target = cand;
-					break;
-				}
-
-				if (target == -1) {
-					for (int idx : popped) {
-						minHeap.push(idx);
-					}
-					groups.emplace_back();
-					used.emplace_back();
-					target = static_cast<int>(groups.size() - 1);
-				}
-				else {
-					for (int idx : popped) {
-						minHeap.push(idx);
-					}
-				}
-
-				if (groups[target].taxids.size() >= maxTaxids) {
-					groups.emplace_back();
-					used.emplace_back();
-					target = static_cast<int>(groups.size() - 1);
-				}
-
-				groups[target].taxids.push_back(chunk.taxid);
-				groups[target].totalHash += chunk.hashCount;
-				used[target].insert(chunk.taxid);
-				minHeap.push(target);
-			}
-
-			return groups;
 		}
-		else if (mode == "fast")
-		{
-			// Step 1: Sort taxids based on hash counts in descending order
-			std::vector<std::pair<std::string, uint64_t>> sortedHashCounts;
-			sortedHashCounts.reserve(hashCount.size());
-			for (const auto& item : hashCount) {
-				sortedHashCounts.emplace_back(item.first, item.second);
-			}
-			std::sort(sortedHashCounts.begin(), sortedHashCounts.end(),
-				[](const std::pair<std::string, uint64_t>& a, const std::pair<std::string, uint64_t>& b) {
-					return a.second > b.second;
-				});
-			// Calculate median and number of groups
-			size_t taxidNum = sortedHashCounts.size();
-			if (taxidNum == 0) {
-				return {};
-			}
-			uint64_t median = sortedHashCounts[taxidNum / 2].second;
-			size_t groupNum = (taxidNum + maxTaxids - 1) / maxTaxids;
-			groupNum = std::max<size_t>(1, groupNum);
-			// Initialize groups
-			std::vector<Group> groups;
-			groups.reserve(groupNum);
-			groups.resize(groupNum);
 
-			// Step 2: Create a priority queue to manage groups by total hash count
-			auto cmp = [&](const int a, const int b) -> bool {
-				return groups[a].totalHash > groups[b].totalHash;
-				};
-			std::priority_queue<int, std::vector<int>, decltype(cmp)> minHeap(cmp);
-			for (size_t i = 0; i < groupNum; ++i) {
-				minHeap.push(static_cast<int>(i));
-			}
-			// Step 3: Assign each taxid to the group with the smallest total hash count
-			for (const auto& [taxid, count] : sortedHashCounts) {
-				int smallestGroup = minHeap.top();
+		// Step 3: Sort the chunks by hash count in descending order
+		std::sort(hashChunks.begin(), hashChunks.end(),
+			[](const HashChunk& a, const HashChunk& b) {
+				return a.hashCount > b.hashCount;
+			});
+
+		// Step 4: Create groups and assign chunks using a priority queue
+		size_t groupNum = (hashChunks.size() + maxTaxids - 1) / maxTaxids;
+		groupNum = std::max<size_t>(1, groupNum);
+		std::vector<Group> groups(groupNum);
+		std::vector<robin_hood::unordered_flat_set<std::string>> used(groupNum);
+
+		auto cmp = [&](const int a, const int b) -> bool {
+			return groups[a].totalHash > groups[b].totalHash;
+		};
+		std::priority_queue<int, std::vector<int>, decltype(cmp)> minHeap(cmp);
+		for (size_t i = 0; i < groupNum; ++i) {
+			minHeap.push(static_cast<int>(i));
+		}
+
+		for (const auto& chunk : hashChunks) {
+			std::vector<int> popped;
+			int target = -1;
+			while (!minHeap.empty()) {
+				int cand = minHeap.top();
 				minHeap.pop();
-				// Check if the group can accommodate more taxids
-				if (groups[smallestGroup].taxids.size() < maxTaxidsPerGroup) {
-					groups[smallestGroup].taxids.push_back(taxid);
-					groups[smallestGroup].totalHash += count;
-					minHeap.push(smallestGroup);
+				if (groups[cand].taxids.size() >= maxTaxids || used[cand].contains(chunk.taxid)) {
+					popped.push_back(cand);
+					continue;
 				}
-				else
-				{
-					// Handle case where all current groups are full
-					bool assigned = false;
-					std::vector<int> tempGroups;
-					// Try to find a group that can accommodate the current taxid
-					while (!minHeap.empty()) {
-						int tempGroup = minHeap.top();
-						minHeap.pop();
-						if (groups[tempGroup].taxids.size() < maxTaxidsPerGroup) {
-							groups[tempGroup].taxids.push_back(taxid);
-							groups[tempGroup].totalHash += count;
-							minHeap.push(tempGroup);
-							assigned = true;
-							break;
-						}
-						tempGroups.push_back(tempGroup);
-					}
-					// Reinsert groups back into the priority queue
-					for (int tempGroup : tempGroups) {
-						minHeap.push(tempGroup);
-					}
-					// Create a new group if no existing group can take the taxid
-					if (!assigned) {
-						groups.emplace_back(Group());
-						groups.back().taxids.push_back(taxid);
-						groups.back().totalHash += count;
-						minHeap.push(static_cast<int>(groups.size() - 1));
-					}
+				target = cand;
+				break;
+			}
+
+			if (target == -1) {
+				for (int idx : popped) {
+					minHeap.push(idx);
+				}
+				groups.emplace_back();
+				used.emplace_back();
+				target = static_cast<int>(groups.size() - 1);
+			}
+			else {
+				for (int idx : popped) {
+					minHeap.push(idx);
 				}
 			}
 
+			if (groups[target].taxids.size() >= maxTaxids) {
+				groups.emplace_back();
+				used.emplace_back();
+				target = static_cast<int>(groups.size() - 1);
+			}
 
-			//uint64_t maxTotalHash = 0;
-			//uint64_t minTotalHash = UINT64_MAX;
-			//for (const auto& group : groups) {
-			//	maxTotalHash = std::max(maxTotalHash, group.totalHash);
-			//	minTotalHash = std::min(minTotalHash, group.totalHash);
-			//}
-
-			//std::cout << "Difference between max and min totalHash: " << (maxTotalHash - minTotalHash) << std::endl;
-			//std::cout << "Filter size: " << (maxTotalHash * groups.size() * 16.0 / 0.95) / 8 / 1024 / 1024 / 1024 << " GB" << std::endl;
-			//std::cout << "Groups size: " << groups.size() << std::endl;
-			//std::cout << "Before Split Groups size: " << (hashCount.size() + 16) / 16 << std::endl;
-
-			return groups;
+			groups[target].taxids.push_back(chunk.taxid);
+			groups[target].totalHash += chunk.hashCount;
+			used[target].insert(chunk.taxid);
+			minHeap.push(target);
 		}
-		else
-		{
-			std::cerr << "Invalid mode: " << mode << std::endl;
-			throw std::runtime_error("Invalid mode");
-		}
-		
+
+		return groups;
 	}
 
 

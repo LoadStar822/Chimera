@@ -30,6 +30,8 @@
 #include <numeric>
 #include <queue>
 #include <sstream>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace ChimeraClassify {
 
@@ -387,62 +389,94 @@ void parseReads(moodycamel::ConcurrentQueue<batchReads> &readQueue,
   }
 }
 
+struct IMCFIndexStatus {
+  bool builtActive{false};
+  bool builtRouter{false};
+  long long activeMs{0};
+  long long routerMs{0};
+};
+
 /**
- * @brief Load the filter from the input file.
+ * @brief 加载 IMCF 主体与索引文件。
  *
- * This function opens the input file and deserializes the filter and related
- * data. It checks if the file is successfully opened and throws an exception if
- * it fails. The function uses a cereal binary input archive to deserialize the
- * filter and data. After deserialization, the function clears the hashCount and
- * taxidBins containers. It then reinserts the data from the deserialized
- * vectors into the hashCount and taxidBins containers. Finally, the function
- * closes the file.
- *
- * @param input_file The path to the input file.
- * @param icf The InterleavedCuckooFilter object to store the deserialized
- * filter.
- * @param icfConfig The ICFConfig object to store the deserialized
- * configuration.
- * @param hashCount The unordered_map to store the deserialized hash count data.
- * @param taxidBins The unordered_map to store the deserialized taxid bins data.
+ * 该函数会按顺序读取 `.imcf` 主档案以及可选的 `.imcf.idx` 与 `.imcf.rtr`
+ * 索引文件；若索引缺失将自动重建并记录耗时，用于后续提示用户。
  */
-void loadFilter(
-    const std::string &input_file, chimera::InterleavedCuckooFilter &icf,
-    ChimeraBuild::ICFConfig &icfConfig,
-    robin_hood::unordered_flat_map<std::string, uint64_t> &hashCount,
-    std::vector<std::pair<std::string, std::size_t>> &taxidBinsData) {
-  // Open the input file
-  std::ifstream is(input_file, std::ios::binary);
+IMCFIndexStatus loadFilter(
+    const std::string &input_file,
+    chimera::imcf::InterleavedMergedCuckooFilter &imcf,
+    ChimeraBuild::IMCFConfig &imcfConfig,
+    std::vector<std::vector<std::string>> &indexToTaxid) {
+  namespace fs = std::filesystem;
+  using Clock = std::chrono::steady_clock;
 
-  // Check if the file is successfully opened
+  fs::path archivePath{input_file};
+  if (!fs::exists(archivePath)) {
+    archivePath = fs::path{input_file + ".imcf"};
+  }
+  if (!fs::exists(archivePath)) {
+    throw std::runtime_error("无法找到 IMCF 主档案: " + input_file);
+  }
+
+  fs::path indexBase = archivePath;
+  if (indexBase.extension() == ".imcf") {
+    indexBase.replace_extension("");
+  }
+
+  std::ifstream is(archivePath, std::ios::binary);
   if (!is.is_open()) {
-    throw std::runtime_error("Failed to open file: " + input_file);
+    throw std::runtime_error("无法打开 IMCF 主档案: " + archivePath.string());
   }
 
-  // Create a cereal binary input archive
   cereal::BinaryInputArchive archive(is);
+  archive(imcf);
+  archive(indexToTaxid);
+  archive(imcfConfig);
+  is.close();
 
-  // Deserialize InterleavedCuckooFilter
-  archive(icf);
+  auto timed = [](auto &&fn) {
+    auto start = Clock::now();
+    bool ok = fn();
+    auto end = Clock::now();
+    long long elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+            .count();
+    return std::pair<bool, long long>{ok, elapsed};
+  };
 
-  // Deserialize ICFConfig
-  archive(icfConfig);
+  IMCFIndexStatus status;
 
-  // Deserialize vectors
-  std::vector<std::pair<std::string, uint64_t>> hashCountData;
-  archive(hashCountData);
-  archive(taxidBinsData);
-
-  // Clear hashCount and taxidBins
-  hashCount.clear();
-
-  // Reinsert data from vectors into robin_hood::unordered_flat_map
-  for (const auto &kv : hashCountData) {
-    hashCount[kv.first] = kv.second;
+  std::string activePath = indexBase.string() + ".imcf.idx";
+  auto [activeLoaded, activeMs] = timed([&]() {
+    return imcf.loadActiveIndex(activePath);
+  });
+  if (!activeLoaded || !imcf.hasActiveIndex()) {
+    auto rebuild = timed([&]() {
+      imcf.buildActiveGroups();
+      return true;
+    });
+    status.builtActive = true;
+    status.activeMs = rebuild.second;
+  } else {
+    status.activeMs = activeMs;
   }
 
-  // Close the file
-  is.close();
+  std::string routerPath = indexBase.string() + ".imcf.rtr";
+  auto [routerLoaded, routerMs] = timed([&]() {
+    return imcf.loadRouterIndex(routerPath);
+  });
+  if (!routerLoaded || !imcf.hasRouterIndex()) {
+    auto rebuild = timed([&]() {
+      imcf.buildRouterIndex();
+      return true;
+    });
+    status.builtRouter = true;
+    status.routerMs = rebuild.second;
+  } else {
+    status.routerMs = routerMs;
+  }
+
+  return status;
 }
 
 /**
@@ -458,513 +492,6 @@ adjust_seed(uint8_t const kmer_size,
   unsigned double_k = static_cast<unsigned>(kmer_size) * 2u;
   unsigned shift = double_k >= 64u ? 0u : (64u - double_k);
   return seed >> shift;
-}
-
-/**
- * @brief Process a sequence for classification.
- *
- * This function processes a sequence for classification using the Interleaved
- * Cuckoo Filter (ICF). It takes the sequence's hash values, the ICF
- * configuration, the taxid bins, the classification configuration, the ICF
- * object, the sequence's ID, and the vector to store the classification
- * results.
- *
- * The function calculates the number of hash values and the threshold for
- * classification based on the configuration. It then performs a bulk count
- * operation on the hash values using the ICF object. The function creates a
- * classifyResult object to store the classification result for the sequence.
- *
- * The function iterates over the taxid bins and calculates the count for each
- * bin based on the bulk count result. If the count for a bin is above the
- * threshold, the bin and count are added to the classifyResult object. The
- * function also keeps track of the bin with the maximum count.
- *
- * If the maximum count is greater than 0, the function checks the
- * classification mode. If the mode is "fast" or there is only one bin with a
- * count above the threshold, the classifyResult object is updated to only
- * contain the bin with the maximum count.
- *
- * Finally, the function locks the resultMutex to ensure thread safety and adds
- * the classifyResult object to the classifyResults vector.
- *
- * @param hashs1 The hash values of the sequence.
- * @param icfConfig The configuration for the Interleaved Cuckoo Filter.
- * @param taxidBins The taxid bins.
- * @param config The configuration for the classification.
- * @param icf The Interleaved Cuckoo Filter object.
- * @param id The ID of the sequence.
- * @param classifyResults The vector to store the classification results.
- * @param fileInfo The information about the files and sequences.
- */
-inline void processSequence(
-    const std::vector<size_t> &hashs1, ChimeraBuild::ICFConfig &icfConfig,
-    const std::vector<std::pair<std::string, std::size_t>> &taxidBins,
-    ClassifyConfig &config, chimera::InterleavedCuckooFilter &icf,
-    const std::string &id, std::vector<classifyResult> &classifyResults,
-    FileInfo &fileInfo, LCA &lca, ProgressTracker *progress) {
-  // Calculate the number of hash values and the threshold for classification
-  size_t hashNum = hashs1.size();
-  auto thr_at_eval = [&](size_t n_eval_now) -> size_t {
-    size_t base = config.adaptive_shot ? n_eval_now : hashNum;
-    double scaled = static_cast<double>(base) * config.shotThreshold;
-    size_t t = static_cast<size_t>(std::ceil(scaled));
-    return std::max<size_t>(t, 1);
-  };
-
-  // Perform bulk count operation on the hash values using the Interleaved
-  // Cuckoo Filter
-  auto count = icf.bulk_count(hashs1);
-  classifyResult result;
-  result.id = id;
-  result.evaluated = static_cast<double>(hashNum);
-  result.evaluated = static_cast<double>(hashNum);
-
-  size_t maxBinCount = 0;
-  std::pair<std::string, std::size_t> maxCount;
-  robin_hood::unordered_flat_map<std::string, size_t> taxidToCount;
-  size_t oldIndex = 0;
-
-  // Iterate over the taxid bins and calculate the count for each bin based on
-  // the bulk count result
-  for (auto const &[taxid, bins] : taxidBins) {
-    size_t binCount = 0;
-    for (size_t i = oldIndex; i < bins; i++) {
-      binCount += kv_A(count, i);
-    }
-    oldIndex = bins;
-    if (binCount > hashNum) {
-      binCount = hashNum;
-    }
-    taxidToCount[taxid] = binCount;
-    if (binCount > maxBinCount) {
-      maxBinCount = binCount;
-    }
-  }
-
-  // First filter step: remove bins with count less than 80% of the maximum
-  // count
-  size_t thresholdCount =
-      static_cast<size_t>(0.8 * static_cast<double>(maxBinCount));
-  size_t threshold = thr_at_eval(hashNum);
-  for (const auto &[taxid, binCount] : taxidToCount) {
-    if (binCount >= thresholdCount && binCount >= threshold) {
-      result.taxidCount.emplace_back(taxid, binCount);
-
-      if (binCount == maxBinCount) {
-        maxCount = std::make_pair(taxid, binCount);
-      }
-      fileInfo.taxidTotalMatches[taxid] += 1;
-    }
-  }
-
-  // If the maximum count is greater than 0, update the classifyResult object
-  // based on the classification mode
-  if (!result.taxidCount.empty()) {
-
-    bool isUniqueMapping = (result.taxidCount.size() == 1);
-    if (isUniqueMapping) {
-      fileInfo.uniqueTaxids.insert(result.taxidCount.front().first);
-      const std::string &taxid = result.taxidCount.front().first;
-      fileInfo.taxidUniqueMatches[taxid] += 1;
-    }
-
-    fileInfo.classifiedNum++;
-    if (config.lca && result.taxidCount.size() > 1) {
-      std::vector<std::string> taxids;
-      for (auto &[taxid, count] : result.taxidCount) {
-        taxids.push_back(taxid);
-      }
-      std::string lcaTaxid = lca.getLCA(taxids);
-      result.taxidCount.clear();
-      result.taxidCount.emplace_back(lcaTaxid, 0);
-    } else if (config.mode == "fast" || result.taxidCount.size() == 1) {
-      result.taxidCount.clear();
-      result.taxidCount.emplace_back(maxCount);
-    } else if (config.mode == "normal") {
-      //// Sort the taxidCount vector based on the count in descending order
-      // std::sort(result.taxidCount.begin(), result.taxidCount.end(), [](const
-      // auto& a, const auto& b) { 	return a.second > b.second;  // Sort in
-      // descending order
-    }
-  } else {
-    fileInfo.unclassifiedNum++;
-    result.taxidCount.emplace_back("unclassified", 1);
-  }
-
-  // Lock the resultMutex to ensure thread safety and add the classifyResult
-  // object to the classifyResults vector
-  kv_destroy(count);
-  if (progress) {
-    progress->mark_processed(1);
-  }
-  classifyResults.emplace_back(std::move(result));
-}
-
-/**
- * @brief Process a batch of reads for classification.
- *
- * This function processes a batch of reads for classification using the
- * Interleaved Cuckoo Filter (ICF). It takes the batch of reads, the ICF
- * configuration, the taxid bins, the classification configuration, the ICF
- * object, the vector to store the classification results, and the minimiser
- * view for hashing.
- *
- * If the batch contains paired-end reads, the function generates minimizer hash
- * values for each sequence. If the sequence lengths meet the window size
- * requirement, the function generates the hash values using the minimiser view.
- * For paired-end reads, the function combines the hash values from both
- * sequences.
- *
- * If the batch contains single-end reads, the function generates minimizer hash
- * values for each sequence. If the sequence length meets the window size
- * requirement, the function generates the hash values using the minimiser view.
- *
- * The function then calls the processSequence function to perform
- * classification on the generated hash values.
- *
- * @param batch The batch of reads to process.
- * @param icfConfig The configuration for the Interleaved Cuckoo Filter.
- * @param taxidBins The taxid bins.
- * @param config The configuration for the classification.
- * @param icf The Interleaved Cuckoo Filter object.
- * @param classifyResults The vector to store the classification results.
- * @param minimiser_view The minimiser view for hashing.
- * @param fileInfo The information about the files and sequences.
- */
-inline void
-processBatch(batchReads batch, ChimeraBuild::ICFConfig &icfConfig,
-             const std::vector<std::pair<std::string, std::size_t>> &taxidBins,
-             ClassifyConfig &config, chimera::InterleavedCuckooFilter &icf,
-             std::vector<classifyResult> &classifyResults,
-             const auto &minimiser_view, FileInfo &fileInfo, LCA &lca,
-             ProgressTracker *progress = nullptr) {
-  // Process batch of reads
-  std::vector<size_t> hashs1;
-  if (!batch.seqs2.empty()) {
-    // Process paired-end reads
-    for (size_t i = 0; i < batch.ids.size(); ++i) {
-      hashs1.clear();
-      if (i < batch.seqs.size() &&
-          batch.seqs[i].size() >= icfConfig.window_size) {
-        hashs1 =
-            batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector>();
-      }
-      if (i < batch.seqs2.size() &&
-          batch.seqs2[i].size() >= icfConfig.window_size) {
-        std::vector<size_t> hashs2 =
-            batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector>();
-        hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
-      }
-      processSequence(hashs1, icfConfig, taxidBins, config, icf, batch.ids[i],
-                      classifyResults, fileInfo, lca, progress);
-    }
-  } else {
-    // Process single-end reads
-    for (size_t i = 0; i < batch.seqs.size(); i++) {
-      hashs1.clear();
-      if (batch.seqs[i].size() >= icfConfig.window_size) {
-        // Generate minimizer hash values for the sequence
-        hashs1 =
-            batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector>();
-      }
-      // Process the hash values for classification
-      processSequence(hashs1, icfConfig, taxidBins, config, icf, batch.ids[i],
-                      classifyResults, fileInfo, lca, progress);
-    }
-  }
-}
-
-/*
- * @brief Build the LCA object from the taxonomy file.
- *
- * This function builds the LCA object from the taxonomy file.
- * It reads the taxonomy file line by line and splits each line into taxid and
- * parent taxid. The function then adds the edge to the LCA object. After
- * reading the entire file, the function performs Euler walk on the LCA object.
- *
- * @param lca The LCA object to build.
- * @param taxFile The path to the taxonomy file.
- */
-void buildLCA(LCA &lca, const std::string &taxFile) {
-  // Open the taxonomy file
-  std::ifstream is(taxFile);
-
-  // Check if the file is successfully opened
-  if (!is.is_open()) {
-    throw std::runtime_error("Failed to open file: " + taxFile);
-  }
-
-  // Read the taxonomy file line by line
-  std::string line;
-  while (std::getline(is, line)) {
-    // Split the line into taxid and parent taxid
-    std::istringstream iss(line);
-    std::string childID, parentID, rank, name;
-    // Read the taxid, parent taxid, rank, and name from the line
-    if (!(iss >> childID >> parentID >> rank >> name)) {
-      continue;
-    }
-
-    // Add the edge to the LCA object
-    lca.addEdge(parentID, childID);
-  }
-
-  // Close the file
-  is.close();
-
-  // Perform Euler walk on the LCA object
-  lca.doEulerWalk("1");
-}
-
-/**
- * @brief Applies a second filtering step to the classification results based on
- * unique taxids.
- *
- * This function filters out taxids from the classification results that are not
- * present in the provided set of unique taxids. If all taxids in a result are
- * removed during this filtering, the result is marked as "unclassified".
- *
- * @param classifyResults A vector containing the classification results for
- * each sequence.
- * @param uniqueTaxids An unordered set of unique taxids that should be retained
- * in the classification results.
- *
- * @details
- * The function iterates over each `classifyResult` in `classifyResults` and
- * applies the following logic:
- * - It removes any taxid from `result.taxidCount` if it is not found in
- * `uniqueTaxids`.
- * - If the `taxidCount` vector becomes empty after filtering, the result is
- * marked as "unclassified" by adding a placeholder entry ("unclassified", 1).
- */
-void secondFilteringStep(std::vector<classifyResult> &classifyResults,
-                         const std::unordered_set<std::string> &uniqueTaxids) {
-  for (auto &result : classifyResults) {
-    // Remove taxids that are not in the uniqueTaxids set
-    result.taxidCount.erase(
-        std::remove_if(result.taxidCount.begin(), result.taxidCount.end(),
-                       [&uniqueTaxids](const auto &pair) {
-                         return uniqueTaxids.find(pair.first) ==
-                                uniqueTaxids.end();
-                       }),
-        result.taxidCount.end());
-    // If all taxids were removed, mark the result as "unclassified"
-    if (result.taxidCount.empty()) {
-      result.taxidCount.emplace_back("unclassified", 1);
-    }
-  }
-}
-
-/**
- * @brief Applies a third filtering step to the classification results, focusing
- * on removing low-uniqueness taxids and reassigning them.
- *
- * This function identifies taxids with low unique matches relative to their
- * total matches and checks if their associated reads are shared with other
- * taxids. If a taxid has significant overlap (95% or more) of reads with
- * another taxid, it is removed from the classification results, and the reads
- * are reassigned to the other taxid.
- *
- * @param classifyResults A vector containing the classification results for
- * each sequence.
- * @param fileInfo A structure holding statistical data about the classification
- * process, including taxid match counts.
- *
- * @details
- * Step 1: Identify taxids with low unique matches.
- * - The function calculates the unique match rate for each taxid using the data
- * in `fileInfo`.
- * - Taxids with unique matches less than 5% of their total matches are marked
- * as low-uniqueness taxids.
- *
- * Step 2: Map reads to taxids.
- * - The function creates a map (`taxidToReads`) that associates each taxid with
- * the set of read IDs it appears in.
- *
- * Step 3: Compare read sharing between taxids.
- * - For each low-uniqueness taxid, the function checks how many of its reads
- * are shared with other taxids.
- * - If 95% or more of its reads are found in another taxid's read set, the
- * original taxid is removed from the results, and its reads are reassigned to
- * the other taxid.
- *
- * Step 4: Update classification results.
- * - The classification results are modified by removing occurrences of the
- * low-uniqueness taxid and replacing it with the new taxid.
- */
-void thirdFilteringStep(std::vector<classifyResult> &classifyResults,
-                        FileInfo &fileInfo) {
-  // Identify taxids with low unique matches (less than 5% of their total
-  // matches)
-  std::unordered_set<std::string> lowUniqueTaxids;
-  for (const auto &[taxid, totalMatches] : fileInfo.taxidTotalMatches) {
-    size_t uniqueMatches = fileInfo.taxidUniqueMatches[taxid];
-    if (uniqueMatches < 0.05 * totalMatches) {
-      lowUniqueTaxids.insert(taxid);
-    }
-  }
-
-  // Map reads to the taxids they are associated with
-  robin_hood::unordered_flat_map<std::string, std::unordered_set<std::string>>
-      taxidToReads;
-  for (const auto &result : classifyResults) {
-    for (const auto &[taxid, count] : result.taxidCount) {
-      taxidToReads[taxid].insert(result.id);
-    }
-  }
-
-  // Compare read sharing between low-uniqueness taxids and other taxids
-  for (const auto &taxid : lowUniqueTaxids) {
-    const auto &reads = taxidToReads[taxid];
-    if (reads.empty())
-      continue;
-    for (const auto &[otherTaxid, otherReads] : taxidToReads) {
-      if (taxid == otherTaxid)
-        continue;
-      // Count shared reads between the current taxid and another taxid
-      size_t sharedReads = 0;
-      for (const auto &readId : reads) {
-        if (otherReads.find(readId) != otherReads.end()) {
-          sharedReads++;
-        }
-      }
-      // Calculate the percentage of shared reads
-      double sharedPercentage = static_cast<double>(sharedReads) / reads.size();
-      if (sharedPercentage >= 0.95) {
-        // Update classification results: replace occurrences of the
-        // low-uniqueness taxid
-        for (auto &result : classifyResults) {
-          if (reads.find(result.id) != reads.end()) {
-            result.taxidCount.erase(std::remove_if(result.taxidCount.begin(),
-                                                   result.taxidCount.end(),
-                                                   [&taxid](const auto &pair) {
-                                                     return pair.first == taxid;
-                                                   }),
-                                    result.taxidCount.end());
-            result.taxidCount.emplace_back(otherTaxid, 0);
-          }
-        }
-        break;
-      }
-    }
-  }
-}
-
-/**
- * @brief Classify the reads using the Interleaved Cuckoo Filter.
- *
- * This function performs the classification of reads using the Interleaved
- * Cuckoo Filter (ICF). It takes the ICF configuration, a queue of batchReads
- * objects, the classification configuration, the ICF object, the taxid bins,
- * and a vector to store the classification results. The function creates a
- * minimiser view for hashing and processes batches from the read queue. Each
- * batch is processed asynchronously using multiple threads, and the results are
- * stored in the classifyResults vector. The function waits for all the tasks to
- * complete before returning.
- *
- * @param icfConfig The configuration for the Interleaved Cuckoo Filter.
- * @param readQueue The queue of batchReads objects containing the reads to
- * classify.
- * @param config The configuration for the classification.
- * @param icf The Interleaved Cuckoo Filter object.
- * @param taxidBins The taxid bins.
- * @param classifyResults The vector to store the classification results.
- * @param fileInfo The information about the files and sequences.
- */
-void classify(ChimeraBuild::ICFConfig &icfConfig,
-              moodycamel::ConcurrentQueue<batchReads> &readQueue,
-              ClassifyConfig &config, chimera::InterleavedCuckooFilter &icf,
-              std::vector<std::pair<std::string, std::size_t>> &taxidBins,
-              std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
-              ProgressTracker *progress) {
-  auto minimiser_view = seqan3::views::minimiser_hash(
-      seqan3::shape{seqan3::ungapped{icfConfig.kmer_size}},
-      seqan3::window_size{icfConfig.window_size},
-      seqan3::seed{adjust_seed(icfConfig.kmer_size)});
-
-  LCA lca;
-  if (config.lca) {
-    buildLCA(lca, config.taxFile);
-  }
-
-  using minimiser_view_t = decltype(minimiser_view);
-
-  struct classify_thread_data {
-    ChimeraBuild::ICFConfig *icfConfig;
-    moodycamel::ConcurrentQueue<batchReads> *readQueue;
-    ClassifyConfig *config;
-    chimera::InterleavedCuckooFilter *icf;
-    std::vector<std::pair<std::string, std::size_t>> *taxidBins;
-    FileInfo localFileInfo;
-    LCA *lca;
-    minimiser_view_t minimiser_view;
-    std::vector<classifyResult> localClassifyResults;
-    ProgressTracker *progress;
-
-    classify_thread_data(
-        ChimeraBuild::ICFConfig *icfConfig,
-        moodycamel::ConcurrentQueue<batchReads> *readQueue,
-        ClassifyConfig *config, chimera::InterleavedCuckooFilter *icf,
-        std::vector<std::pair<std::string, std::size_t>> *taxidBins, LCA *lca,
-        minimiser_view_t minimiser_view, ProgressTracker *progress)
-        : icfConfig(icfConfig), readQueue(readQueue), config(config), icf(icf),
-          taxidBins(taxidBins), lca(lca),
-          minimiser_view(std::move(minimiser_view)), progress(progress) {}
-  };
-
-  int num_threads = config.threads;
-  std::vector<classify_thread_data> thread_data;
-  thread_data.reserve(num_threads);
-
-  for (int i = 0; i < num_threads; ++i) {
-    thread_data.emplace_back(&icfConfig, &readQueue, &config, &icf, &taxidBins,
-                             &lca, minimiser_view, progress);
-  }
-
-  auto classify_worker = [](void *_data, long tid, int nthr) {
-    classify_thread_data *thread_data =
-        static_cast<classify_thread_data *>(_data);
-    classify_thread_data &data = thread_data[tid];
-    batchReads batch;
-    while (data.readQueue->try_dequeue(batch)) {
-      processBatch(batch, *data.icfConfig, *data.taxidBins, *data.config,
-                   *data.icf, data.localClassifyResults, data.minimiser_view,
-                   data.localFileInfo, *data.lca, data.progress);
-    }
-  };
-
-  void *thread_pool = kt_forpool_init(num_threads);
-
-  kt_forpool(thread_pool, classify_worker, thread_data.data(), num_threads);
-
-  kt_forpool_destroy(thread_pool);
-
-  for (int i = 0; i < num_threads; ++i) {
-    classifyResults.insert(classifyResults.end(),
-                           thread_data[i].localClassifyResults.begin(),
-                           thread_data[i].localClassifyResults.end());
-
-    fileInfo.uniqueTaxids.insert(
-        thread_data[i].localFileInfo.uniqueTaxids.begin(),
-        thread_data[i].localFileInfo.uniqueTaxids.end());
-
-    for (const auto &[taxid, count] :
-         thread_data[i].localFileInfo.taxidTotalMatches) {
-      fileInfo.taxidTotalMatches[taxid] += count;
-    }
-    for (const auto &[taxid, count] :
-         thread_data[i].localFileInfo.taxidUniqueMatches) {
-      fileInfo.taxidUniqueMatches[taxid] += count;
-    }
-
-    fileInfo.classifiedNum += thread_data[i].localFileInfo.classifiedNum;
-    fileInfo.unclassifiedNum += thread_data[i].localFileInfo.unclassifiedNum;
-  }
-
-  if (!(config.em || config.vem) || !config.skip_post_filter) {
-    secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
-    thirdFilteringStep(classifyResults, fileInfo);
-  }
 }
 
 /**
@@ -1099,415 +626,6 @@ void postEmDecision(std::vector<classifyResult> &results,
   }
 }
 
-void loadFilter(const std::string &inputFile,
-                chimera::hicf::HierarchicalInterleavedCuckooFilter &hicf,
-                ChimeraBuild::HICFConfig &hicfConfig,
-                std::vector<std::string> &indexToTaxid) {
-  // Open the input file
-  std::ifstream is(inputFile, std::ios::binary);
-
-  // Check if the file is successfully opened
-  if (!is.is_open()) {
-    throw std::runtime_error("Failed to open file: " + inputFile);
-  }
-
-  // Create a cereal binary input archive
-  cereal::BinaryInputArchive archive(is);
-
-  archive(hicf);
-  archive(indexToTaxid);
-  archive(hicfConfig);
-
-  is.close();
-}
-
-inline void processSequence(
-    const std::vector<size_t> &hashs1, ChimeraBuild::HICFConfig &hicfConfig,
-    const std::vector<std::string> &indexToTaxid, ClassifyConfig &config,
-    chimera::hicf::HierarchicalInterleavedCuckooFilter &hicf,
-    const std::string &id, std::vector<classifyResult> &classifyResults,
-    FileInfo &fileInfo, LCA &lca, ProgressTracker *progress) {
-  // Calculate the number of hash values and the threshold for classification
-  size_t hashNum = hashs1.size();
-  auto thr_at_eval = [&](size_t n_eval_now) -> size_t {
-    size_t base = config.adaptive_shot ? n_eval_now : hashNum;
-    double scaled = static_cast<double>(base) * config.shotThreshold;
-    size_t t = static_cast<size_t>(std::ceil(scaled));
-    return std::max<size_t>(t, 1);
-  };
-
-  // Perform bulk count operation on the hash values using the Interleaved
-  // Cuckoo Filter
-  size_t threshold = thr_at_eval(hashNum);
-  auto count = hicf.bulkCount(hashs1, threshold);
-  classifyResult result;
-  result.id = id;
-
-  size_t oldIndex = 0;
-  size_t maxBinCount = 0;
-  std::pair<std::string, std::size_t> maxCount;
-  robin_hood::unordered_flat_map<std::string, size_t> taxidToCount;
-  size_t i = 0;
-  for (const auto &taxid : indexToTaxid) {
-    taxidToCount[taxid] = kv_A(count, i);
-    if (kv_A(count, i) > maxBinCount) {
-      maxBinCount = kv_A(count, i);
-    }
-    ++i;
-  }
-
-  // First filter step: remove bins with count less than 80% of the maximum
-  // count
-  size_t thresholdCount =
-      static_cast<size_t>(0.8 * static_cast<double>(maxBinCount));
-  for (const auto &[taxid, binCount] : taxidToCount) {
-    if (binCount >= thresholdCount && binCount >= threshold) {
-      result.taxidCount.emplace_back(taxid, binCount);
-
-      if (binCount == maxBinCount) {
-        maxCount = std::make_pair(taxid, binCount);
-      }
-      fileInfo.taxidTotalMatches[taxid] += 1;
-    }
-  }
-
-  // If the maximum count is greater than 0, update the classifyResult object
-  // based on the classification mode
-  if (!result.taxidCount.empty()) {
-
-    bool isUniqueMapping = (result.taxidCount.size() == 1);
-    if (isUniqueMapping) {
-      fileInfo.uniqueTaxids.insert(result.taxidCount.front().first);
-      const std::string &taxid = result.taxidCount.front().first;
-      fileInfo.taxidUniqueMatches[taxid] += 1;
-    }
-
-    fileInfo.classifiedNum++;
-    if (config.lca && result.taxidCount.size() > 1) {
-      std::vector<std::string> taxids;
-      for (auto &[taxid, count] : result.taxidCount) {
-        taxids.push_back(taxid);
-      }
-      std::string lcaTaxid = lca.getLCA(taxids);
-      result.taxidCount.clear();
-      result.taxidCount.emplace_back(lcaTaxid, 0);
-    } else if (config.mode == "fast" || result.taxidCount.size() == 1) {
-      result.taxidCount.clear();
-      result.taxidCount.emplace_back(maxCount);
-    } else if (config.mode == "normal") {
-      //// Sort the taxidCount vector based on the count in descending order
-      // std::sort(result.taxidCount.begin(), result.taxidCount.end(), [](const
-      // auto& a, const auto& b) { 	return a.second > b.second;  // Sort in
-      // descending order
-    }
-  } else {
-    fileInfo.unclassifiedNum++;
-    result.taxidCount.emplace_back("unclassified", 1);
-  }
-
-  // Lock the resultMutex to ensure thread safety and add the classifyResult
-  // object to the classifyResults vector
-  kv_destroy(count);
-  if (progress) {
-    progress->mark_processed(1);
-  }
-  classifyResults.emplace_back(std::move(result));
-}
-
-inline void
-processBatch(batchReads batch, ChimeraBuild::HICFConfig &hicfConfig,
-             const std::vector<std::string> &indexToTaxid,
-             ClassifyConfig &config,
-             chimera::hicf::HierarchicalInterleavedCuckooFilter &hicf,
-             std::vector<classifyResult> &classifyResults,
-             const auto &minimiser_view, FileInfo &fileInfo, LCA &lca,
-             ProgressTracker *progress = nullptr) {
-  // Process batch of reads
-  std::vector<size_t> hashs1;
-  if (!batch.seqs2.empty()) {
-    for (size_t i = 0; i < batch.ids.size(); ++i) {
-      hashs1.clear();
-      if (i < batch.seqs.size() &&
-          batch.seqs[i].size() >= hicfConfig.windowSize) {
-        hashs1 =
-            batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector>();
-      }
-      if (i < batch.seqs2.size() &&
-          batch.seqs2[i].size() >= hicfConfig.windowSize) {
-        std::vector<size_t> hashs2 =
-            batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector>();
-        hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
-      }
-      processSequence(hashs1, hicfConfig, indexToTaxid, config, hicf,
-                      batch.ids[i], classifyResults, fileInfo, lca, progress);
-    }
-  } else {
-    // Process single-end reads
-    for (size_t i = 0; i < batch.seqs.size(); i++) {
-      hashs1.clear();
-      if (batch.seqs[i].size() >= hicfConfig.windowSize) {
-        // Generate minimizer hash values for the sequence
-        hashs1 =
-            batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector>();
-      }
-      // Process the hash values for classification
-      processSequence(hashs1, hicfConfig, indexToTaxid, config, hicf,
-                      batch.ids[i], classifyResults, fileInfo, lca, progress);
-  }
-}
-}
-
-void classify(ChimeraBuild::HICFConfig &hicfConfig,
-              moodycamel::ConcurrentQueue<batchReads> &readQueue,
-              ClassifyConfig &config,
-              chimera::hicf::HierarchicalInterleavedCuckooFilter &hicf,
-              std::vector<std::string> &indexToTaxid,
-              std::vector<classifyResult> &classifyResults,
-              FileInfo &fileInfo, ProgressTracker *progress) {
-  auto minimiser_view = seqan3::views::minimiser_hash(
-      seqan3::shape{seqan3::ungapped{hicfConfig.kmerSize}},
-      seqan3::window_size{hicfConfig.windowSize},
-      seqan3::seed{adjust_seed(hicfConfig.kmerSize)});
-
-  LCA lca;
-  if (config.lca) {
-    buildLCA(lca, config.taxFile);
-  }
-
-  using minimiser_view_t = decltype(minimiser_view);
-
-  struct classify_thread_data {
-    ChimeraBuild::HICFConfig *hicfConfig;
-    moodycamel::ConcurrentQueue<batchReads> *readQueue;
-    ClassifyConfig *config;
-    chimera::hicf::HierarchicalInterleavedCuckooFilter *hicf;
-    std::vector<std::string> *indexToTaxid;
-    FileInfo localFileInfo;
-    LCA *lca;
-    minimiser_view_t minimiser_view;
-    std::vector<classifyResult> localClassifyResults;
-    ProgressTracker *progress;
-
-    classify_thread_data(
-        ChimeraBuild::HICFConfig *hicfConfig,
-        moodycamel::ConcurrentQueue<batchReads> *readQueue,
-        ClassifyConfig *config,
-        chimera::hicf::HierarchicalInterleavedCuckooFilter *hicf,
-        std::vector<std::string> *indexToTaxid, LCA *lca,
-        minimiser_view_t minimiser_view, ProgressTracker *progress)
-        : hicfConfig(hicfConfig), readQueue(readQueue), config(config),
-          hicf(hicf), indexToTaxid(indexToTaxid), lca(lca),
-          minimiser_view(std::move(minimiser_view)), progress(progress) {}
-  };
-
-  int num_threads = config.threads;
-  std::vector<classify_thread_data> thread_data;
-  thread_data.reserve(num_threads);
-
-  for (int i = 0; i < num_threads; ++i) {
-    thread_data.emplace_back(&hicfConfig, &readQueue, &config, &hicf,
-                             &indexToTaxid, &lca, minimiser_view, progress);
-  }
-
-  auto classify_worker = [](void *_data, long tid, int nthr) {
-    classify_thread_data *thread_data =
-        static_cast<classify_thread_data *>(_data);
-    classify_thread_data &data = thread_data[tid];
-    batchReads batch;
-    while (data.readQueue->try_dequeue(batch)) {
-      processBatch(batch, *data.hicfConfig, *data.indexToTaxid, *data.config,
-                   *data.hicf, data.localClassifyResults, data.minimiser_view,
-                   data.localFileInfo, *data.lca, data.progress);
-    }
-  };
-
-  void *thread_pool = kt_forpool_init(num_threads);
-
-  kt_forpool(thread_pool, classify_worker, thread_data.data(), num_threads);
-
-  kt_forpool_destroy(thread_pool);
-
-  for (int i = 0; i < num_threads; ++i) {
-    classifyResults.insert(classifyResults.end(),
-                           thread_data[i].localClassifyResults.begin(),
-                           thread_data[i].localClassifyResults.end());
-
-    fileInfo.uniqueTaxids.insert(
-        thread_data[i].localFileInfo.uniqueTaxids.begin(),
-        thread_data[i].localFileInfo.uniqueTaxids.end());
-
-    for (const auto &[taxid, count] :
-         thread_data[i].localFileInfo.taxidTotalMatches) {
-      fileInfo.taxidTotalMatches[taxid] += count;
-    }
-    for (const auto &[taxid, count] :
-         thread_data[i].localFileInfo.taxidUniqueMatches) {
-      fileInfo.taxidUniqueMatches[taxid] += count;
-    }
-
-    fileInfo.classifiedNum += thread_data[i].localFileInfo.classifiedNum;
-    fileInfo.unclassifiedNum += thread_data[i].localFileInfo.unclassifiedNum;
-  }
-
-  if (!(config.em || config.vem) || !config.skip_post_filter) {
-    secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
-    thirdFilteringStep(classifyResults, fileInfo);
-  }
-}
-
-struct IMCFIndexStatus {
-  bool builtActive{false};
-  bool builtRouter{false};
-  long long activeMs{0};
-  long long routerMs{0};
-};
-
-IMCFIndexStatus loadFilter(const std::string &inputFile,
-                          chimera::imcf::InterleavedMergedCuckooFilter &imcf,
-                          ChimeraBuild::IMCFConfig &imcfConfig,
-                          std::vector<std::vector<std::string>> &indexToTaxid) {
-  IMCFIndexStatus status;
-  // Open the input file
-  std::ifstream is(inputFile, std::ios::binary);
-
-  // Check if the file is successfully opened
-  if (!is.is_open()) {
-    throw std::runtime_error("Failed to open file: " + inputFile);
-  }
-
-  // Create a cereal binary input archive
-  cereal::BinaryInputArchive archive(is);
-
-  // Deserialize
-  archive(imcf);
-  archive(indexToTaxid);
-  archive(imcfConfig);
-
-  // Close the file
-  is.close();
-
-  namespace fs = std::filesystem;
-  std::string base = inputFile;
-  if (auto pos = base.rfind(".imcf"); pos != std::string::npos) {
-    base = base.substr(0, pos);
-  }
-
-  auto try_load = [](auto &&loader, const fs::path &path) {
-    return loader(path.string());
-  };
-
-  bool idx_ok = false;
-  fs::path idxPath = base + ".imcf.idx";
-  if (fs::exists(idxPath)) {
-    idx_ok = try_load(
-        [&](const std::string &p) { return imcf.loadActiveIndex(p); }, idxPath);
-  }
-  if (!idx_ok) {
-    fs::path legacyIdx = inputFile + ".idx";
-    if (fs::exists(legacyIdx)) {
-      idx_ok = try_load(
-          [&](const std::string &p) { return imcf.loadActiveIndex(p); },
-          legacyIdx);
-    }
-  }
-  if (!idx_ok) {
-    auto start = std::chrono::high_resolution_clock::now();
-    imcf.buildActiveGroups();
-    auto end = std::chrono::high_resolution_clock::now();
-    status.builtActive = true;
-    status.activeMs =
-        std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
-            .count();
-  }
-
-  bool rtr_ok = false;
-  fs::path rtrPath = base + ".imcf.rtr";
-  if (fs::exists(rtrPath)) {
-    rtr_ok = try_load(
-        [&](const std::string &p) { return imcf.loadRouterIndex(p); }, rtrPath);
-  }
-  if (!rtr_ok) {
-    fs::path legacyRtr = inputFile + ".rtr";
-    if (fs::exists(legacyRtr)) {
-      rtr_ok = try_load(
-          [&](const std::string &p) { return imcf.loadRouterIndex(p); },
-          legacyRtr);
-    }
-  }
-  if (!rtr_ok) {
-    auto start = std::chrono::high_resolution_clock::now();
-    imcf.buildRouterIndex();
-    auto end = std::chrono::high_resolution_clock::now();
-    status.builtRouter = true;
-    status.routerMs =
-        std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
-            .count();
-  }
-
-#ifdef IMCF_MIRROR64
-  imcf.releaseBitStorage();
-#endif
-
-  return status;
-}
-
-/**
- * @brief Processes a sequence of minimizer hashes for classification and
- * applies filtering to determine taxonomic identity.
- *
- * This function handles the classification of a sequence by counting the number
- * of matching hash values in the Interleaved Merged Cuckoo Filter (IMCF),
- * performing filtering steps, and updating the classification results
- * accordingly.
- *
- * @param hashs1 A vector containing the minimizer hash values generated from
- * the sequence.
- * @param imcfConfig Configuration settings for the IMCF, such as k-mer size and
- * window size.
- * @param indexToTaxid A mapping from IMCF indices to taxids used for
- * classification.
- * @param config Configuration settings for classification, including mode and
- * filtering thresholds.
- * @param imcf A reference to the IMCF used for counting hash matches.
- * @param id The identifier for the current sequence being processed.
- * @param classifyResults A vector to store the classification results for each
- * processed sequence.
- * @param fileInfo A structure to store information about processed reads,
- * including counts of classified and unclassified reads.
- * @param lca A reference to an LCA (Lowest Common Ancestor) structure for
- * taxonomic resolution if LCA mode is enabled.
- *
- * @details
- * Step 1: The function calculates the number of hash values (hashNum) and the
- * minimum threshold for classification. If the threshold is calculated to be 0,
- * it is set to 1.
- *
- * Step 2: The function performs a bulk count operation using the IMCF to count
- * how many times each taxid appears for the given hash values.
- *
- * Step 3: The function aggregates the counts for each taxid and identifies the
- * maximum count observed (maxBinCount).
- *
- * Step 4: The first filtering step removes bins with counts less than 80% of
- * maxBinCount or below the minimum threshold. Taxids that pass the filter are
- * added to the result.taxidCount vector.
- *
- * Step 5: If any taxids remain after filtering:
- * - If only one taxid remains, it is marked as a unique mapping.
- * - If LCA mode is enabled and multiple taxids remain, the LCA is determined
- * and stored as the result.
- * - If the classification mode is "fast" or only one taxid remains, the taxid
- * with the maximum count is chosen.
- * - If the classification mode is "normal," the results are left for further
- * processing with the EM algorithm.
- *
- * Step 6: If no taxids pass the filters, the sequence is marked as
- * unclassified.
- *
- * The function updates shared fileInfo fields for classified and unclassified
- * reads and ensures thread safety when adding results to the classifyResults
- * vector.
- */
 struct GroupHeat {
   std::vector<uint32_t> score;
   uint32_t decay_shift = 5;   // divide by 32
@@ -1956,8 +1074,7 @@ inline void processSequence(const std::vector<size_t> &hashs1,
     }
   }
 
-  // Update classifyResult based on the number of remaining taxids and
-  // classification mode
+  // Update classifyResult based on the number of remaining taxids.
   if (!result.taxidCount.empty()) {
 
     for (const auto &entry : result.taxidCount) {
@@ -1972,7 +1089,7 @@ inline void processSequence(const std::vector<size_t> &hashs1,
     }
 
     fileInfo.classifiedNum++;
-  if (config.lca && result.taxidCount.size() > 1) {
+    if (config.lca && result.taxidCount.size() > 1) {
       std::vector<std::string> taxids;
       for (auto &[taxid, count] : result.taxidCount) {
         taxids.push_back(taxid);
@@ -1980,15 +1097,9 @@ inline void processSequence(const std::vector<size_t> &hashs1,
       std::string lcaTaxid = lca.getLCA(taxids);
       result.taxidCount.clear();
       result.taxidCount.emplace_back(lcaTaxid, 0);
-    } else if (config.mode == "fast" || result.taxidCount.size() == 1) {
+    } else if (result.taxidCount.size() == 1) {
       result.taxidCount.clear();
       result.taxidCount.emplace_back(maxCount);
-    } else if (config.mode == "normal") {
-      //// Sort the taxidCount vector based on the count in descending order
-      // std::sort(result.taxidCount.begin(), result.taxidCount.end(), [](const
-      // auto& a, const auto& b) { 	return a.second > b.second;  // Sort in
-      // descending order
-      //  Leave result for further EM algorithm processing
     }
   } else {
     fileInfo.unclassifiedNum++;
@@ -2000,6 +1111,119 @@ inline void processSequence(const std::vector<size_t> &hashs1,
     progress->mark_processed(1);
   }
   classifyResults.emplace_back(std::move(result));
+}
+
+/*
+ * @brief 从分类用的 taxonomy 文件构建 LCA 结构。
+ *
+ * taxonomy 文件假定每行提供 `child parent rank name` 四列，以空格分隔；
+ * 这里只关心父子关系，因此只解析前两列并写入 LCA。
+ */
+void buildLCA(LCA &lca, const std::string &taxFile) {
+  std::ifstream is(taxFile);
+  if (!is.is_open()) {
+    throw std::runtime_error("Failed to open file: " + taxFile);
+  }
+
+  std::string line;
+  while (std::getline(is, line)) {
+    std::istringstream iss(line);
+    std::string childID;
+    std::string parentID;
+    std::string rank;
+    std::string name;
+    if (!(iss >> childID >> parentID >> rank >> name)) {
+      continue;
+    }
+    lca.addEdge(parentID, childID);
+  }
+
+  is.close();
+  lca.doEulerWalk("1");
+}
+
+// 第二阶段筛选：丢弃未出现在 uniqueTaxids 中的税号，防止噪声 taxid 残留。
+void secondFilteringStep(std::vector<classifyResult> &classifyResults,
+                         const std::unordered_set<std::string> &uniqueTaxids) {
+  for (auto &result : classifyResults) {
+    result.taxidCount.erase(
+        std::remove_if(result.taxidCount.begin(), result.taxidCount.end(),
+                       [&uniqueTaxids](const auto &pair) {
+                         return uniqueTaxids.find(pair.first) ==
+                                uniqueTaxids.end();
+                       }),
+        result.taxidCount.end());
+
+    if (result.taxidCount.empty()) {
+      result.taxidCount.emplace_back("unclassified", 1);
+    }
+  }
+}
+
+/*
+ * 第三阶段筛选：识别唯一匹配度过低的 taxid，若大部分 reads 与其他 taxid 重合
+ * 则将其替换为重合度更高的 taxid，避免劣质税号污染结果。
+ */
+void thirdFilteringStep(std::vector<classifyResult> &classifyResults,
+                        FileInfo &fileInfo) {
+  std::unordered_set<std::string> lowUniqueTaxids;
+  for (const auto &[taxid, totalMatches] : fileInfo.taxidTotalMatches) {
+    size_t uniqueMatches = fileInfo.taxidUniqueMatches[taxid];
+    if (totalMatches == 0) {
+      continue;
+    }
+    if (static_cast<double>(uniqueMatches) < 0.05 * totalMatches) {
+      lowUniqueTaxids.insert(taxid);
+    }
+  }
+
+  robin_hood::unordered_flat_map<std::string, std::unordered_set<std::string>>
+      taxidToReads;
+  for (const auto &result : classifyResults) {
+    for (const auto &[taxid, _] : result.taxidCount) {
+      taxidToReads[taxid].insert(result.id);
+    }
+  }
+
+  for (const auto &taxid : lowUniqueTaxids) {
+    const auto &reads = taxidToReads[taxid];
+    if (reads.empty()) {
+      continue;
+    }
+
+    for (const auto &[otherTaxid, otherReads] : taxidToReads) {
+      if (taxid == otherTaxid) {
+        continue;
+      }
+
+      size_t sharedReads = 0;
+      for (const auto &readId : reads) {
+        if (otherReads.find(readId) != otherReads.end()) {
+          ++sharedReads;
+        }
+      }
+
+      double sharedPercentage =
+          static_cast<double>(sharedReads) / static_cast<double>(reads.size());
+      if (sharedPercentage < 0.95) {
+        continue;
+      }
+
+      for (auto &result : classifyResults) {
+        if (reads.find(result.id) == reads.end()) {
+          continue;
+        }
+        result.taxidCount.erase(
+            std::remove_if(result.taxidCount.begin(), result.taxidCount.end(),
+                           [&taxid](const auto &pair) {
+                             return pair.first == taxid;
+                           }),
+            result.taxidCount.end());
+        result.taxidCount.emplace_back(otherTaxid, 0);
+      }
+      break;
+    }
+  }
 }
 
 /**
@@ -2305,11 +1529,6 @@ void run(ClassifyConfig config) {
   if (!config.em && !config.vem && !config.lca) {
     config.em = true;
   }
-  if ((config.em || config.lca || config.vem) && config.mode == "fast") {
-    config.mode = "normal";
-    std::cout << "Warning: The mode is changed to 'normal' for EM algorithm or "
-                 "LCA classification\n";
-  }
   if (!(config.post_ratio > 0.0)) {
     config.post_ratio = std::numeric_limits<double>::quiet_NaN();
   }
@@ -2394,86 +1613,9 @@ void run(ClassifyConfig config) {
                   << std::endl;
       }
     }
-  } else if (config.filter == "icf") {
-    parseReads(readQueue, config, fileInfo, progressPtr);
-    std::vector<std::pair<std::string, std::size_t>> taxidBins;
-    chimera::InterleavedCuckooFilter icf;
-    ChimeraBuild::ICFConfig icfConfig;
-    robin_hood::unordered_flat_map<std::string, uint64_t> hashCount;
-    loadFilter(config.dbFile, icf, icfConfig, hashCount, taxidBins);
-    auto readEnd = std::chrono::high_resolution_clock::now();
-    auto readDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
-        readEnd - readStart);
-    if (config.verbose) {
-      std::cout << "Read time: ";
-      print_classify_time(readDuration.count());
-      std::cout << "Number of taxids: " << taxidBins.size() << std::endl
-                << std::endl;
-    }
-    auto classifyStart = std::chrono::high_resolution_clock::now();
-    std::cout << "Classifying sequences by icf..." << std::endl;
-    classify(icfConfig, readQueue, config, icf, taxidBins, classifyResults,
-             fileInfo, progressPtr);
-    auto classifyEnd = std::chrono::high_resolution_clock::now();
-    auto classifyDuration =
-        std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd -
-                                                              classifyStart);
-    if (progressPtr) {
-      progress.finish();
-    }
-    if (config.verbose) {
-      std::cout << "Classify time: ";
-      print_classify_time(classifyDuration.count());
-      if (classifyDuration.count() > 0 && fileInfo.sequenceNum > 0) {
-        double readsPerSec =
-            static_cast<double>(fileInfo.sequenceNum) /
-            (static_cast<double>(classifyDuration.count()) / 1000.0);
-        std::cout << "平均分类速度: " << std::fixed << std::setprecision(1)
-                  << readsPerSec << " reads/s" << std::defaultfloat
-                  << std::endl;
-      }
-    }
-  } else if (config.filter == "hicf") {
-    parseReads(readQueue, config, fileInfo, progressPtr);
-    std::vector<std::string> indexToTaxid;
-    chimera::hicf::HierarchicalInterleavedCuckooFilter hicf;
-    ChimeraBuild::HICFConfig hicfConfig;
-    loadFilter(config.dbFile, hicf, hicfConfig, indexToTaxid);
-    auto readEnd = std::chrono::high_resolution_clock::now();
-    auto readDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
-        readEnd - readStart);
-    if (config.verbose) {
-      std::cout << "Read time: ";
-      print_classify_time(readDuration.count());
-      std::cout << "Number of taxids: " << indexToTaxid.size() << std::endl
-                << std::endl;
-    }
-
-    auto classifyStart = std::chrono::high_resolution_clock::now();
-    std::cout << "Classifying sequences by hicf..." << std::endl;
-    classify(hicfConfig, readQueue, config, hicf, indexToTaxid, classifyResults,
-             fileInfo, progressPtr);
-    auto classifyEnd = std::chrono::high_resolution_clock::now();
-    auto classifyDuration =
-        std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd -
-                                                              classifyStart);
-    if (progressPtr) {
-      progress.finish();
-    }
-    if (config.verbose) {
-      std::cout << "Classify time: ";
-      print_classify_time(classifyDuration.count());
-      if (classifyDuration.count() > 0 && fileInfo.sequenceNum > 0) {
-        double readsPerSec =
-            static_cast<double>(fileInfo.sequenceNum) /
-            (static_cast<double>(classifyDuration.count()) / 1000.0);
-        std::cout << "平均分类速度: " << std::fixed << std::setprecision(1)
-                  << readsPerSec << " reads/s" << std::defaultfloat
-                  << std::endl;
-      }
-    }
   } else {
-    throw std::runtime_error("Invalid filter type: " + config.filter);
+    throw std::runtime_error("Invalid filter type: " + config.filter +
+                             ". 当前仅支持 imcf");
   }
 
   if (config.em) {
@@ -2549,22 +1691,33 @@ void run(ClassifyConfig config) {
     std::cout << "\nSave time: ";
     print_classify_time(saveDuration.count());
     std::cout << "Total sequences: " << fileInfo.sequenceNum << std::endl;
+
+    const auto format_percentage = [](size_t part, size_t total) {
+      std::ostringstream oss;
+      if (total == 0) {
+        oss << "N/A";
+        return oss.str();
+      }
+      oss.setf(std::ios::fixed);
+      oss << std::setprecision(2)
+          << static_cast<double>(part) * 100.0 /
+                 static_cast<double>(total)
+          << '%';
+      return oss.str();
+    };
+
     std::cout << "Classified sequences: " << fileInfo.classifiedNum << " ("
-              << (static_cast<double>(fileInfo.classifiedNum) /
-                  fileInfo.sequenceNum) *
-                     100
-              << "%)" << std::endl;
+              << format_percentage(fileInfo.classifiedNum,
+                                   fileInfo.sequenceNum)
+              << ")" << std::endl;
     std::cout << "Unclassified sequences: " << fileInfo.unclassifiedNum << " ("
-              << (static_cast<double>(fileInfo.unclassifiedNum) /
-                  fileInfo.sequenceNum) *
-                     100
-              << "%)" << std::endl;
+              << format_percentage(fileInfo.unclassifiedNum,
+                                   fileInfo.sequenceNum)
+              << ")" << std::endl;
     if (config.lca) {
       std::cout << "Total LCA classification: " << fileInfo.lcaNum << " ("
-                << (static_cast<double>(fileInfo.lcaNum) /
-                    fileInfo.classifiedNum) *
-                       100
-                << "%)" << std::endl;
+                << format_percentage(fileInfo.lcaNum, fileInfo.classifiedNum)
+                << ")" << std::endl;
     }
     if (rebuildActiveMs > 0 || rebuildRouterMs > 0) {
       std::cout << "Index rebuild summary:" << std::endl;

@@ -34,8 +34,6 @@
 #include <fstream>
 #include <functional>
 #include <future>
-#include <hierarchical-interleaved-cuckoo-filter.h>
-#include <interleaved-cuckoo-filter.h>
 #include <interleaved-merged-cuckoo-filter.h>
 #include <iomanip>
 #include <iostream>

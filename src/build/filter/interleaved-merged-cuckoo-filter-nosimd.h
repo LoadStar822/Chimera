@@ -43,163 +43,120 @@ namespace chimera::imcf {
 		uint64_t hashCount;
 	};
 
-	inline std::vector<Group> partitionHashCount(const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount, std::string mode, int maxTaxidsPerGroup = 16)
+	inline std::vector<Group> partitionHashCount(const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount, int maxTaxidsPerGroup = 16)
 	{
-		if (mode == "normal")
-		{
-			std::vector<uint64_t> counts;
-			counts.reserve(hashCount.size());
-			for (const auto& [taxid, count] : hashCount) {
-				counts.push_back(count);
-			}
+		if (hashCount.empty()) {
+			return {};
+		}
+		if (maxTaxidsPerGroup <= 0) {
+			throw std::invalid_argument("IMCF partition: maxTaxidsPerGroup must be positive");
+		}
 
-			std::sort(counts.begin(), counts.end());
-			uint64_t median = counts[counts.size() / 2];
+		std::vector<uint64_t> counts;
+		counts.reserve(hashCount.size());
+		for (const auto& [taxid, count] : hashCount) {
+			counts.push_back(count);
+		}
+		std::sort(counts.begin(), counts.end());
+		uint64_t median = counts[counts.size() / 2];
 
-			uint64_t threshold = median * 64;
+		uint64_t threshold = 0;
+		if (median == 0) {
+			threshold = 1;
+		}
+		else if (median > std::numeric_limits<uint64_t>::max() / 64ull) {
+			threshold = std::numeric_limits<uint64_t>::max();
+		}
+		else {
+			threshold = median * 64ull;
+		}
+		if (threshold == 0) {
+			threshold = 1;
+		}
 
-			std::vector<HashChunk> hashChunks;
-			for (const auto& [taxid, count] : hashCount) {
-				if (count > threshold) {
-					int numChunks = static_cast<int>(std::ceil(static_cast<double>(count) / threshold));
-					uint64_t chunkSize = count / numChunks;
-					for (int i = 0; i < numChunks; ++i) {
-						uint64_t currentChunkSize = (i == numChunks - 1) ? (count - chunkSize * (numChunks - 1)) : chunkSize;
-						hashChunks.push_back({ taxid, currentChunkSize });
+		std::vector<HashChunk> hashChunks;
+		for (const auto& [taxid, count] : hashCount) {
+			if (count > threshold) {
+				uint64_t numChunks = count / threshold;
+				if (count % threshold != 0) {
+					++numChunks;
+				}
+				numChunks = std::max<uint64_t>(1, numChunks);
+				uint64_t chunkSize = numChunks ? count / numChunks : count;
+				for (uint64_t i = 0; i < numChunks; ++i) {
+					uint64_t current = chunkSize;
+					if (i == numChunks - 1) {
+						current = count - chunkSize * (numChunks - 1);
 					}
-				}
-				else {
-					hashChunks.push_back({ taxid, count });
+					hashChunks.push_back({ taxid, current });
 				}
 			}
-
-			std::sort(hashChunks.begin(), hashChunks.end(),
-				[](const HashChunk& a, const HashChunk& b) {
-					return a.hashCount > b.hashCount;
-				});
-
-			size_t groupNum = (hashChunks.size() + maxTaxidsPerGroup - 1) / maxTaxidsPerGroup;
-			std::vector<Group> groups(groupNum);
-
-			auto cmp = [&](const int a, const int b) -> bool {
-				return groups[a].totalHash > groups[b].totalHash;
-				};
-			std::priority_queue<int, std::vector<int>, decltype(cmp)> minHeap(cmp);
-			for (size_t i = 0; i < groupNum; ++i) {
-				minHeap.push(static_cast<int>(i));
+			else {
+				hashChunks.push_back({ taxid, count });
 			}
+		}
 
-			for (const auto& chunk : hashChunks) {
-				int groupIndex = minHeap.top();
+		std::sort(hashChunks.begin(), hashChunks.end(),
+			[](const HashChunk& a, const HashChunk& b) {
+				return a.hashCount > b.hashCount;
+			});
+
+		size_t maxTaxids = static_cast<size_t>(maxTaxidsPerGroup);
+		size_t groupNum = (hashChunks.size() + maxTaxids - 1) / maxTaxids;
+		groupNum = std::max<size_t>(1, groupNum);
+		std::vector<Group> groups(groupNum);
+		std::vector<robin_hood::unordered_flat_set<std::string>> used(groupNum);
+
+		auto cmp = [&](const int a, const int b) -> bool {
+			return groups[a].totalHash > groups[b].totalHash;
+		};
+		std::priority_queue<int, std::vector<int>, decltype(cmp)> minHeap(cmp);
+		for (size_t i = 0; i < groupNum; ++i) {
+			minHeap.push(static_cast<int>(i));
+		}
+
+		for (const auto& chunk : hashChunks) {
+			std::vector<int> popped;
+			int target = -1;
+			while (!minHeap.empty()) {
+				int cand = minHeap.top();
 				minHeap.pop();
-
-				groups[groupIndex].taxids.push_back(chunk.taxid);
-				groups[groupIndex].totalHash += chunk.hashCount;
-
-				minHeap.push(groupIndex);
-			}
-
-
-			//uint64_t maxTotalHash = 0;
-			//uint64_t minTotalHash = UINT64_MAX;
-			//for (const auto& group : groups) {
-			//	maxTotalHash = std::max(maxTotalHash, group.totalHash);
-			//	minTotalHash = std::min(minTotalHash, group.totalHash);
-			//}
-
-			//std::cout << "Difference between max and min totalHash: " << (maxTotalHash - minTotalHash) << std::endl;
-			//std::cout << "Filter size: " << (maxTotalHash * groups.size() * 16.0 / 0.95) / 8 / 1024 / 1024 / 1024 << " GB" << std::endl;
-			//std::cout << "Groups size: " << groups.size() << std::endl;
-			//std::cout << "Before Split Groups size: " << hashCount.size() / 16 << std::endl;
-
-
-			return groups;
-		}
-		else if (mode == "fast")
-		{
-			std::vector<std::pair<std::string, uint64_t>> sortedHashCounts;
-			sortedHashCounts.reserve(hashCount.size());
-			for (const auto& item : hashCount) {
-				sortedHashCounts.emplace_back(item.first, item.second);
-			}
-			std::sort(sortedHashCounts.begin(), sortedHashCounts.end(),
-				[](const std::pair<std::string, uint64_t>& a, const std::pair<std::string, uint64_t>& b) {
-					return a.second > b.second;
-				});
-			size_t taxidNum = sortedHashCounts.size();
-			size_t median = sortedHashCounts[taxidNum / 2].second;
-			size_t groupNum = (taxidNum + maxTaxidsPerGroup) / maxTaxidsPerGroup;
-			uint64_t threshold = median * maxTaxidsPerGroup;
-			std::vector<Group> groups;
-			groups.reserve(groupNum);
-			groups.resize(groupNum);
-
-			auto cmp = [&](const int a, const int b) -> bool {
-				return groups[a].totalHash > groups[b].totalHash;
-				};
-			std::priority_queue<int, std::vector<int>, decltype(cmp)> minHeap(cmp);
-			for (size_t i = 0; i < groupNum; ++i) {
-				minHeap.push(static_cast<int>(i));
-			}
-			for (const auto& [taxid, count] : sortedHashCounts) {
-				int smallestGroup = minHeap.top();
-				minHeap.pop();
-				if (groups[smallestGroup].taxids.size() < maxTaxidsPerGroup) {
-					groups[smallestGroup].taxids.push_back(taxid);
-					groups[smallestGroup].totalHash += count;
-					minHeap.push(smallestGroup);
+				if (groups[cand].taxids.size() >= maxTaxids || used[cand].contains(chunk.taxid)) {
+					popped.push_back(cand);
+					continue;
 				}
-				else
-				{
-					bool assigned = false;
-					std::vector<int> tempGroups;
-					while (!minHeap.empty()) {
-						int tempGroup = minHeap.top();
-						minHeap.pop();
-						if (groups[tempGroup].taxids.size() < maxTaxidsPerGroup) {
-							groups[tempGroup].taxids.push_back(taxid);
-							groups[tempGroup].totalHash += count;
-							minHeap.push(tempGroup);
-							assigned = true;
-							break;
-						}
-						tempGroups.push_back(tempGroup);
-					}
-					for (int tempGroup : tempGroups) {
-						minHeap.push(tempGroup);
-					}
-					if (!assigned) {
-						groups.emplace_back(Group());
-						groups.back().taxids.push_back(taxid);
-						groups.back().totalHash += count;
-						minHeap.push(static_cast<int>(groups.size() - 1));
-					}
+				target = cand;
+				break;
+			}
+
+			if (target == -1) {
+				for (int idx : popped) {
+					minHeap.push(idx);
+				}
+				groups.emplace_back();
+				used.emplace_back();
+				target = static_cast<int>(groups.size() - 1);
+			}
+			else {
+				for (int idx : popped) {
+					minHeap.push(idx);
 				}
 			}
 
+			if (groups[target].taxids.size() >= maxTaxids) {
+				groups.emplace_back();
+				used.emplace_back();
+				target = static_cast<int>(groups.size() - 1);
+			}
 
-			//uint64_t maxTotalHash = 0;
-			//uint64_t minTotalHash = UINT64_MAX;
-			//for (const auto& group : groups) {
-			//	maxTotalHash = std::max(maxTotalHash, group.totalHash);
-			//	minTotalHash = std::min(minTotalHash, group.totalHash);
-			//}
-
-			//std::cout << "Difference between max and min totalHash: " << (maxTotalHash - minTotalHash) << std::endl;
-			//std::cout << "Filter size: " << (maxTotalHash * groups.size() * 16.0 / 0.95) / 8 / 1024 / 1024 / 1024 << " GB" << std::endl;
-			//std::cout << "Groups size: " << groups.size() << std::endl;
-			//std::cout << "Before Split Groups size: " << (hashCount.size() + 16) / 16 << std::endl;
-
-			return groups;
-		}
-		else
-		{
-			std::cerr << "Invalid mode: " << mode << std::endl;
-			throw std::runtime_error("Invalid mode");
+			groups[target].taxids.push_back(chunk.taxid);
+			groups[target].totalHash += chunk.hashCount;
+			used[target].insert(chunk.taxid);
+			minHeap.push(target);
 		}
 
+		return groups;
 	}
-
 
 	class InterleavedMergedCuckooFilter {
 		typedef kvec_t(int) kvector;

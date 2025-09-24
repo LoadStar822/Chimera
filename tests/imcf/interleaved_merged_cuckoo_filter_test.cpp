@@ -268,31 +268,31 @@ std::vector<size_t> generate_values(size_t binNum, size_t perBin) {
 }
 } // namespace
 
-static void test_partition_normal_small() {
+static void test_partition_default_small() {
   robin_hood::unordered_flat_map<std::string, uint64_t> counts{
       {"tax1", 120}, {"tax2", 80}, {"tax3", 20}, {"tax4", 10}};
 
-  auto groups = chimera::imcf::partitionHashCount(counts, "normal", 2);
+  auto groups = chimera::imcf::partitionHashCount(counts, 2);
   expect_equal(groups.size(), static_cast<std::size_t>(2),
-               "普通模式（小样本）应得到 2 个分组");
+               "默认策略（小样本）应得到 2 个分组");
 
   uint64_t expectedTotal = 0;
   for (const auto &kv : counts) {
     expectedTotal += kv.second;
   }
   expect_equal(total_hash(groups), expectedTotal,
-               "普通模式（小样本）总哈希量应守恒");
+               "默认策略（小样本）总哈希量应守恒");
 
   std::unordered_set<std::string> covered;
   for (const auto &group : groups) {
-    expect_true(!group.taxids.empty(), "普通模式（小样本）不允许空分组");
+    expect_true(!group.taxids.empty(), "默认策略（小样本）不允许空分组");
     covered.insert(group.taxids.begin(), group.taxids.end());
   }
   expect_equal(covered.size(), counts.size(),
-               "普通模式（小样本）应覆盖全部 taxid");
+               "默认策略（小样本）应覆盖全部 taxid");
 }
 
-static void test_partition_normal_heavy_tail() {
+static void test_partition_default_heavy_tail() {
   robin_hood::unordered_flat_map<std::string, uint64_t> counts;
   counts["tax_big"] = 1'000'000ULL;
   for (int i = 0; i < 50; ++i) {
@@ -306,7 +306,7 @@ static void test_partition_normal_heavy_tail() {
         20ULL + static_cast<uint64_t>(i % 5);
   }
 
-  auto groups = chimera::imcf::partitionHashCount(counts, "normal", 4);
+  auto groups = chimera::imcf::partitionHashCount(counts, 4);
   expect_true(!groups.empty(), "重尾数据分组结果不应为空");
 
   uint64_t expectedTotal = 0;
@@ -360,7 +360,7 @@ static void test_partition_normal_heavy_tail() {
 static void test_partition_edge_cases() {
   robin_hood::unordered_flat_map<std::string, uint64_t> single{
       {"tax_only", 42}};
-  auto singleGroups = chimera::imcf::partitionHashCount(single, "normal", 8);
+  auto singleGroups = chimera::imcf::partitionHashCount(single, 8);
   expect_equal(singleGroups.size(), static_cast<std::size_t>(1),
                "单个 taxid 应只生成一个分组");
   expect_equal(total_hash(singleGroups), static_cast<uint64_t>(42),
@@ -372,7 +372,7 @@ static void test_partition_edge_cases() {
   for (int i = 0; i < 10; ++i) {
     equal["tax_eq_" + std::to_string(i)] = 500;
   }
-  auto equalGroups = chimera::imcf::partitionHashCount(equal, "normal", 4);
+  auto equalGroups = chimera::imcf::partitionHashCount(equal, 4);
   expect_equal(total_hash(equalGroups), static_cast<uint64_t>(5000),
                "哈希值相等场景总量应守恒");
   std::unordered_set<std::string> covered;
@@ -382,63 +382,11 @@ static void test_partition_edge_cases() {
   expect_equal(covered.size(), equal.size(), "哈希值相等场景应覆盖全部 taxid");
 
   auto wideCapGroups = chimera::imcf::partitionHashCount(
-      equal, "normal", static_cast<int>(equal.size()) + 5);
+      equal, static_cast<int>(equal.size()) + 5);
   expect_equal(wideCapGroups.size(), static_cast<std::size_t>(1),
                "上限足够大时应只生成一个分组");
   expect_equal(total_hash(wideCapGroups), static_cast<uint64_t>(5000),
                "上限足够大时总哈希量应守恒");
-}
-
-static void test_partition_fast_small() {
-  robin_hood::unordered_flat_map<std::string, uint64_t> counts{
-      {"tax1", 300}, {"tax2", 200}, {"tax3", 100}, {"tax4", 50}, {"tax5", 25}};
-
-  auto groups = chimera::imcf::partitionHashCount(counts, "fast", 3);
-  expect_true(groups.size() >= 2, "快速模式（小样本）应至少生成 2 个分组");
-
-  std::unordered_set<std::string> assigned;
-  uint64_t expectedTotal = 0;
-  for (const auto &kv : counts) {
-    expectedTotal += kv.second;
-  }
-  expect_equal(total_hash(groups), expectedTotal,
-               "快速模式（小样本）总哈希量应守恒");
-
-  for (const auto &group : groups) {
-    expect_true(!group.taxids.empty(), "快速模式（小样本）不允许空分组");
-    assigned.insert(group.taxids.begin(), group.taxids.end());
-  }
-  expect_equal(assigned.size(), counts.size(),
-               "快速模式（小样本）应覆盖全部 taxid");
-}
-
-static void test_partition_fast_cap_large() {
-  robin_hood::unordered_flat_map<std::string, uint64_t> counts;
-  counts.reserve(100);
-  for (int i = 0; i < 100; ++i) {
-    counts["tax" + std::to_string(i)] = 100 + (rand64() % 5000);
-  }
-
-  auto groups = chimera::imcf::partitionHashCount(counts, "fast", 3);
-  std::unordered_set<std::string> assigned;
-  for (const auto &group : groups) {
-    expect_true(group.taxids.size() <= 3, "快速模式（大样本）必须遵守每组上限");
-    assigned.insert(group.taxids.begin(), group.taxids.end());
-  }
-  expect_equal(assigned.size(), counts.size(),
-               "快速模式（大样本）应覆盖全部 taxid");
-
-  uint64_t total = total_hash(groups);
-  uint64_t expected = 0;
-  for (const auto &kv : counts) {
-    expected += kv.second;
-  }
-  expect_equal(total, expected, "快速模式（大样本）总哈希量应守恒");
-
-  size_t minGroups =
-      static_cast<size_t>(std::ceil(static_cast<double>(counts.size()) / 3.0));
-  expect_true(groups.size() >= minGroups,
-              "快速模式（大样本）分组数不得低于理论下限");
 }
 
 static void test_insert_and_bulk_contain_basic() {
@@ -872,11 +820,9 @@ static void benchmark_imcf_large_scale() {
 
 int main() {
   TestRunner runner;
-  runner.add("分组-普通模式-小样本", test_partition_normal_small);
-  runner.add("分组-普通模式-重尾", test_partition_normal_heavy_tail);
+  runner.add("分组-默认策略-小样本", test_partition_default_small);
+  runner.add("分组-默认策略-重尾", test_partition_default_heavy_tail);
   runner.add("分组-边界情况", test_partition_edge_cases);
-  runner.add("分组-快速模式-小样本", test_partition_fast_small);
-  runner.add("分组-快速模式-上限", test_partition_fast_cap_large);
   runner.add("插入与 bulkContain-基础", test_insert_and_bulk_contain_basic);
   runner.add("bulkCount-重复计数", test_bulk_count_repeat);
   runner.add("路由索引与子集计数", test_router_route_and_subset);

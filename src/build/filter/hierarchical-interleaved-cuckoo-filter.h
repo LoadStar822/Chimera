@@ -21,18 +21,44 @@
 #pragma once
 
 #include <HyperLogLog.hpp>
-#include <buildConfig.hpp>
-#include <optional>
-#include <robin_hood.h>
-#include <atomic>
-#include <kvec.h>
-#include <interleaved-cuckoo-filter.h>
-#include <numeric>
-#include <random>
 #include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstdint>
 #include <fstream>
+#include <kvec.h>
+#include <limits>
+#include <mutex>
+#include <numeric>
+#include <optional>
+#include <random>
+#include <robin_hood.h>
+#include <string>
+#include <vector>
+#include <interleaved-cuckoo-filter.h>
 
 namespace chimera::hicf {
+	struct HICFConfig {
+		size_t userBinsNum{};
+		size_t technicalBinsNum{};
+		size_t technicalBinsMaxNum{};
+		uint8_t tagNum{ 4 };
+		uint8_t tagBits{ 16 };
+		int MaxCuckooCount{ 500 };
+		double loadFactor{ 0.95 };
+		double relaxedLoadFactor{ 0.95 };
+		uint8_t kmerSize{};
+		uint16_t windowSize{};
+		size_t totalHashes{};
+
+		template <class Archive>
+		void serialize(Archive& archive)
+		{
+			archive(userBinsNum, technicalBinsNum, tagNum, tagBits, MaxCuckooCount, loadFactor);
+			archive(relaxedLoadFactor, kmerSize, windowSize, technicalBinsMaxNum, totalHashes);
+		}
+	};
+
 	struct Layout
 	{
 		struct maxBin
@@ -184,7 +210,7 @@ namespace chimera::hicf {
 
 	struct buildData {
 		std::atomic<size_t> icfNumber{};
-		ChimeraBuild::HICFConfig const& config;
+		HICFConfig const& config;
 		graph icfGraph{};
 
 		size_t requestICFIndex()
@@ -391,7 +417,7 @@ namespace chimera::hicf {
 	public:
 
 		HierarchicalInterleavedCuckooFilter() = default;
-		HierarchicalInterleavedCuckooFilter(Layout& layout, ChimeraBuild::HICFConfig& config, std::vector<std::string>& indexToTaxid)
+		HierarchicalInterleavedCuckooFilter(Layout& layout, HICFConfig& config, std::vector<std::string>& indexToTaxid)
 		{
 			userBinsNum = config.userBinsNum;
 			technicalBinsNum = config.technicalBinsNum;
