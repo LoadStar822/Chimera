@@ -20,7 +20,6 @@
 
 #pragma once
 
-#include <HyperLogLog.hpp>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -79,36 +78,6 @@ namespace chimera::hicf {
 		std::vector<maxBin> maxBins{};
 		std::vector<userBin> userBins{};
 		bool operator==(Layout const& other) const = default;
-	};
-
-	struct DataStore
-	{
-		struct previousLevel
-		{
-			std::vector<size_t> binIndices{};
-			std::string binsNum;
-			bool empty() const
-			{
-				return binIndices.empty();
-			};
-		};
-		Layout* layout{};
-		std::vector<size_t>* estimateKmerCounts{};
-		std::vector<HyperLogLog>* hllVec{};
-
-		previousLevel previous{};
-		std::vector<uint64_t> estimates;
-		long long totalTime = 0;
-		std::vector<size_t> location;
-		double loadFactor;
-		double relaxedLoadFactor;
-
-		void createLocation()
-		{
-			location.resize(estimateKmerCounts->size());
-			std::iota(location.begin(), location.end(), 0);
-		}
-
 	};
 
 	struct graph {

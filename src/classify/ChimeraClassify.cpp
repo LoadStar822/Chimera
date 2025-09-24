@@ -40,11 +40,11 @@ class ProgressTracker {
 public:
   ProgressTracker(bool enabled, std::string stage, size_t min_step,
                   double min_interval_seconds)
-      : enabled_(enabled && min_step != 0),
-        stage_(std::move(stage)),
+      : enabled_(enabled && min_step != 0), stage_(std::move(stage)),
         min_step_(std::max<size_t>(min_step, 1)),
         interval_(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::duration<double>(std::max(0.0, min_interval_seconds)))),
+            std::chrono::duration<double>(
+                std::max(0.0, min_interval_seconds)))),
         start_time_(std::chrono::steady_clock::now()),
         last_report_time_(start_time_) {}
 
@@ -61,7 +61,8 @@ public:
     if (!enabled_) {
       return;
     }
-    size_t processed = processed_.fetch_add(value, std::memory_order_relaxed) + value;
+    size_t processed =
+        processed_.fetch_add(value, std::memory_order_relaxed) + value;
     maybe_report(processed, false);
   }
 
@@ -136,8 +137,8 @@ private:
     if (!force) {
       bool reached_total = total > 0 && processed >= total;
       bool step_ready = processed >= last_reported_ + min_step_;
-      bool interval_ready = interval_.count() == 0 ||
-                            now - last_report_time_ >= interval_;
+      bool interval_ready =
+          interval_.count() == 0 || now - last_report_time_ >= interval_;
       if (!reached_total && !step_ready && !interval_ready) {
         return;
       }
@@ -402,11 +403,11 @@ struct IMCFIndexStatus {
  * 该函数会按顺序读取 `.imcf` 主档案以及可选的 `.imcf.idx` 与 `.imcf.rtr`
  * 索引文件；若索引缺失将自动重建并记录耗时，用于后续提示用户。
  */
-IMCFIndexStatus loadFilter(
-    const std::string &input_file,
-    chimera::imcf::InterleavedMergedCuckooFilter &imcf,
-    ChimeraBuild::IMCFConfig &imcfConfig,
-    std::vector<std::vector<std::string>> &indexToTaxid) {
+IMCFIndexStatus
+loadFilter(const std::string &input_file,
+           chimera::imcf::InterleavedMergedCuckooFilter &imcf,
+           ChimeraBuild::IMCFConfig &imcfConfig,
+           std::vector<std::vector<std::string>> &indexToTaxid) {
   namespace fs = std::filesystem;
   using Clock = std::chrono::steady_clock;
 
@@ -447,9 +448,8 @@ IMCFIndexStatus loadFilter(
   IMCFIndexStatus status;
 
   std::string activePath = indexBase.string() + ".imcf.idx";
-  auto [activeLoaded, activeMs] = timed([&]() {
-    return imcf.loadActiveIndex(activePath);
-  });
+  auto [activeLoaded, activeMs] =
+      timed([&]() { return imcf.loadActiveIndex(activePath); });
   if (!activeLoaded || !imcf.hasActiveIndex()) {
     auto rebuild = timed([&]() {
       imcf.buildActiveGroups();
@@ -462,9 +462,8 @@ IMCFIndexStatus loadFilter(
   }
 
   std::string routerPath = indexBase.string() + ".imcf.rtr";
-  auto [routerLoaded, routerMs] = timed([&]() {
-    return imcf.loadRouterIndex(routerPath);
-  });
+  auto [routerLoaded, routerMs] =
+      timed([&]() { return imcf.loadRouterIndex(routerPath); });
   if (!routerLoaded || !imcf.hasRouterIndex()) {
     auto rebuild = timed([&]() {
       imcf.buildRouterIndex();
@@ -662,16 +661,13 @@ struct GroupHeat {
   }
 };
 
-inline void processSequence(const std::vector<size_t> &hashs1,
-                            ChimeraBuild::IMCFConfig &imcfConfig,
-                            std::vector<std::vector<std::string>> &indexToTaxid,
-                            const TaxDict &tax, ClassifyConfig &config,
-                            GroupHeat &heat,
-                            chimera::imcf::InterleavedMergedCuckooFilter &imcf,
-                            const std::string &id,
-                            std::vector<classifyResult> &classifyResults,
-                            FileInfo &fileInfo, LCA &lca,
-                            ProgressTracker *progress) {
+inline void processSequence(
+    const std::vector<size_t> &hashs1, ChimeraBuild::IMCFConfig &imcfConfig,
+    std::vector<std::vector<std::string>> &indexToTaxid, const TaxDict &tax,
+    ClassifyConfig &config, GroupHeat &heat,
+    chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
+    std::vector<classifyResult> &classifyResults, FileInfo &fileInfo, LCA &lca,
+    ProgressTracker *progress) {
   // Calculate the number of hash values and determine the threshold for
   // classification
   size_t hashNum = hashs1.size();
@@ -1011,17 +1007,40 @@ inline void processSequence(const std::vector<size_t> &hashs1,
     beta = 0.8;
   }
   beta = std::clamp(beta, 0.0, 1.0);
-  if (use_em && beta > 0.6) {
-    beta = 0.6;
+  if (use_em) {
+    beta = std::min(beta, 0.45);
   }
-  size_t thr_beta = static_cast<size_t>(
-      std::floor(beta * static_cast<double>(maxBinCount)));
+  size_t thr_beta =
+      static_cast<size_t>(std::floor(beta * static_cast<double>(maxBinCount)));
   size_t thr_eval = thr_at_eval(n_eval);
+  if (use_em) {
+    size_t base = config.adaptive_shot ? n_eval : hashNum;
+    double softened_ratio = std::min(config.shotThreshold, 0.4);
+    size_t em_eval = static_cast<size_t>(
+        std::ceil(static_cast<double>(base) * softened_ratio));
+    if (em_eval == 0 && base > 0) {
+      em_eval = 1;
+    }
+    thr_eval = std::min(thr_eval, em_eval);
+  }
   size_t thr_min_eval = (config.min_eval_count > 0) ? config.min_eval_count : 0;
 
   size_t thr_final = 0;
   if (use_em) {
-    thr_final = std::max(thr_beta, thr_min_eval);
+    size_t adaptive_floor = static_cast<size_t>(
+        std::ceil(0.25 * static_cast<double>(std::max<size_t>(n_eval, 1))));
+    if (adaptive_floor == 0 && n_eval > 0) {
+      adaptive_floor = 1;
+    }
+
+    size_t min_eval_gate = 0;
+    if (thr_min_eval > 0 && n_eval >= thr_min_eval) {
+      min_eval_gate = thr_min_eval;
+    }
+
+    size_t thr_cap = std::max(adaptive_floor, min_eval_gate);
+    thr_cap = std::min(thr_cap, std::max<size_t>(n_eval, 1));
+    thr_final = std::max(thr_beta, thr_cap);
   } else {
     uint64_t TOT = 0;
     for (const auto &kv : tidCount) {
@@ -1044,10 +1063,9 @@ inline void processSequence(const std::vector<size_t> &hashs1,
 
     double mu = static_cast<double>(TOT) / static_cast<double>(M);
     double Z = (config.adaptive_fdr ? std::max(0.0, config.fdr_z) : 0.0);
-    size_t thr_fdr = (Z > 0.0)
-                         ? static_cast<size_t>(std::ceil(
-                               mu + Z * std::sqrt(std::max(mu, 1e-9))))
-                         : 1;
+    size_t thr_fdr = (Z > 0.0) ? static_cast<size_t>(std::ceil(
+                                     mu + Z * std::sqrt(std::max(mu, 1e-9))))
+                               : 1;
 
     thr_final = std::max({thr_eval, thr_fdr, thr_beta, thr_min_eval});
   }
@@ -1213,12 +1231,12 @@ void thirdFilteringStep(std::vector<classifyResult> &classifyResults,
         if (reads.find(result.id) == reads.end()) {
           continue;
         }
-        result.taxidCount.erase(
-            std::remove_if(result.taxidCount.begin(), result.taxidCount.end(),
-                           [&taxid](const auto &pair) {
-                             return pair.first == taxid;
-                           }),
-            result.taxidCount.end());
+        result.taxidCount.erase(std::remove_if(result.taxidCount.begin(),
+                                               result.taxidCount.end(),
+                                               [&taxid](const auto &pair) {
+                                                 return pair.first == taxid;
+                                               }),
+                                result.taxidCount.end());
         result.taxidCount.emplace_back(otherTaxid, 0);
       }
       break;
@@ -1519,7 +1537,8 @@ void run(ClassifyConfig config) {
     if (hardwareThreads == 0) {
       hardwareThreads = 1;
     }
-    const auto maxThreads = static_cast<unsigned int>(std::numeric_limits<uint16_t>::max());
+    const auto maxThreads =
+        static_cast<unsigned int>(std::numeric_limits<uint16_t>::max());
     if (hardwareThreads > maxThreads) {
       hardwareThreads = maxThreads;
     }
@@ -1549,7 +1568,8 @@ void run(ClassifyConfig config) {
   long long rebuildActiveMs = 0;
   long long rebuildRouterMs = 0;
 
-  std::string progressLabel = config.filter.empty() ? "classify" : config.filter;
+  std::string progressLabel =
+      config.filter.empty() ? "classify" : config.filter;
   ProgressTracker progress(config.verbose && config.progress, progressLabel,
                            config.progressStep, config.progressInterval);
   ProgressTracker *progressPtr = progress.enabled() ? &progress : nullptr;
@@ -1584,8 +1604,7 @@ void run(ClassifyConfig config) {
     auto classifyStart = std::chrono::high_resolution_clock::now();
     std::cout << "Classifying sequences by imcf..." << std::endl;
     classify_streaming(imcfConfig, readQueue, config, imcf, indexToTaxid, tax,
-                       classifyResults, fileInfo, producer_done,
-                       progressPtr);
+                       classifyResults, fileInfo, producer_done, progressPtr);
     auto classifyEnd = std::chrono::high_resolution_clock::now();
     auto classifyDuration =
         std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd -
@@ -1700,15 +1719,13 @@ void run(ClassifyConfig config) {
       }
       oss.setf(std::ios::fixed);
       oss << std::setprecision(2)
-          << static_cast<double>(part) * 100.0 /
-                 static_cast<double>(total)
+          << static_cast<double>(part) * 100.0 / static_cast<double>(total)
           << '%';
       return oss.str();
     };
 
     std::cout << "Classified sequences: " << fileInfo.classifiedNum << " ("
-              << format_percentage(fileInfo.classifiedNum,
-                                   fileInfo.sequenceNum)
+              << format_percentage(fileInfo.classifiedNum, fileInfo.sequenceNum)
               << ")" << std::endl;
     std::cout << "Unclassified sequences: " << fileInfo.unclassifiedNum << " ("
               << format_percentage(fileInfo.unclassifiedNum,
