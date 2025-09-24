@@ -45,6 +45,8 @@
 #include <stdexcept>
 #include <limits>
 #include <type_traits>
+#include <numeric>
+#include <atomic>
 #ifdef IMCF_MIRROR64
 #include <sys/mman.h>
 #endif
@@ -70,6 +72,7 @@ static inline size_t next_pow2(size_t v) {
 namespace chimera::imcf {
 	struct Group {
 		std::vector<std::string> taxids;
+		std::vector<uint64_t> assignedHashes;
 		uint64_t totalHash{ 0 };
 	};
 
@@ -220,6 +223,7 @@ namespace chimera::imcf {
 			}
 
 			groups[target].taxids.push_back(chunk.taxid);
+			groups[target].assignedHashes.push_back(chunk.hashCount);
 			groups[target].totalHash += chunk.hashCount;
 			used[target].insert(chunk.taxid);
 			minHeap.push(target);
@@ -287,9 +291,11 @@ struct SegmentPrefetch {
 #endif
 std::vector<std::vector<uint32_t>> activeGroups;
 std::vector<uint64_t> routerBucketOffsets;
-std::vector<uint16_t> routerEntryFingerprints;
-std::vector<uint64_t> routerEntryOffsets;
+	std::vector<uint16_t> routerEntryFingerprints;
+	std::vector<uint64_t> routerEntryOffsets;
 	std::vector<uint8_t> routerPayload;
+	std::atomic<uint64_t> insertFailureTotal{ 0 };
+	std::atomic<uint64_t> insertFailureSaturated{ 0 };
 
 	static inline void decodeVarintSequence(const std::vector<uint8_t>& dataBytes,
 		size_t start, size_t end, std::vector<uint32_t>& out) {
@@ -515,14 +521,21 @@ inline void writeBucket64(size_t bucket, size_t bin, uint64_t value) {
 
 	public:
 		InterleavedMergedCuckooFilter() = default;
-		InterleavedMergedCuckooFilter(std::vector<Group>& groups, ChimeraBuild::IMCFConfig& config)
-		{
-			uint64_t maxTotalHash = 0;
-			for (const auto& group : groups) {
-				if (group.totalHash > maxTotalHash) {
-					maxTotalHash = group.totalHash;
+			InterleavedMergedCuckooFilter(std::vector<Group>& groups, ChimeraBuild::IMCFConfig& config)
+			{
+				uint64_t maxTotalHash = 0;
+				for (const auto& group : groups) {
+					if (group.taxids.size() != group.assignedHashes.size()) {
+						throw std::runtime_error("IMCF constructor: group taxids/assignedHashes size mismatch");
+					}
+					uint64_t assignedSum = std::accumulate(group.assignedHashes.begin(), group.assignedHashes.end(), uint64_t{ 0 });
+					if (assignedSum != group.totalHash) {
+						throw std::runtime_error("IMCF constructor: group totalHash inconsistent with shard sums");
+					}
+					if (group.totalHash > maxTotalHash) {
+						maxTotalHash = group.totalHash;
+					}
 				}
-			}
 			binNum = groups.size();
 
 			// 关键：向上取整 + 2 的幂，便于用按位掩码实现可逆备桶
@@ -678,11 +691,11 @@ inline void writeBucket64(size_t bucket, size_t bin, uint64_t value) {
 		 * 构造标签后先命中主桶，再跳到可逆备桶，两桶任意存在空位或已有指纹即视为成功；
 		 * 若均告满载则进入踢出流程。
 		 */
-		inline bool insertTag(size_t binIndex, size_t value, size_t index)
-		{
-			if (index >= 16) {
-				assert(false && "IMCF group index overflow (taxids per group must be <=16)");
-				return false;
+			inline bool insertTag(size_t binIndex, size_t value, size_t index)
+			{
+				if (index >= 16) {
+					assert(false && "IMCF group index overflow (taxids per group must be <=16)");
+					return false;
 			}
 			uint16_t tag = reduceTo12bitAndAddIndex(value, index);
 			uint16_t fp = (uint16_t)(tag & 0x0FFFu);
@@ -705,15 +718,44 @@ inline void writeBucket64(size_t bucket, size_t bin, uint64_t value) {
 			return false;
 		};
 
-			if (try_insert_bucket(b1)) return true;
-			if (try_insert_bucket(b2)) return true;
+				if (try_insert_bucket(b1)) return true;
+				if (try_insert_bucket(b2)) return true;
 
-			return kickOut(binIndex, value, tag);
-		}
+				auto countMatching = [&](uint64_t bucketValue) -> int {
+					int matches = 0;
+					for (int i = 0; i < 4; ++i) {
+						uint16_t chunk = (uint16_t)((bucketValue >> (i * 16)) & 0xFFFFu);
+						if ((chunk & 0x0FFFu) == fp) {
+							++matches;
+						}
+					}
+					return matches;
+				};
+				int sameFingerprint = countMatching(readBucket64(b1, binIndex)) + countMatching(readBucket64(b2, binIndex));
+				if (sameFingerprint >= 8) {
+					insertFailureTotal.fetch_add(1, std::memory_order_relaxed);
+					insertFailureSaturated.fetch_add(1, std::memory_order_relaxed);
+					return false;
+				}
+
+				bool kicked = kickOut(binIndex, value, tag);
+				if (!kicked) {
+					insertFailureTotal.fetch_add(1, std::memory_order_relaxed);
+				}
+				return kicked;
+			}
+
+			inline uint64_t getInsertFailureTotal() const {
+				return insertFailureTotal.load(std::memory_order_relaxed);
+			}
+
+			inline uint64_t getInsertFailureSaturatedFingerprint() const {
+				return insertFailureSaturated.load(std::memory_order_relaxed);
+			}
 
 
-		/**
-		 * @brief 踢出流程，只在两桶之间往返。
+			/**
+			 * @brief 踢出流程，只在两桶之间往返。
 		 *
 		 * 随机逐出当前桶一项换入新项，再借助可逆哈希跳往另一桶继续尝试，最多迭代 `MaxCuckooCount` 次。
 		 */

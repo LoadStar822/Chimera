@@ -31,6 +31,7 @@
 #include <robin_hood.h>
 #include <queue>
 #include <buildConfig.hpp>
+#include <atomic>
 
 namespace chimera::imcf {
 	struct Group {
@@ -161,12 +162,14 @@ namespace chimera::imcf {
 	class InterleavedMergedCuckooFilter {
 		typedef kvec_t(int) kvector;
 		typedef kvec_t(bool) kvectorBool;
-		sdsl::bit_vector data;
-		size_t binNum;
-		size_t binSize;
-		size_t tagNum{ 4 };
-		int MaxCuckooCount{ 500 };
-		size_t hashSize{};
+	sdsl::bit_vector data;
+	size_t binNum;
+	size_t binSize;
+	size_t tagNum{ 4 };
+	int MaxCuckooCount{ 500 };
+	size_t hashSize{};
+	std::atomic<uint64_t> insertFailureTotal{ 0 };
+	std::atomic<uint64_t> insertFailureSaturated{ 0 };
 
 
 		friend std::ostream& operator<<(std::ostream& os, const InterleavedMergedCuckooFilter& filter)
@@ -229,35 +232,70 @@ namespace chimera::imcf {
 			return reduced_value;
 		}
 
-		inline bool insertTag(size_t binIndex, size_t value, size_t index)
-		{
-			uint16_t tag = reduceTo12bitAndAddIndex(value, index);
-			size_t b = hashIndex(value);
-			size_t bucketPosition = b * binNum + binIndex;
-			size_t indexStart = bucketPosition * tagNum * 16;
-			uint64_t query = data.get_int(indexStart, 64);
-			for (int i = 0; i < 4; i++)
+			inline bool insertTag(size_t binIndex, size_t value, size_t index)
 			{
-				uint16_t chunk = (query >> (i << 4)) & 0xFFFF;
-				if (chunk == 0)
-				{
-					query &= ~((uint64_t)0xFFFF << (i << 4));
-					query |= ((uint64_t)tag << (i << 4));
-					data.set_int(indexStart, query, 64);
-					return true;
+				uint16_t tag = reduceTo12bitAndAddIndex(value, index);
+				uint16_t fp = tag & 0x0FFF;
+				size_t b1 = hashIndex(value);
+				size_t b2 = altHash(b1, fp);
+
+				auto tryInsert = [&](size_t bucket) -> bool {
+					size_t bucketPosition = bucket * binNum + binIndex;
+					size_t indexStart = bucketPosition * tagNum * 16;
+					uint64_t query = data.get_int(indexStart, 64);
+					for (int i = 0; i < 4; ++i) {
+						uint16_t chunk = (uint16_t)((query >> (i * 16)) & 0xFFFF);
+						if (chunk == 0u) {
+							query &= ~((uint64_t)0xFFFFu << (i * 16));
+							query |= ((uint64_t)tag << (i * 16));
+							data.set_int(indexStart, query, 64);
+							return true;
+						}
+						if (chunk == tag) {
+							return true;
+						}
+					}
+					return false;
+				};
+
+				if (tryInsert(b1)) return true;
+				if (tryInsert(b2)) return true;
+
+				auto countMatching = [&](size_t bucket) -> int {
+					size_t bucketPosition = bucket * binNum + binIndex;
+					size_t indexStart = bucketPosition * tagNum * 16;
+					uint64_t query = data.get_int(indexStart, 64);
+					int matches = 0;
+					for (int i = 0; i < 4; ++i) {
+						uint16_t chunk = (uint16_t)((query >> (i * 16)) & 0xFFFF);
+						if ((chunk & 0x0FFFu) == fp) {
+							++matches;
+						}
+					}
+					return matches;
+				};
+
+				int sameFingerprint = countMatching(b1) + countMatching(b2);
+				if (sameFingerprint >= 8) {
+					insertFailureTotal.fetch_add(1, std::memory_order_relaxed);
+					insertFailureSaturated.fetch_add(1, std::memory_order_relaxed);
+					return false;
 				}
-				else if (chunk == tag)
-				{
-					return true;
+
+				bool kicked = kickOut(binIndex, value, tag);
+				if (!kicked) {
+					insertFailureTotal.fetch_add(1, std::memory_order_relaxed);
 				}
+				return kicked;
 			}
-			if (!kickOut(binIndex, value, tag))
-			{
-				throw std::runtime_error("Filter is full. Cannot insert more tags.");
-				return false;
+
+			inline uint64_t getInsertFailureTotal() const {
+				return insertFailureTotal.load(std::memory_order_relaxed);
 			}
-			return true;
-		}
+
+			inline uint64_t getInsertFailureSaturatedFingerprint() const {
+				return insertFailureSaturated.load(std::memory_order_relaxed);
+			}
 
 		inline bool kickOut(size_t binIndex, size_t value, uint16_t tag)
 		{

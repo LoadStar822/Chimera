@@ -286,6 +286,14 @@ static void test_partition_default_small() {
   std::unordered_set<std::string> covered;
   for (const auto &group : groups) {
     expect_true(!group.taxids.empty(), "默认策略（小样本）不允许空分组");
+    expect_equal(group.taxids.size(), group.assignedHashes.size(),
+                 "默认策略（小样本）每个 taxid 应有匹配的配额");
+    uint64_t shardSum = 0;
+    for (uint64_t assigned : group.assignedHashes) {
+      shardSum += assigned;
+    }
+    expect_equal(shardSum, group.totalHash,
+                 "默认策略（小样本）组内配额总和应匹配 totalHash");
     covered.insert(group.taxids.begin(), group.taxids.end());
   }
   expect_equal(covered.size(), counts.size(),
@@ -320,6 +328,14 @@ static void test_partition_default_heavy_tail() {
   uint64_t minTotal = std::numeric_limits<uint64_t>::max();
   for (const auto &group : groups) {
     expect_true(!group.taxids.empty(), "重尾数据每个分组都应包含 taxid");
+    expect_equal(group.taxids.size(), group.assignedHashes.size(),
+                 "重尾数据每个分组都应保留配额信息");
+    uint64_t shardSum = 0;
+    for (uint64_t assigned : group.assignedHashes) {
+      shardSum += assigned;
+    }
+    expect_equal(shardSum, group.totalHash,
+                 "重尾数据分组的配额总和应守恒");
     covered.insert(group.taxids.begin(), group.taxids.end());
     maxTotal = std::max(maxTotal, group.totalHash);
     minTotal = std::min(minTotal, group.totalHash);

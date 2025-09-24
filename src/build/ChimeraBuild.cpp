@@ -20,6 +20,7 @@
 #include <ChimeraBuild.hpp>
 #include <limits>
 #include <future>
+#include <algorithm>
 #include <sstream>
 #include <iomanip>
 #include <string_view>
@@ -27,9 +28,16 @@
 #include <cereal/archives/binary.hpp>
 #include <cereal/types/string.hpp>
 #include <cereal/types/vector.hpp>
-#include <atomic>
+#include <mutex>
+#include <span>
 
 namespace ChimeraBuild {
+	struct TaxidShardPlan {
+		size_t groupIndex;
+		size_t slotIndex;
+		uint64_t expectedCount;
+	};
+
 	/**
 	* Print the build time in a human-readable format.
 	*
@@ -421,46 +429,316 @@ namespace ChimeraBuild {
 	 */
 	std::vector<std::vector<std::string>> buildIMCF(
 		chimera::imcf::InterleavedMergedCuckooFilter& imcf,
-		std::vector<chimera::imcf::Group>& groups)
+		const std::vector<chimera::imcf::Group>& groups,
+		const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount)
 	{
-		// Initialize the index-to-taxid mapping structure with the number of groups
-		std::vector<std::vector<std::string>> indexToTaxid;
-		indexToTaxid.resize(groups.size());
-		// 记录踢出失败次数，便于构建结束时汇报潜在丢失的 minimizer
-		std::atomic<uint64_t> failedInsertions{ 0 };
-		// Parallel loop to process each group concurrently
-	#pragma omp parallel for
-		for (size_t i = 0; i < groups.size(); i++)
-		{
-			// Resize the sub-vector to hold the taxids for the current group
-			indexToTaxid[i].resize(groups[i].taxids.size());
-			// Iterate over each taxid in the current group
-			for (size_t index = 0; index < groups[i].taxids.size(); index++)
-			{
-				indexToTaxid[i][index] = groups[i].taxids[index];
-				auto taxid = groups[i].taxids[index];
-				// Open the corresponding minimizer file for reading
-				std::ifstream ifile("tmp/" + taxid + ".mini", std::ios::binary);
-				if (ifile.fail()) {
-					std::cerr << "Failed to open minimiser file: " << taxid << ".mini" << std::endl;
+		std::vector<std::vector<std::string>> indexToTaxid(groups.size());
+		robin_hood::unordered_flat_map<std::string, std::vector<TaxidShardPlan>> shardPlan;
+		shardPlan.reserve(hashCount.size());
+
+		for (size_t groupIdx = 0; groupIdx < groups.size(); ++groupIdx) {
+			const auto& group = groups[groupIdx];
+			indexToTaxid[groupIdx] = group.taxids;
+			if (group.taxids.size() != group.assignedHashes.size()) {
+				throw std::runtime_error("IMCF build: taxid list and assigned hash quotas length mismatch");
+			}
+			for (size_t slot = 0; slot < group.taxids.size(); ++slot) {
+				uint64_t expected = group.assignedHashes[slot];
+				if (expected == 0) {
+					continue;
 				}
-				// Read minimizer hashes and insert them into the IMCF
-				uint64_t hash;
-				while (ifile.read(reinterpret_cast<char*>(&hash), sizeof(hash)))
-				{
-					if (!imcf.insertTag(i, hash, index)) {
-						failedInsertions.fetch_add(1, std::memory_order_relaxed);
-					}
-				}
-				ifile.close();
+				auto& plans = shardPlan[group.taxids[slot]];
+				plans.push_back({ groupIdx, slot, expected });
 			}
 		}
-		uint64_t failureCount = failedInsertions.load(std::memory_order_relaxed);
-		if (failureCount > 0) {
-			std::cerr << "[警告] IMCF 插入失败：" << failureCount
-				<< " 条 minimizer 达到踢出上限并被丢弃" << std::endl;
+
+		const double kShardToleranceRatio = 0.001; // 0.1%
+		for (const auto& [taxid, plans] : shardPlan) {
+			uint64_t shardTotal = 0;
+			for (const auto& plan : plans) {
+				shardTotal += plan.expectedCount;
+			}
+			auto it = hashCount.find(taxid);
+			if (it == hashCount.end()) {
+				std::cerr << "Warning: shard plan references unknown taxid " << taxid << std::endl;
+				continue;
+			}
+			uint64_t expected = it->second;
+			if (expected == 0 && shardTotal == 0) {
+				continue;
+			}
+			int64_t delta = static_cast<int64_t>(shardTotal) - static_cast<int64_t>(expected);
+			uint64_t absDelta = delta >= 0 ? static_cast<uint64_t>(delta) : static_cast<uint64_t>(-delta);
+			double ratio = expected == 0 ? (delta == 0 ? 0.0 : std::numeric_limits<double>::infinity())
+				: static_cast<double>(absDelta) / static_cast<double>(expected);
+				if (ratio > kShardToleranceRatio) {
+					std::cerr << "Warning: minimiser count mismatch for taxid " << taxid
+						<< ": expected=" << expected << ", planned=" << shardTotal
+						<< ", delta=" << delta << " (" << std::fixed << std::setprecision(4)
+						<< ratio * 100.0 << "%)" << std::endl;
+				}
 		}
-		// Return the constructed index-to-taxid mapping
+
+		struct ShardEntry {
+			std::string taxid;
+			const std::vector<TaxidShardPlan>* plans;
+		};
+		std::vector<ShardEntry> shardEntries;
+		shardEntries.reserve(shardPlan.size());
+		for (auto& kv : shardPlan) {
+			shardEntries.push_back({ kv.first, &kv.second });
+		}
+
+		std::vector<std::mutex> groupLocks(groups.size());
+
+		std::vector<uint64_t> groupSuccess(groups.size(), 0);
+		std::vector<uint64_t> groupFailures(groups.size(), 0);
+		std::vector<std::vector<uint64_t>> slotSuccess(groups.size());
+		std::vector<std::vector<uint64_t>> slotFailures(groups.size());
+		for (size_t g = 0; g < groups.size(); ++g) {
+			size_t slotCount = groups[g].taxids.size();
+			slotSuccess[g].assign(slotCount, 0);
+			slotFailures[g].assign(slotCount, 0);
+		}
+
+		constexpr size_t kFlushThreshold = 16384;
+		constexpr size_t kReadBlockBytes = 512 * 1024;
+
+		const auto shardEntriesView = std::span<const ShardEntry>(shardEntries.data(), shardEntries.size());
+
+#pragma omp parallel for schedule(dynamic)
+		for (size_t entryIdx = 0; entryIdx < shardEntriesView.size(); ++entryIdx) {
+			const auto& entry = shardEntriesView[entryIdx];
+			const std::string& taxid = entry.taxid;
+			const auto& plans = *entry.plans;
+			std::ifstream ifile("tmp/" + taxid + ".mini", std::ios::binary);
+			if (!ifile) {
+#pragma omp critical(imcf_log)
+				std::cerr << "Failed to open minimiser file: " << taxid << ".mini" << std::endl;
+				continue;
+			}
+
+			std::vector<uint64_t> remainingCounts(plans.size());
+			for (size_t i = 0; i < plans.size(); ++i) {
+				remainingCounts[i] = plans[i].expectedCount;
+			}
+			std::vector<std::vector<uint64_t>> slotBuffers(plans.size());
+			for (size_t i = 0; i < plans.size(); ++i) {
+				size_t reserveSize = static_cast<size_t>(std::min<uint64_t>(remainingCounts[i], static_cast<uint64_t>(kFlushThreshold)));
+				if (reserveSize > 0) {
+					slotBuffers[i].reserve(reserveSize);
+				}
+			}
+
+			auto flushSlot = [&](size_t planIdx) {
+				auto& buffer = slotBuffers[planIdx];
+				if (buffer.empty()) {
+					return;
+				}
+				const auto& plan = plans[planIdx];
+				std::lock_guard<std::mutex> guard(groupLocks[plan.groupIndex]);
+				uint64_t success = 0;
+				uint64_t failure = 0;
+				for (uint64_t value : buffer) {
+					if (imcf.insertTag(plan.groupIndex, value, plan.slotIndex)) {
+						++success;
+					}
+					else {
+						++failure;
+					}
+				}
+				groupSuccess[plan.groupIndex] += success;
+				groupFailures[plan.groupIndex] += failure;
+				slotSuccess[plan.groupIndex][plan.slotIndex] += success;
+				slotFailures[plan.groupIndex][plan.slotIndex] += failure;
+				buffer.clear();
+			};
+
+			auto advanceShard = [&](size_t& shardIdx) {
+				while (shardIdx < plans.size() && remainingCounts[shardIdx] == 0) {
+					flushSlot(shardIdx);
+					++shardIdx;
+				}
+				return shardIdx < plans.size();
+			};
+
+			size_t currentShard = 0;
+			advanceShard(currentShard);
+			std::vector<uint64_t> readBlock(kReadBlockBytes / sizeof(uint64_t));
+			while (ifile) {
+				ifile.read(reinterpret_cast<char*>(readBlock.data()), static_cast<std::streamsize>(readBlock.size() * sizeof(uint64_t)));
+				std::streamsize bytesRead = ifile.gcount();
+				if (bytesRead <= 0) {
+					break;
+				}
+				size_t hashesRead = static_cast<size_t>(bytesRead) / sizeof(uint64_t);
+				bool exhausted = false;
+				for (size_t h = 0; h < hashesRead; ++h) {
+					if (!advanceShard(currentShard)) {
+	#pragma omp critical(imcf_log)
+						std::cerr << "Warning: taxid " << taxid
+							<< " produced more minimisers than expected; extra entries ignored" << std::endl;
+						exhausted = true;
+						break;
+					}
+					slotBuffers[currentShard].push_back(readBlock[h]);
+					if (slotBuffers[currentShard].size() >= kFlushThreshold) {
+						flushSlot(currentShard);
+					}
+					if (remainingCounts[currentShard] > 0) {
+						--remainingCounts[currentShard];
+					}
+					if (remainingCounts[currentShard] == 0) {
+						advanceShard(currentShard);
+					}
+				}
+				if (exhausted) {
+					break;
+				}
+			}
+
+			if (!ifile.eof() && ifile.fail()) {
+	#pragma omp critical(imcf_log)
+				std::cerr << "Warning: failed to read minimiser file completely for taxid " << taxid << std::endl;
+			}
+			ifile.close();
+
+			for (size_t shardIdx = 0; shardIdx < plans.size(); ++shardIdx) {
+				flushSlot(shardIdx);
+			}
+
+			uint64_t missing = 0;
+			for (uint64_t remain : remainingCounts) {
+				missing += remain;
+			}
+			if (missing != 0) {
+#pragma omp critical(imcf_log)
+				std::cerr << "Warning: taxid " << taxid
+					<< " ended with " << missing << " minimisers short of expected quota" << std::endl;
+			}
+		}
+
+		uint64_t totalInserted = 0;
+		uint64_t totalFailed = 0;
+		for (size_t i = 0; i < groups.size(); ++i) {
+			totalInserted += groupSuccess[i];
+			totalFailed += groupFailures[i];
+		}
+		uint64_t totalAttempts = totalInserted + totalFailed;
+		if (totalAttempts > 0) {
+			auto formatRate = [](double rate) {
+				std::ostringstream oss;
+				oss << std::fixed << std::setprecision(4) << rate * 100.0 << '%';
+				return oss.str();
+			};
+				double failureRate = static_cast<double>(totalFailed) / static_cast<double>(totalAttempts);
+				std::cout << "  - IMCF insertion result: " << totalFailed << "/" << totalAttempts
+					<< " failed (" << formatRate(failureRate) << ")" << std::endl;
+				constexpr double kFailureWarningThreshold = 0.001; // 0.1%
+				constexpr uint64_t kFailureMinPrint = 100;
+				size_t groupsWithFailures = 0;
+				size_t groupsAboveWarn = 0;
+				double maxGroupRate = 0.0;
+				size_t maxGroupIndex = std::numeric_limits<size_t>::max();
+				struct GroupSummary {
+					size_t index;
+					uint64_t attempts;
+					uint64_t failures;
+					double rate;
+					size_t worstSlot;
+					uint64_t worstSlotAttempts;
+					uint64_t worstSlotFailures;
+					double worstSlotRate;
+				};
+				std::vector<GroupSummary> summaries;
+				summaries.reserve(groups.size());
+
+				for (size_t i = 0; i < groups.size(); ++i) {
+					uint64_t attempts = groupSuccess[i] + groupFailures[i];
+					if (attempts == 0) {
+						continue;
+					}
+					double groupFailureRate = static_cast<double>(groupFailures[i]) / static_cast<double>(attempts);
+					if (groupFailures[i] > 0) {
+						++groupsWithFailures;
+					}
+					if (groupFailureRate > kFailureWarningThreshold) {
+						++groupsAboveWarn;
+					}
+					if (groupFailureRate > maxGroupRate) {
+						maxGroupRate = groupFailureRate;
+						maxGroupIndex = i;
+					}
+					if (groupFailures[i] == 0) {
+						continue;
+					}
+					if (groupFailureRate <= kFailureWarningThreshold && groupFailures[i] < kFailureMinPrint) {
+						continue;
+					}
+
+					size_t worstSlot = std::numeric_limits<size_t>::max();
+					double worstSlotRate = 0.0;
+					uint64_t worstSlotAttempts = 0;
+					uint64_t worstSlotFailures = 0;
+					for (size_t slot = 0; slot < slotSuccess[i].size(); ++slot) {
+						uint64_t slotAttempts = slotSuccess[i][slot] + slotFailures[i][slot];
+						if (slotAttempts == 0) {
+							continue;
+						}
+						double slotRate = static_cast<double>(slotFailures[i][slot]) / static_cast<double>(slotAttempts);
+						if (slotRate > worstSlotRate) {
+							worstSlotRate = slotRate;
+							worstSlot = slot;
+							worstSlotAttempts = slotAttempts;
+							worstSlotFailures = slotFailures[i][slot];
+						}
+					}
+
+					GroupSummary summary{ i, attempts, groupFailures[i], groupFailureRate, worstSlot, worstSlotAttempts, worstSlotFailures, worstSlotRate };
+					summaries.push_back(summary);
+				}
+
+				std::cout << "    groups with failures: " << groupsWithFailures << "/" << groups.size();
+				if (maxGroupIndex != std::numeric_limits<size_t>::max()) {
+					std::cout << ", worst group=" << maxGroupIndex << " (" << formatRate(maxGroupRate) << ")";
+				}
+				std::cout << std::endl;
+				if (groupsAboveWarn > 0) {
+					std::cout << "    groups above warning threshold (" << formatRate(kFailureWarningThreshold) << "): "
+						<< groupsAboveWarn << std::endl;
+				}
+
+				std::sort(summaries.begin(), summaries.end(), [](const GroupSummary& a, const GroupSummary& b) {
+					return a.rate > b.rate;
+				});
+
+				const size_t maxDetails = 5;
+				for (size_t idx = 0; idx < summaries.size() && idx < maxDetails; ++idx) {
+					const auto& summary = summaries[idx];
+					std::ostringstream line;
+					line << "    group " << summary.index << ": " << summary.failures << "/" << summary.attempts
+						 << " failed (" << formatRate(summary.rate) << ")";
+					if (summary.rate > kFailureWarningThreshold) {
+						line << " — 建议降低 load_factor 或提高 MaxCuckooCount/扩大 binSize";
+					}
+					std::cout << line.str() << std::endl;
+					if (summary.worstSlot != std::numeric_limits<size_t>::max() && summary.worstSlot < indexToTaxid[summary.index].size() && summary.worstSlotFailures > 0 && summary.worstSlotRate > kFailureWarningThreshold) {
+						std::cout << "      worst slot " << summary.worstSlot << " (taxid="
+							<< indexToTaxid[summary.index][summary.worstSlot] << ") : "
+							<< summary.worstSlotFailures << "/" << summary.worstSlotAttempts
+							<< " failed (" << formatRate(summary.worstSlotRate) << ")" << std::endl;
+					}
+				}
+			uint64_t imcfFailureTotal = imcf.getInsertFailureTotal();
+			uint64_t imcfFailureSaturated = imcf.getInsertFailureSaturatedFingerprint();
+			if (imcfFailureTotal > 0) {
+				double saturatedRatio = static_cast<double>(imcfFailureSaturated) / static_cast<double>(imcfFailureTotal);
+				std::cout << "  - IMCF failure counters: total=" << imcfFailureTotal
+					<< ", saturated_fp=" << imcfFailureSaturated << " ("
+					<< formatRate(saturatedRatio) << ")" << std::endl;
+			}
+		}
+
 		return indexToTaxid;
 	}
 
@@ -675,7 +953,7 @@ namespace ChimeraBuild {
 			imcfConfig.kmerSize = config.kmer_size;
 			imcfConfig.windowSize = config.window_size;
 			chimera::imcf::InterleavedMergedCuckooFilter imcf(groups, imcfConfig);
-			std::vector<std::vector<std::string>> indexToTaxid = buildIMCF(imcf, groups);
+			std::vector<std::vector<std::string>> indexToTaxid = buildIMCF(imcf, groups, hashCount);
 			auto build_end = std::chrono::high_resolution_clock::now();
 			auto build_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(build_end - build_start).count();
 			if (config.verbose) {
