@@ -179,7 +179,7 @@ make_filter(ChimeraBuild::IMCFConfig &config, std::size_t groupHashes) {
 
 std::unordered_set<uint16_t>
 collect_fingerprints(chimera::imcf::InterleavedMergedCuckooFilter &filter,
-                     const std::vector<size_t> &values) {
+                     const std::vector<uint64_t> &values) {
   std::unordered_set<uint16_t> fps;
   for (auto value : values) {
     fps.insert(filter.reduceTo12bit(value));
@@ -187,10 +187,10 @@ collect_fingerprints(chimera::imcf::InterleavedMergedCuckooFilter &filter,
   return fps;
 }
 
-size_t next_absent_with_unique_fingerprint(
+uint64_t next_absent_with_unique_fingerprint(
     chimera::imcf::InterleavedMergedCuckooFilter &filter,
-    const std::unordered_set<uint16_t> &used, size_t seed) {
-  size_t candidate = seed;
+    const std::unordered_set<uint16_t> &used, uint64_t seed) {
+  uint64_t candidate = seed;
   for (int attempt = 0; attempt < 4096; ++attempt) {
     if (!used.contains(filter.reduceTo12bit(candidate))) {
       return candidate;
@@ -256,8 +256,8 @@ uint64_t total_hash(const std::vector<chimera::imcf::Group> &groups) {
   return sum;
 }
 
-std::vector<size_t> generate_values(size_t binNum, size_t perBin) {
-  std::vector<size_t> values;
+std::vector<uint64_t> generate_values(size_t binNum, size_t perBin) {
+  std::vector<uint64_t> values;
   values.reserve(binNum * perBin);
   uint64_t seed = 42;
   for (size_t bin = 0; bin < binNum; ++bin) {
@@ -418,9 +418,9 @@ static void test_insert_and_bulk_contain_basic() {
   filter.bulkContain(424242ULL, result);
   expect_true(result[0].test(3), "bulkContain 应命中刚插入的标签");
 
-  std::vector<size_t> insertedValues{424242ULL};
+  std::vector<uint64_t> insertedValues{424242ULL};
   auto fps = collect_fingerprints(filter, insertedValues);
-  size_t absent = next_absent_with_unique_fingerprint(filter, fps, 111111ULL);
+  uint64_t absent = next_absent_with_unique_fingerprint(filter, fps, 111111ULL);
 
   for (auto &bitset : result) {
     bitset.reset();
@@ -439,7 +439,7 @@ static void test_bulk_count_repeat() {
   filter.insertTag(0, 200ULL, 2);
 
   std::vector<std::vector<std::size_t>> counters(config.binNum);
-  filter.bulkCount(std::vector<std::size_t>{100ULL, 200ULL, 100ULL}, counters);
+  filter.bulkCount(std::vector<uint64_t>{100ULL, 200ULL, 100ULL}, counters);
 
   expect_true(counters.size() == config.binNum,
               "bulkCount 返回的桶维度应与配置一致");
@@ -456,7 +456,7 @@ static void test_router_route_and_subset() {
 
   expect_true(config.binNum >= 2, "测试路由需至少两个分组");
 
-  const size_t value = 987654321ULL;
+  const uint64_t value = 987654321ULL;
   expect_true(filter.insertTag(0, value, 1), "应能向分组 0 插入标签");
   expect_true(filter.insertTag(1, value, 2), "应能向分组 1 插入标签");
 
@@ -491,7 +491,7 @@ static void test_router_route_and_subset() {
   expect_true(routed.size() == 2 && routed[0] == 0 && routed[1] == 1,
               "重新加载后路由结果应保持一致");
 
-  std::vector<size_t> minimizers{value};
+  std::vector<uint64_t> minimizers{value};
   std::vector<uint32_t> subset{0, 1, 5};
   std::sort(subset.begin(), subset.end());
 
@@ -518,10 +518,10 @@ static void test_serialize_roundtrip() {
   ChimeraBuild::IMCFConfig config{};
   auto filter = make_filter_with_hashes(config, {128, 96});
 
-  std::vector<size_t> values;
+  std::vector<uint64_t> values;
   values.reserve(40);
   for (size_t i = 0; i < 40; ++i) {
-    size_t value = 1'000'000ULL * (i + 3) + 7;
+    uint64_t value = 1'000'000ULL * (i + 3) + 7;
     size_t bin = i % config.binNum;
     size_t index = i % 16;
     expect_true(filter.insertTag(bin, value, index),
@@ -530,8 +530,8 @@ static void test_serialize_roundtrip() {
   }
 
   auto fps = collect_fingerprints(filter, values);
-  std::vector<size_t> queries = values;
-  size_t seed = 777ULL;
+  std::vector<uint64_t> queries = values;
+  uint64_t seed = 777ULL;
   for (int i = 0; i < 5; ++i) {
     seed = next_absent_with_unique_fingerprint(filter, fps,
                                                seed + kGoldenIncrement);
@@ -564,7 +564,7 @@ static void test_serialize_roundtrip() {
                 "序列化往返后的 bulkContain 结果应与基线一致");
   }
 
-  size_t newValue =
+  uint64_t newValue =
       next_absent_with_unique_fingerprint(filter, fps, seed + kGoldenIncrement);
   expect_true(filter.insertTag(0, newValue, 5), "往返后原始过滤器仍应接受新值");
   expect_true(restored.insertTag(0, newValue, 5),
@@ -582,9 +582,9 @@ static void test_insert_alt_bucket_and_find() {
   ChimeraBuild::IMCFConfig config{};
   config.loadFactor = 0.95;
   auto filter = make_filter(config, 8);
-  std::vector<size_t> collidingValues;
+  std::vector<uint64_t> collidingValues;
   size_t baseHash = filter.hashIndex(1ULL);
-  for (size_t candidate = 2;
+  for (uint64_t candidate = 2;
        collidingValues.size() < 6 && candidate < 2'000'000; ++candidate) {
     if (filter.hashIndex(candidate) != baseHash) {
       continue;
@@ -623,7 +623,7 @@ static void test_insert_failure_throw() {
   auto filter = make_filter(config, 4);
 
   std::unordered_set<uint16_t> fps;
-  size_t seed = 10ULL;
+  uint64_t seed = 10ULL;
   size_t capacity = config.binNum * config.binSize * 4;
   for (size_t i = 0; i < capacity && seed < 10'000ULL; ++i) {
     size_t bin = config.binNum > 0 ? (i % config.binNum) : 0;
@@ -634,7 +634,7 @@ static void test_insert_failure_throw() {
     seed += 1;
   }
 
-  size_t failingValue = next_absent_with_unique_fingerprint(filter, fps, seed);
+  uint64_t failingValue = next_absent_with_unique_fingerprint(filter, fps, seed);
   bool ok = true;
   bool caught = false;
   try {
@@ -649,10 +649,10 @@ static void test_bulk_contain_negative() {
   ChimeraBuild::IMCFConfig config{};
   auto filter = make_filter_with_hashes(config, {64, 64});
 
-  std::vector<size_t> inserted;
+  std::vector<uint64_t> inserted;
   inserted.reserve(64);
   for (size_t i = 0; i < 64; ++i) {
-    size_t value = 500'000ULL + i * 97ULL;
+    uint64_t value = 500'000ULL + i * 97ULL;
     size_t bin = i % config.binNum;
     size_t index = i % 16;
     expect_true(filter.insertTag(bin, value, index),
@@ -661,9 +661,9 @@ static void test_bulk_contain_negative() {
   }
 
   auto fps = collect_fingerprints(filter, inserted);
-  size_t seed = 123456789ULL;
+  uint64_t seed = 123456789ULL;
   for (int attempt = 0; attempt < 32; ++attempt) {
-    size_t absent = next_absent_with_unique_fingerprint(
+    uint64_t absent = next_absent_with_unique_fingerprint(
         filter, fps, seed + attempt * kGoldenIncrement);
     std::vector<std::bitset<16>> result(config.binNum);
     filter.bulkContain(absent, result);
@@ -680,10 +680,10 @@ static void benchmark_imcf_large_scale() {
   const size_t countSamples = 50000;
   const size_t fprSamples = 100000;
 
-  std::vector<size_t> values = generate_values(binNum, valuesPerBin);
-  std::vector<size_t> queryValues(
+  std::vector<uint64_t> values = generate_values(binNum, valuesPerBin);
+  std::vector<uint64_t> queryValues(
       values.begin(), values.begin() + std::min(containSamples, values.size()));
-  std::vector<size_t> countValues(
+  std::vector<uint64_t> countValues(
       values.begin(), values.begin() + std::min(countSamples, values.size()));
 
   std::vector<uint64_t> groupHashes(binNum, valuesPerBin);
@@ -691,11 +691,11 @@ static void benchmark_imcf_large_scale() {
   config.loadFactor = 0.3;
   auto filter = make_filter_with_hashes(config, groupHashes);
 
-  std::vector<std::pair<size_t, size_t>> entries;
+  std::vector<std::pair<uint64_t, size_t>> entries;
   entries.reserve(values.size());
   for (size_t bin = 0; bin < binNum; ++bin) {
     for (size_t i = 0; i < valuesPerBin; ++i) {
-      size_t value = values[bin * valuesPerBin + i];
+      uint64_t value = values[bin * valuesPerBin + i];
       entries.emplace_back(value, bin);
     }
   }

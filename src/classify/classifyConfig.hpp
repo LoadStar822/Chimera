@@ -29,12 +29,16 @@
 #include <limits>
 #include <cstdint>
 #include <atomic>
+#include <memory>
 #include "robin_hood.h"
 #include <optional>
 #include <seqan3/alphabet/nucleotide/dna4.hpp>
 #include <seqan3/core/debug_stream.hpp>
 
 namespace ChimeraClassify {
+namespace dbg {
+  struct TraceRecord;
+}
 	struct ClassifyConfig {
 		std::vector<std::string> singleFiles;
 		std::vector<std::string> pairedFiles;
@@ -141,6 +145,7 @@ namespace ChimeraClassify {
 		std::vector<std::pair<std::string, size_t>> taxidCount;
 		std::vector<std::pair<std::string, double>> posteriors;
 		double evaluated{ 0.0 }; // 实际参与判别的 minimizer 数，用于归一化
+		std::shared_ptr<dbg::TraceRecord> trace;
 	};
 
 	struct DecisionConfig {

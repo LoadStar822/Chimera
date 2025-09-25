@@ -148,18 +148,6 @@ namespace ChimeraBuild {
 		}
 	}
 
-	/**
-	 * Adjust the seed value based on the kmer size.
-	 *
-	 * @param kmer_size The size of the kmer.
-	 * @param seed The seed value to adjust (default: 0x8F3F73B5CF1C9ADEULL).
-	 * @return The adjusted seed value.
-	 */
-	inline constexpr static uint64_t adjust_seed(uint8_t const kmer_size, uint64_t const seed = 0x8F3F73B5CF1C9ADEULL) noexcept {
-		// Right shift the seed by (64 - 2 * kmer_size) bits
-		return seed >> (64u - 2u * kmer_size);
-	}
-
 	/*
 	 * Check if the file is compressed based on the file extension.
 	 *
@@ -190,7 +178,7 @@ namespace ChimeraBuild {
 		auto minimiser_view = seqan3::views::minimiser_hash(
 			seqan3::shape{ seqan3::ungapped{ config.kmer_size } },
 			seqan3::window_size{ config.window_size },
-			seqan3::seed{ adjust_seed(config.kmer_size) });
+			seqan3::seed{ ChimeraBuild::adjust_seed(config.kmer_size) });
 
 		// Expand the pairs of taxid and files
 		std::vector<std::pair<std::string, std::string>> taxid_file_pairs;
@@ -985,6 +973,9 @@ namespace ChimeraBuild {
 			imcfConfig.loadFactor = config.load_factor;
 			imcfConfig.kmerSize = config.kmer_size;
 			imcfConfig.windowSize = config.window_size;
+			imcfConfig.seed64 = ChimeraBuild::adjust_seed(config.kmer_size);
+			imcfConfig.fpSalt = IMCFConfig::DefaultFingerprintSalt;
+			imcfConfig.hashVersion = IMCFConfig::CurrentHashVersion;
 			chimera::imcf::InterleavedMergedCuckooFilter imcf(groups, imcfConfig);
 			std::vector<std::vector<std::string>> indexToTaxid = buildIMCF(imcf, groups, hashCount);
 			auto build_end = std::chrono::high_resolution_clock::now();

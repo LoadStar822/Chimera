@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <limits>
 #include <mutex>
@@ -32,8 +33,207 @@
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
 
 namespace ChimeraClassify {
+
+namespace dbg {
+struct TraceCfg {
+  bool enabled = true;
+  bool once = true;
+  std::string id_substr;
+  std::string file = "chimera_trace.log";
+  size_t topk_print = 10;
+
+  static TraceCfg fromEnv() {
+    TraceCfg cfg;
+    if (const char *v = std::getenv("CHIMERA_TRACE")) {
+      cfg.enabled = std::string(v) != "0";
+    }
+    if (const char *v = std::getenv("CHIMERA_TRACE_ONCE")) {
+      cfg.once = std::string(v) != "0";
+    }
+    if (const char *v = std::getenv("CHIMERA_TRACE_ID")) {
+      cfg.id_substr = v;
+    }
+    if (const char *v = std::getenv("CHIMERA_TRACE_FILE")) {
+      cfg.file = v;
+    }
+    return cfg;
+  }
+};
+
+struct Counters {
+  std::atomic<uint64_t> total_reads{0};
+  std::atomic<uint64_t> too_short{0};
+  std::atomic<uint64_t> has_minimizers{0};
+  std::atomic<uint64_t> imcf_event_zero{0};
+  std::atomic<uint64_t> candidate_zero{0};
+  std::atomic<uint64_t> entered_em{0};
+  std::atomic<uint64_t> passed_post{0};
+} g;
+
+static TraceCfg gCfg = TraceCfg::fromEnv();
+static std::atomic_flag gDeepUsed = ATOMIC_FLAG_INIT;
+static std::mutex gMtx;
+static std::unique_ptr<std::ofstream> gOut;
+
+inline bool enabled() { return gCfg.enabled; }
+
+inline void reset() {
+  if (!enabled()) {
+    return;
+  }
+  g.total_reads.store(0, std::memory_order_relaxed);
+  g.too_short.store(0, std::memory_order_relaxed);
+  g.has_minimizers.store(0, std::memory_order_relaxed);
+  g.imcf_event_zero.store(0, std::memory_order_relaxed);
+  g.candidate_zero.store(0, std::memory_order_relaxed);
+  g.entered_em.store(0, std::memory_order_relaxed);
+  g.passed_post.store(0, std::memory_order_relaxed);
+  gDeepUsed.clear(std::memory_order_release);
+}
+
+inline void initSink() {
+  if (!enabled()) {
+    return;
+  }
+  std::scoped_lock lk(gMtx);
+  if (gOut) {
+    return;
+  }
+  auto sink = std::make_unique<std::ofstream>(gCfg.file,
+                                              std::ios::out | std::ios::app);
+  if (sink->is_open()) {
+    gOut = std::move(sink);
+  }
+}
+
+inline bool wantDeep(const std::string &id, bool isSuspicious) {
+  if (!enabled()) {
+    return false;
+  }
+  if (!gCfg.id_substr.empty() && id.find(gCfg.id_substr) == std::string::npos) {
+    return false;
+  }
+  if (!isSuspicious) {
+    return false;
+  }
+  if (!gCfg.once) {
+    return true;
+  }
+  if (!gDeepUsed.test_and_set()) {
+    return true;
+  }
+  return false;
+}
+
+template <class... Args>
+inline void log(const char *fmt, Args &&...args) {
+  if (!enabled()) {
+    return;
+  }
+  if (!gOut) {
+    return;
+  }
+  std::scoped_lock lk(gMtx);
+  int size = std::snprintf(nullptr, 0, fmt, std::forward<Args>(args)...);
+  if (size <= 0) {
+    return;
+  }
+  std::vector<char> buf(static_cast<size_t>(size) + 1, '\0');
+  std::snprintf(buf.data(), buf.size(), fmt, std::forward<Args>(args)...);
+  (*gOut) << buf.data() << '\n';
+  gOut->flush();
+}
+
+struct TraceRecord {
+  size_t readLen = 0;
+  size_t minimizerTotal = 0;
+  size_t uniqCount = 0;
+  size_t sampleCount = 0;
+  uint64_t xorAll = 0;
+  uint64_t xorSample = 0;
+  uint64_t imcfEvents = 0;
+  size_t binsWithHits = 0;
+  size_t touchedBins = 0;
+  size_t candidateSize = 0;
+  std::vector<std::pair<uint32_t, uint32_t>> topBinHits;
+  std::vector<std::pair<std::string, size_t>> emInputTop;
+  std::vector<std::pair<std::string, double>> emFinalTop;
+  uint64_t totalTidHits = 0;
+  bool candidateEmpty = false;
+  bool fallbackFull = false;
+  size_t thrConf = 0;
+  size_t thrEval = 0;
+  size_t thrBeta = 0;
+  size_t thrMinEval = 0;
+  double shotThreshold = 0.0;
+  double firstFilterBeta = 0.0;
+  size_t preEmTopK = 0;
+  size_t evaluated = 0;
+  size_t bestCount = 0;
+  size_t secondCount = 0;
+  uint32_t bestTid = std::numeric_limits<uint32_t>::max();
+  std::string bestTaxid;
+  bool useEm = false;
+  bool enteredEm = false;
+  bool passedPost = false;
+  std::string decisionReason;
+  bool deepLogged = false;
+  bool suspiciousPre = false;
+  bool suspiciousPost = false;
+  bool emFinalLogged = false;
+};
+
+inline void dumpTrace(TraceRecord &rec, const std::string &id,
+                      const char *stage) {
+  if (!enabled()) {
+    return;
+  }
+  const char *stageLabel = stage ? stage : "pre";
+  const char *bestTaxid = rec.bestTaxid.empty() ? "N/A" : rec.bestTaxid.c_str();
+  log("READ[%s][%s] len=%zu mm_total=%zu mm_uniq=%zu mm_sample=%zu xor_all=%016llx xor_sample=%016llx",
+      id.c_str(), stageLabel, rec.readLen, rec.minimizerTotal, rec.uniqCount,
+      rec.sampleCount, static_cast<unsigned long long>(rec.xorAll),
+      static_cast<unsigned long long>(rec.xorSample));
+  log("IMCF: events=%llu bins=%zu touched=%zu candidate=%zu fallback=%d total_tid=%llu",
+      static_cast<unsigned long long>(rec.imcfEvents), rec.binsWithHits,
+      rec.touchedBins, rec.candidateSize, rec.fallbackFull ? 1 : 0,
+      static_cast<unsigned long long>(rec.totalTidHits));
+  if (!rec.topBinHits.empty()) {
+    size_t idx = 0;
+    for (const auto &[bin, count] : rec.topBinHits) {
+      log("  bin[%zu]=%u count=%u", idx, bin, count);
+      ++idx;
+    }
+  }
+  log("Thresholds: shot=%.3f thr_conf=%zu thr_eval=%zu thr_beta=%zu thr_min_eval=%zu preEmTopK=%zu",
+      rec.shotThreshold, rec.thrConf, rec.thrEval, rec.thrBeta, rec.thrMinEval,
+      rec.preEmTopK);
+  log("Counts: evaluated=%zu best=%zu second=%zu best_tid=%s",
+      rec.evaluated, rec.bestCount, rec.secondCount, bestTaxid);
+  if (!rec.emInputTop.empty()) {
+    size_t idx = 0;
+    for (const auto &[taxid, cnt] : rec.emInputTop) {
+      log("  EM-in[%zu]=%s:%zu", idx, taxid.c_str(), cnt);
+      ++idx;
+    }
+  }
+  if (!rec.emFinalTop.empty()) {
+    size_t idx = 0;
+    for (const auto &[taxid, val] : rec.emFinalTop) {
+      log("  EM-final[%zu]=%s:%.6f", idx, taxid.c_str(), val);
+      ++idx;
+    }
+  }
+  log("Decision: passed=%d reason=%s", rec.passedPost ? 1 : 0,
+      rec.decisionReason.empty() ? "" : rec.decisionReason.c_str());
+  rec.emFinalLogged = !rec.emFinalTop.empty();
+}
+} // namespace dbg
 
 namespace {
 class ProgressTracker {
@@ -435,6 +635,23 @@ loadFilter(const std::string &input_file,
   archive(imcfConfig);
   is.close();
 
+  if (imcfConfig.hashVersion != ChimeraBuild::IMCFConfig::CurrentHashVersion) {
+    throw std::runtime_error(
+        "IMCF 数据库版本不兼容：hash_version=" +
+        std::to_string(imcfConfig.hashVersion) +
+        "，请使用当前 Chimera 重新构建数据库。");
+  }
+  if (imcfConfig.seed64 == 0) {
+    throw std::runtime_error(
+        "IMCF 数据库缺少 minimiser 种子信息，请重新执行 Chimera build。"
+    );
+  }
+  if (imcfConfig.fpSalt != ChimeraBuild::IMCFConfig::DefaultFingerprintSalt) {
+    throw std::runtime_error(
+        "IMCF 数据库指纹盐值与当前实现不一致，检测到 fp_salt=" +
+        std::to_string(imcfConfig.fpSalt) +
+        "，请重新构建数据库或升级程序。");
+  }
   auto timed = [](auto &&fn) {
     auto start = Clock::now();
     bool ok = fn();
@@ -476,21 +693,6 @@ loadFilter(const std::string &input_file,
   }
 
   return status;
-}
-
-/**
- * Adjust the seed value based on the kmer size.
- *
- * @param kmer_size The size of the kmer.
- * @param seed The seed value to adjust (default: 0x8F3F73B5CF1C9ADEULL).
- * @return The adjusted seed value.
- */
-inline constexpr static uint64_t
-adjust_seed(uint8_t const kmer_size,
-            uint64_t const seed = 0x8F3F73B5CF1C9ADEULL) noexcept {
-  unsigned double_k = static_cast<unsigned>(kmer_size) * 2u;
-  unsigned shift = double_k >= 64u ? 0u : (64u - double_k);
-  return seed >> shift;
 }
 
 /**
@@ -566,8 +768,42 @@ void postEmDecision(std::vector<classifyResult> &results,
                     std::optional<std::reference_wrapper<LCA>> lca) {
   constexpr const char *kUnclassified = "unclassified";
 
+  auto format_val = [](double value) {
+    std::ostringstream oss;
+    oss.setf(std::ios::fixed);
+    oss << std::setprecision(4) << value;
+    return oss.str();
+  };
+
   for (auto &result : results) {
+    auto trace = result.trace;
+    auto appendReason = [&](const std::string &tag) {
+      if (!trace || tag.empty()) {
+        return;
+      }
+      if (trace->decisionReason.empty()) {
+        trace->decisionReason = tag;
+        return;
+      }
+      if (trace->decisionReason.find(tag) == std::string::npos) {
+        trace->decisionReason += "|" + tag;
+      }
+    };
+
     if (result.posteriors.empty()) {
+      if (trace) {
+        trace->passedPost = false;
+        trace->suspiciousPost = trace->enteredEm;
+        appendReason("posterior_empty");
+        if (trace->suspiciousPost && !trace->deepLogged &&
+            dbg::wantDeep(result.id, trace->suspiciousPost)) {
+          trace->deepLogged = true;
+          dbg::dumpTrace(*trace, result.id, "post");
+        } else if (trace->deepLogged) {
+          dbg::log("Decision[%s][post]: passed=0 reason=%s", result.id.c_str(),
+                   trace->decisionReason.c_str());
+        }
+      }
       result.taxidCount.clear();
       result.taxidCount.emplace_back(kUnclassified, 1);
       continue;
@@ -580,32 +816,84 @@ void postEmDecision(std::vector<classifyResult> &results,
     const auto &top = posterior.front();
     double top_score = top.second;
     double runner_up = posterior.size() > 1 ? posterior[1].second : 0.0;
+    double ratio = runner_up <= 0.0 ? std::numeric_limits<double>::infinity()
+                                    : (top_score / runner_up);
+    double delta = top_score - runner_up;
 
-    bool pass = top_score >= decisionConfig.posterior_threshold;
-    if (!std::isnan(decisionConfig.margin_ratio)) {
-      double ratio = runner_up <= 0.0 ? std::numeric_limits<double>::infinity()
-                                      : (top_score / runner_up);
-      pass = pass && (ratio >= decisionConfig.margin_ratio);
-    } else {
-      pass = pass && ((top_score - runner_up) >= decisionConfig.margin_delta);
-    }
+    bool threshold_ok = top_score >= decisionConfig.posterior_threshold;
+    bool using_ratio = !std::isnan(decisionConfig.margin_ratio);
+    bool margin_ok = using_ratio ? (ratio >= decisionConfig.margin_ratio)
+                                 : (delta >= decisionConfig.margin_delta);
 
+    double class_weight = 0.0;
     bool weight_ok = true;
     if (!classWeights.empty()) {
       auto weight_it = classWeights.find(top.first);
       if (weight_it != classWeights.end()) {
-        weight_ok = (weight_it->second >= decisionConfig.min_class_weight);
+        class_weight = weight_it->second;
+        weight_ok =
+            (class_weight >= decisionConfig.min_class_weight);
       }
     }
-    pass = pass && weight_ok;
+
+    if (trace) {
+      trace->emFinalTop.clear();
+      size_t limit = std::min(posterior.size(), dbg::gCfg.topk_print);
+      for (size_t i = 0; i < limit; ++i) {
+        trace->emFinalTop.emplace_back(posterior[i].first, posterior[i].second);
+      }
+      if (trace->deepLogged && !trace->emFinalLogged &&
+          !trace->emFinalTop.empty()) {
+        size_t idx = 0;
+        for (const auto &[taxid, val] : trace->emFinalTop) {
+          dbg::log("  EM-final[%zu]=%s:%.6f", idx, taxid.c_str(), val);
+          ++idx;
+        }
+        trace->emFinalLogged = true;
+      }
+    }
+
+    std::string reason;
+    if (!threshold_ok) {
+      reason = "below_posterior(" + format_val(top_score) + "<" +
+               format_val(decisionConfig.posterior_threshold) + ")";
+    } else if (!margin_ok) {
+      if (using_ratio) {
+        reason = "below_ratio(" + format_val(ratio) + "<" +
+                 format_val(decisionConfig.margin_ratio) + ")";
+      } else {
+        reason = "below_margin(" + format_val(delta) + "<" +
+                 format_val(decisionConfig.margin_delta) + ")";
+      }
+    } else if (!weight_ok) {
+      reason = "below_weight(" + format_val(class_weight) + "<" +
+               format_val(decisionConfig.min_class_weight) + ")";
+    }
+
+    bool pass = threshold_ok && margin_ok && weight_ok;
 
     result.posteriors = std::move(posterior);
 
     if (pass) {
       result.taxidCount.clear();
       result.taxidCount.emplace_back(top.first, 0);
+      if (trace) {
+        trace->passedPost = true;
+        trace->suspiciousPost = false;
+        appendReason("post_pass");
+        if (trace->deepLogged) {
+          dbg::log("Decision[%s][post]: passed=1 reason=%s", result.id.c_str(),
+                   trace->decisionReason.c_str());
+        }
+      }
+      dbg::g.passed_post.fetch_add(1, std::memory_order_relaxed);
       continue;
     }
+
+    if (reason.empty()) {
+      reason = "post_reject";
+    }
+    appendReason(reason);
 
     if (decisionConfig.use_lca_fallback && lca &&
         result.posteriors.size() > 1) {
@@ -618,7 +906,30 @@ void postEmDecision(std::vector<classifyResult> &results,
       if (!fallback.empty() && fallback != kUnclassified) {
         result.taxidCount.clear();
         result.taxidCount.emplace_back(fallback, 0);
+        if (trace) {
+          trace->passedPost = true;
+          trace->suspiciousPost = false;
+          appendReason("lca_fallback");
+          if (trace->deepLogged) {
+            dbg::log("Decision[%s][post]: passed=1 reason=%s",
+                     result.id.c_str(), trace->decisionReason.c_str());
+          }
+        }
+        dbg::g.passed_post.fetch_add(1, std::memory_order_relaxed);
         continue;
+      }
+    }
+
+    if (trace) {
+      trace->passedPost = false;
+      trace->suspiciousPost = trace->enteredEm;
+      if (trace->suspiciousPost && !trace->deepLogged &&
+          dbg::wantDeep(result.id, trace->suspiciousPost)) {
+        trace->deepLogged = true;
+        dbg::dumpTrace(*trace, result.id, "post");
+      } else if (trace->deepLogged) {
+        dbg::log("Decision[%s][post]: passed=0 reason=%s", result.id.c_str(),
+                 trace->decisionReason.c_str());
       }
     }
 
@@ -664,7 +975,8 @@ struct GroupHeat {
 };
 
 inline void processSequence(
-    const std::vector<size_t> &hashs1, ChimeraBuild::IMCFConfig &imcfConfig,
+    const std::vector<uint64_t> &hashs1, size_t readLen,
+    ChimeraBuild::IMCFConfig &imcfConfig,
     std::vector<std::vector<std::string>> &indexToTaxid, const TaxDict &tax,
     ClassifyConfig &config, GroupHeat &heat,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
@@ -673,6 +985,33 @@ inline void processSequence(
   // Calculate the number of hash values and determine the threshold for
   // classification
   size_t hashNum = hashs1.size();
+  auto xor_reduce = [](const std::vector<uint64_t> &vals) {
+    uint64_t acc = 0;
+    for (uint64_t v : vals) {
+      acc ^= v;
+    }
+    return acc;
+  };
+
+  std::shared_ptr<dbg::TraceRecord> trace;
+  if (dbg::enabled()) {
+    trace = std::make_shared<dbg::TraceRecord>();
+    trace->readLen = readLen;
+    trace->minimizerTotal = hashNum;
+    trace->shotThreshold = config.shotThreshold;
+    trace->firstFilterBeta = config.firstFilterBeta;
+    trace->preEmTopK = config.preEmTopK;
+    trace->thrMinEval = config.min_eval_count;
+    if (!hashs1.empty()) {
+      trace->xorAll = xor_reduce(hashs1);
+      std::vector<uint64_t> uniqVals = hashs1;
+      std::sort(uniqVals.begin(), uniqVals.end());
+      uniqVals.erase(std::unique(uniqVals.begin(), uniqVals.end()),
+                     uniqVals.end());
+      trace->uniqCount = uniqVals.size();
+    }
+  }
+
   auto thr_at_eval = [&](size_t n_eval_now) -> size_t {
     size_t base = config.adaptive_shot ? n_eval_now : hashNum;
     double scaled = static_cast<double>(base) * config.shotThreshold;
@@ -686,7 +1025,7 @@ inline void processSequence(
   size_t targetSample = hashNum / 4;
   targetSample = std::clamp<size_t>(targetSample, 16, 96);
   const size_t sampleBudget = std::min<size_t>(targetSample, hashs1.size());
-  std::vector<size_t> sampleVals;
+  std::vector<uint64_t> sampleVals;
   if (sampleBudget > 0) {
     sampleVals.reserve(sampleBudget);
     size_t step = std::max<size_t>(1, hashs1.size() / sampleBudget);
@@ -715,6 +1054,19 @@ inline void processSequence(
       }
       coarseTotal += contrib;
       sampleBinScore[bi] += contrib;
+    }
+  }
+
+  if (trace) {
+    trace->sampleCount = sampleVals.size();
+    trace->xorSample = xor_reduce(sampleVals);
+    if (!touchedS.empty()) {
+      std::unordered_set<uint32_t> touched;
+      touched.reserve(touchedS.size());
+      for (const auto &[bi, _] : touchedS) {
+        touched.insert(bi);
+      }
+      trace->touchedBins = touched.size();
     }
   }
 
@@ -905,6 +1257,16 @@ inline void processSequence(
     }
   }
 
+  bool candidateEmpty = fallback_full || topBins.empty();
+  if (trace) {
+    trace->candidateSize = topBins.size();
+    trace->fallbackFull = fallback_full;
+    trace->candidateEmpty = candidateEmpty;
+  }
+  if (trace && candidateEmpty) {
+    dbg::g.candidate_zero.fetch_add(1, std::memory_order_relaxed);
+  }
+
   if (!fallback_full) {
     for (auto bin : topBins) {
       uint32_t delta = 1;
@@ -924,6 +1286,12 @@ inline void processSequence(
   robin_hood::unordered_flat_map<uint32_t, uint32_t> tidCount;
   tidCount.reserve(128);
 
+  uint64_t eventHits = 0;
+  robin_hood::unordered_flat_map<uint32_t, uint32_t> binHitCount;
+  if (trace) {
+    binHitCount.reserve(128);
+  }
+
   auto emit_to_tid = [&](uint32_t bin, uint16_t sp) {
     if (bin >= tax.idx2id.size()) {
       return;
@@ -937,6 +1305,10 @@ inline void processSequence(
       return;
     }
     ++tidCount[tid];
+    if (trace) {
+      ++eventHits;
+      ++binHitCount[bin];
+    }
   };
 
   size_t n_eval = 0;
@@ -997,8 +1369,46 @@ inline void processSequence(
     top2(bestTid, best, second);
   }
 
+  if (trace) {
+    trace->thrConf = thr_conf;
+  }
+
+  if (trace) {
+    trace->imcfEvents = eventHits;
+    trace->binsWithHits = binHitCount.size();
+    trace->evaluated = n_eval;
+    trace->bestCount = best;
+    trace->secondCount = second;
+    trace->bestTid = bestTid;
+    if (bestTid < tax.id2str.size()) {
+      trace->bestTaxid = tax.id2str[bestTid];
+    }
+    if (!binHitCount.empty()) {
+      std::vector<std::pair<uint32_t, uint32_t>> ranked;
+      ranked.reserve(binHitCount.size());
+      for (const auto &kv : binHitCount) {
+        ranked.emplace_back(kv.first, kv.second);
+      }
+      std::sort(ranked.begin(), ranked.end(),
+                [](const auto &a, const auto &b) { return a.second > b.second; });
+      if (ranked.size() > dbg::gCfg.topk_print) {
+        ranked.resize(dbg::gCfg.topk_print);
+      }
+      trace->topBinHits = std::move(ranked);
+    }
+    bool eventZero = (eventHits == 0);
+    if (!hashs1.empty() && eventZero) {
+      dbg::g.imcf_event_zero.fetch_add(1, std::memory_order_relaxed);
+      trace->suspiciousPre = true;
+    }
+    if (eventHits > 0 && trace->candidateEmpty) {
+      trace->suspiciousPre = true;
+    }
+  }
+
   classifyResult result;
   result.id = id;
+  result.trace = trace;
   std::pair<std::string, std::size_t> maxCount;
   bool maxCountValid = false;
 
@@ -1033,9 +1443,35 @@ inline void processSequence(
   }
   size_t thr_min_eval = (config.min_eval_count > 0) ? config.min_eval_count : 0;
 
+  if (trace) {
+    trace->thrBeta = thr_beta;
+    trace->thrEval = thr_eval;
+    trace->thrMinEval = thr_min_eval;
+    trace->useEm = use_em;
+  }
+
   uint64_t TOT = 0;
   for (const auto &kv : tidCount) {
     TOT += kv.second;
+  }
+  if (trace) {
+    trace->totalTidHits = TOT;
+  }
+
+  if (trace && !tidCount.empty()) {
+    std::vector<std::pair<std::string, size_t>> ranked;
+    ranked.reserve(tidCount.size());
+    for (const auto &[tid_id, raw] : tidCount) {
+      if (tid_id < tax.id2str.size()) {
+        ranked.emplace_back(tax.id2str[tid_id], raw);
+      }
+    }
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto &a, const auto &b) { return a.second > b.second; });
+    if (ranked.size() > dbg::gCfg.topk_print) {
+      ranked.resize(dbg::gCfg.topk_print);
+    }
+    trace->emInputTop = ranked;
   }
 
   size_t M = 0;
@@ -1090,6 +1526,16 @@ inline void processSequence(
     result.taxidCount.emplace_back(maxCount);
   }
 
+  if (trace) {
+    bool enters = use_em && !result.taxidCount.empty() &&
+                  !(result.taxidCount.size() == 1 &&
+                    result.taxidCount.front().first == "unclassified");
+    trace->enteredEm = enters;
+    if (enters) {
+      dbg::g.entered_em.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
   if (!result.taxidCount.empty() && (config.em || config.vem)) {
     size_t K = config.preEmTopK > 0 ? config.preEmTopK : static_cast<size_t>(0);
     if (K > 0 && result.taxidCount.size() > K) {
@@ -1131,6 +1577,21 @@ inline void processSequence(
   } else {
     fileInfo.unclassifiedNum++;
     result.taxidCount.emplace_back("unclassified", 1);
+  }
+
+  if (trace) {
+    if (trace->decisionReason.empty()) {
+      if (!hashs1.empty() && trace->imcfEvents == 0) {
+        trace->decisionReason = "imcf_no_hit";
+      } else if (trace->candidateEmpty) {
+        trace->decisionReason = "candidate_empty";
+      }
+    }
+    if (trace->suspiciousPre && !trace->deepLogged &&
+        dbg::wantDeep(id, trace->suspiciousPre)) {
+      trace->deepLogged = true;
+      dbg::dumpTrace(*trace, id, "pre");
+    }
   }
 
   // Add the classifyResult to the shared classifyResults vector
@@ -1305,44 +1766,70 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
                          LCA &lca, GroupHeat &heat,
                          ProgressTracker *progress = nullptr) {
   // Process batch of reads
-  std::vector<size_t> hashs1;
+  std::vector<uint64_t> hashs1;
   if (!batch.seqs2.empty()) {
     for (size_t i = 0; i < batch.ids.size(); ++i) {
       hashs1.clear();
+      size_t len1 = (i < batch.seqs.size()) ? batch.seqs[i].size() : 0;
+      size_t len2 = (i < batch.seqs2.size()) ? batch.seqs2[i].size() : 0;
+      size_t readLen = len1 + len2;
       if (i < batch.seqs.size() &&
           batch.seqs[i].size() >= imcfConfig.windowSize) {
         hashs1 =
-            batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector>();
+            batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector<uint64_t>>();
       }
       if (i < batch.seqs2.size() &&
           batch.seqs2[i].size() >= imcfConfig.windowSize) {
-        std::vector<size_t> hashs2 =
-            batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector>();
+        std::vector<uint64_t> hashs2 =
+            batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector<uint64_t>>();
         hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
       }
       if (hashs1.size() > 2048) {
         std::sort(hashs1.begin(), hashs1.end());
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
-      processSequence(hashs1, imcfConfig, indexToTaxid, tax, config, heat, imcf,
-                      batch.ids[i], classifyResults, fileInfo, lca, progress);
+      if (dbg::enabled()) {
+        dbg::g.total_reads.fetch_add(1, std::memory_order_relaxed);
+        bool allShort = (len1 < imcfConfig.windowSize) &&
+                        (len2 < imcfConfig.windowSize);
+        if (allShort) {
+          dbg::g.too_short.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (!hashs1.empty()) {
+          dbg::g.has_minimizers.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+      processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
+                      heat, imcf, batch.ids[i], classifyResults, fileInfo, lca,
+                      progress);
     }
   } else {
     // Process single-end reads
     for (size_t i = 0; i < batch.seqs.size(); i++) {
       hashs1.clear();
+      size_t readLen = batch.seqs[i].size();
       if (batch.seqs[i].size() >= imcfConfig.windowSize) {
         // Generate minimizer hash values for the sequence
         hashs1 =
-            batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector>();
+            batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector<uint64_t>>();
       }
       if (hashs1.size() > 2048) {
         std::sort(hashs1.begin(), hashs1.end());
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
+      if (dbg::enabled()) {
+        dbg::g.total_reads.fetch_add(1, std::memory_order_relaxed);
+        if (readLen < imcfConfig.windowSize) {
+          dbg::g.too_short.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (!hashs1.empty()) {
+          dbg::g.has_minimizers.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
       // Process the hash values for classification
-      processSequence(hashs1, imcfConfig, indexToTaxid, tax, config, heat, imcf,
-                      batch.ids[i], classifyResults, fileInfo, lca, progress);
+      processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
+                      heat, imcf, batch.ids[i], classifyResults, fileInfo, lca,
+                      progress);
     }
   }
 }
@@ -1359,10 +1846,23 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
                         std::vector<classifyResult> &classifyResults,
                         FileInfo &fileInfo, std::atomic<bool> &producer_done,
                         ProgressTracker *progress) {
+  if (dbg::enabled()) {
+    dbg::reset();
+  }
+  dbg::initSink();
+  if (dbg::enabled()) {
+    dbg::log("Trace start: seed64=%llu, k=%u, w=%u, hashVersion=%u, fpSalt=%llu",
+             static_cast<unsigned long long>(imcfConfig.seed64),
+             static_cast<unsigned>(imcfConfig.kmerSize),
+             static_cast<unsigned>(imcfConfig.windowSize),
+             static_cast<unsigned>(imcfConfig.hashVersion),
+             static_cast<unsigned long long>(imcfConfig.fpSalt));
+  }
+
   auto minimiser_view = seqan3::views::minimiser_hash(
       seqan3::shape{seqan3::ungapped{imcfConfig.kmerSize}},
       seqan3::window_size{imcfConfig.windowSize},
-      seqan3::seed{adjust_seed(imcfConfig.kmerSize)});
+      seqan3::seed{imcfConfig.seed64});
 
   LCA lca;
   if (config.lca) {
@@ -1415,6 +1915,17 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
   if (!(config.em || config.vem) || !config.skip_post_filter) {
     secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
     thirdFilteringStep(classifyResults, fileInfo);
+  }
+
+  if (dbg::enabled()) {
+    dbg::log("Summary: reads=%llu, too_short=%llu, has_min=%llu, imcf_event_zero=%llu, candidate_zero=%llu, entered_em=%llu, passed_post=%llu",
+             static_cast<unsigned long long>(dbg::g.total_reads.load()),
+             static_cast<unsigned long long>(dbg::g.too_short.load()),
+             static_cast<unsigned long long>(dbg::g.has_minimizers.load()),
+             static_cast<unsigned long long>(dbg::g.imcf_event_zero.load()),
+             static_cast<unsigned long long>(dbg::g.candidate_zero.load()),
+             static_cast<unsigned long long>(dbg::g.entered_em.load()),
+             static_cast<unsigned long long>(dbg::g.passed_post.load()));
   }
 }
 
@@ -1471,11 +1982,24 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               std::vector<std::vector<std::string>> &indexToTaxid,
               const TaxDict &tax, std::vector<classifyResult> &classifyResults,
               FileInfo &fileInfo, ProgressTracker *progress) {
+  if (dbg::enabled()) {
+    dbg::reset();
+  }
+  dbg::initSink();
+  if (dbg::enabled()) {
+    dbg::log("Trace start: seed64=%llu, k=%u, w=%u, hashVersion=%u, fpSalt=%llu",
+             static_cast<unsigned long long>(imcfConfig.seed64),
+             static_cast<unsigned>(imcfConfig.kmerSize),
+             static_cast<unsigned>(imcfConfig.windowSize),
+             static_cast<unsigned>(imcfConfig.hashVersion),
+             static_cast<unsigned long long>(imcfConfig.fpSalt));
+  }
+
   // Create a minimiser hash view based on IMCF configuration
   auto minimiser_view = seqan3::views::minimiser_hash(
       seqan3::shape{seqan3::ungapped{imcfConfig.kmerSize}},
       seqan3::window_size{imcfConfig.windowSize},
-      seqan3::seed{adjust_seed(imcfConfig.kmerSize)});
+      seqan3::seed{imcfConfig.seed64});
 
   // Initialize LCA structure if LCA mode is enabled in the configuration
   LCA lca;
@@ -1525,6 +2049,17 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
   if (!(config.em || config.vem) || !config.skip_post_filter) {
     secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
     thirdFilteringStep(classifyResults, fileInfo);
+  }
+
+  if (dbg::enabled()) {
+    dbg::log("Summary: reads=%llu, too_short=%llu, has_min=%llu, imcf_event_zero=%llu, candidate_zero=%llu, entered_em=%llu, passed_post=%llu",
+             static_cast<unsigned long long>(dbg::g.total_reads.load()),
+             static_cast<unsigned long long>(dbg::g.too_short.load()),
+             static_cast<unsigned long long>(dbg::g.has_minimizers.load()),
+             static_cast<unsigned long long>(dbg::g.imcf_event_zero.load()),
+             static_cast<unsigned long long>(dbg::g.candidate_zero.load()),
+             static_cast<unsigned long long>(dbg::g.entered_em.load()),
+             static_cast<unsigned long long>(dbg::g.passed_post.load()));
   }
 }
 

@@ -23,8 +23,17 @@
 #include <iostream>
 #include <iomanip>
 #include <cstdint>
+#include <cereal/cereal.hpp>
 
 namespace ChimeraBuild {
+	inline constexpr uint64_t adjust_seed(uint8_t const kmer_size,
+		uint64_t const seed = 0x8F3F73B5CF1C9ADEULL) noexcept
+	{
+		unsigned double_k = static_cast<unsigned>(kmer_size) * 2u;
+		unsigned shift = double_k >= 64u ? 0u : (64u - double_k);
+		return seed >> shift;
+	}
+
 	struct BuildConfig {
 		std::string input_file;
 		std::string output_file;
@@ -80,17 +89,46 @@ namespace ChimeraBuild {
 	};
 
 	struct IMCFConfig {
-		size_t binNum;
-		size_t binSize;
-		uint8_t kmerSize;
-		uint16_t windowSize;
+		inline static constexpr uint64_t DefaultFingerprintSalt = 0xD1B54A32D192ED03ULL;
+		inline static constexpr uint8_t CurrentHashVersion = 1;
+
+		size_t binNum{};
+		size_t binSize{};
+		uint8_t kmerSize{};
+		uint16_t windowSize{};
 		int MaxCuckooCount{ 500 };
 		double loadFactor{ 0.95 };
+		uint64_t seed64{ 0 };
+		uint64_t fpSalt{ DefaultFingerprintSalt };
+		uint8_t hashVersion{ 0 };
 
 		template <class Archive>
-		void serialize(Archive& archive) {
-			archive(binNum, binSize, MaxCuckooCount, loadFactor);
-			archive(kmerSize, windowSize);
+		void save(Archive& archive) const {
+			archive(binNum, binSize, MaxCuckooCount, loadFactor,
+				kmerSize, windowSize, seed64, fpSalt, hashVersion);
+		}
+
+		template <class Archive>
+		void load(Archive& archive) {
+			archive(binNum, binSize, MaxCuckooCount, loadFactor, kmerSize, windowSize);
+			seed64 = adjust_seed(kmerSize);
+			fpSalt = DefaultFingerprintSalt;
+			hashVersion = 0;
+			try {
+				archive(seed64, fpSalt, hashVersion);
+			}
+			catch (const cereal::Exception&) {
+				// 旧版本存档不包含扩展字段，保留默认推导值
+				return;
+			}
+			// 兼容先前测试版本多写入的 canonical 字段，忽略其值
+			try {
+				bool legacyCanonical = false;
+				archive(legacyCanonical);
+			}
+			catch (const cereal::Exception&) {
+				// 没有额外字段，直接忽略
+			}
 		}
 	};
 }

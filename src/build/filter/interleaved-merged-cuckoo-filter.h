@@ -700,7 +700,7 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
    *
    * @return 编码好物种索引与指纹的 16 bit 标签。
    */
-  inline uint16_t reduceTo12bitAndAddIndex(size_t value, size_t index) const {
+	inline uint16_t reduceTo12bitAndAddIndex(uint64_t value, size_t index) const {
     assert(index < 16);
     uint16_t reduced_value = reduceTo12bit(value);
     uint16_t combined = (index << 12) | reduced_value;
@@ -712,11 +712,11 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
    *
    * 复用主哈希的位混合策略，只截取低 12 bit，并保证不返回 0。
    */
-inline uint16_t reduceTo12bit(size_t value) const {
-  uint64_t mixed = mix64((uint64_t)value ^ 0xD1B54A32D192ED03ull);
-  uint16_t v = (uint16_t)(mixed & 0x0FFFu);
-  return v ? v : 1;
-}
+	inline uint16_t reduceTo12bit(uint64_t value) const {
+		uint64_t mixed = mix64((uint64_t)value ^ ChimeraBuild::IMCFConfig::DefaultFingerprintSalt);
+		uint16_t v = (uint16_t)(mixed & 0x0FFFu);
+		return v ? v : 1;
+	}
 
   inline bool hasRouterIndex() const {
     return routerBucketOffsets.size() == hashSize + 1 &&
@@ -730,7 +730,7 @@ inline uint16_t reduceTo12bit(size_t value) const {
     routerPayload.clear();
   }
 
-  inline void route(size_t value, std::vector<uint32_t> &bins) const {
+	inline void route(uint64_t value, std::vector<uint32_t> &bins) const {
     bins.clear();
     if (!hasRouterIndex()) {
       return;
@@ -781,7 +781,7 @@ inline uint16_t reduceTo12bit(size_t value) const {
    * 构造标签后先命中主桶，再跳到可逆备桶，两桶任意存在空位或已有指纹即视为成功；
    * 若均告满载则进入踢出流程。
    */
-  inline bool insertTag(size_t binIndex, size_t value, size_t index) {
+	inline bool insertTag(size_t binIndex, uint64_t value, size_t index) {
     if (index >= 16) {
       assert(false &&
              "IMCF group index overflow (taxids per group must be <=16)");
@@ -952,7 +952,7 @@ inline uint16_t reduceTo12bit(size_t value) const {
    * 随机逐出当前桶一项换入新项，再借助可逆哈希跳往另一桶继续尝试，最多迭代
    * `MaxCuckooCount` 次。
    */
-  inline bool kickOut(size_t binIndex, size_t value, uint16_t tag) {
+	inline bool kickOut(size_t binIndex, uint64_t value, uint16_t tag) {
     uint16_t cur = tag;
     uint16_t fp = (uint16_t)(cur & 0x0FFFu);
     size_t b = hashIndex(value);
@@ -1050,7 +1050,7 @@ inline uint16_t reduceTo12bit(size_t value) const {
    * (e.g., data.get_int). The function requires the SIMDe library for SIMD
    * operations.
    */
-  inline void bulkContain(size_t value, std::vector<std::bitset<16>> &result) {
+	inline void bulkContain(uint64_t value, std::vector<std::bitset<16>> &result) {
     // Step 1: Reduce the minimizer hash to a 12-bit fingerprint
     uint16_t fingerprint = reduceTo12bit(value);
     // Step 2: Calculate primary and alternative hash positions
@@ -1163,7 +1163,7 @@ inline uint16_t reduceTo12bit(size_t value) const {
   }
 
   template <class EmitFn>
-  inline void bulkContain_events(size_t value, EmitFn &&emit) {
+	inline void bulkContain_events(uint64_t value, EmitFn &&emit) {
     uint16_t fingerprint = reduceTo12bit(value);
     size_t hash1 = hashIndex(value);
     size_t hash2 = altHash(hash1, fingerprint);
@@ -1306,7 +1306,7 @@ inline uint16_t reduceTo12bit(size_t value) const {
   }
 
   template <class EmitFn>
-  inline void bulkContain_events_subset(size_t value,
+	inline void bulkContain_events_subset(uint64_t value,
                                         const std::vector<uint32_t> &binSubset,
                                         EmitFn &&emit) {
     uint16_t fingerprint = reduceTo12bit(value);
