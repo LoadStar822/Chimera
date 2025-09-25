@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <bitset>
 #include <buildConfig.hpp>
 #include <cassert>
@@ -312,6 +313,16 @@ class InterleavedMergedCuckooFilter {
   std::vector<uint16_t> routerEntryFingerprints;
   std::vector<uint64_t> routerEntryOffsets;
   std::vector<uint8_t> routerPayload;
+  struct StashEntry {
+    uint64_t bucket{0};
+    uint16_t fingerprint{0};
+    uint16_t speciesMask{0};
+
+    template <class Archive> void serialize(Archive &ar) {
+      ar(bucket, fingerprint, speciesMask);
+    }
+  };
+  std::vector<std::vector<StashEntry>> stash;
   std::atomic<uint64_t> insertFailureTotal{0};
   std::atomic<uint64_t> insertFailureSaturated{0};
 
@@ -325,7 +336,42 @@ class InterleavedMergedCuckooFilter {
     size_t lowBitBins{0};
     double lowBitMinRatio{0.0};
     double lowBitMaxRatio{0.0};
+    uint64_t stashEntries{0};
+    size_t stashEntryCount{0};
+    size_t stashMaxPerEntry{0};
   };
+
+  static inline uint16_t popcount16(uint16_t value) {
+#if defined(__cpp_lib_bitops)
+    return static_cast<uint16_t>(std::popcount(value));
+#else
+    return static_cast<uint16_t>(__builtin_popcount(static_cast<unsigned int>(value)));
+#endif
+  }
+
+  inline bool insertIntoStash(size_t binIndex, size_t bucket, uint16_t fingerprint,
+                              size_t speciesIndex) {
+    if (binIndex >= stash.size()) {
+      return false;
+    }
+    auto &entries = stash[binIndex];
+    uint16_t speciesBit = static_cast<uint16_t>(1u << speciesIndex);
+    for (auto &entry : entries) {
+      if (entry.bucket == bucket && entry.fingerprint == fingerprint) {
+        if ((entry.speciesMask & speciesBit) != 0) {
+          return true;
+        }
+        if (entry.speciesMask == 0xFFFFu) {
+          return false;
+        }
+        entry.speciesMask = static_cast<uint16_t>(entry.speciesMask | speciesBit);
+        return true;
+      }
+    }
+    entries.push_back(
+        StashEntry{static_cast<uint64_t>(bucket), fingerprint, speciesBit});
+    return true;
+  }
 
   static inline void decodeVarintSequence(const std::vector<uint8_t> &dataBytes,
                                           size_t start, size_t end,
@@ -592,10 +638,11 @@ public:
 #ifdef IMCF_MIRROR64
     initializeMirrorStorage();
 #endif
+    stash.assign(binNum, {});
   }
 
   template <class Archive> void serialize(Archive &ar) {
-    ar(data, binNum, binSize, tagNum, MaxCuckooCount, hashSize);
+    ar(data, binNum, binSize, tagNum, MaxCuckooCount, hashSize, stash);
 #ifdef IMCF_MIRROR64
     if constexpr (Archive::is_loading::value) {
       rebuildMirrorFromBitVector();
@@ -606,6 +653,11 @@ public:
       }
     }
 #endif
+    if constexpr (Archive::is_loading::value) {
+      if (stash.size() != binNum) {
+        stash.resize(binNum);
+      }
+    }
   }
 
   /**
@@ -775,6 +827,13 @@ inline uint16_t reduceTo12bit(size_t value) const {
     int sameFingerprint = countMatching(readBucket64(b1, binIndex)) +
                           countMatching(readBucket64(b2, binIndex));
     if (sameFingerprint >= 8) {
+      bool stored = insertIntoStash(binIndex, b1, fp, index);
+      if (!stored && b2 != b1) {
+        stored = insertIntoStash(binIndex, b2, fp, index);
+      }
+      if (stored) {
+        return true;
+      }
       insertFailureTotal.fetch_add(1, std::memory_order_relaxed);
       insertFailureSaturated.fetch_add(1, std::memory_order_relaxed);
       return false;
@@ -867,6 +926,23 @@ inline uint16_t reduceTo12bit(size_t value) const {
     }
     stats.lowBitMinRatio = minRatio;
     stats.lowBitMaxRatio = maxRatio;
+    if (binIndex < stash.size()) {
+      const auto &entries = stash[binIndex];
+      if (!entries.empty()) {
+        stats.stashEntryCount = entries.size();
+        uint64_t totalSpecies = 0;
+        size_t maxPerEntry = 0;
+        for (const auto &entry : entries) {
+          uint16_t count = popcount16(entry.speciesMask);
+          totalSpecies += count;
+          if (count > maxPerEntry) {
+            maxPerEntry = count;
+          }
+        }
+        stats.stashEntries = totalSpecies;
+        stats.stashMaxPerEntry = maxPerEntry;
+      }
+    }
     return stats;
   }
 
@@ -910,6 +986,30 @@ inline uint16_t reduceTo12bit(size_t value) const {
       b = altHash(b, fp);
     }
     return false;
+  }
+
+  template <typename Emit>
+  inline void forEachStashMatch(size_t binIndex, size_t bucket,
+                                uint16_t fingerprint, Emit &&emit) const {
+    if (binIndex >= stash.size()) {
+      return;
+    }
+    const auto &entries = stash[binIndex];
+    if (entries.empty()) {
+      return;
+    }
+    for (const auto &entry : entries) {
+      if (entry.bucket != bucket || entry.fingerprint != fingerprint) {
+        continue;
+      }
+      unsigned int mask = entry.speciesMask;
+      while (mask) {
+        auto species = static_cast<uint16_t>(std::countr_zero(mask));
+        emit(species);
+        mask &= (mask - 1);
+      }
+      return;
+    }
   }
 
   /**
@@ -1006,6 +1106,16 @@ inline uint16_t reduceTo12bit(size_t value) const {
           uint16_t speciesIndex = species_vals[i];
           result[binIndex].set(speciesIndex);
         }
+      }
+      forEachStashMatch(binIndex, hash1, fingerprint,
+                        [&](uint16_t speciesIndex) {
+                          result[binIndex].set(speciesIndex);
+                        });
+      if (hash2 != hash1) {
+        forEachStashMatch(binIndex, hash2, fingerprint,
+                          [&](uint16_t speciesIndex) {
+                            result[binIndex].set(speciesIndex);
+                          });
       }
     }
   }
@@ -1108,6 +1218,16 @@ inline uint16_t reduceTo12bit(size_t value) const {
             if (q2[i] != 0) {
               process64(q2[i], bin);
             }
+            forEachStashMatch(bin, hash1, fingerprint,
+                              [&](uint16_t speciesIndex) {
+                                emit(bin, speciesIndex);
+                              });
+            if (hash2 != hash1) {
+              forEachStashMatch(bin, hash2, fingerprint,
+                                [&](uint16_t speciesIndex) {
+                                  emit(bin, speciesIndex);
+                                });
+            }
           }
         }
       }
@@ -1142,6 +1262,16 @@ inline uint16_t reduceTo12bit(size_t value) const {
         }
         if (qAlt != 0) {
           process64(qAlt, bin);
+        }
+        forEachStashMatch(bin, hash1, fingerprint,
+                          [&](uint16_t speciesIndex) {
+                            emit(bin, speciesIndex);
+                          });
+        if (hash2 != hash1) {
+          forEachStashMatch(bin, hash2, fingerprint,
+                            [&](uint16_t speciesIndex) {
+                              emit(bin, speciesIndex);
+                            });
         }
       }
       count = 0;
@@ -1272,12 +1402,20 @@ inline uint16_t reduceTo12bit(size_t value) const {
           if (q != 0ULL) {
             process64(q, binIndex);
           }
+          forEachStashMatch(binIndex, hash1, fingerprint,
+                            [&](uint16_t speciesIndex) {
+                              emit(binIndex, speciesIndex);
+                            });
         }
         if ((maskBits & 0x2) && hash2 != hash1) {
           uint64_t q = readBucket64(hash2, binIndex);
           if (q != 0ULL) {
             process64(q, binIndex);
           }
+          forEachStashMatch(binIndex, hash2, fingerprint,
+                            [&](uint16_t speciesIndex) {
+                              emit(binIndex, speciesIndex);
+                            });
         }
       }
       return;
@@ -1300,10 +1438,21 @@ inline uint16_t reduceTo12bit(size_t value) const {
           ++cnt;
         }
         for (size_t i = 0; i < cnt; ++i) {
+          uint32_t bin = bins[i];
           if (q1[i] != 0)
-            process64(q1[i], bins[i]);
+            process64(q1[i], bin);
+          forEachStashMatch(bin, hash1, fingerprint,
+                            [&](uint16_t speciesIndex) {
+                              emit(bin, speciesIndex);
+                            });
           if (q2[i] != 0)
-            process64(q2[i], bins[i]);
+            process64(q2[i], bin);
+          if (hash2 != hash1) {
+            forEachStashMatch(bin, hash2, fingerprint,
+                              [&](uint16_t speciesIndex) {
+                                emit(bin, speciesIndex);
+                              });
+          }
         }
       }
       return;
@@ -1343,11 +1492,21 @@ inline uint16_t reduceTo12bit(size_t value) const {
           uint64_t q = readBucket64(hash1, binIndex);
           if (q != 0)
             process64(q, binIndex);
+          forEachStashMatch(binIndex, hash1, fingerprint,
+                            [&](uint16_t speciesIndex) {
+                              emit(binIndex, speciesIndex);
+                            });
         }
         if (use2[i]) {
           uint64_t q = readBucket64(hash2, binIndex);
           if (q != 0)
             process64(q, binIndex);
+          if (hash2 != hash1) {
+            forEachStashMatch(binIndex, hash2, fingerprint,
+                              [&](uint16_t speciesIndex) {
+                                emit(binIndex, speciesIndex);
+                              });
+          }
         }
       }
     }

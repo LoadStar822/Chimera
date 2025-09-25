@@ -754,6 +754,12 @@ namespace ChimeraBuild {
 						<< " (" << formatRate(bucketStats.percentFull) << ")";
 					statsLine << std::setprecision(3)
 						<< ", low-bit load ratio range=" << bucketStats.lowBitMinRatio << " - " << bucketStats.lowBitMaxRatio;
+					if (bucketStats.stashEntries > 0) {
+						statsLine << std::setprecision(0)
+							<< ", stash_species=" << bucketStats.stashEntries
+							<< " (entries=" << bucketStats.stashEntryCount
+							<< ", max_per_entry=" << bucketStats.stashMaxPerEntry << ")";
+					}
 					std::cout << statsLine.str() << std::endl;
 				}
 			uint64_t imcfFailureTotal = imcf.getInsertFailureTotal();
