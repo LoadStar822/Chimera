@@ -32,8 +32,33 @@
 #include <queue>
 #include <buildConfig.hpp>
 #include <atomic>
+#include <array>
+#include <vector>
+#include <cmath>
+
+static inline size_t ceil_div_u64(uint64_t a, uint64_t b) {
+	return (size_t)((a + b - 1) / b);
+}
+
+static inline size_t next_pow2(size_t v) {
+	if (v <= 1) return 1;
+	v--;
+	v |= v >> 1;
+	v |= v >> 2;
+	v |= v >> 4;
+	v |= v >> 8;
+	v |= v >> 16;
+#if SIZE_MAX > 0xFFFFFFFFu
+	v |= v >> 32;
+#endif
+	return v + 1;
+}
 
 namespace chimera::imcf {
+	static inline uint64_t mix64(uint64_t value) {
+		return XXH3_64bits(&value, sizeof(value));
+	}
+
 	struct Group {
 		std::vector<std::string> taxids;
 		uint64_t totalHash{ 0 };
@@ -170,6 +195,17 @@ namespace chimera::imcf {
 	size_t hashSize{};
 	std::atomic<uint64_t> insertFailureTotal{ 0 };
 	std::atomic<uint64_t> insertFailureSaturated{ 0 };
+	struct BucketStats {
+		size_t bucketCount{ 0 };
+		std::array<uint64_t, 5> occupancy{};
+		double meanLoad{ 0.0 };
+		double stddevLoad{ 0.0 };
+		double percentFull{ 0.0 };
+		double maxBucketLoad{ 0.0 };
+		size_t lowBitBins{ 0 };
+		double lowBitMinRatio{ 0.0 };
+		double lowBitMaxRatio{ 0.0 };
+	};
 
 
 		friend std::ostream& operator<<(std::ostream& os, const InterleavedMergedCuckooFilter& filter)
@@ -192,9 +228,14 @@ namespace chimera::imcf {
 				}
 			}
 			binNum = groups.size();
-			binSize = maxTotalHash / (config.loadFactor * tagNum);
+			double denom = config.loadFactor * static_cast<double>(tagNum);
+			double provisional = denom > 0.0 ? static_cast<double>(maxTotalHash) / denom : 0.0;
+			constexpr double safetyCoeff = 1.05;
+			binSize = static_cast<size_t>(std::ceil(provisional * safetyCoeff));
+			binSize = std::max<size_t>(1, binSize);
+			hashSize = next_pow2(binSize);
+			binSize = hashSize;
 			data = sdsl::bit_vector(binNum * binSize * tagNum * 16, 0);
-			hashSize = binSize;
 			config.binNum = binNum;
 			config.binSize = binSize;
 		}
@@ -205,29 +246,30 @@ namespace chimera::imcf {
 		}
 
 		inline size_t hashIndex(uint64_t value) {
-			uint64_t hash = XXH64(&value, sizeof(value), 0);
-			return hash % hashSize;
+			uint64_t hashed = mix64(value);
+			return (size_t)hashed & (hashSize - 1);
 		}
 
 		inline size_t altHash(size_t hashValue, uint16_t fingerprint) {
-			uint64_t data = hashValue ^ (fingerprint * 0x5bd1e995);
-			uint64_t hash = XXH64(&data, sizeof(data), 0);
-			return hash % hashSize;
+			uint64_t fp64 = (uint64_t)fingerprint ^ 0x9E3779B97F4A7C15ull;
+			size_t alt = (hashValue ^ (size_t)mix64(fp64)) & (hashSize - 1);
+			if (alt == hashValue) {
+				alt = (hashValue + 1) & (hashSize - 1);
+			}
+			return alt;
 		}
 
 		inline uint16_t reduceTo12bitAndAddIndex(size_t value, size_t index)
 		{
-			uint64_t hash = XXH64(&value, sizeof(value), 0);
-			uint16_t reduced_value = static_cast<uint16_t>(hash & 0x0FFF);
-			reduced_value = reduced_value == 0 ? 1 : reduced_value;
+			uint16_t reduced_value = reduceTo12bit(value);
 			uint16_t combined = (index << 12) | reduced_value;
 			return combined;
 		}
 
 		inline uint16_t reduceTo12bit(size_t value)
 		{
-			uint64_t hash = XXH64(&value, sizeof(value), 0);
-			uint16_t reduced_value = static_cast<uint16_t>(hash & 0x0FFF);
+			uint64_t mixed = mix64((uint64_t)value ^ 0xD1B54A32D192ED03ull);
+			uint16_t reduced_value = static_cast<uint16_t>(mixed & 0x0FFF);
 			reduced_value = reduced_value == 0 ? 1 : reduced_value;
 			return reduced_value;
 		}
@@ -295,6 +337,79 @@ namespace chimera::imcf {
 
 			inline uint64_t getInsertFailureSaturatedFingerprint() const {
 				return insertFailureSaturated.load(std::memory_order_relaxed);
+			}
+
+			BucketStats computeBucketStats(size_t binIndex, size_t lowBitBins = 256) const
+			{
+				if (binIndex >= binNum) {
+					throw std::out_of_range("IMCF (nosimd) bucket stats: binIndex out of range");
+				}
+				if (lowBitBins == 0 || (lowBitBins & (lowBitBins - 1)) != 0) {
+					throw std::invalid_argument("IMCF (nosimd) bucket stats: lowBitBins must be power of two");
+				}
+				BucketStats stats;
+				stats.bucketCount = hashSize;
+				stats.lowBitBins = lowBitBins;
+				double sum = 0.0;
+				double sumSq = 0.0;
+				uint64_t maxLoad = 0;
+				std::vector<uint64_t> lowBitLoad(lowBitBins, 0);
+				std::vector<uint64_t> lowBitBucketCount(lowBitBins, 0);
+				size_t mask = lowBitBins - 1;
+				for (size_t bucket = 0; bucket < hashSize; ++bucket) {
+					size_t bucketPosition = bucket * binNum + binIndex;
+					size_t indexStart = bucketPosition * tagNum * 16;
+					uint64_t raw = data.get_int(indexStart, 64);
+					uint64_t load = 0;
+					for (int i = 0; i < static_cast<int>(tagNum); ++i) {
+						uint16_t chunk = (uint16_t)((raw >> (i * 16)) & 0xFFFFu);
+						if (chunk != 0u) {
+							++load;
+						}
+					}
+					if (load <= 4) {
+						stats.occupancy[load]++;
+					}
+					sum += static_cast<double>(load);
+					sumSq += static_cast<double>(load) * static_cast<double>(load);
+					if (load > maxLoad) {
+						maxLoad = load;
+					}
+					size_t lowIdx = bucket & mask;
+					lowBitLoad[lowIdx] += load;
+					lowBitBucketCount[lowIdx]++;
+				}
+				if (stats.bucketCount > 0) {
+					stats.meanLoad = sum / static_cast<double>(stats.bucketCount);
+					double variance = sumSq / static_cast<double>(stats.bucketCount) - stats.meanLoad * stats.meanLoad;
+					if (variance < 0.0) {
+						variance = 0.0;
+					}
+					stats.stddevLoad = std::sqrt(variance);
+					stats.percentFull = static_cast<double>(stats.occupancy[4]) / static_cast<double>(stats.bucketCount);
+				}
+				stats.maxBucketLoad = static_cast<double>(maxLoad);
+				double minRatio = std::numeric_limits<double>::infinity();
+				double maxRatio = 0.0;
+				for (size_t idx = 0; idx < lowBitBins; ++idx) {
+					if (lowBitBucketCount[idx] == 0) {
+						continue;
+					}
+					double avg = static_cast<double>(lowBitLoad[idx]) / static_cast<double>(lowBitBucketCount[idx]);
+					double ratio = stats.meanLoad > 0.0 ? avg / stats.meanLoad : 0.0;
+					if (ratio > maxRatio) {
+						maxRatio = ratio;
+					}
+					if (ratio < minRatio) {
+						minRatio = ratio;
+					}
+				}
+				if (!std::isfinite(minRatio)) {
+					minRatio = 0.0;
+				}
+				stats.lowBitMinRatio = minRatio;
+				stats.lowBitMaxRatio = maxRatio;
+				return stats;
 			}
 
 		inline bool kickOut(size_t binIndex, size_t value, uint16_t tag)

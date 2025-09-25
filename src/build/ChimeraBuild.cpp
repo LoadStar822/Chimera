@@ -32,6 +32,10 @@
 #include <span>
 
 namespace ChimeraBuild {
+	static inline uint64_t mix64(uint64_t value) {
+		return XXH3_64bits(&value, sizeof(value));
+	}
+
 	struct TaxidShardPlan {
 		size_t groupIndex;
 		size_t slotIndex;
@@ -554,16 +558,29 @@ namespace ChimeraBuild {
 				buffer.clear();
 			};
 
-			auto advanceShard = [&](size_t& shardIdx) {
-				while (shardIdx < plans.size() && remainingCounts[shardIdx] == 0) {
-					flushSlot(shardIdx);
-					++shardIdx;
+			uint64_t totalRemaining = 0;
+			for (uint64_t v : remainingCounts) {
+				totalRemaining += v;
+			}
+
+			auto pickShard = [&](uint64_t hash) -> size_t {
+				if (totalRemaining == 0) {
+					return plans.size();
 				}
-				return shardIdx < plans.size();
+				uint64_t r = mix64(hash) % totalRemaining;
+				for (size_t idx = 0; idx < remainingCounts.size(); ++idx) {
+					uint64_t quota = remainingCounts[idx];
+					if (quota == 0) {
+						continue;
+					}
+					if (r < quota) {
+						return idx;
+					}
+					r -= quota;
+				}
+				return plans.size();
 			};
 
-			size_t currentShard = 0;
-			advanceShard(currentShard);
 			std::vector<uint64_t> readBlock(kReadBlockBytes / sizeof(uint64_t));
 			while (ifile) {
 				ifile.read(reinterpret_cast<char*>(readBlock.data()), static_cast<std::streamsize>(readBlock.size() * sizeof(uint64_t)));
@@ -572,27 +589,30 @@ namespace ChimeraBuild {
 					break;
 				}
 				size_t hashesRead = static_cast<size_t>(bytesRead) / sizeof(uint64_t);
-				bool exhausted = false;
+				bool overflow = false;
 				for (size_t h = 0; h < hashesRead; ++h) {
-					if (!advanceShard(currentShard)) {
+					size_t shard = pickShard(readBlock[h]);
+					if (shard >= plans.size()) {
+						// Extra minimisers beyond planned quota
 	#pragma omp critical(imcf_log)
 						std::cerr << "Warning: taxid " << taxid
 							<< " produced more minimisers than expected; extra entries ignored" << std::endl;
-						exhausted = true;
+						overflow = true;
 						break;
 					}
-					slotBuffers[currentShard].push_back(readBlock[h]);
-					if (slotBuffers[currentShard].size() >= kFlushThreshold) {
-						flushSlot(currentShard);
+					slotBuffers[shard].push_back(readBlock[h]);
+					if (slotBuffers[shard].size() >= kFlushThreshold) {
+						flushSlot(shard);
 					}
-					if (remainingCounts[currentShard] > 0) {
-						--remainingCounts[currentShard];
+					if (remainingCounts[shard] > 0) {
+						--remainingCounts[shard];
+						--totalRemaining;
 					}
-					if (remainingCounts[currentShard] == 0) {
-						advanceShard(currentShard);
+					if (remainingCounts[shard] == 0) {
+						flushSlot(shard);
 					}
 				}
-				if (exhausted) {
+				if (overflow) {
 					break;
 				}
 			}
@@ -607,10 +627,7 @@ namespace ChimeraBuild {
 				flushSlot(shardIdx);
 			}
 
-			uint64_t missing = 0;
-			for (uint64_t remain : remainingCounts) {
-				missing += remain;
-			}
+			uint64_t missing = totalRemaining;
 			if (missing != 0) {
 #pragma omp critical(imcf_log)
 				std::cerr << "Warning: taxid " << taxid
@@ -728,6 +745,16 @@ namespace ChimeraBuild {
 							<< summary.worstSlotFailures << "/" << summary.worstSlotAttempts
 							<< " failed (" << formatRate(summary.worstSlotRate) << ")" << std::endl;
 					}
+					auto bucketStats = imcf.computeBucketStats(summary.index, 256);
+					std::ostringstream statsLine;
+					statsLine << std::fixed << std::setprecision(4)
+						<< "      bucket load mean=" << bucketStats.meanLoad
+						<< ", stdev=" << bucketStats.stddevLoad
+						<< ", full=" << bucketStats.occupancy[4] << "/" << bucketStats.bucketCount
+						<< " (" << formatRate(bucketStats.percentFull) << ")";
+					statsLine << std::setprecision(3)
+						<< ", low-bit load ratio range=" << bucketStats.lowBitMinRatio << " - " << bucketStats.lowBitMaxRatio;
+					std::cout << statsLine.str() << std::endl;
 				}
 			uint64_t imcfFailureTotal = imcf.getInsertFailureTotal();
 			uint64_t imcfFailureSaturated = imcf.getInsertFailureSaturatedFingerprint();
