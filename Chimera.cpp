@@ -251,11 +251,11 @@ int main(int argc, char **argv) {
   classify
       ->add_option("--post-thres", classifyConfig.post_thres,
                    "Posterior acceptance threshold")
-      ->default_val(0.75);
+      ->default_val(0.6);
   classify
       ->add_option("--post-margin", classifyConfig.post_margin,
                    "Minimum gap between top posteriors")
-      ->default_val(0.05);
+      ->default_val(0.02);
   classify->add_option("--post-ratio", classifyConfig.post_ratio,
                        "Minimum ratio between top1 and top2 posteriors");
   classify

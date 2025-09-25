@@ -60,8 +60,8 @@ namespace ChimeraClassify {
 		bool vem = false;
 		double emThreshold;
 		size_t emIter;
-		double post_thres = 0.9;
-		double post_margin = 0.2;
+		double post_thres = 0.6;
+		double post_margin = 0.02;
 		double post_ratio = std::numeric_limits<double>::quiet_NaN();
 		double post_pi_min = 1e-4;
 		bool lca_fallback = false;

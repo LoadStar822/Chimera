@@ -590,12 +590,14 @@ void postEmDecision(std::vector<classifyResult> &results,
       pass = pass && ((top_score - runner_up) >= decisionConfig.margin_delta);
     }
 
-    double global_weight = 0.0;
-    auto weight_it = classWeights.find(top.first);
-    if (weight_it != classWeights.end()) {
-      global_weight = weight_it->second;
+    bool weight_ok = true;
+    if (!classWeights.empty()) {
+      auto weight_it = classWeights.find(top.first);
+      if (weight_it != classWeights.end()) {
+        weight_ok = (weight_it->second >= decisionConfig.min_class_weight);
+      }
     }
-    pass = pass && (global_weight >= decisionConfig.min_class_weight);
+    pass = pass && weight_ok;
 
     result.posteriors = std::move(posterior);
 
@@ -964,7 +966,7 @@ inline void processSequence(
     }
   };
 
-  [[maybe_unused]] uint32_t bestTid = std::numeric_limits<uint32_t>::max();
+  uint32_t bestTid = std::numeric_limits<uint32_t>::max();
   size_t best = 0;
   size_t second = 0;
   top2(bestTid, best, second);
@@ -998,6 +1000,12 @@ inline void processSequence(
   classifyResult result;
   result.id = id;
   std::pair<std::string, std::size_t> maxCount;
+  bool maxCountValid = false;
+
+  if (!maxCountValid && best > 0 && bestTid < tax.id2str.size()) {
+    maxCount = std::make_pair(tax.id2str[bestTid], std::min(best, n_eval));
+    maxCountValid = true;
+  }
 
   bool use_em = (config.em || config.vem);
 
@@ -1025,48 +1033,44 @@ inline void processSequence(
   }
   size_t thr_min_eval = (config.min_eval_count > 0) ? config.min_eval_count : 0;
 
-  size_t thr_final = 0;
-  if (use_em) {
-    size_t adaptive_floor = static_cast<size_t>(
-        std::ceil(0.25 * static_cast<double>(std::max<size_t>(n_eval, 1))));
-    if (adaptive_floor == 0 && n_eval > 0) {
-      adaptive_floor = 1;
-    }
+  uint64_t TOT = 0;
+  for (const auto &kv : tidCount) {
+    TOT += kv.second;
+  }
 
-    size_t min_eval_gate = 0;
-    if (thr_min_eval > 0 && n_eval >= thr_min_eval) {
-      min_eval_gate = thr_min_eval;
-    }
-
-    size_t thr_cap = std::max(adaptive_floor, min_eval_gate);
-    thr_cap = std::min(thr_cap, std::max<size_t>(n_eval, 1));
-    thr_final = std::max(thr_beta, thr_cap);
-  } else {
-    uint64_t TOT = 0;
-    for (const auto &kv : tidCount) {
-      TOT += kv.second;
-    }
-
-    size_t M = 0;
-    if (!topBins.empty()) {
-      for (auto b : topBins) {
-        if (b < tax.idx2id.size()) {
-          M += tax.idx2id[b].size();
-        }
-      }
-    } else {
-      for (size_t b = 0; b < tax.idx2id.size(); ++b) {
+  size_t M = 0;
+  if (!topBins.empty()) {
+    for (auto b : topBins) {
+      if (b < tax.idx2id.size()) {
         M += tax.idx2id[b].size();
       }
     }
-    M = std::max<size_t>(M, 1);
+  } else {
+    for (size_t b = 0; b < tax.idx2id.size(); ++b) {
+      M += tax.idx2id[b].size();
+    }
+  }
+  M = std::max<size_t>(M, 1);
 
+  auto compute_thr_fdr = [&](double Z_value) -> size_t {
+    if (!config.adaptive_fdr || Z_value <= 0.0) {
+      return 1;
+    }
     double mu = static_cast<double>(TOT) / static_cast<double>(M);
-    double Z = (config.adaptive_fdr ? std::max(0.0, config.fdr_z) : 0.0);
-    size_t thr_fdr = (Z > 0.0) ? static_cast<size_t>(std::ceil(
-                                     mu + Z * std::sqrt(std::max(mu, 1e-9))))
-                               : 1;
+    return static_cast<size_t>(
+        std::ceil(mu + Z_value * std::sqrt(std::max(mu, 1e-9))));
+  };
 
+  size_t thr_final = 0;
+  if (use_em) {
+    size_t thr_fdr = compute_thr_fdr(std::max(0.0, config.fdr_z));
+    size_t thr_min_gate = 0;
+    if (config.min_eval_count > 0 && n_eval >= config.min_eval_count) {
+      thr_min_gate = config.min_eval_count;
+    }
+    thr_final = std::max({thr_fdr, thr_beta, thr_min_gate});
+  } else {
+    size_t thr_fdr = compute_thr_fdr(std::max(0.0, config.fdr_z));
     thr_final = std::max({thr_eval, thr_fdr, thr_beta, thr_min_eval});
   }
 
@@ -1077,8 +1081,13 @@ inline void processSequence(
       result.taxidCount.emplace_back(taxid, countVal);
       if (countVal == maxBinCount) {
         maxCount = std::make_pair(taxid, countVal);
+        maxCountValid = true;
       }
     }
+  }
+
+  if (result.taxidCount.empty() && use_em && maxCountValid && maxCount.second > 0) {
+    result.taxidCount.emplace_back(maxCount);
   }
 
   if (!result.taxidCount.empty() && (config.em || config.vem)) {
@@ -1311,7 +1320,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
             batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector>();
         hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
       }
-      if (hashs1.size() > 256) {
+      if (hashs1.size() > 2048) {
         std::sort(hashs1.begin(), hashs1.end());
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
@@ -1327,7 +1336,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
         hashs1 =
             batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector>();
       }
-      if (hashs1.size() > 256) {
+      if (hashs1.size() > 2048) {
         std::sort(hashs1.begin(), hashs1.end());
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
