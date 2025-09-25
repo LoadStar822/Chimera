@@ -159,7 +159,9 @@ make_filter_with_hashes(ChimeraBuild::IMCFConfig &config,
   for (size_t i = 0; i < groupHashes.size(); ++i) {
     chimera::imcf::Group group;
     group.taxids = {"taxid_" + std::to_string(i)};
-    group.totalHash = groupHashes[i];
+    uint64_t total = groupHashes[i];
+    group.assignedHashes.push_back(total);
+    group.totalHash = total;
     groups.push_back(std::move(group));
   }
 
