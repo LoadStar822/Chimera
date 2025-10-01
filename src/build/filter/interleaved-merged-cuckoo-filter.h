@@ -1516,14 +1516,27 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
   inline void bulkCount_sparse(
       value_range_t &&values, CounterMatrix &result,
       std::vector<std::pair<uint32_t, uint16_t>> *touched = nullptr) {
+    using PairCode = uint64_t;
+    static thread_local std::vector<PairCode> uniq;
+
     using CounterRow = typename CounterMatrix::value_type;
     using Counter = typename CounterRow::value_type;
     static_assert(std::is_integral_v<Counter>,
                   "IMCF counter type must be integral");
     for (auto value : values) {
+      uniq.clear();
       bulkContain_events(value, [&](uint32_t bin, uint16_t sp) {
-        size_t binIdx = static_cast<size_t>(bin);
-        size_t spIdx = static_cast<size_t>(sp);
+        uniq.push_back((PairCode(bin) << 16) | PairCode(sp));
+      });
+      if (uniq.empty()) {
+        continue;
+      }
+      std::sort(uniq.begin(), uniq.end());
+      uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
+
+      for (PairCode code : uniq) {
+        size_t binIdx = static_cast<size_t>(code >> 16);
+        size_t spIdx = static_cast<size_t>(code & 0xFFFFu);
         if (result.size() <= binIdx) {
           result.resize(binIdx + 1);
         }
@@ -1533,12 +1546,13 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
         }
         Counter &ref = row[spIdx];
         if (ref == Counter{0} && touched) {
-          touched->emplace_back(bin, sp);
+          touched->emplace_back(static_cast<uint32_t>(binIdx),
+                                static_cast<uint16_t>(spIdx));
         }
         if (ref < std::numeric_limits<Counter>::max()) {
           ++ref;
         }
-      });
+      }
     }
   }
 
@@ -1547,30 +1561,45 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
       value_range_t &&values, const std::vector<uint32_t> &binSubset,
       CounterMatrix &result,
       std::vector<std::pair<uint32_t, uint16_t>> *touched = nullptr) {
+    using PairCode = uint64_t;
+    static thread_local std::vector<PairCode> uniq;
+
     using CounterRow = typename CounterMatrix::value_type;
     using Counter = typename CounterRow::value_type;
     static_assert(std::is_integral_v<Counter>,
                   "IMCF counter type must be integral");
     for (auto value : values) {
-      bulkContain_events_subset(
-          value, binSubset, [&](uint32_t bin, uint16_t sp) {
-            size_t binIdx = static_cast<size_t>(bin);
-            size_t spIdx = static_cast<size_t>(sp);
-            if (result.size() <= binIdx) {
-              result.resize(binIdx + 1);
-            }
-            auto &row = result[binIdx];
-            if (row.size() <= spIdx) {
-              row.resize(spIdx + 1, Counter{0});
-            }
-            Counter &ref = row[spIdx];
-            if (ref == Counter{0} && touched) {
-              touched->emplace_back(bin, sp);
-            }
-            if (ref < std::numeric_limits<Counter>::max()) {
-              ++ref;
-            }
-          });
+      uniq.clear();
+      bulkContain_events_subset(value, binSubset,
+                                [&](uint32_t bin, uint16_t sp) {
+                                  uniq.push_back((PairCode(bin) << 16) |
+                                                PairCode(sp));
+                                });
+      if (uniq.empty()) {
+        continue;
+      }
+      std::sort(uniq.begin(), uniq.end());
+      uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
+
+      for (PairCode code : uniq) {
+        size_t binIdx = static_cast<size_t>(code >> 16);
+        size_t spIdx = static_cast<size_t>(code & 0xFFFFu);
+        if (result.size() <= binIdx) {
+          result.resize(binIdx + 1);
+        }
+        auto &row = result[binIdx];
+        if (row.size() <= spIdx) {
+          row.resize(spIdx + 1, Counter{0});
+        }
+        Counter &ref = row[spIdx];
+        if (ref == Counter{0} && touched) {
+          touched->emplace_back(static_cast<uint32_t>(binIdx),
+                                static_cast<uint16_t>(spIdx));
+        }
+        if (ref < std::numeric_limits<Counter>::max()) {
+          ++ref;
+        }
+      }
     }
   }
 

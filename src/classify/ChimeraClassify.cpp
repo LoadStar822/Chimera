@@ -791,6 +791,36 @@ void postEmDecision(std::vector<classifyResult> &results,
     };
 
     if (result.posteriors.empty()) {
+      if (trace && !trace->emInputTop.empty()) {
+        const auto &fallback = trace->emInputTop.front().first;
+        result.taxidCount.clear();
+        result.taxidCount.emplace_back(fallback, 0);
+        trace->passedPost = true;
+        trace->suspiciousPost = false;
+        appendReason("em_fallback_pre_counts");
+        if (trace->deepLogged) {
+          dbg::log("Decision[%s][post]: passed=1 reason=%s", result.id.c_str(),
+                   trace->decisionReason.c_str());
+        }
+        dbg::g.passed_post.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+
+      if (!result.taxidCount.empty() &&
+          result.taxidCount.front().first != kUnclassified) {
+        if (trace) {
+          trace->passedPost = true;
+          trace->suspiciousPost = false;
+          appendReason("em_fallback_pre_result");
+          if (trace->deepLogged) {
+            dbg::log("Decision[%s][post]: passed=1 reason=%s",
+                     result.id.c_str(), trace->decisionReason.c_str());
+          }
+        }
+        dbg::g.passed_post.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+
       if (trace) {
         trace->passedPost = false;
         trace->suspiciousPost = trace->enteredEm;
@@ -881,6 +911,35 @@ void postEmDecision(std::vector<classifyResult> &results,
         trace->passedPost = true;
         trace->suspiciousPost = false;
         appendReason("post_pass");
+        if (trace->deepLogged) {
+          dbg::log("Decision[%s][post]: passed=1 reason=%s", result.id.c_str(),
+                   trace->decisionReason.c_str());
+        }
+      }
+      dbg::g.passed_post.fetch_add(1, std::memory_order_relaxed);
+      continue;
+    }
+
+    bool soft_ok = false;
+    if (!threshold_ok && top_score >= 0.50) {
+      soft_ok = true;
+    }
+    if (!margin_ok) {
+      if (!using_ratio && delta >= 0.02) {
+        soft_ok = true;
+      }
+      if (using_ratio && ratio >= 1.25) {
+        soft_ok = true;
+      }
+    }
+
+    if (soft_ok && weight_ok) {
+      result.taxidCount.clear();
+      result.taxidCount.emplace_back(top.first, 0);
+      if (trace) {
+        trace->passedPost = true;
+        trace->suspiciousPost = false;
+        appendReason("post_soft_pass");
         if (trace->deepLogged) {
           dbg::log("Decision[%s][post]: passed=1 reason=%s", result.id.c_str(),
                    trace->decisionReason.c_str());
@@ -1407,6 +1466,8 @@ inline void processSequence(
   }
 
   classifyResult result;
+  // 告诉 EM/VEM：这条 read 实际参与判别的 minimizer 数
+  result.evaluated = static_cast<double>(n_eval);
   result.id = id;
   result.trace = trace;
   std::pair<std::string, std::size_t> maxCount;
