@@ -46,12 +46,12 @@ namespace dbg {
 		std::string dbFile;
 		std::string taxFile;
 		std::string filter{ "imcf" };
-		double shotThreshold;
+		double shotThreshold = 0.60;
 		bool adaptive_shot = true;
 		double firstFilterBeta = 0.8;
-		size_t preEmTopK = 24;
+		size_t preEmTopK = 48;
 		bool adaptive_fdr = true;
-		double fdr_z = 3.0;
+		double fdr_z = 2.0;
 		size_t min_eval_count = 24;
 		uint16_t threads;
 		bool verbose = true;
@@ -64,10 +64,10 @@ namespace dbg {
 		bool vem = false;
 		double emThreshold;
 		size_t emIter;
-		double post_thres = 0.6;
-		double post_margin = 0.02;
-		double post_ratio = std::numeric_limits<double>::quiet_NaN();
-		double post_pi_min = 1e-4;
+		double post_thres = 0.55;
+		double post_margin = 0.015;
+		double post_ratio = 1.25;
+		double post_pi_min = 0.0;
 		bool lca_fallback = false;
 		bool output_posterior = true;
 		bool skip_post_filter = true;
@@ -149,10 +149,10 @@ namespace dbg {
 	};
 
 	struct DecisionConfig {
-		double posterior_threshold = 0.9;
-		double margin_delta = 0.2;
-		double margin_ratio = std::numeric_limits<double>::quiet_NaN();
-		double min_class_weight = 1e-4;
+		double posterior_threshold = 0.55;
+		double margin_delta = 0.015;
+		double margin_ratio = 1.25;
+		double min_class_weight = 0.0;
 		bool use_lca_fallback = false;
 	};
 }

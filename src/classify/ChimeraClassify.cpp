@@ -861,9 +861,12 @@ void postEmDecision(std::vector<classifyResult> &results,
       auto weight_it = classWeights.find(top.first);
       if (weight_it != classWeights.end()) {
         class_weight = weight_it->second;
-        weight_ok =
-            (class_weight >= decisionConfig.min_class_weight);
+        weight_ok = (class_weight >= decisionConfig.min_class_weight);
       }
+    }
+    double weight_guard = std::max(0.7, decisionConfig.posterior_threshold);
+    if (top_score >= weight_guard) {
+      weight_ok = true;
     }
 
     if (trace) {
@@ -921,25 +924,49 @@ void postEmDecision(std::vector<classifyResult> &results,
     }
 
     bool soft_ok = false;
-    if (!threshold_ok && top_score >= 0.50) {
-      soft_ok = true;
-    }
-    if (!margin_ok) {
-      if (!using_ratio && delta >= 0.02) {
-        soft_ok = true;
-      }
-      if (using_ratio && ratio >= 1.25) {
+    if (weight_ok && top_score >= 0.50) {
+      if ((!using_ratio && delta >= 0.02) || (ratio >= 1.25)) {
         soft_ok = true;
       }
     }
 
-    if (soft_ok && weight_ok) {
+    if (soft_ok) {
       result.taxidCount.clear();
       result.taxidCount.emplace_back(top.first, 0);
       if (trace) {
         trace->passedPost = true;
         trace->suspiciousPost = false;
         appendReason("post_soft_pass");
+        if (trace->deepLogged) {
+          dbg::log("Decision[%s][post]: passed=1 reason=%s", result.id.c_str(),
+                   trace->decisionReason.c_str());
+        }
+      }
+      dbg::g.passed_post.fetch_add(1, std::memory_order_relaxed);
+      continue;
+    }
+
+    bool evidence_ok = false;
+    if (trace) {
+      size_t gap_need = std::max<size_t>(1, trace->evaluated / 32);
+      size_t gap =
+          (trace->bestCount > trace->secondCount)
+              ? (trace->bestCount - trace->secondCount)
+              : 0;
+      if (trace->bestCount >= trace->thrConf && gap >= gap_need &&
+          !trace->bestTaxid.empty()) {
+        evidence_ok = true;
+      }
+    }
+
+    if (evidence_ok && trace) {
+      const std::string &fallback = trace->bestTaxid;
+      result.taxidCount.clear();
+      result.taxidCount.emplace_back(fallback, 0);
+      if (trace) {
+        trace->passedPost = true;
+        trace->suspiciousPost = false;
+        appendReason("pre_evidence_override");
         if (trace->deepLogged) {
           dbg::log("Decision[%s][post]: passed=1 reason=%s", result.id.c_str(),
                    trace->decisionReason.c_str());
@@ -1102,6 +1129,10 @@ inline void processSequence(
   touchedS.reserve(64);
   robin_hood::unordered_flat_map<uint32_t, uint32_t> sampleBinScore;
   uint64_t coarseTotal = 0;
+  std::vector<uint64_t> deferredEval;
+  if (hashs1.size() > 64) {
+    deferredEval.reserve(hashs1.size() - 64);
+  }
 
   if (sampleBudget > 0) {
     imcf.bulkCount_sparse(sampleVals, sampleCount, &touchedS);
@@ -1402,20 +1433,24 @@ inline void processSequence(
   size_t second = 0;
   top2(bestTid, best, second);
 
+  auto compute_ratio = [&](size_t best_count, size_t second_count) {
+    if (second_count > 0) {
+      return static_cast<double>(best_count) /
+             static_cast<double>(std::max<size_t>(second_count, size_t(1)));
+    }
+    return best_count == 0 ? 0.0
+                           : std::numeric_limits<double>::infinity();
+  };
+
   size_t thr_conf = thr_at_eval(n_eval);
-  double best_ratio = std::numeric_limits<double>::infinity();
-  if (second > 0) {
-    best_ratio = static_cast<double>(best) /
-                 static_cast<double>(std::max<size_t>(second, size_t(1)));
-  } else if (best == 0) {
-    best_ratio = 0.0;
-  }
+  double best_ratio = compute_ratio(best, second);
   bool confident = (best >= thr_conf) && (best_ratio >= 1.8);
 
   if (!confident && hashs1.size() > n0) {
     size_t mask = (static_cast<size_t>(1) << 3) - 1; // sample 1/8
     for (size_t i = n0; i < hashs1.size(); ++i) {
       if ((hashs1[i] & mask) != 0) {
+        deferredEval.push_back(hashs1[i]);
         continue;
       }
       if (fallback_full || topBins.size() == binNumAll) {
@@ -1426,6 +1461,25 @@ inline void processSequence(
       ++n_eval;
     }
     top2(bestTid, best, second);
+    thr_conf = thr_at_eval(n_eval);
+    best_ratio = compute_ratio(best, second);
+    size_t gap_need = std::max<size_t>(1, n_eval / 32);
+    bool need_escalate = (best < thr_conf) || (best_ratio < 1.35) ||
+                         ((best > second ? best - second : 0) < gap_need);
+    if (need_escalate && !deferredEval.empty()) {
+      for (auto value : deferredEval) {
+        if (fallback_full || topBins.size() == binNumAll) {
+          imcf.bulkContain_events(value, emit_to_tid);
+        } else {
+          imcf.bulkContain_events_subset(value, topBins, emit_to_tid);
+        }
+        ++n_eval;
+      }
+      deferredEval.clear();
+      top2(bestTid, best, second);
+      thr_conf = thr_at_eval(n_eval);
+      best_ratio = compute_ratio(best, second);
+    }
   }
 
   if (trace) {
@@ -1561,11 +1615,9 @@ inline void processSequence(
   size_t thr_final = 0;
   if (use_em) {
     size_t thr_fdr = compute_thr_fdr(std::max(0.0, config.fdr_z));
-    size_t thr_min_gate = 0;
-    if (config.min_eval_count > 0 && n_eval >= config.min_eval_count) {
-      thr_min_gate = config.min_eval_count;
-    }
-    thr_final = std::max({thr_fdr, thr_beta, thr_min_gate});
+    size_t thr_beta_eval = std::min(thr_beta, thr_eval);
+    size_t min_hits = 1;
+    thr_final = std::max({thr_fdr, thr_beta_eval, min_hits});
   } else {
     size_t thr_fdr = compute_thr_fdr(std::max(0.0, config.fdr_z));
     thr_final = std::max({thr_eval, thr_fdr, thr_beta, thr_min_eval});
@@ -1597,8 +1649,20 @@ inline void processSequence(
     }
   }
 
+  size_t dynamicTopK = 0;
+  if (config.preEmTopK > 0) {
+    dynamicTopK = static_cast<size_t>(config.preEmTopK);
+    bool widen = (best < thr_conf) || (best_ratio < 1.5);
+    if (widen && dynamicTopK < 96) {
+      dynamicTopK = 96;
+    }
+  }
+  if (trace) {
+    trace->preEmTopK = dynamicTopK;
+  }
+
   if (!result.taxidCount.empty() && (config.em || config.vem)) {
-    size_t K = config.preEmTopK > 0 ? config.preEmTopK : static_cast<size_t>(0);
+    size_t K = dynamicTopK;
     if (K > 0 && result.taxidCount.size() > K) {
       std::nth_element(
           result.taxidCount.begin(), result.taxidCount.begin() + K,
