@@ -775,7 +775,36 @@ void postEmDecision(std::vector<classifyResult> &results,
     return oss.str();
   };
 
+  auto prune_by_global_pi = [&](classifyResult &res, double pi_min) {
+    if (pi_min <= 0.0 || res.posteriors.empty() || classWeights.empty()) {
+      return;
+    }
+    std::vector<std::pair<std::string, double>> kept;
+    kept.reserve(res.posteriors.size());
+    double sum = 0.0;
+    for (const auto &kv : res.posteriors) {
+      auto weight_it = classWeights.find(kv.first);
+      double w = (weight_it != classWeights.end()) ? weight_it->second : 0.0;
+      if (w >= pi_min) {
+        kept.push_back(kv);
+        sum += kv.second;
+      }
+    }
+    if (kept.empty()) {
+      res.posteriors.clear();
+      return;
+    }
+    if (sum > 0.0) {
+      for (auto &kv : kept) {
+        kv.second /= sum;
+      }
+    }
+    res.posteriors.swap(kept);
+  };
+
   for (auto &result : results) {
+    // 先用全局权重剪枝，减少长尾“假阳性类”对后验的稀释
+    prune_by_global_pi(result, decisionConfig.min_class_weight);
     auto trace = result.trace;
     auto appendReason = [&](const std::string &tag) {
       if (!trace || tag.empty()) {
@@ -791,34 +820,36 @@ void postEmDecision(std::vector<classifyResult> &results,
     };
 
     if (result.posteriors.empty()) {
-      if (trace && !trace->emInputTop.empty()) {
-        const auto &fallback = trace->emInputTop.front().first;
-        result.taxidCount.clear();
-        result.taxidCount.emplace_back(fallback, 0);
-        trace->passedPost = true;
-        trace->suspiciousPost = false;
-        appendReason("em_fallback_pre_counts");
-        if (trace->deepLogged) {
-          dbg::log("Decision[%s][post]: passed=1 reason=%s", result.id.c_str(),
-                   trace->decisionReason.c_str());
-        }
-        dbg::g.passed_post.fetch_add(1, std::memory_order_relaxed);
-        continue;
-      }
-
-      if (!result.taxidCount.empty() &&
-          result.taxidCount.front().first != kUnclassified) {
-        if (trace) {
+      if (decisionConfig.use_lca_fallback) {
+        if (trace && !trace->emInputTop.empty()) {
+          const auto &fallback = trace->emInputTop.front().first;
+          result.taxidCount.clear();
+          result.taxidCount.emplace_back(fallback, 0);
           trace->passedPost = true;
           trace->suspiciousPost = false;
-          appendReason("em_fallback_pre_result");
+          appendReason("em_fallback_pre_counts");
           if (trace->deepLogged) {
             dbg::log("Decision[%s][post]: passed=1 reason=%s",
                      result.id.c_str(), trace->decisionReason.c_str());
           }
+          dbg::g.passed_post.fetch_add(1, std::memory_order_relaxed);
+          continue;
         }
-        dbg::g.passed_post.fetch_add(1, std::memory_order_relaxed);
-        continue;
+
+        if (!result.taxidCount.empty() &&
+            result.taxidCount.front().first != kUnclassified) {
+          if (trace) {
+            trace->passedPost = true;
+            trace->suspiciousPost = false;
+            appendReason("em_fallback_pre_result");
+            if (trace->deepLogged) {
+              dbg::log("Decision[%s][post]: passed=1 reason=%s",
+                       result.id.c_str(), trace->decisionReason.c_str());
+            }
+          }
+          dbg::g.passed_post.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
       }
 
       if (trace) {
@@ -850,10 +881,34 @@ void postEmDecision(std::vector<classifyResult> &results,
                                     : (top_score / runner_up);
     double delta = top_score - runner_up;
 
-    bool threshold_ok = top_score >= decisionConfig.posterior_threshold;
-    bool using_ratio = !std::isnan(decisionConfig.margin_ratio);
-    bool margin_ok = using_ratio ? (ratio >= decisionConfig.margin_ratio)
-                                 : (delta >= decisionConfig.margin_delta);
+    // 动态阈值：短读段必须更“自信”才放行
+    double dyn_post = decisionConfig.posterior_threshold;
+    double dyn_delta = decisionConfig.margin_delta;
+    double dyn_ratio = decisionConfig.margin_ratio; // NaN 表示用 delta
+    size_t neval = trace ? static_cast<size_t>(trace->evaluated) : 0;
+    if (neval > 0 && neval < 40) {
+      dyn_post = std::max(dyn_post, 0.55);
+      if (!std::isnan(dyn_ratio)) {
+        dyn_ratio = std::max(dyn_ratio, 1.35);
+      }
+      dyn_delta = std::max(dyn_delta, 0.03);
+    } else if (neval >= 40 && neval < 80) {
+      dyn_post = std::max(dyn_post, 0.52);
+      if (!std::isnan(dyn_ratio)) {
+        dyn_ratio = std::max(dyn_ratio, 1.30);
+      }
+      dyn_delta = std::max(dyn_delta, 0.025);
+    } else {
+      dyn_post = std::max(dyn_post, 0.50);
+      if (!std::isnan(dyn_ratio)) {
+        dyn_ratio = std::max(dyn_ratio, 1.25);
+      }
+      dyn_delta = std::max(dyn_delta, 0.02);
+    }
+    bool threshold_ok = top_score >= dyn_post;
+    bool using_ratio = !std::isnan(dyn_ratio);
+    bool margin_ok = using_ratio ? (ratio >= dyn_ratio)
+                                 : (delta >= dyn_delta);
 
     double class_weight = 0.0;
     bool weight_ok = true;
@@ -864,7 +919,7 @@ void postEmDecision(std::vector<classifyResult> &results,
         weight_ok = (class_weight >= decisionConfig.min_class_weight);
       }
     }
-    double weight_guard = std::max(0.7, decisionConfig.posterior_threshold);
+    double weight_guard = std::max(0.7, dyn_post);
     if (top_score >= weight_guard) {
       weight_ok = true;
     }
@@ -889,14 +944,14 @@ void postEmDecision(std::vector<classifyResult> &results,
     std::string reason;
     if (!threshold_ok) {
       reason = "below_posterior(" + format_val(top_score) + "<" +
-               format_val(decisionConfig.posterior_threshold) + ")";
+               format_val(dyn_post) + ")";
     } else if (!margin_ok) {
       if (using_ratio) {
         reason = "below_ratio(" + format_val(ratio) + "<" +
-                 format_val(decisionConfig.margin_ratio) + ")";
+                 format_val(dyn_ratio) + ")";
       } else {
         reason = "below_margin(" + format_val(delta) + "<" +
-                 format_val(decisionConfig.margin_delta) + ")";
+                 format_val(dyn_delta) + ")";
       }
     } else if (!weight_ok) {
       reason = "below_weight(" + format_val(class_weight) + "<" +
@@ -923,9 +978,11 @@ void postEmDecision(std::vector<classifyResult> &results,
       continue;
     }
 
+    // 软通过更温和，top1 仍需满足动态阈值
     bool soft_ok = false;
-    if (weight_ok && top_score >= 0.50) {
-      if ((!using_ratio && delta >= 0.02) || (ratio >= 1.25)) {
+    if (weight_ok && top_score >= dyn_post) {
+      if ((!using_ratio && delta >= dyn_delta) ||
+          (using_ratio && ratio >= std::max(1.20, dyn_ratio * 0.95))) {
         soft_ok = true;
       }
     }
@@ -953,13 +1010,20 @@ void postEmDecision(std::vector<classifyResult> &results,
           (trace->bestCount > trace->secondCount)
               ? (trace->bestCount - trace->secondCount)
               : 0;
-      if (trace->bestCount >= trace->thrConf && gap >= gap_need &&
-          !trace->bestTaxid.empty()) {
+      double ratio_pre = (trace->secondCount > 0)
+                             ? static_cast<double>(trace->bestCount) /
+                                   static_cast<double>(trace->secondCount)
+                             : std::numeric_limits<double>::infinity();
+      double min_ratio = (trace->evaluated < 40)
+                             ? 2.0
+                             : (trace->evaluated < 80) ? 1.7 : 1.5;
+      if (trace->bestCount >= trace->thrConf && ratio_pre >= min_ratio &&
+          gap >= gap_need && !trace->bestTaxid.empty()) {
         evidence_ok = true;
       }
     }
 
-    if (evidence_ok && trace) {
+    if (decisionConfig.use_lca_fallback && evidence_ok && trace) {
       const std::string &fallback = trace->bestTaxid;
       result.taxidCount.clear();
       result.taxidCount.emplace_back(fallback, 0);
@@ -1540,15 +1604,17 @@ inline void processSequence(
     beta = 0.8;
   }
   beta = std::clamp(beta, 0.0, 1.0);
-  if (use_em) {
-    beta = std::min(beta, 0.45);
+  // 不再在 EM 路径强行压低 beta；至少保证 0.5 防止极弱证据入场
+  if (use_em && beta < 0.50) {
+    beta = 0.50;
   }
   size_t thr_beta =
       static_cast<size_t>(std::floor(beta * static_cast<double>(maxBinCount)));
   size_t thr_eval = thr_at_eval(n_eval);
   if (use_em) {
     size_t base = config.adaptive_shot ? n_eval : hashNum;
-    double softened_ratio = std::min(config.shotThreshold, 0.4);
+    // EM 也需要足量证据：soften 到 0.50（原 0.40）
+    double softened_ratio = std::min(config.shotThreshold, 0.50);
     size_t em_eval = static_cast<size_t>(
         std::ceil(static_cast<double>(base) * softened_ratio));
     if (em_eval == 0 && base > 0) {
@@ -1617,7 +1683,8 @@ inline void processSequence(
     size_t thr_fdr = compute_thr_fdr(std::max(0.0, config.fdr_z));
     size_t thr_beta_eval = std::min(thr_beta, thr_eval);
     size_t min_hits = 1;
-    thr_final = std::max({thr_fdr, thr_beta_eval, min_hits});
+    // EM 路径也强制最少评估量
+    thr_final = std::max({thr_fdr, thr_beta_eval, min_hits, thr_min_eval});
   } else {
     size_t thr_fdr = compute_thr_fdr(std::max(0.0, config.fdr_z));
     thr_final = std::max({thr_eval, thr_fdr, thr_beta, thr_min_eval});
@@ -1649,13 +1716,15 @@ inline void processSequence(
     }
   }
 
-  size_t dynamicTopK = 0;
-  if (config.preEmTopK > 0) {
-    dynamicTopK = static_cast<size_t>(config.preEmTopK);
-    bool widen = (best < thr_conf) || (best_ratio < 1.5);
-    if (widen && dynamicTopK < 96) {
-      dynamicTopK = 96;
-    }
+  size_t dynamicTopK = config.preEmTopK > 0 ? static_cast<size_t>(config.preEmTopK)
+                                            : 16;
+  bool strong = (best_ratio >= 2.5) &&
+                (best >= thr_conf + std::max<size_t>(1, n_eval / 16));
+  bool weak = (best < thr_conf) || (best_ratio < 1.35);
+  if (strong && dynamicTopK > 8) {
+    dynamicTopK = 8;
+  } else if (weak && dynamicTopK < 64) {
+    dynamicTopK = 64;
   }
   if (trace) {
     trace->preEmTopK = dynamicTopK;

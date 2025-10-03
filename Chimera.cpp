@@ -138,7 +138,7 @@ int main(int argc, char **argv) {
   build
       ->add_option("--load-factor", buildConfig.load_factor,
                    "IMCF 滤器负载因子")
-      ->default_val(0.9);
+      ->default_val(0.85);
   build
       ->add_option("-M,--max-hashes", buildConfig.max_hashes_per_taxid,
                    "Maximum number of hashes per taxid")
@@ -202,11 +202,11 @@ int main(int argc, char **argv) {
   classify
       ->add_option("--first-filter-beta", classifyConfig.firstFilterBeta,
                    "Keep bins >= beta * max count in first filter")
-      ->default_val(0.75);
+      ->default_val(0.80);
   classify
       ->add_option("--pre-em-topk", classifyConfig.preEmTopK,
                    "Keep top-K candidates per read before EM/VEM")
-      ->default_val(24);
+      ->default_val(48);
   classify
       ->add_flag("--adaptive-fdr,!--no-adaptive-fdr",
                  classifyConfig.adaptive_fdr,
@@ -219,7 +219,7 @@ int main(int argc, char **argv) {
   classify
       ->add_option("--min-eval-count", classifyConfig.min_eval_count,
                    "Minimum #evaluated minimizers to classify")
-      ->default_val(24);
+      ->default_val(28);
   classify
       ->add_option("-t,--threads", classifyConfig.threads,
                    "Number of threads for classifying")
@@ -251,19 +251,21 @@ int main(int argc, char **argv) {
   classify
       ->add_option("--post-thres", classifyConfig.post_thres,
                    "Posterior acceptance threshold")
-      ->default_val(0.6);
+      ->default_val(0.58);
   classify
       ->add_option("--post-margin", classifyConfig.post_margin,
                    "Minimum gap between top posteriors")
       ->default_val(0.02);
   classify->add_option("--post-ratio", classifyConfig.post_ratio,
-                       "Minimum ratio between top1 and top2 posteriors");
+                       "Minimum ratio between top1 and top2 posteriors")
+      ->default_val(1.35);
   classify
       ->add_option("--post-pi-min", classifyConfig.post_pi_min,
                    "Minimum global class weight")
-      ->default_val(1e-4);
+      ->default_val(5e-3);
   classify->add_flag("--lca-fallback", classifyConfig.lca_fallback,
-                     "Use LCA fallback when EM/VEM confidence is low");
+                     "Use LCA fallback when EM/VEM confidence is low")
+      ->default_val(false);
   classify
       ->add_flag("--output-posterior,!--no-output-posterior",
                  classifyConfig.output_posterior,

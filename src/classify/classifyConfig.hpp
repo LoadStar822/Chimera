@@ -51,8 +51,8 @@ namespace dbg {
 		double firstFilterBeta = 0.8;
 		size_t preEmTopK = 48;
 		bool adaptive_fdr = true;
-		double fdr_z = 2.0;
-		size_t min_eval_count = 24;
+		double fdr_z = 3.0;
+		size_t min_eval_count = 28;
 		uint16_t threads;
 		bool verbose = true;
 		bool progress = true;
@@ -64,10 +64,10 @@ namespace dbg {
 		bool vem = false;
 		double emThreshold;
 		size_t emIter;
-		double post_thres = 0.55;
-		double post_margin = 0.015;
-		double post_ratio = 1.25;
-		double post_pi_min = 0.0;
+		double post_thres = 0.58;
+		double post_margin = 0.02;
+		double post_ratio = 1.35;
+		double post_pi_min = 5e-3;
 		bool lca_fallback = false;
 		bool output_posterior = true;
 		bool skip_post_filter = true;
@@ -149,9 +149,9 @@ namespace dbg {
 	};
 
 	struct DecisionConfig {
-		double posterior_threshold = 0.55;
-		double margin_delta = 0.015;
-		double margin_ratio = 1.25;
+		double posterior_threshold = 0.58;
+		double margin_delta = 0.02;
+		double margin_ratio = 1.35;
 		double min_class_weight = 0.0;
 		bool use_lca_fallback = false;
 	};
