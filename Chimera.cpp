@@ -233,11 +233,7 @@ int main(int argc, char **argv) {
       ->add_option("-b,--batch-size", classifyConfig.batchSize,
                    "Batch size for classifying")
       ->default_val(400);
-  classify->add_flag("--lca", classifyConfig.lca, "Enable LCA mode");
-  classify
-      ->add_option("--tax-file", classifyConfig.taxFile,
-                   "Taxonomy file for LCA mode")
-      ->check(CLI::ExistingFile);
+  // TODO: LCA 相关参数暂时废弃，仅保留内部实现以便后续恢复
   auto emFlag = classify->add_flag("-e,--EM", classifyConfig.em,
                                    "Enable EM mode (default)");
   auto vemFlag =
@@ -263,19 +259,12 @@ int main(int argc, char **argv) {
       ->add_option("--post-pi-min", classifyConfig.post_pi_min,
                    "Minimum global class weight")
       ->default_val(5e-3);
-  classify->add_flag("--lca-fallback", classifyConfig.lca_fallback,
-                     "Use LCA fallback when EM/VEM confidence is low")
-      ->default_val(false);
   classify
       ->add_flag("--output-posterior,!--no-output-posterior",
                  classifyConfig.output_posterior,
                  "Write posterior probabilities to the TSV output")
       ->default_val("true");
-  classify
-      ->add_flag("--skip-postfilter,!--no-skip-postfilter",
-                 classifyConfig.skip_post_filter,
-                 "Skip legacy filtering steps when EM/VEM is enabled")
-      ->default_val("true");
+  // TODO: 后处理相关参数暂时废弃，内部逻辑维持默认行为
   classify->add_flag("-q,--quiet", classifyConfig.verbose, "Quiet output")
       ->default_val(true)
       ->disable_flag_override();

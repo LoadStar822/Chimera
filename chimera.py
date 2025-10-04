@@ -269,12 +269,7 @@ def parse_arguments():
         default=None,
         help="Minimum global class weight (default 1e-4)",
     )
-    classify_parser.add_argument(
-        "--lca-fallback",
-        action="store_true",
-        default=False,
-        help="Use LCA fallback when EM/VEM confidence is low",
-    )
+    # NOTE: LCA 及后处理相关参数暂时废弃，内部逻辑继续沿用默认值
     classify_parser.add_argument(
         "--output-posterior",
         dest="output_posterior",
@@ -287,19 +282,6 @@ def parse_arguments():
         dest="output_posterior",
         action="store_false",
         help="Do not write posterior probabilities to the TSV output",
-    )
-    classify_parser.add_argument(
-        "--skip-postfilter",
-        dest="skip_postfilter",
-        action="store_true",
-        default=None,
-        help="Skip legacy filtering steps when EM/VEM is enabled",
-    )
-    classify_parser.add_argument(
-        "--no-skip-postfilter",
-        dest="skip_postfilter",
-        action="store_false",
-        help="Run legacy filtering steps after EM/VEM",
     )
     classify_parser.add_argument(
         "-t",
@@ -317,12 +299,6 @@ def parse_arguments():
     )
     classify_parser.add_argument(
         "-b", "--batch-size", type=int, default=400, help="Batch size for classifying"
-    )
-    classify_parser.add_argument(
-        "-l", "--lca", action="store_true", help="Use LCA algorithm for classification"
-    )
-    classify_parser.add_argument(
-        "-T", "--tax-file", help="Taxonomy file for LCA classification"
     )
     classify_parser.add_argument(
         "-e",
@@ -362,7 +338,7 @@ def parse_arguments():
     args = parser.parse_args()
 
     if args.command == "classify":
-        if not any([args.em, args.vem, args.lca]):
+        if not any([args.em, args.vem]):
             args.em = True
 
     return args
@@ -471,26 +447,13 @@ def run_chimera(args, chimera_path):
             command.extend(["--post-ratio", str(args.post_ratio)])
         if args.post_pi_min is not None:
             command.extend(["--post-pi-min", str(args.post_pi_min)])
-        if args.lca_fallback:
-            command.append("--lca-fallback")
         if args.output_posterior is True:
             command.append("--output-posterior")
         elif args.output_posterior is False:
             command.append("--no-output-posterior")
-        if args.skip_postfilter is True:
-            command.append("--skip-postfilter")
-        elif args.skip_postfilter is False:
-            command.append("--no-skip-postfilter")
         command.extend(["-t", str(args.threads)])
         command.extend(["-b", str(args.batch_size)])
         command.extend(["-f", args.filter])
-        if args.lca:
-            command.append("--lca")
-            if not args.tax_file:
-                raise ValueError(
-                    "Taxonomy file must be provided when using LCA algorithm"
-                )
-            command.extend(["--tax-file", args.tax_file])
         if args.em:
             command.append("-e")
             command.extend(["--em-iter", str(args.em_iter)])
