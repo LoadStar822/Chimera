@@ -46,13 +46,15 @@ namespace dbg {
 		std::string dbFile;
 		std::string taxFile;
 		std::string filter{ "imcf" };
-		double shotThreshold = 0.60;
+		double shotThreshold = 0.62;
 		bool adaptive_shot = true;
 		double firstFilterBeta = 0.8;
-		size_t preEmTopK = 48;
+		size_t preEmTopK = 32;
 		bool adaptive_fdr = true;
 		double fdr_z = 3.0;
-		size_t min_eval_count = 28;
+		size_t min_eval_count = 0;
+		bool evidence_override = true;
+		bool use_router_index = false;
 		uint16_t threads;
 		bool verbose = true;
 		bool progress = true;
@@ -64,10 +66,10 @@ namespace dbg {
 		bool vem = false;
 		double emThreshold;
 		size_t emIter;
-		double post_thres = 0.58;
-		double post_margin = 0.02;
-		double post_ratio = 1.35;
-		double post_pi_min = 5e-3;
+		double post_thres = 0.56;
+		double post_margin = 0.03;
+		double post_ratio = 1.30;
+		double post_pi_min = 1e-4;
 		bool lca_fallback = false;
 		bool output_posterior = true;
 		bool skip_post_filter = true;
@@ -96,6 +98,8 @@ namespace dbg {
 			<< std::setw(20) << "Adaptive FDR:" << config.adaptive_fdr << std::endl
 			<< std::setw(20) << "FDR Z:" << config.fdr_z << std::endl
 			<< std::setw(20) << "Min eval count:" << config.min_eval_count << std::endl
+			<< std::setw(20) << "Evidence override:" << config.evidence_override << std::endl
+			<< std::setw(20) << "Use router index:" << config.use_router_index << std::endl
 			<< std::setw(20) << "Filter:" << config.filter << std::endl
 			<< std::setw(20) << "Batch size:" << config.batchSize << std::endl
 			<< std::setw(20) << "LCA:" << config.lca << std::endl
@@ -149,11 +153,12 @@ namespace dbg {
 	};
 
 	struct DecisionConfig {
-		double posterior_threshold = 0.58;
-		double margin_delta = 0.02;
-		double margin_ratio = 1.35;
-		double min_class_weight = 0.0;
+		double posterior_threshold = 0.56;
+		double margin_delta = 0.03;
+		double margin_ratio = 1.30;
+		double min_class_weight = 1e-4;
 		bool use_lca_fallback = false;
+		bool evidence_override = true;
 	};
 }
 #endif // !CLASSIFYCONFIG_HPP

@@ -766,7 +766,9 @@ namespace ChimeraBuild {
 	void saveIMCF(chimera::imcf::InterleavedMergedCuckooFilter& imcf,
 		const std::string& output_file,
 		std::vector<std::vector<std::string>>& indexToTaxid,
-		IMCFConfig& imcfConfig)
+		IMCFConfig& imcfConfig,
+		bool needIndexStructures,
+		bool writeRouterIndex)
 	{
 	// Open the output file
 	std::ofstream os(output_file + ".imcf", std::ios::binary);
@@ -822,13 +824,21 @@ namespace ChimeraBuild {
 	}
 #endif
 
-	std::future<void> routerFuture;
-	Clock::time_point routerLaunchTime{};
-	if (runAsyncIndexBuild) {
-		routerLaunchTime = Clock::now();
-		routerFuture = std::async(std::launch::async, [&imcf]() {
-			imcf.buildRouterIndex();
-		});
+	const bool wantRouterIndex = needIndexStructures && writeRouterIndex;
+
+	std::future<void> indexFuture;
+	Clock::time_point indexLaunchTime{};
+	if (needIndexStructures && runAsyncIndexBuild) {
+		indexLaunchTime = Clock::now();
+		if (wantRouterIndex) {
+			indexFuture = std::async(std::launch::async, [&imcf]() {
+				imcf.buildRouterIndex();
+			});
+		} else {
+			indexFuture = std::async(std::launch::async, [&imcf]() {
+				imcf.buildActiveGroups();
+			});
+		}
 	}
 
 	logStep("Writing filter archive (.imcf)", [&]() {
@@ -840,39 +850,55 @@ namespace ChimeraBuild {
 		return true;
 	});
 
-	const char* indexTitle = runAsyncIndexBuild ? "Building index structures (.idx/.rtr) [async]" : "Building index structures (.idx/.rtr)";
-	std::cout << "  - " << indexTitle << "... " << std::flush;
-	long long indexElapsedMs = 0;
-	if (routerFuture.valid()) {
-		routerFuture.get();
-		auto end = Clock::now();
-		indexElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(end - routerLaunchTime).count();
-	}
-	else {
-		auto start = Clock::now();
-		imcf.buildRouterIndex();
-		auto end = Clock::now();
-		indexElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-	}
-	std::cout << "done (" << formatDuration(indexElapsedMs) << ")" << std::endl;
-
-	std::string idxPath = output_file + ".imcf.idx";
-	logStep("Writing active index (.imcf.idx)", [&]() {
-		if (!imcf.saveActiveIndex(idxPath)) {
-			std::cerr << "Warning: failed to write IMCF index file: " << idxPath << std::endl;
-			return false;
+	if (needIndexStructures) {
+		const char *indexTitle = nullptr;
+		if (wantRouterIndex) {
+			indexTitle = runAsyncIndexBuild ?
+			    "Building index structures (.idx/.rtr) [async]" :
+			    "Building index structures (.idx/.rtr)";
+		} else {
+			indexTitle = runAsyncIndexBuild ?
+			    "Building index structures (.idx) [async]" :
+			    "Building index structures (.idx)";
 		}
-		return true;
-	});
-
-	std::string routerPath = output_file + ".imcf.rtr";
-	logStep("Writing router index (.imcf.rtr)", [&]() {
-		if (!imcf.saveRouterIndex(routerPath)) {
-			std::cerr << "Warning: failed to write IMCF router file: " << routerPath << std::endl;
-			return false;
+		std::cout << "  - " << indexTitle << "... " << std::flush;
+		long long indexElapsedMs = 0;
+		if (indexFuture.valid()) {
+			indexFuture.get();
+			auto end = Clock::now();
+			indexElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(end - indexLaunchTime).count();
+		} else {
+			auto start = Clock::now();
+			if (wantRouterIndex) {
+				imcf.buildRouterIndex();
+			} else {
+				imcf.buildActiveGroups();
+			}
+			auto end = Clock::now();
+			indexElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 		}
-		return true;
-	});
+		std::cout << "done (" << formatDuration(indexElapsedMs) << ")" << std::endl;
+
+		std::string idxPath = output_file + ".imcf.idx";
+		logStep("Writing active index (.imcf.idx)", [&]() {
+			if (!imcf.saveActiveIndex(idxPath)) {
+				std::cerr << "Warning: failed to write IMCF index file: " << idxPath << std::endl;
+				return false;
+			}
+			return true;
+		});
+
+		if (wantRouterIndex) {
+			std::string routerPath = output_file + ".imcf.rtr";
+			logStep("Writing router index (.imcf.rtr)", [&]() {
+				if (!imcf.saveRouterIndex(routerPath)) {
+					std::cerr << "Warning: failed to write IMCF router file: " << routerPath << std::endl;
+					return false;
+				}
+				return true;
+			});
+		}
+	}
 
 		// Get the file size
 		std::uintmax_t fileSize = std::filesystem::file_size(output_file + ".imcf");
@@ -989,7 +1015,9 @@ namespace ChimeraBuild {
 
 			auto save_start = std::chrono::high_resolution_clock::now();
 			std::cout << "Saving IMCF..." << std::endl;
-			saveIMCF(imcf, config.output_file, indexToTaxid, imcfConfig);
+			saveIMCF(imcf, config.output_file, indexToTaxid, imcfConfig,
+			        config.filter == "imcf",
+			        config.filter == "imcf" && config.write_router_index);
 			auto save_end = std::chrono::high_resolution_clock::now();
 			auto save_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(save_end - save_start).count();
 			if (config.verbose) {

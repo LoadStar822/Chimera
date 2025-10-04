@@ -153,6 +153,11 @@ int main(int argc, char **argv) {
   build->add_flag("-q,--quiet", buildConfig.verbose, "Quiet output")
       ->default_val(true)
       ->disable_flag_override();
+  build
+      ->add_flag("--router-index,!--no-router-index",
+                 buildConfig.write_router_index,
+                 "Persist router index (.imcf.rtr) alongside .imcf")
+      ->default_val(false);
 
   // Classify
   // Add --single option
@@ -193,7 +198,7 @@ int main(int argc, char **argv) {
   classify
       ->add_option("-s,--shot-threshold", classifyConfig.shotThreshold,
                    "Shot threshold for classifying")
-      ->default_val(0.65);
+      ->default_val(0.62);
   classify
       ->add_flag("--adaptive-shot,!--no-adaptive-shot",
                  classifyConfig.adaptive_shot,
@@ -206,7 +211,7 @@ int main(int argc, char **argv) {
   classify
       ->add_option("--pre-em-topk", classifyConfig.preEmTopK,
                    "Keep top-K candidates per read before EM/VEM")
-      ->default_val(48);
+      ->default_val(32);
   classify
       ->add_flag("--adaptive-fdr,!--no-adaptive-fdr",
                  classifyConfig.adaptive_fdr,
@@ -219,7 +224,7 @@ int main(int argc, char **argv) {
   classify
       ->add_option("--min-eval-count", classifyConfig.min_eval_count,
                    "Minimum #evaluated minimizers to classify")
-      ->default_val(28);
+      ->default_val(0);
   classify
       ->add_option("-t,--threads", classifyConfig.threads,
                    "Number of threads for classifying")
@@ -247,18 +252,28 @@ int main(int argc, char **argv) {
   classify
       ->add_option("--post-thres", classifyConfig.post_thres,
                    "Posterior acceptance threshold")
-      ->default_val(0.58);
+      ->default_val(0.56);
   classify
       ->add_option("--post-margin", classifyConfig.post_margin,
                    "Minimum gap between top posteriors")
-      ->default_val(0.02);
+      ->default_val(0.03);
   classify->add_option("--post-ratio", classifyConfig.post_ratio,
                        "Minimum ratio between top1 and top2 posteriors")
-      ->default_val(1.35);
+      ->default_val(1.30);
   classify
       ->add_option("--post-pi-min", classifyConfig.post_pi_min,
                    "Minimum global class weight")
-      ->default_val(5e-3);
+      ->default_val(1e-4);
+  classify
+      ->add_flag("--evidence-override,!--no-evidence-override",
+                 classifyConfig.evidence_override,
+                 "Allow strong pre-EM evidence to bypass posterior filter")
+      ->default_val(true);
+  classify
+      ->add_flag("--router-index,!--no-router-index",
+                 classifyConfig.use_router_index,
+                 "Build in-memory router index for candidate routing")
+      ->default_val(false);
   classify
       ->add_flag("--output-posterior,!--no-output-posterior",
                  classifyConfig.output_posterior,

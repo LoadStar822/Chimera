@@ -560,6 +560,45 @@ class InterleavedMergedCuckooFilter {
     decodeVarintSequence(routerPayload, start, end, out);
   }
 
+  inline void fetchActiveBins(size_t bucket, uint16_t fingerprint,
+                              std::vector<uint32_t> &out) const {
+    out.clear();
+    if (bucket >= activeGroups.size()) {
+      return;
+    }
+    const auto &candidates = activeGroups[bucket];
+    if (candidates.empty()) {
+      return;
+    }
+    out.reserve(candidates.size());
+    for (uint32_t bin : candidates) {
+      uint64_t bucketValue = readBucket64(bucket, bin);
+      bool match = false;
+      for (int lane = 0; lane < static_cast<int>(tagNum); ++lane) {
+        uint16_t tag = static_cast<uint16_t>((bucketValue >> (lane * 16)) & 0xFFFFu);
+        if (tag == 0u) {
+          continue;
+        }
+        if ((tag & 0x0FFFu) == fingerprint) {
+          match = true;
+          break;
+        }
+      }
+      if (!match) {
+        bool stashHit = false;
+        forEachStashMatch(bin, bucket, fingerprint,
+                          [&](uint16_t) { stashHit = true; });
+        if (!stashHit) {
+          continue;
+        }
+        match = true;
+      }
+      if (match) {
+        out.push_back(bin);
+      }
+    }
+  }
+
   static inline void encodeVarint(std::vector<uint8_t> &out, uint32_t value) {
     while (value >= 0x80) {
       out.push_back(static_cast<uint8_t>((value & 0x7F) | 0x80));
@@ -732,9 +771,6 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
 
 	inline void route(uint64_t value, std::vector<uint32_t> &bins) const {
     bins.clear();
-    if (!hasRouterIndex()) {
-      return;
-    }
 
     uint16_t fingerprint = reduceTo12bit(value);
     size_t hash1 = hashIndex(value);
@@ -743,11 +779,20 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
     static thread_local std::vector<uint32_t> routeBuf1;
     static thread_local std::vector<uint32_t> routeBuf2;
 
-    fetchRouterBins(hash1, fingerprint, routeBuf1);
-    if (hash2 != hash1) {
-      fetchRouterBins(hash2, fingerprint, routeBuf2);
+    if (hasRouterIndex()) {
+      fetchRouterBins(hash1, fingerprint, routeBuf1);
+      if (hash2 != hash1) {
+        fetchRouterBins(hash2, fingerprint, routeBuf2);
+      } else {
+        routeBuf2.clear();
+      }
     } else {
-      routeBuf2.clear();
+      fetchActiveBins(hash1, fingerprint, routeBuf1);
+      if (hash2 != hash1) {
+        fetchActiveBins(hash2, fingerprint, routeBuf2);
+      } else {
+        routeBuf2.clear();
+      }
     }
 
     if (routeBuf1.empty() && routeBuf2.empty()) {

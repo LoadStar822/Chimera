@@ -186,6 +186,7 @@ struct TraceRecord {
   bool suspiciousPre = false;
   bool suspiciousPost = false;
   bool emFinalLogged = false;
+  double evaluatedWeight = 0.0;
 };
 
 inline void dumpTrace(TraceRecord &rec, const std::string &id,
@@ -213,8 +214,9 @@ inline void dumpTrace(TraceRecord &rec, const std::string &id,
   log("Thresholds: shot=%.3f thr_conf=%zu thr_eval=%zu thr_beta=%zu thr_min_eval=%zu preEmTopK=%zu",
       rec.shotThreshold, rec.thrConf, rec.thrEval, rec.thrBeta, rec.thrMinEval,
       rec.preEmTopK);
-  log("Counts: evaluated=%zu best=%zu second=%zu best_tid=%s",
-      rec.evaluated, rec.bestCount, rec.secondCount, bestTaxid);
+  log("Counts: evaluated=%zu weight=%.2f best=%zu second=%zu best_tid=%s",
+      rec.evaluated, rec.evaluatedWeight, rec.bestCount, rec.secondCount,
+      bestTaxid);
   if (!rec.emInputTop.empty()) {
     size_t idx = 0;
     for (const auto &[taxid, cnt] : rec.emInputTop) {
@@ -399,8 +401,9 @@ private:
 } // namespace
 // --- fast taxid dictionary ---
 struct TaxDict {
-  std::vector<std::vector<uint32_t>> idx2id; // [bin][species] -> tid_id
-  std::vector<std::string> id2str;           // tid_id -> taxid string
+  std::vector<std::vector<uint32_t>> idx2id;  // [bin][species] -> tid_id
+  std::vector<std::string> id2str;            // tid_id -> taxid string
+  std::vector<std::vector<uint32_t>> tid2bin; // tid_id -> 所在 bin 列表（去重）
 };
 
 static TaxDict
@@ -420,11 +423,17 @@ build_tax_dict(const std::vector<std::vector<std::string>> &idx2tax) {
         id = static_cast<uint32_t>(td.id2str.size());
         dict.emplace(t, id);
         td.id2str.push_back(t);
+        td.tid2bin.emplace_back();
       } else {
         id = it->second;
       }
       td.idx2id[b][s] = id;
+      td.tid2bin[id].push_back(static_cast<uint32_t>(b));
     }
+  }
+  for (auto &bins : td.tid2bin) {
+    std::sort(bins.begin(), bins.end());
+    bins.erase(std::unique(bins.begin(), bins.end()), bins.end());
   }
   return td;
 }
@@ -607,7 +616,8 @@ IMCFIndexStatus
 loadFilter(const std::string &input_file,
            chimera::imcf::InterleavedMergedCuckooFilter &imcf,
            ChimeraBuild::IMCFConfig &imcfConfig,
-           std::vector<std::vector<std::string>> &indexToTaxid) {
+           std::vector<std::vector<std::string>> &indexToTaxid,
+           bool wantRouter) {
   namespace fs = std::filesystem;
   using Clock = std::chrono::steady_clock;
 
@@ -678,18 +688,22 @@ loadFilter(const std::string &input_file,
     status.activeMs = activeMs;
   }
 
-  std::string routerPath = indexBase.string() + ".imcf.rtr";
-  auto [routerLoaded, routerMs] =
-      timed([&]() { return imcf.loadRouterIndex(routerPath); });
-  if (!routerLoaded || !imcf.hasRouterIndex()) {
-    auto rebuild = timed([&]() {
-      imcf.buildRouterIndex();
-      return true;
-    });
-    status.builtRouter = true;
-    status.routerMs = rebuild.second;
+  if (wantRouter) {
+    std::string routerPath = indexBase.string() + ".imcf.rtr";
+    auto [routerLoaded, routerMs] =
+        timed([&]() { return imcf.loadRouterIndex(routerPath); });
+    if (!routerLoaded || !imcf.hasRouterIndex()) {
+      auto rebuild = timed([&]() {
+        imcf.buildRouterIndex();
+        return true;
+      });
+      status.builtRouter = true;
+      status.routerMs = rebuild.second;
+    } else {
+      status.routerMs = routerMs;
+    }
   } else {
-    status.routerMs = routerMs;
+    imcf.clearRouterIndex();
   }
 
   return status;
@@ -804,7 +818,9 @@ void postEmDecision(std::vector<classifyResult> &results,
 
   for (auto &result : results) {
     // 先用全局权重剪枝，减少长尾“假阳性类”对后验的稀释
-    prune_by_global_pi(result, decisionConfig.min_class_weight);
+    if (decisionConfig.min_class_weight > 0.0) {
+      prune_by_global_pi(result, decisionConfig.min_class_weight);
+    }
     auto trace = result.trace;
     auto appendReason = [&](const std::string &tag) {
       if (!trace || tag.empty()) {
@@ -883,32 +899,28 @@ void postEmDecision(std::vector<classifyResult> &results,
 
     // 动态阈值：短读段必须更“自信”才放行
     double dyn_post = decisionConfig.posterior_threshold;
-    double dyn_delta = decisionConfig.margin_delta;
-    double dyn_ratio = decisionConfig.margin_ratio; // NaN 表示用 delta
-    size_t neval = trace ? static_cast<size_t>(trace->evaluated) : 0;
-    if (neval > 0 && neval < 40) {
-      dyn_post = std::max(dyn_post, 0.55);
-      if (!std::isnan(dyn_ratio)) {
-        dyn_ratio = std::max(dyn_ratio, 1.35);
-      }
-      dyn_delta = std::max(dyn_delta, 0.03);
-    } else if (neval >= 40 && neval < 80) {
-      dyn_post = std::max(dyn_post, 0.52);
-      if (!std::isnan(dyn_ratio)) {
-        dyn_ratio = std::max(dyn_ratio, 1.30);
-      }
-      dyn_delta = std::max(dyn_delta, 0.025);
-    } else {
-      dyn_post = std::max(dyn_post, 0.50);
-      if (!std::isnan(dyn_ratio)) {
-        dyn_ratio = std::max(dyn_ratio, 1.25);
-      }
-      dyn_delta = std::max(dyn_delta, 0.02);
+    double evalWeight = 0.0;
+    if (trace) {
+      evalWeight = (trace->evaluatedWeight > 0.0)
+                       ? trace->evaluatedWeight
+                       : static_cast<double>(trace->evaluated);
     }
+    if (evalWeight < 24.0) {
+      dyn_post = std::max(dyn_post, 0.60);
+    } else if (evalWeight < 48.0) {
+      dyn_post = std::max(dyn_post, 0.56);
+    } else {
+      dyn_post = std::max(dyn_post, 0.52);
+    }
+    double dyn_ratio = std::isnan(decisionConfig.margin_ratio)
+                           ? 1.30
+                           : std::max(decisionConfig.margin_ratio, 1.30);
+    double dyn_delta = std::max(decisionConfig.margin_delta, 0.03);
+
     bool threshold_ok = top_score >= dyn_post;
-    bool using_ratio = !std::isnan(dyn_ratio);
-    bool margin_ok = using_ratio ? (ratio >= dyn_ratio)
-                                 : (delta >= dyn_delta);
+    bool ratio_ok = ratio >= dyn_ratio;
+    bool delta_ok = delta >= dyn_delta;
+    bool pass_margins = ratio_ok && delta_ok;
 
     double class_weight = 0.0;
     bool weight_ok = true;
@@ -945,8 +957,8 @@ void postEmDecision(std::vector<classifyResult> &results,
     if (!threshold_ok) {
       reason = "below_posterior(" + format_val(top_score) + "<" +
                format_val(dyn_post) + ")";
-    } else if (!margin_ok) {
-      if (using_ratio) {
+    } else if (!pass_margins) {
+      if (!std::isnan(dyn_ratio) && !ratio_ok) {
         reason = "below_ratio(" + format_val(ratio) + "<" +
                  format_val(dyn_ratio) + ")";
       } else {
@@ -958,7 +970,7 @@ void postEmDecision(std::vector<classifyResult> &results,
                format_val(decisionConfig.min_class_weight) + ")";
     }
 
-    bool pass = threshold_ok && margin_ok && weight_ok;
+    bool pass = threshold_ok && pass_margins && weight_ok;
 
     result.posteriors = std::move(posterior);
 
@@ -978,52 +990,27 @@ void postEmDecision(std::vector<classifyResult> &results,
       continue;
     }
 
-    // 软通过更温和，top1 仍需满足动态阈值
-    bool soft_ok = false;
-    if (weight_ok && top_score >= dyn_post) {
-      if ((!using_ratio && delta >= dyn_delta) ||
-          (using_ratio && ratio >= std::max(1.20, dyn_ratio * 0.95))) {
-        soft_ok = true;
-      }
-    }
-
-    if (soft_ok) {
-      result.taxidCount.clear();
-      result.taxidCount.emplace_back(top.first, 0);
-      if (trace) {
-        trace->passedPost = true;
-        trace->suspiciousPost = false;
-        appendReason("post_soft_pass");
-        if (trace->deepLogged) {
-          dbg::log("Decision[%s][post]: passed=1 reason=%s", result.id.c_str(),
-                   trace->decisionReason.c_str());
-        }
-      }
-      dbg::g.passed_post.fetch_add(1, std::memory_order_relaxed);
-      continue;
-    }
-
     bool evidence_ok = false;
-    if (trace) {
-      size_t gap_need = std::max<size_t>(1, trace->evaluated / 32);
-      size_t gap =
-          (trace->bestCount > trace->secondCount)
-              ? (trace->bestCount - trace->secondCount)
-              : 0;
+    if (decisionConfig.evidence_override && trace) {
+      double eval_ref = (trace->evaluatedWeight > 0.0)
+                            ? trace->evaluatedWeight
+                            : static_cast<double>(trace->evaluated);
+      double gap_need = std::max(1.0, eval_ref / 32.0);
+      double gap = static_cast<double>(trace->bestCount) -
+                   static_cast<double>(trace->secondCount);
       double ratio_pre = (trace->secondCount > 0)
                              ? static_cast<double>(trace->bestCount) /
                                    static_cast<double>(trace->secondCount)
                              : std::numeric_limits<double>::infinity();
-      double min_ratio = (trace->evaluated < 40)
-                             ? 2.0
-                             : (trace->evaluated < 80) ? 1.7 : 1.5;
-      if (trace->bestCount >= trace->thrConf && ratio_pre >= min_ratio &&
-          gap >= gap_need && !trace->bestTaxid.empty()) {
+      double min_ratio = (eval_ref < 40.0) ? 2.0 : (eval_ref < 80.0 ? 1.6 : 1.4);
+      if (trace->bestCount >= trace->thrConf &&
+          (ratio_pre >= min_ratio || gap >= gap_need) &&
+          !trace->bestTaxid.empty()) {
         evidence_ok = true;
       }
     }
 
-    if (decisionConfig.use_lca_fallback && evidence_ok && trace) {
+    if (decisionConfig.evidence_override && evidence_ok && trace) {
       const std::string &fallback = trace->bestTaxid;
       result.taxidCount.clear();
       result.taxidCount.emplace_back(fallback, 0);
@@ -1162,13 +1149,6 @@ inline void processSequence(
     }
   }
 
-  auto thr_at_eval = [&](size_t n_eval_now) -> size_t {
-    size_t base = config.adaptive_shot ? n_eval_now : hashNum;
-    double scaled = static_cast<double>(base) * config.shotThreshold;
-    size_t t = static_cast<size_t>(std::ceil(scaled));
-    return std::max<size_t>(t, 1);
-  };
-
   const size_t binNumAll = indexToTaxid.size();
   heat.ensure(binNumAll);
 
@@ -1226,189 +1206,108 @@ inline void processSequence(
 
   size_t sqrtBins = std::max<size_t>(
       1, static_cast<size_t>(std::sqrt(static_cast<double>(binNumAll))));
-  size_t KmaxLimit = std::min<size_t>(128, binNumAll);
-  size_t desiredK = std::clamp<size_t>(sqrtBins, sqrtBins, KmaxLimit);
+  const size_t candidateCap =
+      std::min<size_t>(binNumAll, static_cast<size_t>(256));
   std::vector<uint32_t> topBins;
   bool fallback_full = (coarseTotal == 0);
 
-  if (imcf.hasRouterIndex() && !sampleVals.empty()) {
-    robin_hood::unordered_flat_map<uint32_t, uint32_t> freq;
-    freq.reserve(256);
+  robin_hood::unordered_flat_set<uint32_t> candidateSet;
+  candidateSet.reserve(256);
+  robin_hood::unordered_flat_set<uint32_t> lowDegPreserve;
+  lowDegPreserve.reserve(64);
+
+  if (!sampleVals.empty()) {
     std::vector<uint32_t> routed;
+    routed.reserve(16);
     for (auto v : sampleVals) {
       routed.clear();
       imcf.route(v, routed);
-      for (uint32_t b : routed) {
-        if (b < binNumAll) {
-          ++freq[b];
+      if (routed.empty()) {
+        continue;
+      }
+      std::sort(routed.begin(), routed.end());
+      routed.erase(std::unique(routed.begin(), routed.end()), routed.end());
+      if (routed.size() <= 2) {
+        for (uint32_t b : routed) {
+          if (b < binNumAll) {
+            candidateSet.insert(b);
+            lowDegPreserve.insert(b);
+          }
         }
       }
     }
-    if (!freq.empty()) {
-      std::vector<std::pair<uint32_t, uint32_t>> ranked;
-      ranked.reserve(freq.size());
-      for (const auto &kv : freq) {
-        ranked.emplace_back(kv.first, kv.second);
+  }
+
+  constexpr double coverageTarget = 0.92;
+  if (coarseTotal > 0 && !sampleBinScore.empty()) {
+    std::vector<std::pair<uint32_t, uint32_t>> ranked;
+    ranked.reserve(sampleBinScore.size());
+    for (const auto &kv : sampleBinScore) {
+      ranked.emplace_back(kv.first, kv.second);
+    }
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto &a, const auto &b) { return a.second > b.second; });
+
+    uint64_t goal = static_cast<uint64_t>(
+        std::ceil(static_cast<double>(coarseTotal) * coverageTarget));
+    uint64_t covered = 0;
+    for (const auto &[bin, score] : ranked) {
+      if (bin >= binNumAll) {
+        continue;
       }
-      std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) {
-        return a.second > b.second;
-      });
-      size_t take = std::min(desiredK, ranked.size());
-      topBins.reserve(take);
-      for (size_t i = 0; i < take; ++i) {
-        topBins.push_back(ranked[i].first);
+      candidateSet.insert(bin);
+      covered += score;
+      if (goal > 0 && covered >= goal) {
+        break;
       }
-      fallback_full = false;
+    }
+    fallback_full = false;
+  }
+
+  if (!fallback_full) {
+    for (const auto &[bin, _] : sampleBinScore) {
+      if (bin < binNumAll) {
+        candidateSet.insert(bin);
+      }
+    }
+  }
+
+  if (!candidateSet.empty()) {
+    std::vector<std::pair<uint32_t, uint64_t>> weighted;
+    weighted.reserve(candidateSet.size());
+    for (uint32_t bin : candidateSet) {
+      uint64_t weight = 0;
+      if (auto it = sampleBinScore.find(bin); it != sampleBinScore.end()) {
+        weight += it->second * 4ull;
+      }
+      if (bin < heat.score.size()) {
+        weight += heat.score[bin];
+      }
+      if (lowDegPreserve.find(bin) != lowDegPreserve.end()) {
+        weight += (1ull << 32);
+      }
+      weighted.emplace_back(bin, weight);
+    }
+    std::sort(weighted.begin(), weighted.end(),
+              [](const auto &a, const auto &b) { return a.second > b.second; });
+    topBins.reserve(std::min(candidateCap, weighted.size()));
+    for (const auto &[bin, _] : weighted) {
+      topBins.push_back(bin);
+      if (topBins.size() >= candidateCap) {
+        break;
+      }
     }
   }
 
   if (topBins.empty()) {
-    size_t adaptiveK = sqrtBins;
-    if (coarseTotal > 0 && !sampleBinScore.empty()) {
-      std::vector<std::pair<uint32_t, uint32_t>> scoreVec;
-      scoreVec.reserve(sampleBinScore.size());
-      for (const auto &kv : sampleBinScore) {
-        scoreVec.emplace_back(kv.first, kv.second);
-      }
-      std::sort(
-          scoreVec.begin(), scoreVec.end(),
-          [](const auto &a, const auto &b) { return a.second > b.second; });
-      adaptiveK = scoreVec.size();
-      for (size_t i = 1; i < scoreVec.size(); ++i) {
-        double ratio = static_cast<double>(scoreVec[i].second) /
-                       static_cast<double>(scoreVec[i - 1].second);
-        if (ratio <= 0.8) {
-          adaptiveK = i;
-          break;
-        }
-      }
-      adaptiveK = std::max<size_t>(adaptiveK, sqrtBins);
-      adaptiveK = std::min<size_t>(adaptiveK, KmaxLimit);
-    }
-    adaptiveK = std::clamp<size_t>(adaptiveK, sqrtBins, KmaxLimit);
-    size_t K = adaptiveK;
+    fallback_full = true;
+    topBins.resize(binNumAll);
+    std::iota(topBins.begin(), topBins.end(), 0u);
+  }
 
-    if (fallback_full) {
-      topBins.resize(binNumAll);
-      std::iota(topBins.begin(), topBins.end(), 0u);
-    } else {
-      robin_hood::unordered_flat_set<uint32_t> candidateSet;
-      candidateSet.reserve(K * 2 + sampleBinScore.size());
-      std::vector<uint32_t> candidateBins;
-      candidateBins.reserve(K * 2 + sampleBinScore.size());
-
-      auto push_candidate = [&](uint32_t idx) {
-        if (idx >= binNumAll) {
-          return;
-        }
-        if (candidateSet.insert(idx).second) {
-          candidateBins.push_back(idx);
-        }
-      };
-
-      size_t heatTake = std::min<size_t>(
-          binNumAll, std::max<size_t>(K / 2, static_cast<size_t>(1)));
-      using HeapNode = std::pair<uint32_t, uint32_t>;
-      auto cmpNode = [](const HeapNode &a, const HeapNode &b) {
-        return a.first > b.first;
-      };
-      std::priority_queue<HeapNode, std::vector<HeapNode>, decltype(cmpNode)>
-          heatHeap(cmpNode);
-      for (uint32_t idx = 0; idx < binNumAll; ++idx) {
-        uint32_t sc = heat.score[idx];
-        if (heatHeap.size() < heatTake) {
-          heatHeap.emplace(sc, idx);
-        } else if (sc > heatHeap.top().first) {
-          heatHeap.pop();
-          heatHeap.emplace(sc, idx);
-        }
-      }
-      std::vector<uint32_t> fromHeat;
-      fromHeat.reserve(heatHeap.size());
-      while (!heatHeap.empty()) {
-        fromHeat.push_back(heatHeap.top().second);
-        heatHeap.pop();
-      }
-      std::reverse(fromHeat.begin(), fromHeat.end());
-      for (auto idx : fromHeat) {
-        push_candidate(idx);
-      }
-
-      for (const auto &[bin, score] : sampleBinScore) {
-        (void)score;
-        push_candidate(bin);
-      }
-
-      size_t desired = std::min(K, binNumAll);
-      if (candidateBins.size() < desired) {
-        size_t need = desired - candidateBins.size();
-        if (need > 0) {
-          std::priority_queue<HeapNode, std::vector<HeapNode>,
-                              decltype(cmpNode)>
-              fillHeap(cmpNode);
-          for (uint32_t idx = 0; idx < binNumAll; ++idx) {
-            if (candidateSet.find(idx) != candidateSet.end()) {
-              continue;
-            }
-            uint32_t sc = heat.score[idx];
-            if (fillHeap.size() < need) {
-              fillHeap.emplace(sc, idx);
-            } else if (sc > fillHeap.top().first) {
-              fillHeap.pop();
-              fillHeap.emplace(sc, idx);
-            }
-          }
-          std::vector<uint32_t> extra;
-          extra.reserve(fillHeap.size());
-          while (!fillHeap.empty()) {
-            extra.push_back(fillHeap.top().second);
-            fillHeap.pop();
-          }
-          std::reverse(extra.begin(), extra.end());
-          for (auto idx : extra) {
-            push_candidate(idx);
-          }
-        }
-      }
-
-      desired = std::min(K, binNumAll);
-      std::priority_queue<HeapNode, std::vector<HeapNode>, decltype(cmpNode)>
-          finalHeap(cmpNode);
-      for (auto idx : candidateBins) {
-        uint32_t combined = heat.score[idx];
-        if (auto it = sampleBinScore.find(idx); it != sampleBinScore.end()) {
-          combined += it->second;
-        }
-        if (finalHeap.size() < desired) {
-          finalHeap.emplace(combined, idx);
-        } else if (combined > finalHeap.top().first) {
-          finalHeap.pop();
-          finalHeap.emplace(combined, idx);
-        }
-      }
-      while (!finalHeap.empty()) {
-        topBins.push_back(finalHeap.top().second);
-        finalHeap.pop();
-      }
-      std::reverse(topBins.begin(), topBins.end());
-
-      if (topBins.size() < desired) {
-        robin_hood::unordered_flat_set<uint32_t> topSet(topBins.begin(),
-                                                        topBins.end());
-        for (uint32_t idx = 0; idx < binNumAll && topBins.size() < desired;
-             ++idx) {
-          if (topSet.insert(idx).second) {
-            topBins.push_back(idx);
-          }
-        }
-      }
-
-      if (topBins.empty()) {
-        topBins.resize(binNumAll);
-        std::iota(topBins.begin(), topBins.end(), 0u);
-        fallback_full = true;
-      }
-    }
+  if (!fallback_full) {
+    std::sort(topBins.begin(), topBins.end());
+    topBins.erase(std::unique(topBins.begin(), topBins.end()), topBins.end());
   }
 
   bool candidateEmpty = fallback_full || topBins.empty();
@@ -1437,8 +1336,12 @@ inline void processSequence(
     topBins.erase(std::unique(topBins.begin(), topBins.end()), topBins.end());
   }
 
-  robin_hood::unordered_flat_map<uint32_t, uint32_t> tidCount;
-  tidCount.reserve(128);
+  robin_hood::unordered_flat_map<uint32_t, double> tidScore;
+  robin_hood::unordered_flat_map<uint32_t, uint32_t> uniqueHits;
+  robin_hood::unordered_flat_map<uint32_t, uint32_t> consistencyHits;
+  tidScore.reserve(128);
+  uniqueHits.reserve(128);
+  consistencyHits.reserve(128);
 
   uint64_t eventHits = 0;
   robin_hood::unordered_flat_map<uint32_t, uint32_t> binHitCount;
@@ -1446,42 +1349,111 @@ inline void processSequence(
     binHitCount.reserve(128);
   }
 
-  auto emit_to_tid = [&](uint32_t bin, uint16_t sp) {
-    if (bin >= tax.idx2id.size()) {
-      return;
+  std::vector<uint32_t> minimizerTids;
+  minimizerTids.reserve(16);
+  std::vector<uint32_t> routedBinsBuf;
+  routedBinsBuf.reserve(16);
+
+  double eff_eval = 0.0;
+  size_t n_eval = 0;
+
+  const std::vector<uint32_t> *activeSubset =
+      (fallback_full || topBins.size() == binNumAll) ? nullptr : &topBins;
+
+  auto evaluate_minimizer = [&](uint64_t value,
+                                const std::vector<uint32_t> *subset) -> double {
+    minimizerTids.clear();
+    auto emit = [&](uint32_t bin, uint16_t sp) {
+      if (bin >= tax.idx2id.size()) {
+        return;
+      }
+      const auto &speciesVec = tax.idx2id[bin];
+      if (sp >= speciesVec.size()) {
+        return;
+      }
+      uint32_t tid = speciesVec[sp];
+      if (tid >= tax.id2str.size()) {
+        return;
+      }
+      minimizerTids.push_back(tid);
+      if (trace) {
+        ++eventHits;
+        ++binHitCount[bin];
+      }
+    };
+
+    if (!subset) {
+      imcf.bulkContain_events(value, emit);
+    } else {
+      imcf.bulkContain_events_subset(value, *subset, emit);
     }
-    const auto &speciesVec = tax.idx2id[bin];
-    if (sp >= speciesVec.size()) {
-      return;
+
+    if (minimizerTids.empty()) {
+      return 0.0;
     }
-    uint32_t tid = speciesVec[sp];
-    if (tid >= tax.id2str.size()) {
-      return;
+
+    std::sort(minimizerTids.begin(), minimizerTids.end());
+    minimizerTids.erase(
+        std::unique(minimizerTids.begin(), minimizerTids.end()),
+        minimizerTids.end());
+
+    size_t deg = minimizerTids.size();
+    if (deg == 0) {
+      return 0.0;
     }
-    ++tidCount[tid];
-    if (trace) {
-      ++eventHits;
-      ++binHitCount[bin];
+
+    double totalBins = subset ? static_cast<double>(subset->size())
+                              : static_cast<double>(binNumAll);
+    if (totalBins <= 0.0) {
+      totalBins = static_cast<double>(binNumAll);
     }
+
+    routedBinsBuf.clear();
+    imcf.route(value, routedBinsBuf);
+    if (!routedBinsBuf.empty()) {
+      std::sort(routedBinsBuf.begin(), routedBinsBuf.end());
+      routedBinsBuf.erase(
+          std::unique(routedBinsBuf.begin(), routedBinsBuf.end()),
+          routedBinsBuf.end());
+    }
+
+    size_t df = routedBinsBuf.empty() ? deg : routedBinsBuf.size();
+    double idf = std::log2((totalBins + 1.0) /
+                           (static_cast<double>(df) + 1.0));
+    idf = std::clamp(idf, 0.5, 5.0);
+
+    double contrib = idf / std::sqrt(static_cast<double>(deg));
+    for (uint32_t tid : minimizerTids) {
+      tidScore[tid] += contrib;
+      ++consistencyHits[tid];
+    }
+    if (deg == 1) {
+      ++uniqueHits[minimizerTids.front()];
+    }
+
+    return idf;
   };
 
-  size_t n_eval = 0;
-  size_t n0 = std::min<size_t>(64, hashs1.size());
-  for (size_t i = 0; i < n0; ++i) {
-    if (fallback_full || topBins.size() == binNumAll) {
-      imcf.bulkContain_events(hashs1[i], emit_to_tid);
-    } else {
-      imcf.bulkContain_events_subset(hashs1[i], topBins, emit_to_tid);
+  auto recompute_subset_state = [&]() {
+    activeSubset = (fallback_full || topBins.size() == binNumAll)
+                       ? nullptr
+                       : &topBins;
+  };
+
+  robin_hood::unordered_flat_set<uint32_t> topBinSet;
+  if (!fallback_full) {
+    topBinSet.reserve(topBins.size());
+    for (auto bin : topBins) {
+      topBinSet.insert(bin);
     }
   }
-  n_eval = n0;
 
-  auto top2 = [&](uint32_t &bestTid, size_t &best, size_t &second) {
-    best = 0;
-    second = 0;
+  auto compute_top = [&](uint32_t &bestTid, double &best, double &second) {
+    best = 0.0;
+    second = 0.0;
     bestTid = std::numeric_limits<uint32_t>::max();
-    for (const auto &kv : tidCount) {
-      size_t c = kv.second;
+    for (const auto &kv : tidScore) {
+      double c = kv.second;
       if (c > best) {
         second = best;
         best = c;
@@ -1492,73 +1464,165 @@ inline void processSequence(
     }
   };
 
-  uint32_t bestTid = std::numeric_limits<uint32_t>::max();
-  size_t best = 0;
-  size_t second = 0;
-  top2(bestTid, best, second);
-
-  auto compute_ratio = [&](size_t best_count, size_t second_count) {
-    if (second_count > 0) {
-      return static_cast<double>(best_count) /
-             static_cast<double>(std::max<size_t>(second_count, size_t(1)));
+  auto compute_ratio = [](double best_score, double second_score) {
+    if (second_score > 0.0) {
+      return best_score / std::max(second_score, std::numeric_limits<double>::min());
     }
-    return best_count == 0 ? 0.0
-                           : std::numeric_limits<double>::infinity();
+    return best_score <= 0.0 ? 0.0
+                             : std::numeric_limits<double>::infinity();
   };
 
-  size_t thr_conf = thr_at_eval(n_eval);
-  double best_ratio = compute_ratio(best, second);
-  bool confident = (best >= thr_conf) && (best_ratio >= 1.8);
+  struct EvidenceStats {
+    uint32_t bestTid = std::numeric_limits<uint32_t>::max();
+    double best = 0.0;
+    double second = 0.0;
+    double ratio = 0.0;
+    double gap = 0.0;
+    size_t uniqueCount = 0;
+    double uniqueRatio = 0.0;
+    size_t consistency = 0;
+  };
 
-  if (!confident && hashs1.size() > n0) {
+  auto collect_stats = [&]() -> EvidenceStats {
+    EvidenceStats stats;
+    compute_top(stats.bestTid, stats.best, stats.second);
+    stats.ratio = compute_ratio(stats.best, stats.second);
+    stats.gap = stats.best - stats.second;
+    if (stats.bestTid != std::numeric_limits<uint32_t>::max()) {
+      if (auto it = uniqueHits.find(stats.bestTid); it != uniqueHits.end()) {
+        stats.uniqueCount = it->second;
+      }
+      if (auto it = consistencyHits.find(stats.bestTid);
+          it != consistencyHits.end()) {
+        stats.consistency = it->second;
+      }
+    }
+    double denom = eff_eval > 0.0 ? eff_eval : 1.0;
+    stats.uniqueRatio = static_cast<double>(stats.uniqueCount) / denom;
+    return stats;
+  };
+
+  size_t n0 = std::min<size_t>(64, hashs1.size());
+  for (size_t i = 0; i < n0; ++i) {
+    eff_eval += evaluate_minimizer(hashs1[i], activeSubset);
+  }
+  n_eval = n0;
+
+  auto meets_quick = [&](const EvidenceStats &s) {
+    if (s.bestTid == std::numeric_limits<uint32_t>::max()) {
+      return false;
+    }
+    double thr_conf_local = std::ceil(config.shotThreshold * eff_eval);
+    double gap_need_local = std::max(0.5, eff_eval / 24.0);
+    bool strong = (s.best >= thr_conf_local);
+    bool unique_ok = (s.uniqueCount >= 3) ||
+                     (s.uniqueCount >= 2 && s.uniqueRatio >= 0.12);
+    bool stable = (s.gap >= gap_need_local) && (s.ratio >= 1.35);
+    return strong && unique_ok && stable;
+  };
+
+  EvidenceStats stats = collect_stats();
+  bool highConfPre = meets_quick(stats);
+
+  if (!highConfPre && hashs1.size() > n0) {
     size_t mask = (static_cast<size_t>(1) << 3) - 1; // sample 1/8
     for (size_t i = n0; i < hashs1.size(); ++i) {
       if ((hashs1[i] & mask) != 0) {
         deferredEval.push_back(hashs1[i]);
         continue;
       }
-      if (fallback_full || topBins.size() == binNumAll) {
-        imcf.bulkContain_events(hashs1[i], emit_to_tid);
-      } else {
-        imcf.bulkContain_events_subset(hashs1[i], topBins, emit_to_tid);
-      }
+      eff_eval += evaluate_minimizer(hashs1[i], activeSubset);
       ++n_eval;
     }
-    top2(bestTid, best, second);
-    thr_conf = thr_at_eval(n_eval);
-    best_ratio = compute_ratio(best, second);
-    size_t gap_need = std::max<size_t>(1, n_eval / 32);
-    bool need_escalate = (best < thr_conf) || (best_ratio < 1.35) ||
-                         ((best > second ? best - second : 0) < gap_need);
-    if (need_escalate && !deferredEval.empty()) {
+    stats = collect_stats();
+    highConfPre = meets_quick(stats);
+
+    if (!highConfPre && !deferredEval.empty()) {
       for (auto value : deferredEval) {
-        if (fallback_full || topBins.size() == binNumAll) {
-          imcf.bulkContain_events(value, emit_to_tid);
-        } else {
-          imcf.bulkContain_events_subset(value, topBins, emit_to_tid);
-        }
+        eff_eval += evaluate_minimizer(value, activeSubset);
         ++n_eval;
       }
       deferredEval.clear();
-      top2(bestTid, best, second);
-      thr_conf = thr_at_eval(n_eval);
-      best_ratio = compute_ratio(best, second);
+      stats = collect_stats();
+      highConfPre = meets_quick(stats);
     }
   }
 
-  if (trace) {
-    trace->thrConf = thr_conf;
+  double thr_conf = std::max(1.0, std::ceil(config.shotThreshold * eff_eval));
+  double gap_need = std::max(0.5, eff_eval / 24.0);
+
+  uint32_t bestTid = stats.bestTid;
+  double best = stats.best;
+  double second = stats.second;
+  double best_ratio = stats.ratio;
+  double gap = stats.gap;
+  size_t uniqueCount = stats.uniqueCount;
+  double uniqueRatio = stats.uniqueRatio;
+
+  bool expanded = false;
+  if (!fallback_full && bestTid < tax.tid2bin.size()) {
+    const auto &shards = tax.tid2bin[bestTid];
+    for (uint32_t bin : shards) {
+      if (topBinSet.find(bin) == topBinSet.end()) {
+        topBins.push_back(bin);
+        topBinSet.insert(bin);
+        expanded = true;
+      }
+    }
+  }
+
+  if (expanded) {
+    std::sort(topBins.begin(), topBins.end());
+    topBins.erase(std::unique(topBins.begin(), topBins.end()), topBins.end());
+    fallback_full = (topBins.size() == binNumAll);
+    recompute_subset_state();
+
+    tidScore.clear();
+    if (trace) {
+      binHitCount.clear();
+      eventHits = 0;
+    }
+    uniqueHits.clear();
+    consistencyHits.clear();
+    eff_eval = 0.0;
+    n_eval = 0;
+    for (auto value : hashs1) {
+      eff_eval += evaluate_minimizer(value, activeSubset);
+      ++n_eval;
+    }
+    stats = collect_stats();
+    highConfPre = meets_quick(stats);
+    thr_conf = std::ceil(config.shotThreshold * eff_eval);
+    gap_need = std::max(0.5, eff_eval / 24.0);
+    bestTid = stats.bestTid;
+    best = stats.best;
+    second = stats.second;
+    best_ratio = stats.ratio;
+    gap = stats.gap;
+    uniqueCount = stats.uniqueCount;
+    uniqueRatio = stats.uniqueRatio;
   }
 
   if (trace) {
+    trace->thrConf = static_cast<size_t>(std::ceil(thr_conf));
     trace->imcfEvents = eventHits;
     trace->binsWithHits = binHitCount.size();
     trace->evaluated = n_eval;
-    trace->bestCount = best;
-    trace->secondCount = second;
+    trace->evaluatedWeight = eff_eval;
+    trace->bestCount = static_cast<size_t>(std::llround(best));
+    trace->secondCount = static_cast<size_t>(std::llround(second));
     trace->bestTid = bestTid;
     if (bestTid < tax.id2str.size()) {
       trace->bestTaxid = tax.id2str[bestTid];
+    }
+    if (highConfPre) {
+      if (trace->decisionReason.empty()) {
+        trace->decisionReason = "pre_high_conf";
+      } else if (trace->decisionReason.find("pre_high_conf") ==
+                 std::string::npos) {
+        trace->decisionReason += "|pre_high_conf";
+      }
+      trace->suspiciousPre = false;
     }
     if (!binHitCount.empty()) {
       std::vector<std::pair<uint32_t, uint32_t>> ranked;
@@ -1584,21 +1648,25 @@ inline void processSequence(
   }
 
   classifyResult result;
-  // 告诉 EM/VEM：这条 read 实际参与判别的 minimizer 数
-  result.evaluated = static_cast<double>(n_eval);
+  // 告诉 EM/VEM：这条 read 的有效证据权重（考虑到 deg 与 IDF）
+  result.evaluated = eff_eval;
   result.id = id;
   result.trace = trace;
   std::pair<std::string, std::size_t> maxCount;
   bool maxCountValid = false;
 
-  if (!maxCountValid && best > 0 && bestTid < tax.id2str.size()) {
-    maxCount = std::make_pair(tax.id2str[bestTid], std::min(best, n_eval));
+  size_t bestRounded = static_cast<size_t>(std::max<double>(0.0, std::llround(best)));
+  size_t effRounded = static_cast<size_t>(
+      std::max<double>(1.0, std::llround(eff_eval)));
+  if (!maxCountValid && bestRounded > 0 && bestTid < tax.id2str.size()) {
+    maxCount =
+        std::make_pair(tax.id2str[bestTid], std::min(bestRounded, effRounded));
     maxCountValid = true;
   }
 
-  bool use_em = (config.em || config.vem);
+  bool use_em = (config.em || config.vem) && !highConfPre;
 
-  size_t maxBinCount = std::min(best, n_eval);
+  double maxEvidence = std::min(best, eff_eval);
   double beta = config.firstFilterBeta;
   if (beta <= 0.0) {
     beta = 0.8;
@@ -1609,20 +1677,34 @@ inline void processSequence(
     beta = 0.50;
   }
   size_t thr_beta =
-      static_cast<size_t>(std::floor(beta * static_cast<double>(maxBinCount)));
-  size_t thr_eval = thr_at_eval(n_eval);
+      static_cast<size_t>(std::floor(beta * std::max(0.0, maxEvidence)));
+  size_t thr_eval = static_cast<size_t>(std::ceil(
+      config.shotThreshold * (config.adaptive_shot ? eff_eval
+                                                   : static_cast<double>(hashNum))));
+  if (thr_eval == 0) {
+    thr_eval = 1;
+  }
   if (use_em) {
-    size_t base = config.adaptive_shot ? n_eval : hashNum;
+    double base = config.adaptive_shot ? eff_eval
+                                       : static_cast<double>(hashNum);
     // EM 也需要足量证据：soften 到 0.50（原 0.40）
     double softened_ratio = std::min(config.shotThreshold, 0.50);
-    size_t em_eval = static_cast<size_t>(
-        std::ceil(static_cast<double>(base) * softened_ratio));
-    if (em_eval == 0 && base > 0) {
+    size_t em_eval =
+        static_cast<size_t>(std::ceil(base * softened_ratio));
+    if (em_eval == 0 && base > 0.0) {
       em_eval = 1;
     }
     thr_eval = std::min(thr_eval, em_eval);
   }
-  size_t thr_min_eval = (config.min_eval_count > 0) ? config.min_eval_count : 0;
+  size_t thr_min_eval = 0;
+  if (n_eval > 0) {
+    thr_min_eval = static_cast<size_t>(
+        std::ceil(0.3 * static_cast<double>(n_eval)));
+  }
+  thr_min_eval = std::max<size_t>(thr_min_eval, 12);
+  if (config.min_eval_count > 0) {
+    thr_min_eval = std::max(thr_min_eval, config.min_eval_count);
+  }
 
   if (trace) {
     trace->thrBeta = thr_beta;
@@ -1631,20 +1713,22 @@ inline void processSequence(
     trace->useEm = use_em;
   }
 
-  uint64_t TOT = 0;
-  for (const auto &kv : tidCount) {
+  double TOT = 0.0;
+  for (const auto &kv : tidScore) {
     TOT += kv.second;
   }
   if (trace) {
-    trace->totalTidHits = TOT;
+    trace->totalTidHits = static_cast<uint64_t>(std::llround(TOT));
   }
 
-  if (trace && !tidCount.empty()) {
+  if (trace && !tidScore.empty()) {
     std::vector<std::pair<std::string, size_t>> ranked;
-    ranked.reserve(tidCount.size());
-    for (const auto &[tid_id, raw] : tidCount) {
+    ranked.reserve(tidScore.size());
+    for (const auto &[tid_id, raw] : tidScore) {
       if (tid_id < tax.id2str.size()) {
-        ranked.emplace_back(tax.id2str[tid_id], raw);
+        ranked.emplace_back(
+            tax.id2str[tid_id],
+            static_cast<size_t>(std::max<double>(0.0, std::llround(raw))));
       }
     }
     std::sort(ranked.begin(), ranked.end(),
@@ -1673,7 +1757,7 @@ inline void processSequence(
     if (!config.adaptive_fdr || Z_value <= 0.0) {
       return 1;
     }
-    double mu = static_cast<double>(TOT) / static_cast<double>(M);
+    double mu = TOT / static_cast<double>(M);
     return static_cast<size_t>(
         std::ceil(mu + Z_value * std::sqrt(std::max(mu, 1e-9))));
   };
@@ -1690,14 +1774,29 @@ inline void processSequence(
     thr_final = std::max({thr_eval, thr_fdr, thr_beta, thr_min_eval});
   }
 
-  for (const auto &[tid_id, rawCount] : tidCount) {
-    size_t countVal = std::min<size_t>(rawCount, n_eval);
-    if (countVal >= thr_final) {
-      const std::string &taxid = tax.id2str[tid_id];
-      result.taxidCount.emplace_back(taxid, countVal);
-      if (countVal == maxBinCount) {
-        maxCount = std::make_pair(taxid, countVal);
-        maxCountValid = true;
+  if (highConfPre && bestTid < tax.id2str.size()) {
+    size_t bestRoundedDirect = static_cast<size_t>(
+        std::max<double>(1.0, std::llround(best)));
+    const std::string &taxid = tax.id2str[bestTid];
+    result.taxidCount.emplace_back(taxid, bestRoundedDirect);
+    maxCount = std::make_pair(taxid, bestRoundedDirect);
+    maxCountValid = true;
+    if (trace) {
+      trace->passedPost = true;
+      trace->suspiciousPost = false;
+    }
+  } else {
+    for (const auto &[tid_id, rawScore] : tidScore) {
+      size_t rounded = static_cast<size_t>(
+          std::max<double>(0.0, std::llround(rawScore)));
+      size_t countVal = std::min(rounded, effRounded);
+      if (countVal >= thr_final) {
+        const std::string &taxid = tax.id2str[tid_id];
+        result.taxidCount.emplace_back(taxid, countVal);
+        if (countVal == bestRounded) {
+          maxCount = std::make_pair(taxid, countVal);
+          maxCountValid = true;
+        }
       }
     }
   }
@@ -1719,8 +1818,8 @@ inline void processSequence(
   size_t dynamicTopK = config.preEmTopK > 0 ? static_cast<size_t>(config.preEmTopK)
                                             : 16;
   bool strong = (best_ratio >= 2.5) &&
-                (best >= thr_conf + std::max<size_t>(1, n_eval / 16));
-  bool weak = (best < thr_conf) || (best_ratio < 1.35);
+                (best >= thr_conf + std::max(1.0, eff_eval / 16.0));
+  bool weak = (best < thr_conf) || (best_ratio < 1.20);
   if (strong && dynamicTopK > 8) {
     dynamicTopK = 8;
   } else if (weak && dynamicTopK < 64) {
@@ -1730,7 +1829,7 @@ inline void processSequence(
     trace->preEmTopK = dynamicTopK;
   }
 
-  if (!result.taxidCount.empty() && (config.em || config.vem)) {
+  if (!result.taxidCount.empty() && use_em) {
     size_t K = dynamicTopK;
     if (K > 0 && result.taxidCount.size() > K) {
       std::nth_element(
@@ -2325,14 +2424,15 @@ void run(ClassifyConfig config) {
     chimera::imcf::InterleavedMergedCuckooFilter imcf;
     ChimeraBuild::IMCFConfig imcfConfig;
     auto indexStatus =
-        loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid);
+        loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid,
+                   config.use_router_index);
     if (indexStatus.builtActive) {
       rebuildActiveMs = indexStatus.activeMs;
       std::cout
           << "IMCF index: active-group list missing, rebuilding in memory ("
           << rebuildActiveMs << " ms)" << std::endl;
     }
-    if (indexStatus.builtRouter) {
+    if (config.use_router_index && indexStatus.builtRouter) {
       rebuildRouterMs = indexStatus.routerMs;
       std::cout << "IMCF index: router table missing, rebuilding in memory ("
                 << rebuildRouterMs << " ms)" << std::endl;
@@ -2417,6 +2517,7 @@ void run(ClassifyConfig config) {
     decisionConfig.margin_ratio = config.post_ratio;
     decisionConfig.min_class_weight = config.post_pi_min;
     decisionConfig.use_lca_fallback = config.lca_fallback;
+    decisionConfig.evidence_override = config.evidence_override;
 
     std::optional<std::reference_wrapper<LCA>> fallbackLca{};
     LCA lcaInstance;
