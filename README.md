@@ -271,15 +271,17 @@ The `build` function is used to construct a classification database from the dow
   
 **Note**: The difference between the `fast` and `normal` modes is significant. The `fast` mode is optimized for speed and resource efficiency but may lead to larger databases with unbalanced datasets, while the `normal` mode ensures a more balanced database size at the potential cost of speed due to a higher number of CFs.
 
-- `-k` or `--kmer`: K-mer size for building the database (default: `19`). This parameter defines the length of k-mers used in the construction process, and it must be a value between 1 and 31. Adjusting the k-mer size can influence the sensitivity of the database.
-- `-w` or `--window`: Window size (default: `31`). This parameter defines the sliding window size used to scan the input sequences for k-mers. A larger window size can reduce false positives, but may also reduce sensitivity.
+- `-k` or `--kmer`: K-mer size for building the database (default: `31`). This parameter defines the length of k-mers used in the construction process, and it must be a value between 1 and 50. Adjusting the k-mer size can influence the sensitivity of the database.
+- `-s` or `--syncmer-s`: Syncmer s-mer size (default: `16`). This parameter must be smaller than the chosen k-mer size and controls the length of the sub-k-mers used when computing syncmers.
+- `-P` or `--syncmer-pos`: Syncmer minimal offset (default: `7`). This is the 0-based position inside the k-mer where the minimal s-mer must appear to emit a syncmer.
+  The default (`k=31`, `s=16`, `pos=7`) forms an open canonical syncmer with expected density 1/(k−s+1) ≈ 6.25%, balancing sensitivity and robustness.
 - `-l` or `--min-length`: Minimum sequence length (default: `0`). Sequences shorter than this value will be excluded from the database construction. Adjusting this can be useful for filtering out very short or low-quality sequences.
 - `-t` or `--threads`: Number of threads for parallel processing (default: `32`). Increasing the number of threads can significantly speed up the database construction process, especially on multi-core systems.
 - `--load-factor`: Loading ratio of the cuckoo filter (default: `0.58`). This parameter mainly affects the **false positive rate**. Lowering the load factor reduces the filter's capacity utilization, which can decrease the false positive rate but will slightly increase the size of the database. 
 - `-M` or `--max-hashes`: Maximum number of hashes per taxid (default: `2000000`). This parameter limits the number of hashes stored for each taxid, which can help control memory usage.
 - `-a` or `--alpha`: The weight parameters for building HICF have a default value of `1.2`. Please do not modify them unless there are special circumstances
 - `--relaxed-load-factor`: The relaxed load factor for the hierarchical interleaved cuckoo filter. The default value is `0.95`. This parameter can be used to adjust the load factor for
-- `-c` or `--fixed-cutoff`: Filter out the truncation threshold of minimizers with fewer occurrences when calculating them. By default, it is not set and will be automatically calculated based on file size, with a range of `(0-255)`
+- `--adaptive-cutoff`: 启用基于文件大小估算的 syncmer cutoff；默认关闭时保留所有 syncmer。
 - `-f` or `--filter`: Select the type of filter to use (ICF, HICF, IMCF) and default to `IMCF`
 - `-q` or `--quiet`: Suppresses verbose output. Use this option to minimize output during the building process.
 
@@ -322,8 +324,6 @@ The `classify` function allows users to perform taxonomic classification on sing
 #### Algorithm Selection (Mutually Exclusive Options):
 You can select one of the following classification algorithms:
 
-- `-l` or `--lca`: Use the **LCA (Lowest Common Ancestor)** algorithm for classification. This requires the `--tax-file` option:
-- `-T` or `--tax-file`: Specifies the taxonomy file for LCA classification. If not provided, the default is `tax.info` from the downloaded dataset.
 - `-e` or `--em`: Use the **EM (Expectation-Maximization)** algorithm for classification.
 - `-V` or `--vem` : Use the **Variational EM** algorithm for classification. This is the default classification method if no other algorithm is specified.
 - `--em-iter`: Number of EM iterations (default: `100`).
@@ -331,6 +331,8 @@ You can select one of the following classification algorithms:
 - `--none`: Do not use LCA or EM for classification. In this case, classification is based solely on the top hit from the database.
 - `-f` or `--filter`: Select the type of filter to use (ICF, HICF, IMCF) and default to `IMCF`
 - `-q` or `--quiet`: Suppresses verbose output.
+
+> ⚠️ 注意：`-l/--lca`、`--lca-fallback` 以及 `--skip-postfilter/--no-skip-postfilter` 参数暂时废弃，当前版本的 CLI 不再提供这些开关，内部行为保持原有默认逻辑。
 
 **Examples:**
 For single-end input files:
@@ -344,12 +346,6 @@ For paired-end input files (must be an even number):
 chimera classify -p paired1_1.fasta paired1_2.fasta paired2_1.fasta paired2_2.fasta -o results.txt -d ChimeraDB
 ```
 This command classifies the paired-end sequences using the `ChimeraDB` database, saving the output to `results.txt`.
-
-For LCA-based classification with a custom taxonomy file:
-```bash
-chimera classify -i input.fasta -d ChimeraDB -l --tax-file tax.info -o results.txt
-```
-This command uses the LCA algorithm with a specified taxonomy file (`tax.info`) to classify the sequences in `input.fasta` and outputs the results to `results.txt`.
 
 ### 5. Profile
 
@@ -660,7 +656,7 @@ terminate called after throwing an instance of 'std::runtime_error'
 what(): Filter is full. Cannot insert more tags.
 ```
 
-This error occurs when the cuckoo filter reaches its capacity and fails to insert a minimizer hash within the allowed number of relocation attempts, potentially causing an infinite loop. This situation often arises when the load factor is too high for the dataset being used.
+This error occurs when the cuckoo filter reaches its capacity and fails to insert a syncmer hash within the allowed number of relocation attempts, potentially causing an infinite loop. This situation often arises when the load factor is too high for the dataset being used.
 
 **Solution**:
 - **Lower the Load Factor**: Adjust the `--load-factor` parameter to a lower value when constructing your database. This change increases the space available for new entries, helping to avoid the filter becoming full and preventing infinite relocation attempts.
@@ -692,7 +688,7 @@ We would like to acknowledge the following repositories and libraries that contr
 
 - **[klib](https://github.com/attractivechaos/klib)**: This lightweight library was used for its highly efficient implementations of `khash` (a fast hash table) and `kvector` (a dynamic array). These data structures were integral in handling sequence data and managing the large volumes of information necessary for metagenomic classification.
 
-- **[seqan3](https://github.com/seqan/seqan3)**: SeqAn3 is a modern C++ library for sequence analysis, and Chimera leverages it for fast **minimizer** computation. Minimizers are a crucial component for reducing redundancy and optimizing memory usage during the processing of genomic data, making classification faster and more efficient.
+- **[seqan3](https://github.com/seqan/seqan3)**: SeqAn3 is a modern C++ library for sequence analysis, and Chimera leverages it for flexible **syncmer** computation. Syncmers are used to reduce redundancy and optimize memory usage during the processing of genomic data, making classification faster and more efficient.
 
 - **[CLI11](https://github.com/CLIUtils/CLI11)**: This header-only library was used to provide Chimera's flexible and intuitive command-line interface. CLI11 allows users to easily specify options, input files, and configurations, enabling the tool to handle complex workflows with minimal user friction.
 

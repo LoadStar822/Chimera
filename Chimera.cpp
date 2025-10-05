@@ -121,12 +121,16 @@ int main(int argc, char **argv) {
       ->default_val("ChimeraDB");
   build
       ->add_option("-k,--kmer", buildConfig.kmer_size, "Kmer size for building")
-      ->default_val(19)
+      ->default_val(31)
       ->check(CLI::Range(1, 50));
   build
-      ->add_option("-w,--window", buildConfig.window_size,
-                   "Window size for building")
-      ->default_val(31);
+      ->add_option("-s,--syncmer-s", buildConfig.smer_size,
+                   "Syncmer s-mer size (must be < k)")
+      ->default_val(16);
+  build
+      ->add_option("-P,--syncmer-pos", buildConfig.syncmer_position,
+                   "Syncmer minimal s-mer offset (0-based)")
+      ->default_val(7);
   build
       ->add_option("-l,--min-length", buildConfig.min_length,
                    "Minimum length sequence for building")
@@ -143,8 +147,8 @@ int main(int argc, char **argv) {
       ->add_option("-M,--max-hashes", buildConfig.max_hashes_per_taxid,
                    "Maximum number of hashes per taxid")
       ->default_val(2000000);
-  build->add_option("-c,--fixed-cutoff", buildConfig.fixed_cutoff,
-                    "Fixed cutoff for building (0 - 255)");
+  build->add_flag("--adaptive-cutoff", buildConfig.adaptive_cutoff,
+                  "启用基于文件规模的自适应 cutoff");
   build
       ->add_option("-f,--filter", buildConfig.filter,
                    "构建使用的滤器类型 (imcf)")
@@ -153,6 +157,19 @@ int main(int argc, char **argv) {
   build->add_flag("-q,--quiet", buildConfig.verbose, "Quiet output")
       ->default_val(true)
       ->disable_flag_override();
+
+  build->callback([&buildConfig]() {
+    if (buildConfig.smer_size == 0) {
+      throw CLI::ValidationError("--syncmer-s must be greater than 0");
+    }
+    if (buildConfig.smer_size >= buildConfig.kmer_size) {
+      throw CLI::ValidationError("--syncmer-s must be smaller than k-mer size");
+    }
+    const uint16_t window_span = static_cast<uint16_t>(buildConfig.kmer_size - buildConfig.smer_size + 1);
+    if (buildConfig.syncmer_position >= window_span) {
+      throw CLI::ValidationError("--syncmer-pos must be < k - s + 1");
+    }
+  });
 
   // Classify
   // Add --single option
@@ -197,7 +214,7 @@ int main(int argc, char **argv) {
   classify
       ->add_flag("--adaptive-shot,!--no-adaptive-shot",
                  classifyConfig.adaptive_shot,
-                 "Scale thresholds by actually evaluated minimizers")
+                 "Scale thresholds by actually evaluated syncmers")
       ->default_val(true);
   classify
       ->add_option("--first-filter-beta", classifyConfig.firstFilterBeta,
@@ -218,7 +235,7 @@ int main(int argc, char **argv) {
       ->default_val(3.0);
   classify
       ->add_option("--min-eval-count", classifyConfig.min_eval_count,
-                   "Minimum #evaluated minimizers to classify")
+                   "Minimum #evaluated syncmers to classify")
       ->default_val(0);
   classify
       ->add_option("-t,--threads", classifyConfig.threads,

@@ -38,14 +38,15 @@ namespace ChimeraBuild {
 		std::string input_file;
 		std::string output_file;
 		std::string filter{ "imcf" };
-		uint8_t kmer_size;
-		uint16_t window_size;
+		uint8_t kmer_size{ 31 };
+		uint16_t smer_size{ 16 };
+		uint16_t syncmer_position{ 7 };
 		uint64_t min_length;
 		uint16_t threads;
 		bool verbose = true;
 		double load_factor{ 0.95 };
 		size_t max_hashes_per_taxid = 0;
-		uint8_t fixed_cutoff = 0;
+		bool adaptive_cutoff = false;
 	};
 
 	inline std::ostream& operator<<(std::ostream& os, const BuildConfig& config) {
@@ -58,12 +59,13 @@ namespace ChimeraBuild {
 			<< std::setw(25) << "Output file:" << config.output_file << std::endl
 			<< std::setw(25) << "Filter:" << config.filter << std::endl
 			<< std::setw(25) << "Kmer size:" << (int)config.kmer_size << std::endl
-			<< std::setw(25) << "Window size:" << config.window_size << std::endl
+			<< std::setw(25) << "Syncmer s-mer size:" << config.smer_size << std::endl
+			<< std::setw(25) << "Syncmer offset:" << config.syncmer_position << std::endl
 			<< std::setw(25) << "Minimum length:" << config.min_length << std::endl
 			<< std::setw(25) << "Threads:" << config.threads << std::endl
 			<< std::setw(25) << "Load factor:" << config.load_factor << std::endl
 			<< std::setw(25) << "Max hashes per taxid:" << config.max_hashes_per_taxid << std::endl
-			<< std::setw(25) << "Fixed cutoff:" << (int)config.fixed_cutoff << std::endl
+			<< std::setw(25) << "Adaptive cutoff:" << std::boolalpha << config.adaptive_cutoff << std::noboolalpha << std::endl
 			<< std::setw(25) << "Verbose:" << config.verbose << std::endl;
 
 		os << std::string(50, '=') << std::endl;
@@ -90,12 +92,13 @@ namespace ChimeraBuild {
 
 	struct IMCFConfig {
 		inline static constexpr uint64_t DefaultFingerprintSalt = 0xD1B54A32D192ED03ULL;
-		inline static constexpr uint8_t CurrentHashVersion = 1;
+		inline static constexpr uint8_t CurrentHashVersion = 2;
 
 		size_t binNum{};
 		size_t binSize{};
 		uint8_t kmerSize{};
-		uint16_t windowSize{};
+		uint16_t smerSize{};
+		uint16_t syncmerPosition{ 0 };
 		int MaxCuckooCount{ 500 };
 		double loadFactor{ 0.95 };
 		uint64_t seed64{ 0 };
@@ -105,30 +108,13 @@ namespace ChimeraBuild {
 		template <class Archive>
 		void save(Archive& archive) const {
 			archive(binNum, binSize, MaxCuckooCount, loadFactor,
-				kmerSize, windowSize, seed64, fpSalt, hashVersion);
+				kmerSize, smerSize, syncmerPosition, seed64, fpSalt, hashVersion);
 		}
 
 		template <class Archive>
 		void load(Archive& archive) {
-			archive(binNum, binSize, MaxCuckooCount, loadFactor, kmerSize, windowSize);
-			seed64 = adjust_seed(kmerSize);
-			fpSalt = DefaultFingerprintSalt;
-			hashVersion = 0;
-			try {
-				archive(seed64, fpSalt, hashVersion);
-			}
-			catch (const cereal::Exception&) {
-				// 旧版本存档不包含扩展字段，保留默认推导值
-				return;
-			}
-			// 兼容先前测试版本多写入的 canonical 字段，忽略其值
-			try {
-				bool legacyCanonical = false;
-				archive(legacyCanonical);
-			}
-			catch (const cereal::Exception&) {
-				// 没有额外字段，直接忽略
-			}
+			archive(binNum, binSize, MaxCuckooCount, loadFactor,
+				kmerSize, smerSize, syncmerPosition, seed64, fpSalt, hashVersion);
 		}
 	};
 }

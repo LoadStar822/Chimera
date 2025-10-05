@@ -21,6 +21,7 @@
 #include <limits>
 #include <future>
 #include <algorithm>
+#include <array>
 #include <sstream>
 #include <iomanip>
 #include <string_view>
@@ -30,6 +31,8 @@
 #include <cereal/types/vector.hpp>
 #include <mutex>
 #include <span>
+
+#include <utils/Syncmer.hpp>
 
 namespace ChimeraBuild {
 	static inline uint64_t mix64(uint64_t value) {
@@ -161,24 +164,22 @@ namespace ChimeraBuild {
 	}
 
 	/**
-	 * Count the minimisers for each taxid and its associated files.
+	 * Count syncmers for each taxid and its associated files.
 	 *
 	 * @param config The build configuration.
 	 * @param inputFiles The map of input files.
 	 * @param hashCount The map to store the hash count.
 	 * @param fileInfo The struct to store file information.
 	 */
-	void minimiser_count(
+	void syncmer_count(
 		BuildConfig& config,
 		robin_hood::unordered_flat_map<std::string, std::vector<std::string>>& inputFiles,
 		robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
 		FileInfo& fileInfo)
 	{
-		// Define the minimiser view
-		auto minimiser_view = seqan3::views::minimiser_hash(
-			seqan3::shape{ seqan3::ungapped{ config.kmer_size } },
-			seqan3::window_size{ config.window_size },
-			seqan3::seed{ ChimeraBuild::adjust_seed(config.kmer_size) });
+		const std::array<size_t, 1> syncmer_positions{ static_cast<size_t>(config.syncmer_position) };
+		const std::span<const size_t> syncmer_pos_span(syncmer_positions);
+		const uint64_t syncmer_seed = ChimeraBuild::adjust_seed(config.kmer_size);
 
 		// Expand the pairs of taxid and files
 		std::vector<std::pair<std::string, std::string>> taxid_file_pairs;
@@ -233,14 +234,10 @@ namespace ChimeraBuild {
 			robin_hood::unordered_flat_map<uint64_t, uint8_t> local_hash_counts;
 
 			// Calculate the threshold
-			uint8_t cutoff = 1;
-			if (config.fixed_cutoff > 0)
+			uint8_t cutoff = 0;
+			if (config.adaptive_cutoff)
 			{
-				cutoff = config.fixed_cutoff;
-			}
-			else
-			{
-				// Calculate the threshold based on file size and type
+				// 基于文件大小估算 cutoff，仅在显式开启时触发
 				std::filesystem::path filepath(filename);
 				size_t filesize = std::filesystem::file_size(filepath);
 				bool is_compressed = file_is_compressed(filepath);
@@ -279,16 +276,18 @@ namespace ChimeraBuild {
 					localFileInfo.sequenceNum++;
 					localFileInfo.bpLength += seq.size();
 
-					// Compute minimizers and count hash values
-					for (uint64_t hash : seq | minimiser_view)
+					// Compute syncmers and count hash values
+					auto hashes = chimera::syncmer::compute_hashes(
+					    seq, config.smer_size, config.kmer_size, syncmer_pos_span, syncmer_seed, true);
+					for (uint64_t hash : hashes)
 					{
-						uint8_t& count = local_hash_counts[hash];
+						uint8_t &count = local_hash_counts[hash];
 						if (count < 255)
 							++count;
 					}
 				}
 			}
-			// Compute minimizers and count hash values
+			// Compute syncmers and count hash values
 			std::vector<uint64_t> filtered_hashes;
 			filtered_hashes.reserve(local_hash_counts.size());
 			for (const auto& [hash, count] : local_hash_counts)
@@ -306,7 +305,7 @@ namespace ChimeraBuild {
 				filtered_hashes.resize(max_hashes);
 			}
 
-			// Write to the minimiser file
+			// Write to the syncmer file
 			{
 
 
@@ -337,11 +336,11 @@ namespace ChimeraBuild {
 				}
 				if (!filtered_hashes.empty())
 				{
-					std::string output_filename = "tmp/" + taxid + ".mini";
+					std::string output_filename = "tmp/" + taxid + ".sync";
 					std::ofstream ofile(output_filename, std::ios::binary | std::ios::app);
 					if (!ofile.is_open())
 					{
-						std::cerr << "Unable to open the minimiser file: " << output_filename << std::endl;
+						std::cerr << "Unable to open the syncmer file: " << output_filename << std::endl;
 						continue;
 					}
 					for (uint64_t hash : filtered_hashes)
@@ -397,8 +396,8 @@ namespace ChimeraBuild {
 	/**
 	 * @brief Constructs the Interleaved Merged Cuckoo Filter (IMCF) using provided groups and returns a mapping of indices to taxids.
 	 *
-	 * This function builds the IMCF by iterating over groups of taxids, reading minimizer files, and inserting minimizer hashes
-	 * into the IMCF. Each group represents a set of taxids that are processed together, with each minimizer hash being inserted
+	 * This function builds the IMCF by iterating over groups of taxids, reading syncmer files, and inserting syncmer hashes
+	 * into the IMCF. Each group represents a set of taxids that are processed together, with each syncmer hash being inserted
 	 * into the corresponding index in the filter.
 	 *
 	 * @param imcf A reference to the Interleaved Merged Cuckoo Filter object to be built.
@@ -408,16 +407,16 @@ namespace ChimeraBuild {
 	 *
 	 * @details
 	 * The function first resizes `indexToTaxid` to match the number of groups and resizes each sub-vector to the number of taxids
-	 * in the group. It then iterates over each group, reads the minimizer hashes from a file named in the format "tmp/{taxid}.mini",
+	 * in the group. It then iterates over each group, reads the syncmer hashes from a file named in the format "tmp/{taxid}.sync",
 	 * and inserts each hash into the IMCF using the `insertTag` method.
 	 *
 	 * The function is parallelized using OpenMP to process each group concurrently, speeding up the construction process.
 	 *
-	 * If the minimizer file for a taxid cannot be opened, an error message is printed to `std::cerr`.
+	 * If the syncmer file for a taxid cannot be opened, an error message is printed to `std::cerr`.
 	 *
 	 * @note
-	 * Ensure that the temporary files containing minimizer hashes ("tmp/{taxid}.mini") are pre-generated and accessible.
-	 * The function assumes that `imcf.insertTag` is implemented and capable of inserting 64-bit minimizer hashes into the filter.
+	 * Ensure that the temporary files containing syncmer hashes ("tmp/{taxid}.sync") are pre-generated and accessible.
+	 * The function assumes that `imcf.insertTag` is implemented and capable of inserting 64-bit syncmer hashes into the filter.
 	 */
 	std::vector<std::vector<std::string>> buildIMCF(
 		chimera::imcf::InterleavedMergedCuckooFilter& imcf,
@@ -464,7 +463,7 @@ namespace ChimeraBuild {
 			double ratio = expected == 0 ? (delta == 0 ? 0.0 : std::numeric_limits<double>::infinity())
 				: static_cast<double>(absDelta) / static_cast<double>(expected);
 				if (ratio > kShardToleranceRatio) {
-					std::cerr << "Warning: minimiser count mismatch for taxid " << taxid
+					std::cerr << "Warning: syncmer count mismatch for taxid " << taxid
 						<< ": expected=" << expected << ", planned=" << shardTotal
 						<< ", delta=" << delta << " (" << std::fixed << std::setprecision(4)
 						<< ratio * 100.0 << "%)" << std::endl;
@@ -503,10 +502,10 @@ namespace ChimeraBuild {
 			const auto& entry = shardEntriesView[entryIdx];
 			const std::string& taxid = entry.taxid;
 			const auto& plans = *entry.plans;
-			std::ifstream ifile("tmp/" + taxid + ".mini", std::ios::binary);
+			std::ifstream ifile("tmp/" + taxid + ".sync", std::ios::binary);
 			if (!ifile) {
 #pragma omp critical(imcf_log)
-				std::cerr << "Failed to open minimiser file: " << taxid << ".mini" << std::endl;
+				std::cerr << "Failed to open syncmer file: " << taxid << ".sync" << std::endl;
 				continue;
 			}
 
@@ -581,10 +580,10 @@ namespace ChimeraBuild {
 				for (size_t h = 0; h < hashesRead; ++h) {
 					size_t shard = pickShard(readBlock[h]);
 					if (shard >= plans.size()) {
-						// Extra minimisers beyond planned quota
+						// Extra syncmers beyond planned quota
 	#pragma omp critical(imcf_log)
 						std::cerr << "Warning: taxid " << taxid
-							<< " produced more minimisers than expected; extra entries ignored" << std::endl;
+							<< " produced more syncmers than expected; extra entries ignored" << std::endl;
 						overflow = true;
 						break;
 					}
@@ -607,7 +606,7 @@ namespace ChimeraBuild {
 
 			if (!ifile.eof() && ifile.fail()) {
 	#pragma omp critical(imcf_log)
-				std::cerr << "Warning: failed to read minimiser file completely for taxid " << taxid << std::endl;
+				std::cerr << "Warning: failed to read syncmer file completely for taxid " << taxid << std::endl;
 			}
 			ifile.close();
 
@@ -619,7 +618,7 @@ namespace ChimeraBuild {
 			if (missing != 0) {
 #pragma omp critical(imcf_log)
 				std::cerr << "Warning: taxid " << taxid
-					<< " ended with " << missing << " minimisers short of expected quota" << std::endl;
+					<< " ended with " << missing << " syncmers short of expected quota" << std::endl;
 			}
 		}
 
@@ -915,8 +914,17 @@ namespace ChimeraBuild {
 		auto read_start = std::chrono::high_resolution_clock::now();
 		std::cout << "Reading input files..." << std::endl;
 		FileInfo fileInfo;
-		if (config.window_size < config.kmer_size) {
-			std::cerr << "Window size must be greater than or equal to kmer size." << std::endl;
+		if (config.smer_size == 0) {
+			std::cerr << "Syncmer s-mer size must be greater than 0." << std::endl;
+			return;
+		}
+		if (config.smer_size >= config.kmer_size) {
+			std::cerr << "Syncmer s-mer size must be smaller than k-mer size." << std::endl;
+			return;
+		}
+		const uint16_t syncmer_span = static_cast<uint16_t>(config.kmer_size - config.smer_size + 1);
+		if (config.syncmer_position >= syncmer_span) {
+			std::cerr << "Syncmer offset must satisfy 0 <= pos < k - s + 1." << std::endl;
 			return;
 		}
 		robin_hood::unordered_flat_map<std::string, uint64_t> hashCount;
@@ -935,8 +943,8 @@ namespace ChimeraBuild {
 		if (config.filter == "imcf")
 		{
 			auto calculate_start = std::chrono::high_resolution_clock::now();
-			std::cout << "Calculating minimizers..." << std::endl;
-			minimiser_count(config, inputFiles, hashCount, fileInfo);
+			std::cout << "Calculating syncmers..." << std::endl;
+			syncmer_count(config, inputFiles, hashCount, fileInfo);
 			auto calculate_end = std::chrono::high_resolution_clock::now();
 			auto calculate_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_end - calculate_start).count();
 			if (config.verbose) {
@@ -967,7 +975,8 @@ namespace ChimeraBuild {
 			IMCFConfig imcfConfig;
 			imcfConfig.loadFactor = config.load_factor;
 			imcfConfig.kmerSize = config.kmer_size;
-			imcfConfig.windowSize = config.window_size;
+			imcfConfig.smerSize = config.smer_size;
+			imcfConfig.syncmerPosition = config.syncmer_position;
 			imcfConfig.seed64 = ChimeraBuild::adjust_seed(config.kmer_size);
 			imcfConfig.fpSalt = IMCFConfig::DefaultFingerprintSalt;
 			imcfConfig.hashVersion = IMCFConfig::CurrentHashVersion;

@@ -23,6 +23,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -36,6 +37,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <span>
+
+#include <utils/Syncmer.hpp>
 
 namespace ChimeraClassify {
 
@@ -650,7 +654,7 @@ loadFilter(const std::string &input_file,
   }
   if (imcfConfig.seed64 == 0) {
     throw std::runtime_error(
-        "IMCF 数据库缺少 minimiser 种子信息，请重新执行 Chimera build。"
+        "IMCF 数据库缺少 syncmer 种子信息，请重新执行 Chimera build。"
     );
   }
   if (imcfConfig.fpSalt != ChimeraBuild::IMCFConfig::DefaultFingerprintSalt) {
@@ -2007,8 +2011,8 @@ void thirdFilteringStep(std::vector<classifyResult> &classifyResults,
  * @param imcf The Interleaved Merged Cuckoo Filter used for classification.
  * @param classifyResults A vector to store the classification results for each
  * read.
- * @param minimiser_view A view used to generate minimizer hash values from the
- * read sequences.
+ * @param syncmer_positions Positions used to determine syncmer offsets.
+ * @param syncmer_seed Seed used when hashing syncmers.
  * @param fileInfo A structure to store information about the processed reads,
  * such as the number of classified and unclassified reads.
  * @param lca A reference to an LCA (Lowest Common Ancestor) structure, used if
@@ -2016,7 +2020,7 @@ void thirdFilteringStep(std::vector<classifyResult> &classifyResults,
  *
  * @details
  * The function first checks if paired-end reads (`batch.seqs2`) are present. If
- * so, it processes the reads in pairs, generating minimizer hash values for
+ * so, it processes the reads in pairs, generating syncmer hash values for
  * both sequences in each pair and combining the results. For single-end reads,
  * it processes each sequence individually.
  *
@@ -2024,7 +2028,7 @@ void thirdFilteringStep(std::vector<classifyResult> &classifyResults,
  * classification, which updates the classification results and the file
  * information.
  *
- * - If the read length is smaller than the window size specified in
+ * - If the read length is smaller than the k-mer size specified in
  * `imcfConfig`, the read is skipped.
  * - The function ensures that hash values are generated only for reads that
  * meet the minimum length requirement.
@@ -2034,7 +2038,9 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
                          const TaxDict &tax, ClassifyConfig &config,
                          chimera::imcf::InterleavedMergedCuckooFilter &imcf,
                          std::vector<classifyResult> &classifyResults,
-                         const auto &minimiser_view, FileInfo &fileInfo,
+                         std::span<const size_t> syncmer_positions,
+                         uint64_t syncmer_seed,
+                         FileInfo &fileInfo,
                          LCA &lca, GroupHeat &heat,
                          ProgressTracker *progress = nullptr) {
   // Process batch of reads
@@ -2045,15 +2051,22 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
       size_t len1 = (i < batch.seqs.size()) ? batch.seqs[i].size() : 0;
       size_t len2 = (i < batch.seqs2.size()) ? batch.seqs2[i].size() : 0;
       size_t readLen = len1 + len2;
-      if (i < batch.seqs.size() &&
-          batch.seqs[i].size() >= imcfConfig.windowSize) {
-        hashs1 =
-            batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector<uint64_t>>();
+      if (i < batch.seqs.size() && batch.seqs[i].size() >= imcfConfig.kmerSize) {
+        hashs1 = chimera::syncmer::compute_hashes(batch.seqs[i],
+                                                  imcfConfig.smerSize,
+                                                  imcfConfig.kmerSize,
+                                                  syncmer_positions,
+                                                  syncmer_seed,
+                                                  true);
       }
-      if (i < batch.seqs2.size() &&
-          batch.seqs2[i].size() >= imcfConfig.windowSize) {
-        std::vector<uint64_t> hashs2 =
-            batch.seqs2[i] | minimiser_view | seqan3::ranges::to<std::vector<uint64_t>>();
+      if (i < batch.seqs2.size() && batch.seqs2[i].size() >= imcfConfig.kmerSize) {
+        std::vector<uint64_t> hashs2 = chimera::syncmer::compute_hashes(
+            batch.seqs2[i],
+            imcfConfig.smerSize,
+            imcfConfig.kmerSize,
+            syncmer_positions,
+            syncmer_seed,
+            true);
         hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
       }
       if (hashs1.size() > 2048) {
@@ -2062,8 +2075,8 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
       }
       if (dbg::enabled()) {
         dbg::g.total_reads.fetch_add(1, std::memory_order_relaxed);
-        bool allShort = (len1 < imcfConfig.windowSize) &&
-                        (len2 < imcfConfig.windowSize);
+        bool allShort = (len1 < imcfConfig.kmerSize) &&
+                        (len2 < imcfConfig.kmerSize);
         if (allShort) {
           dbg::g.too_short.fetch_add(1, std::memory_order_relaxed);
         }
@@ -2080,10 +2093,14 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
     for (size_t i = 0; i < batch.seqs.size(); i++) {
       hashs1.clear();
       size_t readLen = batch.seqs[i].size();
-      if (batch.seqs[i].size() >= imcfConfig.windowSize) {
-        // Generate minimizer hash values for the sequence
-        hashs1 =
-            batch.seqs[i] | minimiser_view | seqan3::ranges::to<std::vector<uint64_t>>();
+      if (batch.seqs[i].size() >= imcfConfig.kmerSize) {
+        // Generate syncmer hash values for the sequence
+        hashs1 = chimera::syncmer::compute_hashes(batch.seqs[i],
+                                                  imcfConfig.smerSize,
+                                                  imcfConfig.kmerSize,
+                                                  syncmer_positions,
+                                                  syncmer_seed,
+                                                  true);
       }
       if (hashs1.size() > 2048) {
         std::sort(hashs1.begin(), hashs1.end());
@@ -2091,7 +2108,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
       }
       if (dbg::enabled()) {
         dbg::g.total_reads.fetch_add(1, std::memory_order_relaxed);
-        if (readLen < imcfConfig.windowSize) {
+        if (readLen < imcfConfig.kmerSize) {
           dbg::g.too_short.fetch_add(1, std::memory_order_relaxed);
         }
         if (!hashs1.empty()) {
@@ -2123,18 +2140,17 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
   }
   dbg::initSink();
   if (dbg::enabled()) {
-    dbg::log("Trace start: seed64=%llu, k=%u, w=%u, hashVersion=%u, fpSalt=%llu",
+    dbg::log("Trace start: seed64=%llu, k=%u, s=%u, pos=%u, hashVersion=%u, fpSalt=%llu",
              static_cast<unsigned long long>(imcfConfig.seed64),
              static_cast<unsigned>(imcfConfig.kmerSize),
-             static_cast<unsigned>(imcfConfig.windowSize),
+             static_cast<unsigned>(imcfConfig.smerSize),
+             static_cast<unsigned>(imcfConfig.syncmerPosition),
              static_cast<unsigned>(imcfConfig.hashVersion),
              static_cast<unsigned long long>(imcfConfig.fpSalt));
   }
 
-  auto minimiser_view = seqan3::views::minimiser_hash(
-      seqan3::shape{seqan3::ungapped{imcfConfig.kmerSize}},
-      seqan3::window_size{imcfConfig.windowSize},
-      seqan3::seed{imcfConfig.seed64});
+  const std::array<size_t, 1> syncmer_positions{ static_cast<size_t>(imcfConfig.syncmerPosition) };
+  const std::span<const size_t> syncmer_pos_span(syncmer_positions);
 
   LCA lca;
   if (config.lca) {
@@ -2152,7 +2168,8 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
     for (;;) {
       if (readQueue.try_dequeue(batch)) {
         processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
-                     localClassifyResults, minimiser_view, localFileInfo, lca,
+                     localClassifyResults, syncmer_pos_span, imcfConfig.seed64,
+                     localFileInfo, lca,
                      heat, progress);
         continue;
       }
@@ -2259,19 +2276,17 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
   }
   dbg::initSink();
   if (dbg::enabled()) {
-    dbg::log("Trace start: seed64=%llu, k=%u, w=%u, hashVersion=%u, fpSalt=%llu",
+    dbg::log("Trace start: seed64=%llu, k=%u, s=%u, pos=%u, hashVersion=%u, fpSalt=%llu",
              static_cast<unsigned long long>(imcfConfig.seed64),
              static_cast<unsigned>(imcfConfig.kmerSize),
-             static_cast<unsigned>(imcfConfig.windowSize),
+             static_cast<unsigned>(imcfConfig.smerSize),
+             static_cast<unsigned>(imcfConfig.syncmerPosition),
              static_cast<unsigned>(imcfConfig.hashVersion),
              static_cast<unsigned long long>(imcfConfig.fpSalt));
   }
 
-  // Create a minimiser hash view based on IMCF configuration
-  auto minimiser_view = seqan3::views::minimiser_hash(
-      seqan3::shape{seqan3::ungapped{imcfConfig.kmerSize}},
-      seqan3::window_size{imcfConfig.windowSize},
-      seqan3::seed{imcfConfig.seed64});
+  const std::array<size_t, 1> syncmer_positions{ static_cast<size_t>(imcfConfig.syncmerPosition) };
+  const std::span<const size_t> syncmer_pos_span(syncmer_positions);
 
   // Initialize LCA structure if LCA mode is enabled in the configuration
   LCA lca;
@@ -2290,7 +2305,8 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
     // Dequeue and process batches until the queue is empty
     while (readQueue.try_dequeue(batch)) {
       processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
-                   localClassifyResults, minimiser_view, localFileInfo, lca,
+                   localClassifyResults, syncmer_pos_span, imcfConfig.seed64,
+                   localFileInfo, lca,
                    heat, progress);
     }
     // Critical section to merge local results into shared resources

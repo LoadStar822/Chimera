@@ -146,7 +146,7 @@ namespace dbg {
 		std::string id;
 		std::vector<std::pair<std::string, size_t>> taxidCount;
 		std::vector<std::pair<std::string, double>> posteriors;
-		double evaluated{ 0.0 }; // 实际参与判别的 minimizer 数，用于归一化
+		double evaluated{ 0.0 }; // 实际参与判别的 syncmer 数，用于归一化
 		std::shared_ptr<dbg::TraceRecord> trace;
 	};
 

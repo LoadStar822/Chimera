@@ -71,11 +71,22 @@ def parse_arguments():
         "-k",
         "--kmer",
         type=kmer_type,
-        default=19,
+        default=31,
         help="Kmer size for building (must be between 1 and 50)",
     )
     build_parser.add_argument(
-        "-w", "--window", type=int, default=31, help="Window size for building"
+        "-s",
+        "--syncmer-s",
+        type=int,
+        default=16,
+        help="Syncmer s-mer size (must be positive and smaller than k)",
+    )
+    build_parser.add_argument(
+        "-P",
+        "--syncmer-pos",
+        type=int,
+        default=7,
+        help="Syncmer minimal s-mer offset (0-based)",
     )
     build_parser.add_argument(
         "-l",
@@ -109,7 +120,9 @@ def parse_arguments():
         help="构建使用的滤器 (仅 imcf)",
     )
     build_parser.add_argument(
-        "-c", "--fixed-cutoff", type=int, help="Fixed cutoff for minimizer (0 - 255)"
+        "--adaptive-cutoff",
+        action="store_true",
+        help="启用基于文件规模的自适应 cutoff",
     )
     build_parser.add_argument(
         "-q", "--quiet", action="store_true", default=False, help="Quiet output"
@@ -127,11 +140,22 @@ def parse_arguments():
         "-k",
         "--kmer",
         type=kmer_type,
-        default=19,
+        default=31,
         help="Kmer size for building (must be between 1 and 50)",
     )
     download_build_parser.add_argument(
-        "-w", "--window", type=int, default=31, help="Window size for building"
+        "-s",
+        "--syncmer-s",
+        type=int,
+        default=16,
+        help="Syncmer s-mer size (must be positive and smaller than k)",
+    )
+    download_build_parser.add_argument(
+        "-P",
+        "--syncmer-pos",
+        type=int,
+        default=7,
+        help="Syncmer minimal s-mer offset (0-based)",
     )
     download_build_parser.add_argument(
         "-l",
@@ -165,7 +189,9 @@ def parse_arguments():
         help="构建使用的滤器 (仅 imcf)",
     )
     download_build_parser.add_argument(
-        "-c", "--fixed-cutoff", type=int, help="Fixed cutoff for minimizer (0 - 255)"
+        "--adaptive-cutoff",
+        action="store_true",
+        help="启用基于文件规模的自适应 cutoff",
     )
     download_build_parser.add_argument(
         "-q", "--quiet", action="store_true", default=False, help="Quiet output"
@@ -193,20 +219,20 @@ def parse_arguments():
         "--shot-threshold",
         type=float,
         default=None,
-        help="Shot threshold for classifying (defaults to 0.65 if unset)",
+        help="Shot threshold for classifying (defaults to 0.62 if unset)",
     )
     classify_parser.add_argument(
         "--adaptive-shot",
         dest="adaptive_shot",
         action="store_true",
         default=None,
-        help="Scale thresholds by evaluated minimizers (default on)",
+        help="Scale thresholds by evaluated syncmers (default on)",
     )
     classify_parser.add_argument(
         "--no-adaptive-shot",
         dest="adaptive_shot",
         action="store_false",
-        help="Disable threshold scaling by evaluated minimizers",
+        help="Disable threshold scaling by evaluated syncmers",
     )
     classify_parser.add_argument(
         "--first-filter-beta",
@@ -218,7 +244,7 @@ def parse_arguments():
         "--pre-em-topk",
         type=int,
         default=None,
-        help="Limit candidates before EM/VEM to top K (default 24)",
+        help="Limit candidates before EM/VEM to top K (default 32)",
     )
     classify_parser.add_argument(
         "--adaptive-fdr",
@@ -243,31 +269,38 @@ def parse_arguments():
         "--min-eval-count",
         type=int,
         default=None,
-        help="Minimum evaluated minimizers required to classify (default 24)",
+        help="Minimum evaluated syncmers required to classify (default auto)",
     )
     classify_parser.add_argument(
         "--post-thres",
         type=float,
         default=None,
-        help="Posterior acceptance threshold (default 0.9)",
+        help="Posterior acceptance threshold (default 0.56)",
     )
     classify_parser.add_argument(
         "--post-margin",
         type=float,
         default=None,
-        help="Minimum gap between top posteriors (default 0.2)",
+        help="Minimum gap between top posteriors (default 0.03)",
     )
     classify_parser.add_argument(
         "--post-ratio",
         type=float,
         default=None,
-        help="Minimum ratio between top1 and top2 posteriors",
+        help="Minimum ratio between top1 and top2 posteriors (default 1.30)",
     )
     classify_parser.add_argument(
         "--post-pi-min",
         type=float,
         default=None,
-        help="Minimum global class weight (default 1e-4)",
+        help="Minimum global class weight (default 0.0001)",
+    )
+    classify_parser.add_argument(
+        "--evidence-override",
+        dest="evidence_override",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Allow strong pre-EM evidence to bypass posterior filter",
     )
     # NOTE: LCA 及后处理相关参数暂时废弃，内部逻辑继续沿用默认值
     classify_parser.add_argument(
@@ -341,6 +374,15 @@ def parse_arguments():
         if not any([args.em, args.vem]):
             args.em = True
 
+    if args.command in {"build", "download_and_build"}:
+        if args.syncmer_s < 1:
+            parser.error("--syncmer-s must be greater than 0")
+        if args.syncmer_s >= args.kmer:
+            parser.error("--syncmer-s must be smaller than k-mer size")
+        window_span = args.kmer - args.syncmer_s + 1
+        if args.syncmer_pos < 0 or args.syncmer_pos >= window_span:
+            parser.error("--syncmer-pos must satisfy 0 <= pos < k - s + 1")
+
     return args
 
 
@@ -403,13 +445,14 @@ def run_chimera(args, chimera_path):
         command.extend(["-i", args.input])
         command.extend(["-o", args.output])
         command.extend(["-k", str(args.kmer)])
-        command.extend(["-w", str(args.window)])
+        command.extend(["-s", str(args.syncmer_s)])
+        command.extend(["-P", str(args.syncmer_pos)])
         command.extend(["-l", str(args.min_length)])
         command.extend(["-t", str(args.threads)])
         command.extend(["--load-factor", str(args.load_factor)])
         command.extend(["-f", args.filter])
-        if args.fixed_cutoff is not None:
-            command.extend(["-c", str(args.fixed_cutoff)])
+        if args.adaptive_cutoff:
+            command.append("--adaptive-cutoff")
         command.extend(["-M", str(args.max_hashes)])
         if args.quiet:
             command.append("-q")
@@ -447,6 +490,10 @@ def run_chimera(args, chimera_path):
             command.extend(["--post-ratio", str(args.post_ratio)])
         if args.post_pi_min is not None:
             command.extend(["--post-pi-min", str(args.post_pi_min)])
+        if args.evidence_override is True:
+            command.append("--evidence-override")
+        elif args.evidence_override is False:
+            command.append("--no-evidence-override")
         if args.output_posterior is True:
             command.append("--output-posterior")
         elif args.output_posterior is False:

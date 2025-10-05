@@ -82,6 +82,7 @@ file(GLOB_RECURSE SOURCES
 # 移除 CMake 生成的文件
 list(FILTER SOURCES EXCLUDE REGEX "CMakeFiles/")
 list(FILTER SOURCES EXCLUDE REGEX "/tests/")
+list(FILTER SOURCES EXCLUDE REGEX "/libs/minions-master/")
 
 # 递归地查找头文件
 file(GLOB_RECURSE HEADERS
@@ -170,10 +171,46 @@ target_include_directories(imcf_filter_tests
     ${PROJECT_SOURCE_DIR}/src/utils
     ${PROJECT_SOURCE_DIR}/libs
     ${PROJECT_SOURCE_DIR}/libs/klib
+    ${PROJECT_SOURCE_DIR}/libs/minions-master/include
     ${PROJECT_SOURCE_DIR}/libs/seqan3/include
     ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/cereal/include
     ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/sdsl-lite/include
     ${PROJECT_SOURCE_DIR}/src/build/filter
+)
+
+add_executable(syncmer_tests
+    tests/utils/syncmer_test.cpp
+)
+
+target_link_libraries(syncmer_tests
+    PRIVATE
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    pthread
+    BZip2::BZip2
+    ZLIB::ZLIB
+    seqan3::seqan3
+    Threads::Threads
+)
+
+target_compile_definitions(syncmer_tests
+    PRIVATE
+    IMCF_MIRROR64
+)
+
+if (OpenMP_CXX_FOUND)
+    target_link_libraries(syncmer_tests PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
+target_include_directories(syncmer_tests
+    PUBLIC
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/src/utils
+    ${PROJECT_SOURCE_DIR}/libs
+    ${PROJECT_SOURCE_DIR}/libs/minions-master/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/cereal/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/sdsl-lite/include
 )
 
 # 忽略 register 关键字警告

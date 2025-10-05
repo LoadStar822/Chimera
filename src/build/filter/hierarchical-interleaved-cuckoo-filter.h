@@ -47,14 +47,15 @@ namespace chimera::hicf {
 		double loadFactor{ 0.95 };
 		double relaxedLoadFactor{ 0.95 };
 		uint8_t kmerSize{};
-		uint16_t windowSize{};
+		uint16_t smerSize{};
+		uint16_t syncmerPosition{};
 		size_t totalHashes{};
 
 		template <class Archive>
 		void serialize(Archive& archive)
 		{
 			archive(userBinsNum, technicalBinsNum, tagNum, tagBits, MaxCuckooCount, loadFactor);
-			archive(relaxedLoadFactor, kmerSize, windowSize, technicalBinsMaxNum, totalHashes);
+			archive(relaxedLoadFactor, kmerSize, smerSize, syncmerPosition, technicalBinsMaxNum, totalHashes);
 		}
 	};
 
@@ -262,10 +263,10 @@ namespace chimera::hicf {
 				else
 				{
 					auto const& record = currentNode.remainingUserBins[0];
-					std::string miniFilePath = "tmp/" + indexToTaxid[record.index] + ".mini";
+					std::string miniFilePath = "tmp/" + indexToTaxid[record.index] + ".sync";
 					std::ifstream ifile(miniFilePath, std::ios::binary);
 					if (ifile.fail()) {
-						std::cerr << "Failed to open minimiser file: " << indexToTaxid[record.index] << ".mini" << std::endl;
+						std::cerr << "Failed to open syncmer file: " << indexToTaxid[record.index] << ".sync" << std::endl;
 					}
 					uint64_t hash;
 					while (ifile.read(reinterpret_cast<char*>(&hash), sizeof(hash))) {
@@ -346,10 +347,10 @@ namespace chimera::hicf {
 				auto const& record = currentNode.remainingUserBins[i];
 				if (isRoot && record.technicalBinNum == 1)
 				{
-					std::string miniFilePath = "tmp/" + indexToTaxid[record.index] + ".mini";
+					std::string miniFilePath = "tmp/" + indexToTaxid[record.index] + ".sync";
 					std::ifstream ifile(miniFilePath, std::ios::binary);
 					if (ifile.fail()) {
-						std::cerr << "Failed to open minimiser file: " << indexToTaxid[record.index] << ".mini" << std::endl;
+						std::cerr << "Failed to open syncmer file: " << indexToTaxid[record.index] << ".sync" << std::endl;
 					}
 					uint64_t hash;
 					while (ifile.read(reinterpret_cast<char*>(&hash), sizeof(hash))) {
@@ -359,10 +360,10 @@ namespace chimera::hicf {
 				}
 				else
 				{
-					std::string miniFilePath = "tmp/" + indexToTaxid[record.index] + ".mini";
+					std::string miniFilePath = "tmp/" + indexToTaxid[record.index] + ".sync";
 					std::ifstream ifile(miniFilePath, std::ios::binary);
 					if (ifile.fail()) {
-						std::cerr << "Failed to open minimiser file: " << indexToTaxid[record.index] << ".mini" << std::endl;
+						std::cerr << "Failed to open syncmer file: " << indexToTaxid[record.index] << ".sync" << std::endl;
 					}
 					uint64_t hash;
 					while (ifile.read(reinterpret_cast<char*>(&hash), sizeof(hash))) {
