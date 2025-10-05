@@ -54,7 +54,6 @@ namespace dbg {
 		double fdr_z = 3.0;
 		size_t min_eval_count = 0;
 		bool evidence_override = true;
-		bool use_router_index = false;
 		uint16_t threads;
 		bool verbose = true;
 		bool progress = true;
@@ -99,7 +98,6 @@ namespace dbg {
 			<< std::setw(20) << "FDR Z:" << config.fdr_z << std::endl
 			<< std::setw(20) << "Min eval count:" << config.min_eval_count << std::endl
 			<< std::setw(20) << "Evidence override:" << config.evidence_override << std::endl
-			<< std::setw(20) << "Use router index:" << config.use_router_index << std::endl
 			<< std::setw(20) << "Filter:" << config.filter << std::endl
 			<< std::setw(20) << "Batch size:" << config.batchSize << std::endl
 			<< std::setw(20) << "LCA:" << config.lca << std::endl

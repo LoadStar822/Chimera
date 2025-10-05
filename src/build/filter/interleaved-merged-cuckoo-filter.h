@@ -309,10 +309,6 @@ class InterleavedMergedCuckooFilter {
   };
 #endif
   std::vector<std::vector<uint32_t>> activeGroups;
-  std::vector<uint64_t> routerBucketOffsets;
-  std::vector<uint16_t> routerEntryFingerprints;
-  std::vector<uint64_t> routerEntryOffsets;
-  std::vector<uint8_t> routerPayload;
   struct StashEntry {
     uint64_t bucket{0};
     uint16_t fingerprint{0};
@@ -371,27 +367,6 @@ class InterleavedMergedCuckooFilter {
     entries.push_back(
         StashEntry{static_cast<uint64_t>(bucket), fingerprint, speciesBit});
     return true;
-  }
-
-  static inline void decodeVarintSequence(const std::vector<uint8_t> &dataBytes,
-                                          size_t start, size_t end,
-                                          std::vector<uint32_t> &out) {
-    out.clear();
-    if (start >= end) {
-      return;
-    }
-    size_t offset = start;
-    uint32_t prev = 0;
-    while (offset < end) {
-      uint32_t delta = 0;
-      if (!decodeVarint(dataBytes, offset, delta)) {
-        out.clear();
-        return;
-      }
-      uint32_t value = prev + delta;
-      out.push_back(value);
-      prev = value;
-    }
   }
 
   inline size_t bucketLinearIndex(size_t bucket, size_t bin) const {
@@ -509,56 +484,6 @@ class InterleavedMergedCuckooFilter {
     prepareSegmentAdvice();
   }
 #endif
-
-  inline bool locateRouterEntry(size_t bucket, uint16_t fingerprint,
-                                size_t &entryIndex) const {
-    if (routerBucketOffsets.size() != hashSize + 1) {
-      return false;
-    }
-    if (bucket >= hashSize) {
-      return false;
-    }
-    size_t begin = static_cast<size_t>(routerBucketOffsets[bucket]);
-    size_t end = static_cast<size_t>(routerBucketOffsets[bucket + 1]);
-    if (begin >= end) {
-      return false;
-    }
-    size_t left = begin;
-    size_t right = end;
-    while (left < right) {
-      size_t mid = left + ((right - left) >> 1);
-      uint16_t midFp = routerEntryFingerprints[mid];
-      if (midFp < fingerprint) {
-        left = mid + 1;
-      } else {
-        right = mid;
-      }
-    }
-    if (left >= end) {
-      return false;
-    }
-    if (routerEntryFingerprints[left] != fingerprint) {
-      return false;
-    }
-    entryIndex = left;
-    return true;
-  }
-
-  inline void fetchRouterBins(size_t bucket, uint16_t fingerprint,
-                              std::vector<uint32_t> &out) const {
-    size_t entryIndex = 0;
-    if (!locateRouterEntry(bucket, fingerprint, entryIndex)) {
-      out.clear();
-      return;
-    }
-    if (entryIndex + 1 >= routerEntryOffsets.size()) {
-      out.clear();
-      return;
-    }
-    size_t start = static_cast<size_t>(routerEntryOffsets[entryIndex]);
-    size_t end = static_cast<size_t>(routerEntryOffsets[entryIndex + 1]);
-    decodeVarintSequence(routerPayload, start, end, out);
-  }
 
   inline void fetchActiveBins(size_t bucket, uint16_t fingerprint,
                               std::vector<uint32_t> &out) const {
@@ -757,18 +682,6 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
 		return v ? v : 1;
 	}
 
-  inline bool hasRouterIndex() const {
-    return routerBucketOffsets.size() == hashSize + 1 &&
-           routerEntryOffsets.size() == routerEntryFingerprints.size() + 1;
-  }
-
-  inline void clearRouterIndex() {
-    routerBucketOffsets.clear();
-    routerEntryFingerprints.clear();
-    routerEntryOffsets.clear();
-    routerPayload.clear();
-  }
-
 	inline void route(uint64_t value, std::vector<uint32_t> &bins) const {
     bins.clear();
 
@@ -779,20 +692,11 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
     static thread_local std::vector<uint32_t> routeBuf1;
     static thread_local std::vector<uint32_t> routeBuf2;
 
-    if (hasRouterIndex()) {
-      fetchRouterBins(hash1, fingerprint, routeBuf1);
-      if (hash2 != hash1) {
-        fetchRouterBins(hash2, fingerprint, routeBuf2);
-      } else {
-        routeBuf2.clear();
-      }
+    fetchActiveBins(hash1, fingerprint, routeBuf1);
+    if (hash2 != hash1) {
+      fetchActiveBins(hash2, fingerprint, routeBuf2);
     } else {
-      fetchActiveBins(hash1, fingerprint, routeBuf1);
-      if (hash2 != hash1) {
-        fetchActiveBins(hash2, fingerprint, routeBuf2);
-      } else {
-        routeBuf2.clear();
-      }
+      routeBuf2.clear();
     }
 
     if (routeBuf1.empty() && routeBuf2.empty()) {
@@ -1381,91 +1285,6 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
       }
     };
 
-    if (hasRouterIndex()) {
-      if (binSubset.empty()) {
-        return;
-      }
-      assert(std::is_sorted(binSubset.begin(), binSubset.end()));
-      static thread_local std::vector<uint32_t> routeBuf1;
-      static thread_local std::vector<uint32_t> routeBuf2;
-      static thread_local std::vector<uint32_t> mergedBins;
-      static thread_local std::vector<uint8_t> mergedMask;
-
-      fetchRouterBins(hash1, fingerprint, routeBuf1);
-      if (hash2 != hash1) {
-        fetchRouterBins(hash2, fingerprint, routeBuf2);
-      } else {
-        routeBuf2.clear();
-      }
-
-      if (routeBuf1.empty() && routeBuf2.empty()) {
-        return;
-      }
-
-      mergedBins.clear();
-      mergedMask.clear();
-      mergedBins.reserve(routeBuf1.size() + routeBuf2.size());
-      mergedMask.reserve(routeBuf1.size() + routeBuf2.size());
-
-      size_t i = 0;
-      size_t j = 0;
-      while (i < routeBuf1.size() || j < routeBuf2.size()) {
-        uint32_t candidate;
-        uint8_t maskBits = 0;
-        if (j >= routeBuf2.size() ||
-            (i < routeBuf1.size() && routeBuf1[i] < routeBuf2[j])) {
-          candidate = routeBuf1[i++];
-          maskBits |= 0x1;
-        } else if (i >= routeBuf1.size() || routeBuf2[j] < routeBuf1[i]) {
-          candidate = routeBuf2[j++];
-          maskBits |= 0x2;
-        } else {
-          candidate = routeBuf1[i];
-          maskBits |= 0x3;
-          ++i;
-          ++j;
-        }
-        if (!mergedBins.empty() && mergedBins.back() == candidate) {
-          mergedMask.back() |= maskBits;
-        } else {
-          mergedBins.push_back(candidate);
-          mergedMask.push_back(maskBits);
-        }
-      }
-
-      for (size_t idx = 0; idx < mergedBins.size(); ++idx) {
-        uint32_t binIndex = mergedBins[idx];
-        if (!std::binary_search(binSubset.begin(), binSubset.end(), binIndex)) {
-          continue;
-        }
-        if (binIndex >= binNum) {
-          continue;
-        }
-        uint8_t maskBits = mergedMask[idx];
-        if (maskBits & 0x1) {
-          uint64_t q = readBucket64(hash1, binIndex);
-          if (q != 0ULL) {
-            process64(q, binIndex);
-          }
-          forEachStashMatch(binIndex, hash1, fingerprint,
-                            [&](uint16_t speciesIndex) {
-                              emit(binIndex, speciesIndex);
-                            });
-        }
-        if ((maskBits & 0x2) && hash2 != hash1) {
-          uint64_t q = readBucket64(hash2, binIndex);
-          if (q != 0ULL) {
-            process64(q, binIndex);
-          }
-          forEachStashMatch(binIndex, hash2, fingerprint,
-                            [&](uint16_t speciesIndex) {
-                              emit(binIndex, speciesIndex);
-                            });
-        }
-      }
-      return;
-    }
-
     if (activeGroups.empty()) {
       for (size_t offset = 0; offset < binSubset.size(); offset += SUB_BATCH) {
         size_t batchEnd = std::min(binSubset.size(), offset + SUB_BATCH);
@@ -1662,35 +1481,13 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
   }
 #endif
 
-  inline void buildActiveGroups() { buildIndexes(false); }
-
-  inline void buildRouterIndex() { buildIndexes(true); }
-
-  inline void buildIndexes(bool buildRouter) {
+  inline void buildActiveGroups() {
     if (hashSize == 0 || binNum == 0) {
       activeGroups.clear();
-      if (buildRouter) {
-        clearRouterIndex();
-      }
       return;
     }
 
     activeGroups.assign(hashSize, {});
-
-    struct RouterBucketData {
-      std::vector<uint16_t> fingerprints;
-      std::vector<uint64_t> entryOffsets;
-      std::vector<uint8_t> payload;
-    };
-
-    std::vector<RouterBucketData> routerBuckets;
-    if (buildRouter) {
-      routerBuckets.resize(hashSize);
-      routerBucketOffsets.assign(hashSize + 1, 0);
-      routerEntryOffsets.clear();
-      routerEntryFingerprints.clear();
-      routerPayload.clear();
-    }
 
 #pragma omp parallel for schedule(dynamic, 32)
     for (size_t bucket = 0; bucket < hashSize; ++bucket) {
@@ -1698,107 +1495,11 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
       groupList.clear();
       groupList.reserve(16);
 
-      if (!buildRouter) {
-        for (uint32_t bin = 0; bin < binNum; ++bin) {
-          uint64_t q = readBucket64(bucket, bin);
-          if (q != 0ULL) {
-            groupList.push_back(static_cast<uint32_t>(bin));
-          }
-        }
-        continue;
-      }
-
-      RouterBucketData localData;
-      localData.fingerprints.reserve(32);
-      localData.entryOffsets.reserve(32);
-      localData.payload.reserve(128);
-      std::vector<std::pair<uint16_t, uint32_t>> entries;
-      entries.reserve(64);
-
       for (uint32_t bin = 0; bin < binNum; ++bin) {
         uint64_t q = readBucket64(bucket, bin);
-        if (q == 0ULL) {
-          continue;
+        if (q != 0ULL) {
+          groupList.push_back(static_cast<uint32_t>(bin));
         }
-        groupList.push_back(static_cast<uint32_t>(bin));
-        for (int lane = 0; lane < static_cast<int>(tagNum); ++lane) {
-          uint16_t tag = static_cast<uint16_t>((q >> (lane * 16)) & 0xFFFFu);
-          if (tag == 0u) {
-            continue;
-          }
-          uint16_t fp = static_cast<uint16_t>(tag & 0x0FFFu);
-          entries.emplace_back(fp, static_cast<uint32_t>(bin));
-        }
-      }
-
-      if (!entries.empty()) {
-        std::sort(entries.begin(), entries.end(),
-                  [](const auto &lhs, const auto &rhs) {
-                    if (lhs.first != rhs.first) {
-                      return lhs.first < rhs.first;
-                    }
-                    return lhs.second < rhs.second;
-                  });
-
-        localData.entryOffsets.push_back(0);
-        size_t idx = 0;
-        while (idx < entries.size()) {
-          uint16_t fp = entries[idx].first;
-          localData.fingerprints.push_back(fp);
-          uint32_t prev = 0;
-          bool first = true;
-          while (idx < entries.size() && entries[idx].first == fp) {
-            uint32_t binVal = entries[idx].second;
-            if (first || binVal != prev) {
-              uint32_t delta = first ? binVal : (binVal - prev);
-              encodeVarint(localData.payload, delta);
-              prev = binVal;
-              first = false;
-            }
-            ++idx;
-          }
-          localData.entryOffsets.push_back(
-              static_cast<uint64_t>(localData.payload.size()));
-        }
-      }
-
-      routerBuckets[bucket] = std::move(localData);
-    }
-
-    if (buildRouter) {
-      size_t totalEntries = 0;
-      size_t totalPayload = 0;
-      for (const auto &data : routerBuckets) {
-        totalEntries += data.fingerprints.size();
-        totalPayload += data.payload.size();
-      }
-
-      routerEntryFingerprints.reserve(totalEntries);
-      routerEntryOffsets.reserve(totalEntries + 1);
-      routerPayload.reserve(totalPayload);
-      routerEntryOffsets.push_back(0);
-
-      size_t payloadOffset = 0;
-      for (size_t bucket = 0; bucket < hashSize; ++bucket) {
-        const auto &data = routerBuckets[bucket];
-        routerBucketOffsets[bucket + 1] =
-            routerBucketOffsets[bucket] + data.fingerprints.size();
-        routerEntryFingerprints.insert(routerEntryFingerprints.end(),
-                                       data.fingerprints.begin(),
-                                       data.fingerprints.end());
-        for (size_t i = 1; i < data.entryOffsets.size(); ++i) {
-          routerEntryOffsets.push_back(payloadOffset + data.entryOffsets[i]);
-        }
-        routerPayload.insert(routerPayload.end(), data.payload.begin(),
-                             data.payload.end());
-        payloadOffset += data.payload.size();
-      }
-
-      routerBuckets.clear();
-      routerBuckets.shrink_to_fit();
-
-      if (routerEntryOffsets.size() != routerEntryFingerprints.size() + 1) {
-        clearRouterIndex();
       }
     }
   }
@@ -1928,137 +1629,6 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
         activeGroups[bucket].push_back(bin);
       }
     }
-    return true;
-  }
-
-  inline bool saveRouterIndex(const std::string &path) const {
-    if (!hasRouterIndex()) {
-      return false;
-    }
-
-    struct RouterHeader {
-      uint32_t magic{0x524D4349u}; // 'IMCR'
-      uint16_t version{1};
-      uint16_t reserved{0};
-      uint64_t binCount{0};
-      uint64_t hashCount{0};
-      uint64_t entryCount{0};
-      uint64_t payloadBytes{0};
-    };
-
-    std::ofstream out(path, std::ios::binary);
-    if (!out.is_open()) {
-      return false;
-    }
-
-    RouterHeader header;
-    header.binCount = static_cast<uint64_t>(binNum);
-    header.hashCount = static_cast<uint64_t>(hashSize);
-    header.entryCount = static_cast<uint64_t>(routerEntryFingerprints.size());
-    header.payloadBytes = static_cast<uint64_t>(routerPayload.size());
-    out.write(reinterpret_cast<const char *>(&header), sizeof(header));
-    if (!out) {
-      return false;
-    }
-
-    out.write(reinterpret_cast<const char *>(routerBucketOffsets.data()),
-              routerBucketOffsets.size() * sizeof(uint64_t));
-    if (!out) {
-      return false;
-    }
-
-    out.write(reinterpret_cast<const char *>(routerEntryOffsets.data()),
-              routerEntryOffsets.size() * sizeof(uint64_t));
-    if (!out) {
-      return false;
-    }
-
-    out.write(reinterpret_cast<const char *>(routerEntryFingerprints.data()),
-              routerEntryFingerprints.size() * sizeof(uint16_t));
-    if (!out) {
-      return false;
-    }
-
-    if (!routerPayload.empty()) {
-      out.write(reinterpret_cast<const char *>(routerPayload.data()),
-                routerPayload.size());
-      if (!out) {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  inline bool loadRouterIndex(const std::string &path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in.is_open()) {
-      return false;
-    }
-
-    struct RouterHeader {
-      uint32_t magic;
-      uint16_t version;
-      uint16_t reserved;
-      uint64_t binCount;
-      uint64_t hashCount;
-      uint64_t entryCount;
-      uint64_t payloadBytes;
-    };
-
-    RouterHeader header{};
-    in.read(reinterpret_cast<char *>(&header), sizeof(header));
-    if (!in) {
-      return false;
-    }
-    if (header.magic != 0x524D4349u || header.version != 1) {
-      return false;
-    }
-    if (header.binCount != static_cast<uint64_t>(binNum) ||
-        header.hashCount != static_cast<uint64_t>(hashSize)) {
-      return false;
-    }
-
-    routerBucketOffsets.resize(static_cast<size_t>(header.hashCount) + 1);
-    in.read(reinterpret_cast<char *>(routerBucketOffsets.data()),
-            routerBucketOffsets.size() * sizeof(uint64_t));
-    if (!in) {
-      clearRouterIndex();
-      return false;
-    }
-
-    routerEntryOffsets.resize(static_cast<size_t>(header.entryCount) + 1);
-    in.read(reinterpret_cast<char *>(routerEntryOffsets.data()),
-            routerEntryOffsets.size() * sizeof(uint64_t));
-    if (!in) {
-      clearRouterIndex();
-      return false;
-    }
-
-    routerEntryFingerprints.resize(static_cast<size_t>(header.entryCount));
-    in.read(reinterpret_cast<char *>(routerEntryFingerprints.data()),
-            routerEntryFingerprints.size() * sizeof(uint16_t));
-    if (!in) {
-      clearRouterIndex();
-      return false;
-    }
-
-    routerPayload.resize(static_cast<size_t>(header.payloadBytes));
-    if (!routerPayload.empty()) {
-      in.read(reinterpret_cast<char *>(routerPayload.data()),
-              routerPayload.size());
-      if (!in) {
-        clearRouterIndex();
-        return false;
-      }
-    }
-
-    if (routerBucketOffsets.size() != hashSize + 1 ||
-        routerEntryOffsets.size() != routerEntryFingerprints.size() + 1) {
-      clearRouterIndex();
-      return false;
-    }
-
     return true;
   }
 

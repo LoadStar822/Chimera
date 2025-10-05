@@ -18,11 +18,9 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <system_error>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <filesystem>
 
 #include <robin_hood.h>
 
@@ -450,7 +448,7 @@ static void test_bulk_count_repeat() {
                "bulkCount 应将标签 2 计数为 1");
 }
 
-static void test_router_route_and_subset() {
+static void test_route_and_subset() {
   ChimeraBuild::IMCFConfig config{};
   auto filter = make_filter_with_hashes(config, {128, 128});
 
@@ -460,8 +458,8 @@ static void test_router_route_and_subset() {
   expect_true(filter.insertTag(0, value, 1), "应能向分组 0 插入标签");
   expect_true(filter.insertTag(1, value, 2), "应能向分组 1 插入标签");
 
-  filter.buildRouterIndex();
-  expect_true(filter.hasRouterIndex(), "构建路由索引后应标记为可用");
+  filter.buildActiveGroups();
+  expect_true(filter.hasActiveIndex(), "构建活动桶索引后应标记为可用");
 
   std::vector<uint32_t> routed;
   filter.route(value, routed);
@@ -475,21 +473,6 @@ static void test_router_route_and_subset() {
   expect_true(routed.size() == 2 && routed[0] == 0 && routed[1] == 1,
               "释放 bit_vector 后路由仍应依赖镜像正常工作");
 #endif
-
-  auto tmpPath = std::filesystem::temp_directory_path() / "chimera_imcf_router_test.rtr";
-  expect_true(filter.saveRouterIndex(tmpPath.string()), "路由索引应成功写入磁盘");
-
-  filter.clearRouterIndex();
-  expect_true(!filter.hasRouterIndex(), "clearRouterIndex 应清空索引状态");
-  expect_true(filter.loadRouterIndex(tmpPath.string()), "路由索引应可重新载入");
-
-  std::error_code ec;
-  std::filesystem::remove(tmpPath, ec);
-
-  routed.clear();
-  filter.route(value, routed);
-  expect_true(routed.size() == 2 && routed[0] == 0 && routed[1] == 1,
-              "重新加载后路由结果应保持一致");
 
   std::vector<uint64_t> minimizers{value};
   std::vector<uint32_t> subset{0, 1, 5};
@@ -843,7 +826,7 @@ int main() {
   runner.add("分组-边界情况", test_partition_edge_cases);
   runner.add("插入与 bulkContain-基础", test_insert_and_bulk_contain_basic);
   runner.add("bulkCount-重复计数", test_bulk_count_repeat);
-  runner.add("路由索引与子集计数", test_router_route_and_subset);
+  runner.add("候选枚举与子集计数", test_route_and_subset);
   runner.add("序列化往返", test_serialize_roundtrip);
   runner.add("插入备用桶并命中", test_insert_alt_bucket_and_find);
   runner.add("超容量插入抛异常", test_insert_failure_throw);

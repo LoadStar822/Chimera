@@ -767,8 +767,7 @@ namespace ChimeraBuild {
 		const std::string& output_file,
 		std::vector<std::vector<std::string>>& indexToTaxid,
 		IMCFConfig& imcfConfig,
-		bool needIndexStructures,
-		bool writeRouterIndex)
+		bool needIndexStructures)
 	{
 	// Open the output file
 	std::ofstream os(output_file + ".imcf", std::ios::binary);
@@ -824,21 +823,13 @@ namespace ChimeraBuild {
 	}
 #endif
 
-	const bool wantRouterIndex = needIndexStructures && writeRouterIndex;
-
 	std::future<void> indexFuture;
 	Clock::time_point indexLaunchTime{};
 	if (needIndexStructures && runAsyncIndexBuild) {
 		indexLaunchTime = Clock::now();
-		if (wantRouterIndex) {
-			indexFuture = std::async(std::launch::async, [&imcf]() {
-				imcf.buildRouterIndex();
-			});
-		} else {
-			indexFuture = std::async(std::launch::async, [&imcf]() {
-				imcf.buildActiveGroups();
-			});
-		}
+		indexFuture = std::async(std::launch::async, [&imcf]() {
+			imcf.buildActiveGroups();
+		});
 	}
 
 	logStep("Writing filter archive (.imcf)", [&]() {
@@ -851,16 +842,9 @@ namespace ChimeraBuild {
 	});
 
 	if (needIndexStructures) {
-		const char *indexTitle = nullptr;
-		if (wantRouterIndex) {
-			indexTitle = runAsyncIndexBuild ?
-			    "Building index structures (.idx/.rtr) [async]" :
-			    "Building index structures (.idx/.rtr)";
-		} else {
-			indexTitle = runAsyncIndexBuild ?
-			    "Building index structures (.idx) [async]" :
-			    "Building index structures (.idx)";
-		}
+		const char *indexTitle = runAsyncIndexBuild ?
+		    "Building index structures (.idx) [async]" :
+		    "Building index structures (.idx)";
 		std::cout << "  - " << indexTitle << "... " << std::flush;
 		long long indexElapsedMs = 0;
 		if (indexFuture.valid()) {
@@ -869,11 +853,7 @@ namespace ChimeraBuild {
 			indexElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(end - indexLaunchTime).count();
 		} else {
 			auto start = Clock::now();
-			if (wantRouterIndex) {
-				imcf.buildRouterIndex();
-			} else {
-				imcf.buildActiveGroups();
-			}
+			imcf.buildActiveGroups();
 			auto end = Clock::now();
 			indexElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 		}
@@ -887,17 +867,6 @@ namespace ChimeraBuild {
 			}
 			return true;
 		});
-
-		if (wantRouterIndex) {
-			std::string routerPath = output_file + ".imcf.rtr";
-			logStep("Writing router index (.imcf.rtr)", [&]() {
-				if (!imcf.saveRouterIndex(routerPath)) {
-					std::cerr << "Warning: failed to write IMCF router file: " << routerPath << std::endl;
-					return false;
-				}
-				return true;
-			});
-		}
 	}
 
 		// Get the file size
@@ -1015,9 +984,8 @@ namespace ChimeraBuild {
 
 			auto save_start = std::chrono::high_resolution_clock::now();
 			std::cout << "Saving IMCF..." << std::endl;
-			saveIMCF(imcf, config.output_file, indexToTaxid, imcfConfig,
-			        config.filter == "imcf",
-			        config.filter == "imcf" && config.write_router_index);
+		saveIMCF(imcf, config.output_file, indexToTaxid, imcfConfig,
+		        config.filter == "imcf");
 			auto save_end = std::chrono::high_resolution_clock::now();
 			auto save_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(save_end - save_start).count();
 			if (config.verbose) {

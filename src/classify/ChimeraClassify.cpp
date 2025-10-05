@@ -601,23 +601,20 @@ void parseReads(moodycamel::ConcurrentQueue<batchReads> &readQueue,
 
 struct IMCFIndexStatus {
   bool builtActive{false};
-  bool builtRouter{false};
   long long activeMs{0};
-  long long routerMs{0};
 };
 
 /**
  * @brief 加载 IMCF 主体与索引文件。
  *
- * 该函数会按顺序读取 `.imcf` 主档案以及可选的 `.imcf.idx` 与 `.imcf.rtr`
+ * 该函数会按顺序读取 `.imcf` 主档案以及可选的 `.imcf.idx`
  * 索引文件；若索引缺失将自动重建并记录耗时，用于后续提示用户。
  */
 IMCFIndexStatus
 loadFilter(const std::string &input_file,
            chimera::imcf::InterleavedMergedCuckooFilter &imcf,
            ChimeraBuild::IMCFConfig &imcfConfig,
-           std::vector<std::vector<std::string>> &indexToTaxid,
-           bool wantRouter) {
+           std::vector<std::vector<std::string>> &indexToTaxid) {
   namespace fs = std::filesystem;
   using Clock = std::chrono::steady_clock;
 
@@ -686,24 +683,6 @@ loadFilter(const std::string &input_file,
     status.activeMs = rebuild.second;
   } else {
     status.activeMs = activeMs;
-  }
-
-  if (wantRouter) {
-    std::string routerPath = indexBase.string() + ".imcf.rtr";
-    auto [routerLoaded, routerMs] =
-        timed([&]() { return imcf.loadRouterIndex(routerPath); });
-    if (!routerLoaded || !imcf.hasRouterIndex()) {
-      auto rebuild = timed([&]() {
-        imcf.buildRouterIndex();
-        return true;
-      });
-      status.builtRouter = true;
-      status.routerMs = rebuild.second;
-    } else {
-      status.routerMs = routerMs;
-    }
-  } else {
-    imcf.clearRouterIndex();
   }
 
   return status;
@@ -2403,7 +2382,6 @@ void run(ClassifyConfig config) {
   std::unordered_map<std::string, double> classWeights;
   bool posteriorModelUsed = false;
   long long rebuildActiveMs = 0;
-  long long rebuildRouterMs = 0;
 
   std::string progressLabel =
       config.filter.empty() ? "classify" : config.filter;
@@ -2424,18 +2402,12 @@ void run(ClassifyConfig config) {
     chimera::imcf::InterleavedMergedCuckooFilter imcf;
     ChimeraBuild::IMCFConfig imcfConfig;
     auto indexStatus =
-        loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid,
-                   config.use_router_index);
+        loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid);
     if (indexStatus.builtActive) {
       rebuildActiveMs = indexStatus.activeMs;
       std::cout
           << "IMCF index: active-group list missing, rebuilding in memory ("
           << rebuildActiveMs << " ms)" << std::endl;
-    }
-    if (config.use_router_index && indexStatus.builtRouter) {
-      rebuildRouterMs = indexStatus.routerMs;
-      std::cout << "IMCF index: router table missing, rebuilding in memory ("
-                << rebuildRouterMs << " ms)" << std::endl;
     }
     const TaxDict tax = build_tax_dict(indexToTaxid);
 
@@ -2575,15 +2547,11 @@ void run(ClassifyConfig config) {
                 << format_percentage(fileInfo.lcaNum, fileInfo.classifiedNum)
                 << ")" << std::endl;
     }
-    if (rebuildActiveMs > 0 || rebuildRouterMs > 0) {
+    if (rebuildActiveMs > 0) {
       std::cout << "Index rebuild summary:" << std::endl;
       if (rebuildActiveMs > 0) {
         std::cout << "  Active index: ";
         print_classify_time(rebuildActiveMs);
-      }
-      if (rebuildRouterMs > 0) {
-        std::cout << "  Router index: ";
-        print_classify_time(rebuildRouterMs);
       }
     }
   }

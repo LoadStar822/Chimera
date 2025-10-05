@@ -153,11 +153,6 @@ int main(int argc, char **argv) {
   build->add_flag("-q,--quiet", buildConfig.verbose, "Quiet output")
       ->default_val(true)
       ->disable_flag_override();
-  build
-      ->add_flag("--router-index,!--no-router-index",
-                 buildConfig.write_router_index,
-                 "Persist router index (.imcf.rtr) alongside .imcf")
-      ->default_val(false);
 
   // Classify
   // Add --single option
@@ -269,11 +264,6 @@ int main(int argc, char **argv) {
                  classifyConfig.evidence_override,
                  "Allow strong pre-EM evidence to bypass posterior filter")
       ->default_val(true);
-  classify
-      ->add_flag("--router-index,!--no-router-index",
-                 classifyConfig.use_router_index,
-                 "Build in-memory router index for candidate routing")
-      ->default_val(false);
   classify
       ->add_flag("--output-posterior,!--no-output-posterior",
                  classifyConfig.output_posterior,
