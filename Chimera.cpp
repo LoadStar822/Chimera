@@ -145,7 +145,7 @@ int main(int argc, char **argv) {
       ->default_val(0.85);
   build
       ->add_option("-M,--max-hashes", buildConfig.max_hashes_per_taxid,
-                   "Maximum number of hashes per taxid")
+                   "每个 taxid bottom-k 采样数量")
       ->default_val(2000000);
   build->add_flag("--adaptive-cutoff", buildConfig.adaptive_cutoff,
                   "启用基于文件规模的自适应 cutoff");
