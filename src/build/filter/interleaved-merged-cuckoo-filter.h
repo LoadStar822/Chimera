@@ -25,7 +25,6 @@
 #include <array>
 #include <atomic>
 #include <bit>
-#include <bitset>
 #include <buildConfig.hpp>
 #include <cassert>
 #include <cereal/archives/binary.hpp>
@@ -45,9 +44,8 @@
 #include <ranges>
 #include <robin_hood.h>
 #include <sdsl/int_vector.hpp>
-#include <simde/x86/avx2.h>
-#include <simde/x86/sse2.h>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -80,6 +78,47 @@ namespace chimera::imcf {
 static inline uint64_t mix64(uint64_t value) {
   return XXH3_64bits(&value, sizeof(value));
 }
+
+static inline uint8_t ceil_log2(size_t value) {
+  if (value <= 1) {
+    return 0;
+  }
+#if defined(__cpp_lib_bitops)
+  return static_cast<uint8_t>(std::bit_width(static_cast<unsigned long long>(value - 1)));
+#else
+  size_t v = value - 1;
+  uint8_t result = 0;
+  while (v > 0) {
+    v >>= 1;
+    ++result;
+  }
+  return result;
+#endif
+}
+
+struct LayoutHeaderV2 {
+  static constexpr uint16_t CurrentMajor = 3;
+  static constexpr uint16_t CurrentMinor = 0;
+  static constexpr uint32_t Magic = 0x32464D43u; // 'CMF2'
+
+  uint16_t layoutMajor{CurrentMajor};
+  uint16_t layoutMinor{CurrentMinor};
+  uint8_t bucketEntries{4};
+  uint8_t laneBits{16};
+  uint8_t routeFingerprintBits{12};
+  uint8_t fpHashKind{1};
+  uint8_t stashMode{0};
+  uint64_t fpSalt{ChimeraBuild::IMCFConfig::DefaultFingerprintSalt};
+  uint64_t routeSalt{0x9E3779B97F4A7C15ull};
+  std::vector<uint8_t> sBitsPerBin;
+  std::vector<uint8_t> fingerprintBitsPerBin;
+
+  template <class Archive> void serialize(Archive &ar) {
+    ar(layoutMajor, layoutMinor, bucketEntries, laneBits, routeFingerprintBits,
+       fpHashKind, stashMode, fpSalt, routeSalt, sBitsPerBin,
+       fingerprintBitsPerBin);
+  }
+};
 
 struct Group {
   std::vector<std::string> taxids;
@@ -254,6 +293,7 @@ inline std::vector<Group> partitionHashCount(
 class InterleavedMergedCuckooFilter {
   typedef kvec_t(int) kvector;
   typedef kvec_t(bool) kvectorBool;
+  LayoutHeaderV2 layoutHeader;
   sdsl::bit_vector data;
   size_t binNum;
   size_t binSize;
@@ -261,7 +301,7 @@ class InterleavedMergedCuckooFilter {
   int MaxCuckooCount{500};
   size_t hashSize{};
 #ifdef IMCF_MIRROR64
-  std::vector<uint64_t> bucketMirror;
+  std::vector<uint32_t> bucketMirror;
   bool bitStorageReleased{false};
   size_t segmentShift{20};
   size_t segmentSizeBuckets{1ull << 20};
@@ -311,11 +351,11 @@ class InterleavedMergedCuckooFilter {
   std::vector<std::vector<uint32_t>> activeGroups;
   struct StashEntry {
     uint64_t bucket{0};
-    uint16_t fingerprint{0};
-    uint16_t speciesMask{0};
+    uint32_t fingerprint{0};
+    std::vector<uint32_t> species;
 
     template <class Archive> void serialize(Archive &ar) {
-      ar(bucket, fingerprint, speciesMask);
+      ar(bucket, fingerprint, species);
     }
   };
   std::vector<std::vector<StashEntry>> stash;
@@ -337,35 +377,28 @@ class InterleavedMergedCuckooFilter {
     size_t stashMaxPerEntry{0};
   };
 
-  static inline uint16_t popcount16(uint16_t value) {
-#if defined(__cpp_lib_bitops)
-    return static_cast<uint16_t>(std::popcount(value));
-#else
-    return static_cast<uint16_t>(__builtin_popcount(static_cast<unsigned int>(value)));
-#endif
-  }
-
-  inline bool insertIntoStash(size_t binIndex, size_t bucket, uint16_t fingerprint,
+  inline bool insertIntoStash(size_t binIndex, size_t bucket, uint32_t fingerprint,
                               size_t speciesIndex) {
     if (binIndex >= stash.size()) {
       return false;
     }
     auto &entries = stash[binIndex];
-    uint16_t speciesBit = static_cast<uint16_t>(1u << speciesIndex);
     for (auto &entry : entries) {
       if (entry.bucket == bucket && entry.fingerprint == fingerprint) {
-        if ((entry.speciesMask & speciesBit) != 0) {
+        if (std::find(entry.species.begin(), entry.species.end(),
+                      static_cast<uint32_t>(speciesIndex)) !=
+            entry.species.end()) {
           return true;
         }
-        if (entry.speciesMask == 0xFFFFu) {
-          return false;
-        }
-        entry.speciesMask = static_cast<uint16_t>(entry.speciesMask | speciesBit);
+        entry.species.push_back(static_cast<uint32_t>(speciesIndex));
         return true;
       }
     }
-    entries.push_back(
-        StashEntry{static_cast<uint64_t>(bucket), fingerprint, speciesBit});
+    StashEntry newEntry;
+    newEntry.bucket = bucket;
+    newEntry.fingerprint = fingerprint;
+    newEntry.species.push_back(static_cast<uint32_t>(speciesIndex));
+    entries.push_back(std::move(newEntry));
     return true;
   }
 
@@ -374,36 +407,238 @@ class InterleavedMergedCuckooFilter {
   }
 
   inline size_t bucketBitOffset(size_t bucketLinear) const {
-    return bucketLinear * tagNum * 16;
+    return bucketLinear * tagNum * static_cast<size_t>(layoutHeader.laneBits);
   }
 
-  inline uint64_t readBucketRaw(size_t bucketLinear) const {
-    return data.get_int(bucketBitOffset(bucketLinear), 64);
+  inline size_t laneLinearIndex(size_t bucket, size_t bin, size_t lane) const {
+    return (bucket * binNum + bin) * tagNum + lane;
   }
 
-  inline void writeBucketRaw(size_t bucketLinear, uint64_t value) {
-    data.set_int(bucketBitOffset(bucketLinear), value, 64);
+  inline size_t laneBitOffset(size_t bucket, size_t bin, size_t lane) const {
+    return bucketBitOffset(bucketLinearIndex(bucket, bin)) +
+           lane * static_cast<size_t>(layoutHeader.laneBits);
   }
 
-  inline uint64_t readBucket64(size_t bucket, size_t bin) const {
-    size_t linear = bucketLinearIndex(bucket, bin);
+  inline size_t laneCount() const { return tagNum; }
+
+  inline uint32_t readLaneValue(size_t bucket, size_t bin, size_t lane) const {
 #ifdef IMCF_MIRROR64
-    return bucketMirror[linear];
-#else
-    return readBucketRaw(linear);
-#endif
-  }
-
-  inline void writeBucket64(size_t bucket, size_t bin, uint64_t value) {
-    size_t linear = bucketLinearIndex(bucket, bin);
-#ifdef IMCF_MIRROR64
-    bucketMirror[linear] = value;
-    if (!bitStorageReleased) {
-      writeBucketRaw(linear, value);
+    if (!bucketMirror.empty()) {
+      return bucketMirror[laneLinearIndex(bucket, bin, lane)];
     }
-#else
-    writeBucketRaw(linear, value);
 #endif
+    size_t offset = laneBitOffset(bucket, bin, lane);
+    return static_cast<uint32_t>(data.get_int(offset, layoutHeader.laneBits));
+  }
+
+  inline void writeLaneValue(size_t bucket, size_t bin, size_t lane,
+                             uint32_t value) {
+    size_t offset = laneBitOffset(bucket, bin, lane);
+    data.set_int(offset, value, layoutHeader.laneBits);
+#ifdef IMCF_MIRROR64
+    if (!bucketMirror.empty()) {
+      bucketMirror[laneLinearIndex(bucket, bin, lane)] = value;
+    }
+#endif
+  }
+
+  inline uint8_t speciesBits(size_t bin) const {
+    if (bin >= layoutHeader.sBitsPerBin.size()) {
+      return 0;
+    }
+    return layoutHeader.sBitsPerBin[bin];
+  }
+
+  inline uint8_t fingerprintBits(size_t bin) const {
+    if (!layoutHeader.fingerprintBitsPerBin.empty() &&
+        bin < layoutHeader.fingerprintBitsPerBin.size()) {
+      return layoutHeader.fingerprintBitsPerBin[bin];
+    }
+    uint8_t sBits = speciesBits(bin);
+    return static_cast<uint8_t>(layoutHeader.laneBits > sBits
+                                    ? layoutHeader.laneBits - sBits
+                                    : 0);
+  }
+
+  inline uint32_t fingerprintMask(size_t bin) const {
+    uint8_t bits = fingerprintBits(bin);
+    if (bits >= 32) {
+      return 0xFFFFFFFFu;
+    }
+    if (bits == 0) {
+      return 0u;
+    }
+    return (1u << bits) - 1u;
+  }
+
+  inline uint32_t speciesMask(size_t bin) const {
+    uint8_t bits = speciesBits(bin);
+    if (bits >= 32) {
+      return 0xFFFFFFFFu;
+    }
+    if (bits == 0) {
+      return 0u;
+    }
+    return (1u << bits) - 1u;
+  }
+
+  inline uint32_t routeMask() const {
+    uint8_t bits = layoutHeader.routeFingerprintBits;
+    if (bits >= 32) {
+      return 0xFFFFFFFFu;
+    }
+    if (bits == 0) {
+      return 0u;
+    }
+    return (1u << bits) - 1u;
+  }
+
+  inline uint32_t buildLaneValue(size_t bin, uint32_t fingerprint,
+                                 uint32_t speciesIdx) const {
+    uint32_t fpMask = fingerprintMask(bin);
+    uint32_t spMask = speciesMask(bin);
+    uint8_t fBits = fingerprintBits(bin);
+    uint32_t packed = (speciesIdx & spMask) << fBits;
+    packed |= (fingerprint & fpMask);
+    return packed;
+  }
+
+  inline uint32_t laneFingerprint(uint32_t laneValue, size_t bin) const {
+    return laneValue & fingerprintMask(bin);
+  }
+
+  inline uint32_t laneSpecies(uint32_t laneValue, size_t bin) const {
+    uint8_t fBits = fingerprintBits(bin);
+    uint32_t spMask = speciesMask(bin);
+    return (laneValue >> fBits) & spMask;
+  }
+
+  struct FingerprintInfo {
+    uint32_t full{0};
+    uint32_t route{0};
+  };
+
+  inline FingerprintInfo makeFingerprint(uint64_t value, size_t bin, uint32_t presetRoute = 0u) const {
+    uint64_t mixed = mix64(value ^ layoutHeader.fpSalt);
+    uint32_t fpMask = fingerprintMask(bin);
+    uint32_t full =
+        fpMask == 0u ? static_cast<uint32_t>(mixed)
+                     : (fpMask == 0xFFFFFFFFu ? static_cast<uint32_t>(mixed)
+                                               : static_cast<uint32_t>(mixed & fpMask));
+    if (full == 0u) {
+      full = 1u;
+    }
+    uint32_t rMask = routeMask();
+    uint32_t route = rMask == 0u ? 0u : (presetRoute & rMask);
+    if (rMask != 0u && route == 0u) {
+      route = static_cast<uint32_t>(mixed & rMask);
+      if (route == 0u) {
+        uint64_t remixed =
+            mix64((static_cast<uint64_t>(full) ^ layoutHeader.routeSalt) +
+                  value);
+        route = static_cast<uint32_t>(remixed & rMask);
+        if (route == 0u) {
+          route = 1u;
+        }
+      }
+    }
+    if (rMask != 0u) {
+      if ((full & rMask) != route) {
+        full = (full & ~rMask) | route;
+      }
+    }
+    return FingerprintInfo{full, route};
+  }
+
+  inline uint32_t computeRouteFingerprint(uint64_t value) const {
+    uint32_t mask = routeMask();
+    if (mask == 0u) {
+      return 0u;
+    }
+    uint64_t mixed = mix64(value ^ layoutHeader.fpSalt);
+    uint32_t route = static_cast<uint32_t>(mixed & mask);
+    if (route == 0u) {
+      uint64_t remixed =
+          mix64((static_cast<uint64_t>(mixed) ^ layoutHeader.routeSalt) +
+                value);
+      route = static_cast<uint32_t>(remixed & mask);
+      if (route == 0u) {
+        route = 1u;
+      }
+    }
+    return route;
+  }
+
+  inline void gatherCandidateBins(size_t bucket1, size_t bucket2,
+                                  std::vector<uint32_t> &candidates) const {
+    candidates.clear();
+    if (activeGroups.empty()) {
+      candidates.reserve(binNum);
+      for (uint32_t bin = 0; bin < binNum; ++bin) {
+        candidates.push_back(bin);
+      }
+      return;
+    }
+
+    const auto &list1 = activeGroups[bucket1];
+    const auto &list2 = activeGroups[bucket2];
+    size_t i = 0, j = 0;
+    candidates.reserve(list1.size() + list2.size());
+    while (i < list1.size() || j < list2.size()) {
+      uint32_t valueOut;
+      if (j >= list2.size() ||
+          (i < list1.size() && list1[i] < list2[j])) {
+        valueOut = list1[i++];
+      } else if (i >= list1.size() || list2[j] < list1[i]) {
+        valueOut = list2[j++];
+      } else {
+        valueOut = list1[i];
+        ++i;
+        ++j;
+      }
+      if (candidates.empty() || candidates.back() != valueOut) {
+        candidates.push_back(valueOut);
+      }
+    }
+  }
+
+  inline void collectMatchesForBin(uint64_t value, uint32_t routeFingerprint,
+                                   size_t bin, size_t bucket1, size_t bucket2,
+                                   std::vector<uint32_t> &matches) const {
+    matches.clear();
+    FingerprintInfo fp = makeFingerprint(value, bin, routeFingerprint);
+
+    auto probeBucket = [&](size_t bucket) {
+      for (size_t lane = 0; lane < laneCount(); ++lane) {
+        uint32_t laneValue = readLaneValue(bucket, bin, lane);
+        if (laneValue == 0u) {
+          continue;
+        }
+        if (laneFingerprint(laneValue, bin) == fp.full) {
+          matches.push_back(laneSpecies(laneValue, bin));
+        }
+      }
+      if (bin < stash.size()) {
+        for (const auto &entry : stash[bin]) {
+          if (entry.bucket != bucket || entry.fingerprint != fp.full) {
+            continue;
+          }
+          matches.insert(matches.end(), entry.species.begin(),
+                         entry.species.end());
+        }
+      }
+    };
+
+    probeBucket(bucket1);
+    if (bucket2 != bucket1) {
+      probeBucket(bucket2);
+    }
+
+    if (!matches.empty()) {
+      std::sort(matches.begin(), matches.end());
+      matches.erase(std::unique(matches.begin(), matches.end()),
+                    matches.end());
+    }
   }
 
 #ifdef IMCF_MIRROR64
@@ -412,56 +647,22 @@ class InterleavedMergedCuckooFilter {
   }
 
   inline void prepareSegmentAdvice() {
-    if (segmentShift >= sizeof(size_t) * 8 - 1) {
-      segmentShift = static_cast<size_t>(sizeof(size_t) * 8 - 2);
-    }
-    segmentSizeBuckets = static_cast<size_t>(1) << segmentShift;
-    if (segmentSizeBuckets == 0) {
-      segmentSizeBuckets = 1ULL << 20;
-    }
-    if (bucketMirror.empty() || hashSize == 0) {
-      segmentAdviceEnabled = false;
-      segmentCount = 0;
-      return;
-    }
-    segmentCount = (hashSize + segmentSizeBuckets - 1) / segmentSizeBuckets;
-    segmentAdviceEnabled = segmentCount > 0;
-    if (segmentAdviceEnabled) {
-      void *ptr = const_cast<uint64_t *>(bucketMirror.data());
-      size_t bytes = bucketMirror.size() * sizeof(uint64_t);
-      ::madvise(ptr, bytes, MADV_SEQUENTIAL);
-    }
+    segmentAdviceEnabled = false;
+    segmentCount = 0;
   }
 
-  inline void adviseSegment(size_t segment, int advice) const {
-    if (!segmentAdviceEnabled || segment >= segmentCount) {
-      return;
-    }
-    size_t startBucket = segment * segmentSizeBuckets;
-    if (startBucket >= hashSize) {
-      return;
-    }
-    size_t buckets = std::min(segmentSizeBuckets, hashSize - startBucket);
-    if (buckets == 0) {
-      return;
-    }
-    size_t elements = buckets * binNum;
-    void *ptr =
-        const_cast<uint64_t *>(bucketMirror.data() + startBucket * binNum);
-    size_t bytes = elements * sizeof(uint64_t);
-    ::madvise(ptr, bytes, advice);
-  }
+  inline void adviseSegment(size_t, int) const {}
 
-  inline bool hasSegmentAdvice() const { return segmentAdviceEnabled; }
+  inline bool hasSegmentAdvice() const { return false; }
 
   inline void initializeMirrorStorage() {
-    bucketMirror.clear();
     if (hashSize == 0 || binNum == 0) {
+      bucketMirror.clear();
       bitStorageReleased = false;
       prepareSegmentAdvice();
       return;
     }
-    bucketMirror.assign(hashSize * binNum, 0);
+    bucketMirror.assign(hashSize * binNum * laneCount(), 0u);
     bitStorageReleased = false;
     prepareSegmentAdvice();
   }
@@ -473,11 +674,15 @@ class InterleavedMergedCuckooFilter {
       prepareSegmentAdvice();
       return;
     }
-    bucketMirror.resize(hashSize * binNum);
+    bucketMirror.assign(hashSize * binNum * laneCount(), 0u);
     for (size_t bucket = 0; bucket < hashSize; ++bucket) {
       for (size_t bin = 0; bin < binNum; ++bin) {
-        size_t linear = bucketLinearIndex(bucket, bin);
-        bucketMirror[linear] = readBucketRaw(linear);
+        for (size_t lane = 0; lane < laneCount(); ++lane) {
+          size_t idx = laneLinearIndex(bucket, bin, lane);
+          bucketMirror[idx] = static_cast<uint32_t>(
+              data.get_int(laneBitOffset(bucket, bin, lane),
+                           layoutHeader.laneBits));
+        }
       }
     }
     bitStorageReleased = false;
@@ -485,7 +690,7 @@ class InterleavedMergedCuckooFilter {
   }
 #endif
 
-  inline void fetchActiveBins(size_t bucket, uint16_t fingerprint,
+  inline void fetchActiveBins(size_t bucket, uint32_t routeFingerprint,
                               std::vector<uint32_t> &out) const {
     out.clear();
     if (bucket >= activeGroups.size()) {
@@ -497,26 +702,29 @@ class InterleavedMergedCuckooFilter {
     }
     out.reserve(candidates.size());
     for (uint32_t bin : candidates) {
-      uint64_t bucketValue = readBucket64(bucket, bin);
       bool match = false;
-      for (int lane = 0; lane < static_cast<int>(tagNum); ++lane) {
-        uint16_t tag = static_cast<uint16_t>((bucketValue >> (lane * 16)) & 0xFFFFu);
-        if (tag == 0u) {
+      for (size_t lane = 0; lane < laneCount(); ++lane) {
+        uint32_t laneValue = readLaneValue(bucket, bin, lane);
+        if (laneValue == 0u) {
           continue;
         }
-        if ((tag & 0x0FFFu) == fingerprint) {
+        if ((laneFingerprint(laneValue, bin) & routeMask()) == routeFingerprint) {
           match = true;
           break;
         }
       }
       if (!match) {
-        bool stashHit = false;
-        forEachStashMatch(bin, bucket, fingerprint,
-                          [&](uint16_t) { stashHit = true; });
-        if (!stashHit) {
+        const auto &stashEntries = stash[bin];
+        for (const auto &entry : stashEntries) {
+          if (entry.bucket == bucket &&
+              (entry.fingerprint & routeMask()) == routeFingerprint) {
+            match = true;
+            break;
+          }
+        }
+        if (!match) {
           continue;
         }
-        match = true;
       }
       if (match) {
         out.push_back(bin);
@@ -583,6 +791,36 @@ public:
     }
     binNum = groups.size();
 
+    layoutHeader = LayoutHeaderV2{};
+    layoutHeader.bucketEntries = static_cast<uint8_t>(tagNum);
+    layoutHeader.laneBits = 32;
+    layoutHeader.routeFingerprintBits = layoutHeader.laneBits;
+    layoutHeader.fpHashKind = 1;
+    layoutHeader.stashMode = 0;
+    layoutHeader.fpSalt = config.fpSalt;
+    layoutHeader.routeSalt = 0x9E3779B97F4A7C15ull;
+    layoutHeader.sBitsPerBin.assign(binNum, 0);
+    layoutHeader.fingerprintBitsPerBin.assign(binNum, 0);
+    uint8_t minFingerprintBits = layoutHeader.laneBits;
+    for (size_t i = 0; i < binNum; ++i) {
+      size_t speciesCount = groups[i].taxids.size();
+      uint8_t sBits = ceil_log2(speciesCount);
+      layoutHeader.sBitsPerBin[i] = sBits;
+      uint8_t fBits = static_cast<uint8_t>(layoutHeader.laneBits > sBits
+                                               ? layoutHeader.laneBits - sBits
+                                               : 0);
+      layoutHeader.fingerprintBitsPerBin[i] = fBits;
+      if (fBits < minFingerprintBits) {
+        minFingerprintBits = fBits;
+      }
+    }
+    if (minFingerprintBits == 0) {
+      minFingerprintBits = 1;
+    }
+    if (layoutHeader.routeFingerprintBits > minFingerprintBits) {
+      layoutHeader.routeFingerprintBits = minFingerprintBits;
+    }
+
     // 关键：向上取整 + 2 的幂，便于用按位掩码实现可逆备桶
     size_t needBinSize = ceil_div_u64(
         maxTotalHash,
@@ -594,8 +832,11 @@ public:
     binSize = hashSize;
 
     // 保持旧布局：每桶 4×16bit，总位数 = binNum * binSize * tagNum * 16
-    data = sdsl::bit_vector(
-        (uint64_t)binNum * (uint64_t)binSize * (uint64_t)tagNum * 16ull, 0);
+    data = sdsl::bit_vector(static_cast<uint64_t>(binNum) *
+                                static_cast<uint64_t>(binSize) *
+                                static_cast<uint64_t>(tagNum) *
+                                static_cast<uint64_t>(layoutHeader.laneBits),
+                            0);
 
     config.binNum = binNum;
     config.binSize = binSize;
@@ -605,8 +846,14 @@ public:
     stash.assign(binNum, {});
   }
 
+  const LayoutHeaderV2 &layout() const { return layoutHeader; }
+  const std::vector<uint8_t> &sBitsPerBin() const {
+    return layoutHeader.sBitsPerBin;
+  }
+
   template <class Archive> void serialize(Archive &ar) {
-    ar(data, binNum, binSize, tagNum, MaxCuckooCount, hashSize, stash);
+    ar(layoutHeader, data, binNum, binSize, tagNum, MaxCuckooCount, hashSize,
+       stash);
 #ifdef IMCF_MIRROR64
     if constexpr (Archive::is_loading::value) {
       rebuildMirrorFromBitVector();
@@ -618,6 +865,33 @@ public:
     }
 #endif
     if constexpr (Archive::is_loading::value) {
+      if (layoutHeader.layoutMajor != LayoutHeaderV2::CurrentMajor) {
+        throw std::runtime_error(
+            "IMCF 布局版本不兼容，请重新构建数据库 (layout_major=" +
+            std::to_string(layoutHeader.layoutMajor) + ")");
+      }
+      if (layoutHeader.sBitsPerBin.size() != binNum) {
+        throw std::runtime_error(
+            "IMCF 布局信息损坏：sBits 数量与 bin 数不匹配");
+      }
+      if (layoutHeader.bucketEntries != static_cast<uint8_t>(tagNum)) {
+        throw std::runtime_error(
+            "IMCF 布局信息损坏：bucket_entries 与 tagNum 不一致");
+      }
+      if (layoutHeader.fingerprintBitsPerBin.size() != binNum) {
+        if (layoutHeader.fingerprintBitsPerBin.empty()) {
+          layoutHeader.fingerprintBitsPerBin.assign(binNum, 0);
+          for (size_t i = 0; i < binNum; ++i) {
+            uint8_t sBits = layoutHeader.sBitsPerBin[i];
+            layoutHeader.fingerprintBitsPerBin[i] = static_cast<uint8_t>(
+                layoutHeader.laneBits > sBits ? layoutHeader.laneBits - sBits
+                                               : 0);
+          }
+        } else {
+          throw std::runtime_error(
+              "IMCF 布局信息损坏：fingerprintBits 数量与 bin 数不匹配");
+        }
+      }
       if (stash.size() != binNum) {
         stash.resize(binNum);
       }
@@ -643,58 +917,26 @@ inline size_t hashIndex(uint64_t value) const {
    * 大小做掩码， 保证 `altHash(altHash(b, fp), fp) ==
    * b`，便于在踢出链中双向定位。
    */
-inline size_t altHash(size_t b, uint16_t fingerprint) const {
-  uint64_t fp64 = (uint64_t)fingerprint ^ 0x9E3779B97F4A7C15ull;
-  size_t alt = (b ^ (size_t)mix64(fp64)) & (hashSize - 1);
-  if (alt == b) {
-    alt = (b + 1) & (hashSize - 1);
-  }
-  return alt;
+inline size_t altHash(size_t bucket, uint32_t routeFingerprint) const {
+  size_t mask = hashSize - 1;
+  uint64_t mixed = mix64((static_cast<uint64_t>(routeFingerprint) ^ layoutHeader.routeSalt));
+  size_t delta = (static_cast<size_t>(mixed) & mask) | 1ull;
+  return (bucket ^ delta) & mask;
 }
 
-  /**
-   * @brief 组合 12 bit 指纹与物种索引。
-   *
-   * 步骤：
-   * 1. 调用 `reduceTo12bit` 生成非零的 12 bit 指纹。
-   * 2. 将物种索引左移 12 位并与指纹按位或，构造完整标签。
-   *
-   * @param value 用于生成指纹的值（通常是 minimizer 或 k-mer）。
-   * @param index 需要编码进高 4 bit 的物种索引，取值范围 [0, 15]。
-   *
-   * @return 编码好物种索引与指纹的 16 bit 标签。
-   */
-	inline uint16_t reduceTo12bitAndAddIndex(uint64_t value, size_t index) const {
-    assert(index < 16);
-    uint16_t reduced_value = reduceTo12bit(value);
-    uint16_t combined = (index << 12) | reduced_value;
-    return combined;
-  }
-
-  /**
-   * @brief 轻量 12 bit 指纹化。
-   *
-   * 复用主哈希的位混合策略，只截取低 12 bit，并保证不返回 0。
-   */
-	inline uint16_t reduceTo12bit(uint64_t value) const {
-		uint64_t mixed = mix64((uint64_t)value ^ ChimeraBuild::IMCFConfig::DefaultFingerprintSalt);
-		uint16_t v = (uint16_t)(mixed & 0x0FFFu);
-		return v ? v : 1;
-	}
-
-	inline void route(uint64_t value, std::vector<uint32_t> &bins) const {
+  inline void route(uint64_t value, std::vector<uint32_t> &bins) const {
     bins.clear();
 
-    uint16_t fingerprint = reduceTo12bit(value);
+    uint32_t routeFp = computeRouteFingerprint(value);
     size_t hash1 = hashIndex(value);
-    size_t hash2 = altHash(hash1, fingerprint);
+    size_t hash2 = altHash(hash1, routeFp);
 
     static thread_local std::vector<uint32_t> routeBuf1;
     static thread_local std::vector<uint32_t> routeBuf2;
 
-    fetchActiveBins(hash1, fingerprint, routeBuf1);
+    fetchActiveBins(hash1, routeFp, routeBuf1);
     if (hash2 != hash1) {
-      fetchActiveBins(hash2, fingerprint, routeBuf2);
+      fetchActiveBins(hash2, routeFp, routeBuf2);
     } else {
       routeBuf2.clear();
     }
@@ -727,58 +969,62 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
   /**
    * @brief 插入指纹。
    *
-   * 构造标签后先命中主桶，再跳到可逆备桶，两桶任意存在空位或已有指纹即视为成功；
-   * 若均告满载则进入踢出流程。
+   * 构造标签后先尝试两个桶，若均告满载则进入踢出流程。
    */
-	inline bool insertTag(size_t binIndex, uint64_t value, size_t index) {
-    if (index >= 16) {
-      assert(false &&
-             "IMCF group index overflow (taxids per group must be <=16)");
+	inline bool insertTag(size_t binIndex, uint64_t value, size_t speciesIndex) {
+    uint8_t sBits = speciesBits(binIndex);
+    size_t speciesCapacity = sBits == 0 ? 1ull : (1ull << sBits);
+    if (speciesIndex >= speciesCapacity) {
       return false;
     }
-    uint16_t tag = reduceTo12bitAndAddIndex(value, index);
-    uint16_t fp = (uint16_t)(tag & 0x0FFFu);
 
-    size_t b1 = hashIndex(value);
-    size_t b2 = altHash(b1, fp);
+    uint32_t routeFp = computeRouteFingerprint(value);
+    FingerprintInfo fp = makeFingerprint(value, binIndex, routeFp);
+    uint32_t lanePacked =
+        buildLaneValue(binIndex, fp.full, static_cast<uint32_t>(speciesIndex));
 
-    auto try_insert_bucket = [&](size_t b) -> bool {
-      uint64_t q = readBucket64(b, binIndex);
-      for (int i = 0; i < 4; ++i) {
-        uint16_t chunk = (uint16_t)((q >> (i * 16)) & 0xFFFFu);
-        if (chunk == 0u) {
-          q &= ~((uint64_t)0xFFFFu << (i * 16));
-          q |= ((uint64_t)tag << (i * 16));
-          writeBucket64(b, binIndex, q);
+    size_t bucket1 = hashIndex(value);
+    size_t bucket2 = altHash(bucket1, fp.route);
+
+    auto tryInsertBucket = [&](size_t bucket) -> bool {
+      for (size_t lane = 0; lane < laneCount(); ++lane) {
+        uint32_t current = readLaneValue(bucket, binIndex, lane);
+        if (current == 0u) {
+          writeLaneValue(bucket, binIndex, lane, lanePacked);
           return true;
         }
-        if (chunk == tag)
+        if (laneFingerprint(current, binIndex) == fp.full &&
+            laneSpecies(current, binIndex) == speciesIndex) {
           return true;
+        }
       }
       return false;
     };
 
-    if (try_insert_bucket(b1))
+    if (tryInsertBucket(bucket1)) {
       return true;
-    if (try_insert_bucket(b2))
+    }
+    if (tryInsertBucket(bucket2)) {
       return true;
+    }
 
-    auto countMatching = [&](uint64_t bucketValue) -> int {
+    auto countMatching = [&](size_t bucket) -> int {
       int matches = 0;
-      for (int i = 0; i < 4; ++i) {
-        uint16_t chunk = (uint16_t)((bucketValue >> (i * 16)) & 0xFFFFu);
-        if ((chunk & 0x0FFFu) == fp) {
+      for (size_t lane = 0; lane < laneCount(); ++lane) {
+        uint32_t current = readLaneValue(bucket, binIndex, lane);
+        if (current != 0u && laneFingerprint(current, binIndex) == fp.full) {
           ++matches;
         }
       }
       return matches;
     };
-    int sameFingerprint = countMatching(readBucket64(b1, binIndex)) +
-                          countMatching(readBucket64(b2, binIndex));
-    if (sameFingerprint >= 8) {
-      bool stored = insertIntoStash(binIndex, b1, fp, index);
-      if (!stored && b2 != b1) {
-        stored = insertIntoStash(binIndex, b2, fp, index);
+
+    int sameFingerprint = countMatching(bucket1) +
+                          (bucket1 != bucket2 ? countMatching(bucket2) : 0);
+    if (sameFingerprint >= static_cast<int>(laneCount() * 2)) {
+      bool stored = insertIntoStash(binIndex, bucket1, fp.full, speciesIndex);
+      if (!stored && bucket2 != bucket1) {
+        stored = insertIntoStash(binIndex, bucket2, fp.full, speciesIndex);
       }
       if (stored) {
         return true;
@@ -788,9 +1034,12 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
       return false;
     }
 
-    bool kicked = kickOut(binIndex, value, tag);
+    size_t startBucket =
+        (mix64(value ^ layoutHeader.routeSalt) & 1ull) ? bucket2 : bucket1;
+    bool kicked = kickOut(binIndex, startBucket, fp, lanePacked);
     if (!kicked) {
       insertFailureTotal.fetch_add(1, std::memory_order_relaxed);
+      insertFailureSaturated.fetch_add(1, std::memory_order_relaxed);
     }
     return kicked;
   }
@@ -822,16 +1071,16 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
     std::vector<uint64_t> lowBitBucketCount(lowBitBins, 0);
     size_t mask = lowBitBins - 1;
     for (size_t bucket = 0; bucket < hashSize; ++bucket) {
-      uint64_t raw = readBucket64(bucket, binIndex);
       uint64_t load = 0;
-      for (int i = 0; i < static_cast<int>(tagNum); ++i) {
-        uint16_t chunk = (uint16_t)((raw >> (i * 16)) & 0xFFFFu);
-        if (chunk != 0u) {
+      for (size_t lane = 0; lane < laneCount(); ++lane) {
+        if (readLaneValue(bucket, binIndex, lane) != 0u) {
           ++load;
         }
       }
-      if (load <= 4) {
+      if (load < stats.occupancy.size()) {
         stats.occupancy[load]++;
+      } else {
+        stats.occupancy.back()++;
       }
       sum += static_cast<double>(load);
       sumSq += static_cast<double>(load) * static_cast<double>(load);
@@ -850,7 +1099,9 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
         variance = 0.0;
       }
       stats.stddevLoad = std::sqrt(variance);
-      stats.percentFull = static_cast<double>(stats.occupancy[4]) /
+      size_t fullIndex =
+          std::min<size_t>(stats.occupancy.size() - 1, laneCount());
+      stats.percentFull = static_cast<double>(stats.occupancy[fullIndex]) /
                           static_cast<double>(stats.bucketCount);
     }
     stats.maxBucketLoad = static_cast<double>(maxLoad);
@@ -882,7 +1133,7 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
         uint64_t totalSpecies = 0;
         size_t maxPerEntry = 0;
         for (const auto &entry : entries) {
-          uint16_t count = popcount16(entry.speciesMask);
+          size_t count = entry.species.size();
           totalSpecies += count;
           if (count > maxPerEntry) {
             maxPerEntry = count;
@@ -901,45 +1152,46 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
    * 随机逐出当前桶一项换入新项，再借助可逆哈希跳往另一桶继续尝试，最多迭代
    * `MaxCuckooCount` 次。
    */
-	inline bool kickOut(size_t binIndex, uint64_t value, uint16_t tag) {
-    uint16_t cur = tag;
-    uint16_t fp = (uint16_t)(cur & 0x0FFFu);
-    size_t b = hashIndex(value);
+  inline bool kickOut(size_t binIndex, size_t startBucket, FingerprintInfo fp,
+                      uint32_t laneValue) {
+    size_t bucket = startBucket;
 
     static thread_local std::mt19937_64 gen{std::random_device{}()};
-    std::uniform_int_distribution<int> dis(0, (int)tagNum - 1);
+    std::uniform_int_distribution<size_t> dis(0, laneCount() - 1);
 
     for (int cnt = 0; cnt < MaxCuckooCount; ++cnt) {
-      uint64_t q = readBucket64(b, binIndex);
-
-      for (int i = 0; i < 4; ++i) {
-        uint16_t chunk = (uint16_t)((q >> (i * 16)) & 0xFFFFu);
-        if (chunk == 0u) {
-          q &= ~((uint64_t)0xFFFFu << (i * 16));
-          q |= ((uint64_t)cur << (i * 16));
-          writeBucket64(b, binIndex, q);
-          return true;
-        }
-        if (chunk == cur)
-          return true;
+      size_t lane = dis(gen);
+      uint32_t victimValue = readLaneValue(bucket, binIndex, lane);
+      writeLaneValue(bucket, binIndex, lane, laneValue);
+      if (victimValue == 0u || victimValue == laneValue) {
+        return true;
       }
 
-      int rp = dis(gen);
-      uint16_t victim = (uint16_t)((q >> (rp * 16)) & 0xFFFFu);
-      q &= ~((uint64_t)0xFFFFu << (rp * 16));
-      q |= ((uint64_t)cur << (rp * 16));
-      writeBucket64(b, binIndex, q);
+      uint32_t victimFingerprint = laneFingerprint(victimValue, binIndex);
+      uint32_t victimRoute = victimFingerprint & routeMask();
+      if (victimRoute == 0u) {
+        uint64_t remixed =
+            mix64((static_cast<uint64_t>(victimFingerprint) ^
+                   layoutHeader.routeSalt) + bucket);
+        victimRoute = static_cast<uint32_t>(remixed & routeMask());
+        if (victimRoute == 0u) {
+          victimRoute = 1u;
+        }
+        victimFingerprint = (victimFingerprint & ~routeMask()) | victimRoute;
+        writeLaneValue(bucket, binIndex, lane, victimValue);
+      }
 
-      cur = victim;
-      fp = (uint16_t)(cur & 0x0FFFu);
-      b = altHash(b, fp);
+      laneValue = victimValue;
+      fp.full = victimFingerprint;
+      fp.route = victimRoute;
+      bucket = altHash(bucket, fp.route);
     }
     return false;
   }
 
   template <typename Emit>
   inline void forEachStashMatch(size_t binIndex, size_t bucket,
-                                uint16_t fingerprint, Emit &&emit) const {
+                                uint32_t fingerprint, Emit &&emit) const {
     if (binIndex >= stash.size()) {
       return;
     }
@@ -951,11 +1203,8 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
       if (entry.bucket != bucket || entry.fingerprint != fingerprint) {
         continue;
       }
-      unsigned int mask = entry.speciesMask;
-      while (mask) {
-        auto species = static_cast<uint16_t>(std::countr_zero(mask));
-        emit(species);
-        mask &= (mask - 1);
+      for (uint32_t species : entry.species) {
+        emit(static_cast<uint16_t>(species));
       }
       return;
     }
@@ -963,111 +1212,40 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
 
   /**
    * @brief Checks for the presence of a given minimizer hash in the Interleaved
-   * Merged Cuckoo Filter and updates the result vector.
+   * Merged Cuckoo Filter and collects matching species indices per bin.
    *
-   * This function uses the SIMDe library to accelerate the process of checking
-   * whether a given minimizer hash exists in the Interleaved Merged Cuckoo
-   * Filter (IMCF). The hash value is reduced to 12 bits, and two hash positions
-   * are checked for matches. If a match is found, the function extracts the
-   * position index from the upper 4 bits and updates the result vector.
+   * The function computes the route fingerprint, probes both candidate buckets
+   * for each relevant bin, and gathers the species indices whose fingerprints
+   * match the query. Results are stored as a vector of species lists, where each
+   * index corresponds to a bin in the filter.
    *
    * @param value The input minimizer hash value to be checked.
-   * @param result A vector of std::bitset<16> where each bitset corresponds to
-   * a bin index. Each bit represents whether a particular position index
-   * (species index) has been found in the filter.
-   *
-   * @details
-   * The function first reduces the input value to a 12-bit fingerprint using
-   * the reduceTo12bit function. It then computes two hash positions (hash1 and
-   * hash2) to identify potential bucket locations in the filter. The function
-   * iterates over each bin index, checks the data in these bucket positions,
-   * and loads them into SIMD vectors for comparison.
-   *
-   * - SIMDe Vectorization:
-   *   The function uses SIMD vectors to perform parallel comparisons:
-   *   - fingerprint_vec: Contains the 12-bit fingerprint replicated across all
-   * vector positions.
-   *   - fingerprint_mask: A mask used to extract the 12-bit fingerprint from
-   * each 16-bit entry.
-   *   - species_shift: The number of bits to shift to extract the species index
-   * from the upper 4 bits of each entry.
-   *
-   * The function updates the result vector by setting bits corresponding to
-   * matching species indices.
-   *
-   * @note Ensure the data object provides a method to retrieve 64-bit data
-   * (e.g., data.get_int). The function requires the SIMDe library for SIMD
-   * operations.
+   * @param result Output container sized to the number of bins; each entry
+   * contains the species indices matched within that bin.
    */
-	inline void bulkContain(uint64_t value, std::vector<std::bitset<16>> &result) {
-    // Step 1: Reduce the minimizer hash to a 12-bit fingerprint
-    uint16_t fingerprint = reduceTo12bit(value);
-    // Step 2: Calculate primary and alternative hash positions
+	inline void bulkContain(uint64_t value, std::vector<std::vector<uint32_t>> &result) {
+    if (binNum == 0) {
+      result.clear();
+      return;
+    }
+    result.assign(binNum, {});
+
+    uint32_t routeFp = computeRouteFingerprint(value);
     size_t hash1 = hashIndex(value);
-    size_t hash2 = altHash(hash1, fingerprint);
+    size_t hash2 = altHash(hash1, routeFp);
 
-    // Step 3: Prepare SIMD vectors for comparison (128-bit lanes for 8 entries)
-    simde__m128i fingerprint_vec = simde_mm_set1_epi16(fingerprint);
-    simde__m128i fingerprint_mask = simde_mm_set1_epi16(0x0FFF);
-    const int species_shift = 12;
+    static thread_local std::vector<uint32_t> candidates;
+    static thread_local std::vector<uint32_t> matches;
+    gatherCandidateBins(hash1, hash2, candidates);
 
-    // Step 4: Iterate over each bin index to check for matches
-    for (size_t binIndex = 0; binIndex < binNum; binIndex++) {
-      uint64_t bucketData1 = readBucket64(hash1, binIndex);
-      uint64_t bucketData2 = readBucket64(hash2, binIndex);
-
-      // Load entries into an array for SIMD processing
-      uint16_t entries[8];
-      entries[0] = (bucketData1 >> 0) & 0xFFFF;
-      entries[1] = (bucketData1 >> 16) & 0xFFFF;
-      entries[2] = (bucketData1 >> 32) & 0xFFFF;
-      entries[3] = (bucketData1 >> 48) & 0xFFFF;
-
-      entries[4] = (bucketData2 >> 0) & 0xFFFF;
-      entries[5] = (bucketData2 >> 16) & 0xFFFF;
-      entries[6] = (bucketData2 >> 32) & 0xFFFF;
-      entries[7] = (bucketData2 >> 48) & 0xFFFF;
-
-      // Load data into SIMD vectors (8 x 16-bit = 128 bits)
-      simde__m128i bucket_vec =
-          simde_mm_loadu_si128(reinterpret_cast<const simde__m128i *>(entries));
-
-      // Step 5: Extract fingerprints and species indices
-      simde__m128i fingerprints =
-          simde_mm_and_si128(bucket_vec, fingerprint_mask);
-      simde__m128i species_indices =
-          simde_mm_srli_epi16(bucket_vec, species_shift);
-
-      // Compare extracted fingerprints with the input fingerprint
-      simde__m128i cmp = simde_mm_cmpeq_epi16(fingerprints, fingerprint_vec);
-
-      // Step 6: Update the result vector with matching species indices
-      // Store comparison results and species indices to arrays for variable
-      // indexing
-      uint16_t cmp_vals[8];
-      uint16_t species_vals[8];
-      simde_mm_storeu_si128(reinterpret_cast<simde__m128i *>(cmp_vals), cmp);
-      simde_mm_storeu_si128(reinterpret_cast<simde__m128i *>(species_vals),
-                            species_indices);
-
-      for (int i = 0; i < 8; ++i) {
-        if (cmp_vals[i] == 0xFFFF) {
-          uint16_t speciesIndex = species_vals[i];
-          result[binIndex].set(speciesIndex);
-        }
-      }
-      forEachStashMatch(binIndex, hash1, fingerprint,
-                        [&](uint16_t speciesIndex) {
-                          result[binIndex].set(speciesIndex);
-                        });
-      if (hash2 != hash1) {
-        forEachStashMatch(binIndex, hash2, fingerprint,
-                          [&](uint16_t speciesIndex) {
-                            result[binIndex].set(speciesIndex);
-                          });
+    for (uint32_t bin : candidates) {
+      collectMatchesForBin(value, routeFp, bin, hash1, hash2, matches);
+      if (!matches.empty()) {
+        result[bin] = matches;
       }
     }
   }
+
 
   /**
    * @brief Performs bulk counting of input minimizers and updates the result
@@ -1086,19 +1264,12 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
    * sub-vector represents the count for a particular tag at that index.
    *
    * @details
-   * The function uses a temporary vector of `std::bitset<16>` to store the
-   * intermediate results of the containment check for each minimizer. For each
-   * input value:
-   * - The `bitset` vector is reset to ensure no residual data from previous
-   * iterations.
-   * - The `bulkContain` function is called to determine the presence of the
-   * minimizer across multiple positions.
-   * - The results in `tmpResult` are analyzed, and the corresponding positions
-   * in the `result` vector are updated:
-   *   - If a bit is set in `tmpResult`, the respective count in `result` is
-   * incremented.
-   *   - If a sub-vector in `result` does not have enough space for a new tag,
-   * it is resized and initialized to zero.
+   * The function uses an intermediate vector produced by `bulkContain` for each
+   * minimizer and updates the per-bin counters accordingly:
+   * - For every species index returned in `tmpResult`, the corresponding entry
+   *   in `result` is incremented.
+   * - If a sub-vector in `result` does not have enough space for a new tag,
+   *   it is resized and initialized to zero.
    *
    * @note
    * Ensure the `result` vector is pre-initialized with sub-vectors
@@ -1113,268 +1284,50 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
 
   template <class EmitFn>
 	inline void bulkContain_events(uint64_t value, EmitFn &&emit) {
-    uint16_t fingerprint = reduceTo12bit(value);
+    if (binNum == 0) {
+      return;
+    }
+
+    uint32_t routeFp = computeRouteFingerprint(value);
     size_t hash1 = hashIndex(value);
-    size_t hash2 = altHash(hash1, fingerprint);
+    size_t hash2 = altHash(hash1, routeFp);
 
-#ifdef IMCF_MIRROR64
-    [[maybe_unused]] SegmentPrefetch segmentPrefetch(*this, hash1, hash2);
-#endif
+    static thread_local std::vector<uint32_t> candidates;
+    static thread_local std::vector<uint32_t> matches;
+    gatherCandidateBins(hash1, hash2, candidates);
 
-    const uint64_t fpBroadcast =
-        static_cast<uint64_t>(fingerprint) * 0x0001000100010001ULL;
-    const uint64_t fpMask = 0x0FFF0FFF0FFF0FFFULL;
-    const uint64_t idxMask = 0x000F000F000F000FULL;
-
-    constexpr size_t BLOCK = 16;
-    constexpr size_t SUB_BATCH = 4;
-
-    auto process64 = [&](uint64_t q, uint32_t binIndex) {
-      uint64_t diff = (q ^ fpBroadcast) & fpMask;
-      uint64_t idxBits = (q >> 12) & idxMask;
-      for (int lane = 0; lane < 4; ++lane) {
-        if (((diff >> (lane * 16)) & 0x0FFFULL) == 0ULL) {
-          uint16_t speciesIndex =
-              static_cast<uint16_t>((idxBits >> (lane * 16)) & 0xF);
-          emit(static_cast<uint32_t>(binIndex), speciesIndex);
-        }
+    for (uint32_t bin : candidates) {
+      collectMatchesForBin(value, routeFp, bin, hash1, hash2, matches);
+      for (uint32_t species : matches) {
+        emit(bin, static_cast<uint16_t>(species));
       }
-    };
-
-    if (activeGroups.empty()) {
-      for (size_t base = 0; base < binNum; base += BLOCK) {
-        size_t end = std::min(binNum, base + BLOCK);
-        for (size_t batchStart = base; batchStart < end;
-             batchStart += SUB_BATCH) {
-          size_t batchEnd = std::min(end, batchStart + SUB_BATCH);
-          uint64_t q1[SUB_BATCH];
-          uint64_t q2[SUB_BATCH];
-          size_t bins[SUB_BATCH];
-          size_t cnt = 0;
-          for (size_t binIndex = batchStart; binIndex < batchEnd; ++binIndex) {
-            q1[cnt] = readBucket64(hash1, binIndex);
-
-            q2[cnt] = readBucket64(hash2, binIndex);
-            bins[cnt] = binIndex;
-            ++cnt;
-          }
-
-          for (size_t i = 0; i < cnt; ++i) {
-            uint32_t bin = static_cast<uint32_t>(bins[i]);
-            if (q1[i] != 0) {
-              process64(q1[i], bin);
-            }
-            if (q2[i] != 0) {
-              process64(q2[i], bin);
-            }
-            forEachStashMatch(bin, hash1, fingerprint,
-                              [&](uint16_t speciesIndex) {
-                                emit(bin, speciesIndex);
-                              });
-            if (hash2 != hash1) {
-              forEachStashMatch(bin, hash2, fingerprint,
-                                [&](uint16_t speciesIndex) {
-                                  emit(bin, speciesIndex);
-                                });
-            }
-          }
-        }
-      }
-      return;
-    }
-
-    const auto &list1 = activeGroups[hash1];
-    const auto &list2 = activeGroups[hash2];
-    if (list1.empty() && list2.empty()) {
-      return;
-    }
-
-    size_t i = 0, j = 0;
-    uint32_t batchBins[SUB_BATCH];
-    bool active1[SUB_BATCH];
-    bool active2[SUB_BATCH];
-    size_t count = 0;
-
-    auto flush = [&]() {
-      for (size_t idx = 0; idx < count; ++idx) {
-        uint32_t bin = batchBins[idx];
-        uint64_t qPrimary = 0;
-        uint64_t qAlt = 0;
-        if (active1[idx]) {
-          qPrimary = readBucket64(hash1, bin);
-        }
-        if (active2[idx]) {
-          qAlt = readBucket64(hash2, bin);
-        }
-        if (qPrimary != 0) {
-          process64(qPrimary, bin);
-        }
-        if (qAlt != 0) {
-          process64(qAlt, bin);
-        }
-        forEachStashMatch(bin, hash1, fingerprint,
-                          [&](uint16_t speciesIndex) {
-                            emit(bin, speciesIndex);
-                          });
-        if (hash2 != hash1) {
-          forEachStashMatch(bin, hash2, fingerprint,
-                            [&](uint16_t speciesIndex) {
-                              emit(bin, speciesIndex);
-                            });
-        }
-      }
-      count = 0;
-    };
-
-    while (i < list1.size() || j < list2.size()) {
-      uint32_t bin;
-      bool in1 = false;
-      bool in2 = false;
-      if (j >= list2.size() || (i < list1.size() && list1[i] <= list2[j])) {
-        bin = list1[i++];
-        in1 = true;
-        if (j < list2.size() && list2[j] == bin) {
-          in2 = true;
-          ++j;
-        }
-      } else {
-        bin = list2[j++];
-        in2 = true;
-      }
-      batchBins[count] = bin;
-      active1[count] = in1;
-      active2[count] = in2;
-      ++count;
-      if (count == SUB_BATCH) {
-        flush();
-      }
-    }
-    if (count) {
-      flush();
     }
   }
+
 
   template <class EmitFn>
 	inline void bulkContain_events_subset(uint64_t value,
                                         const std::vector<uint32_t> &binSubset,
                                         EmitFn &&emit) {
-    uint16_t fingerprint = reduceTo12bit(value);
-    size_t hash1 = hashIndex(value);
-    size_t hash2 = altHash(hash1, fingerprint);
-
-#ifdef IMCF_MIRROR64
-    [[maybe_unused]] SegmentPrefetch segmentPrefetch(*this, hash1, hash2);
-#endif
-
-    const uint64_t fpBroadcast =
-        static_cast<uint64_t>(fingerprint) * 0x0001000100010001ULL;
-    const uint64_t fpMask = 0x0FFF0FFF0FFF0FFFULL;
-    const uint64_t idxMask = 0x000F000F000F000FULL;
-
-    constexpr size_t SUB_BATCH = 4;
-
-    auto process64 = [&](uint64_t q, uint32_t binIndex) {
-      uint64_t diff = (q ^ fpBroadcast) & fpMask;
-      uint64_t idxBits = (q >> 12) & idxMask;
-      for (int lane = 0; lane < 4; ++lane) {
-        if (((diff >> (lane * 16)) & 0x0FFFULL) == 0ULL) {
-          uint16_t speciesIndex =
-              static_cast<uint16_t>((idxBits >> (lane * 16)) & 0xF);
-          emit(static_cast<uint32_t>(binIndex), speciesIndex);
-        }
-      }
-    };
-
-    if (activeGroups.empty()) {
-      for (size_t offset = 0; offset < binSubset.size(); offset += SUB_BATCH) {
-        size_t batchEnd = std::min(binSubset.size(), offset + SUB_BATCH);
-        uint64_t q1[SUB_BATCH];
-        uint64_t q2[SUB_BATCH];
-        uint32_t bins[SUB_BATCH];
-        size_t cnt = 0;
-        for (size_t i = offset; i < batchEnd; ++i) {
-          uint32_t binIndex = binSubset[i];
-          if (binIndex >= binNum)
-            continue;
-          bins[cnt] = binIndex;
-          q1[cnt] = readBucket64(hash1, binIndex);
-          q2[cnt] = readBucket64(hash2, binIndex);
-          ++cnt;
-        }
-        for (size_t i = 0; i < cnt; ++i) {
-          uint32_t bin = bins[i];
-          if (q1[i] != 0)
-            process64(q1[i], bin);
-          forEachStashMatch(bin, hash1, fingerprint,
-                            [&](uint16_t speciesIndex) {
-                              emit(bin, speciesIndex);
-                            });
-          if (q2[i] != 0)
-            process64(q2[i], bin);
-          if (hash2 != hash1) {
-            forEachStashMatch(bin, hash2, fingerprint,
-                              [&](uint16_t speciesIndex) {
-                                emit(bin, speciesIndex);
-                              });
-          }
-        }
-      }
+    if (binNum == 0 || binSubset.empty()) {
       return;
     }
+    uint32_t routeFp = computeRouteFingerprint(value);
+    size_t hash1 = hashIndex(value);
+    size_t hash2 = altHash(hash1, routeFp);
 
-    const auto &list1 = activeGroups[hash1];
-    const auto &list2 = activeGroups[hash2];
-
-    auto contains = [](const std::vector<uint32_t> &vec, uint32_t value) {
-      return !vec.empty() && std::binary_search(vec.begin(), vec.end(), value);
-    };
-
-    for (size_t offset = 0; offset < binSubset.size(); offset += SUB_BATCH) {
-      size_t batchEnd = std::min(binSubset.size(), offset + SUB_BATCH);
-      size_t cnt = 0;
-      uint32_t bins[SUB_BATCH];
-      bool use1[SUB_BATCH];
-      bool use2[SUB_BATCH];
-      for (size_t i = offset; i < batchEnd; ++i) {
-        uint32_t binIndex = binSubset[i];
-        if (binIndex >= binNum)
-          continue;
-        bool in1 = contains(list1, binIndex);
-        bool in2 = contains(list2, binIndex);
-        if (!in1 && !in2)
-          continue;
-        bins[cnt] = binIndex;
-        use1[cnt] = in1;
-        use2[cnt] = in2;
-        ++cnt;
-      }
-      if (cnt == 0)
+    static thread_local std::vector<uint32_t> matches;
+    for (uint32_t bin : binSubset) {
+      if (bin >= binNum) {
         continue;
-      for (size_t i = 0; i < cnt; ++i) {
-        uint32_t binIndex = bins[i];
-        if (use1[i]) {
-          uint64_t q = readBucket64(hash1, binIndex);
-          if (q != 0)
-            process64(q, binIndex);
-          forEachStashMatch(binIndex, hash1, fingerprint,
-                            [&](uint16_t speciesIndex) {
-                              emit(binIndex, speciesIndex);
-                            });
-        }
-        if (use2[i]) {
-          uint64_t q = readBucket64(hash2, binIndex);
-          if (q != 0)
-            process64(q, binIndex);
-          if (hash2 != hash1) {
-            forEachStashMatch(binIndex, hash2, fingerprint,
-                              [&](uint16_t speciesIndex) {
-                                emit(binIndex, speciesIndex);
-                              });
-          }
-        }
+      }
+      collectMatchesForBin(value, routeFp, bin, hash1, hash2, matches);
+      for (uint32_t species : matches) {
+        emit(bin, static_cast<uint16_t>(species));
       }
     }
   }
+
 
   template <std::ranges::range value_range_t, class CounterMatrix>
   inline void bulkCount_sparse(
@@ -1496,8 +1449,14 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
       groupList.reserve(16);
 
       for (uint32_t bin = 0; bin < binNum; ++bin) {
-        uint64_t q = readBucket64(bucket, bin);
-        if (q != 0ULL) {
+        bool occupied = false;
+        for (size_t lane = 0; lane < laneCount(); ++lane) {
+          if (readLaneValue(bucket, bin, lane) != 0u) {
+            occupied = true;
+            break;
+          }
+        }
+        if (occupied) {
           groupList.push_back(static_cast<uint32_t>(bin));
         }
       }

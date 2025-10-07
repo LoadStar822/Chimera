@@ -1,7 +1,6 @@
 #include <build/filter/interleaved-merged-cuckoo-filter.h>
 
 #include <algorithm>
-#include <bitset>
 #include <cereal/archives/binary.hpp>
 #include <cereal/archives/portable_binary.hpp>
 #include <chrono>
@@ -175,22 +174,61 @@ make_filter(ChimeraBuild::IMCFConfig &config, std::size_t groupHashes) {
   return make_filter_with_hashes(config, {groupHashes});
 }
 
-std::unordered_set<uint16_t>
-collect_fingerprints(chimera::imcf::InterleavedMergedCuckooFilter &filter,
-                     const std::vector<uint64_t> &values) {
-  std::unordered_set<uint16_t> fps;
+uint32_t fingerprint_for_bin(
+    const chimera::imcf::InterleavedMergedCuckooFilter &filter, size_t bin,
+    uint64_t value) {
+  const auto &layout = filter.layout();
+  if (layout.sBitsPerBin.empty()) {
+    return 0;
+  }
+  uint8_t sBits = bin < layout.sBitsPerBin.size() ? layout.sBitsPerBin[bin] : 0;
+  uint8_t fBits = layout.fingerprintBitsPerBin.empty()
+                      ? static_cast<uint8_t>(layout.laneBits > sBits
+                                                ? layout.laneBits - sBits
+                                                : 0)
+                      : layout.fingerprintBitsPerBin[bin];
+
+  uint64_t mixed = chimera::imcf::mix64(value ^ layout.fpSalt);
+  uint32_t mask = fBits >= 32 ? 0xFFFFFFFFu : ((1u << fBits) - 1u);
+  uint32_t full = mask == 0u ? static_cast<uint32_t>(mixed)
+                             : static_cast<uint32_t>(mixed & mask);
+  if (full == 0u) {
+    full = 1u;
+  }
+  uint8_t routeBits = layout.routeFingerprintBits;
+  uint32_t routeMask = routeBits >= 32 ? 0xFFFFFFFFu : ((1u << routeBits) - 1u);
+  if (routeMask != 0u) {
+    uint32_t route = full & routeMask;
+    if (route == 0u) {
+      uint64_t remixed =
+          chimera::imcf::mix64((static_cast<uint64_t>(full) ^ layout.routeSalt) +
+                               value);
+      route = static_cast<uint32_t>(remixed & routeMask);
+      if (route == 0u) {
+        route = 1u;
+      }
+    }
+    full = (full & ~routeMask) | route;
+  }
+  return full;
+}
+
+std::unordered_set<uint32_t> collect_fingerprints(
+    const chimera::imcf::InterleavedMergedCuckooFilter &filter,
+    const std::vector<uint64_t> &values) {
+  std::unordered_set<uint32_t> fps;
   for (auto value : values) {
-    fps.insert(filter.reduceTo12bit(value));
+    fps.insert(fingerprint_for_bin(filter, 0, value));
   }
   return fps;
 }
 
 uint64_t next_absent_with_unique_fingerprint(
-    chimera::imcf::InterleavedMergedCuckooFilter &filter,
-    const std::unordered_set<uint16_t> &used, uint64_t seed) {
+    const chimera::imcf::InterleavedMergedCuckooFilter &filter,
+    const std::unordered_set<uint32_t> &used, uint64_t seed) {
   uint64_t candidate = seed;
   for (int attempt = 0; attempt < 4096; ++attempt) {
-    if (!used.contains(filter.reduceTo12bit(candidate))) {
+    if (!used.contains(fingerprint_for_bin(filter, 0, candidate))) {
       return candidate;
     }
     candidate += kGoldenIncrement;
@@ -198,8 +236,8 @@ uint64_t next_absent_with_unique_fingerprint(
   return candidate;
 }
 
-bool bitset_vectors_equal(const std::vector<std::bitset<16>> &lhs,
-                          const std::vector<std::bitset<16>> &rhs) {
+bool matrix_equal(const std::vector<std::vector<uint32_t>> &lhs,
+                    const std::vector<std::vector<uint32_t>> &rhs) {
   if (lhs.size() != rhs.size()) {
     return false;
   }
@@ -408,24 +446,23 @@ static void test_partition_edge_cases() {
 static void test_insert_and_bulk_contain_basic() {
   ChimeraBuild::IMCFConfig config{};
   auto filter = make_filter(config, 64);
-  std::vector<std::bitset<16>> result(config.binNum);
+  std::vector<std::vector<uint32_t>> result;
 
   bool inserted = filter.insertTag(0, 424242ULL, 3);
   expect_true(inserted, "insertTag 应成功插入新条目");
 
   filter.bulkContain(424242ULL, result);
-  expect_true(result[0].test(3), "bulkContain 应命中刚插入的标签");
+  expect_true(std::find(result[0].begin(), result[0].end(), 3) != result[0].end(),
+              "bulkContain 应命中刚插入的标签");
 
   std::vector<uint64_t> insertedValues{424242ULL};
   auto fps = collect_fingerprints(filter, insertedValues);
   uint64_t absent = next_absent_with_unique_fingerprint(filter, fps, 111111ULL);
 
-  for (auto &bitset : result) {
-    bitset.reset();
-  }
+  result.clear();
   filter.bulkContain(absent, result);
-  for (const auto &bitset : result) {
-    expect_true(!bitset.any(), "bulkContain 不应为缺失标签置位");
+  for (const auto &vec : result) {
+    expect_true(vec.empty(), "bulkContain 不应为缺失标签置位");
   }
 }
 
@@ -521,29 +558,37 @@ static void test_serialize_roundtrip() {
     queries.push_back(seed);
   }
 
-  std::vector<std::vector<std::bitset<16>>> baseline;
+  std::vector<std::vector<std::vector<uint32_t>>> baseline;
   for (auto query : queries) {
-    std::vector<std::bitset<16>> result(config.binNum);
+    std::vector<std::vector<uint32_t>> result;
     filter.bulkContain(query, result);
     baseline.push_back(result);
   }
 
   std::stringstream buffer(std::ios::in | std::ios::out | std::ios::binary);
   {
+    uint32_t magic = chimera::imcf::LayoutHeaderV2::Magic;
+    buffer.write(reinterpret_cast<const char *>(&magic), sizeof(magic));
     cereal::BinaryOutputArchive archive(buffer);
     archive(filter);
   }
 
   chimera::imcf::InterleavedMergedCuckooFilter restored;
   {
+    buffer.clear();
+    buffer.seekg(0);
+    uint32_t magic = 0;
+    buffer.read(reinterpret_cast<char *>(&magic), sizeof(magic));
+    expect_true(magic == chimera::imcf::LayoutHeaderV2::Magic,
+                "IMCF 反序列化时应读取到正确的布局 magic");
     cereal::BinaryInputArchive archive(buffer);
     archive(restored);
   }
 
   for (size_t i = 0; i < queries.size(); ++i) {
-    std::vector<std::bitset<16>> result(config.binNum);
+    std::vector<std::vector<uint32_t>> result;
     restored.bulkContain(queries[i], result);
-    expect_true(bitset_vectors_equal(result, baseline[i]),
+    expect_true(matrix_equal(result, baseline[i]),
                 "序列化往返后的 bulkContain 结果应与基线一致");
   }
 
@@ -553,11 +598,11 @@ static void test_serialize_roundtrip() {
   expect_true(restored.insertTag(0, newValue, 5),
               "反序列化后的过滤器应接受新值插入");
 
-  std::vector<std::bitset<16>> resultOriginal(config.binNum);
-  std::vector<std::bitset<16>> resultRestored(config.binNum);
+  std::vector<std::vector<uint32_t>> resultOriginal;
+  std::vector<std::vector<uint32_t>> resultRestored;
   filter.bulkContain(newValue, resultOriginal);
   restored.bulkContain(newValue, resultRestored);
-  expect_true(bitset_vectors_equal(resultOriginal, resultRestored),
+  expect_true(matrix_equal(resultOriginal, resultRestored),
               "新值插入后原始与恢复过滤器的结果应保持一致");
 }
 
@@ -572,10 +617,10 @@ static void test_insert_alt_bucket_and_find() {
     if (filter.hashIndex(candidate) != baseHash) {
       continue;
     }
-    uint16_t fp = filter.reduceTo12bit(candidate);
+    uint32_t fp = fingerprint_for_bin(filter, 0, candidate);
     bool duplicate = false;
     for (auto existing : collidingValues) {
-      if (filter.reduceTo12bit(existing) == fp) {
+      if (fingerprint_for_bin(filter, 0, existing) == fp) {
         duplicate = true;
         break;
       }
@@ -594,9 +639,11 @@ static void test_insert_alt_bucket_and_find() {
   }
 
   for (size_t i = 0; i < collidingValues.size(); ++i) {
-    std::vector<std::bitset<16>> result(config.binNum);
+    std::vector<std::vector<uint32_t>> result;
     filter.bulkContain(collidingValues[i], result);
-    expect_true(result[0].test(i % 16), "bulkContain 应能定位这些碰撞值");
+    expect_true(std::find(result[0].begin(), result[0].end(), i % 16) !=
+                result[0].end(),
+                "bulkContain 应能定位这些碰撞值");
   }
 }
 
@@ -605,7 +652,7 @@ static void test_insert_failure_throw() {
   config.loadFactor = 0.95;
   auto filter = make_filter(config, 4);
 
-  std::unordered_set<uint16_t> fps;
+  std::unordered_set<uint32_t> fps;
   uint64_t seed = 10ULL;
   size_t capacity = config.binNum * config.binSize * 4;
   for (size_t i = 0; i < capacity && seed < 10'000ULL; ++i) {
@@ -613,7 +660,7 @@ static void test_insert_failure_throw() {
     size_t index = i % 16;
     expect_true(filter.insertTag(bin, seed, index),
                 "预填充阶段的插入操作应成功");
-    fps.insert(filter.reduceTo12bit(seed));
+    fps.insert(fingerprint_for_bin(filter, bin, seed));
     seed += 1;
   }
 
@@ -648,10 +695,10 @@ static void test_bulk_contain_negative() {
   for (int attempt = 0; attempt < 32; ++attempt) {
     uint64_t absent = next_absent_with_unique_fingerprint(
         filter, fps, seed + attempt * kGoldenIncrement);
-    std::vector<std::bitset<16>> result(config.binNum);
+    std::vector<std::vector<uint32_t>> result;
     filter.bulkContain(absent, result);
-    for (const auto &bitset : result) {
-      expect_true(!bitset.any(), "查询缺失值时 bulkContain 结果应保持为空");
+    for (const auto &vec : result) {
+      expect_true(vec.empty(), "查询缺失值时 bulkContain 结果应保持为空");
     }
   }
 }
@@ -711,12 +758,9 @@ static void benchmark_imcf_large_scale() {
 
   // Contain benchmark
   {
-    std::vector<std::bitset<16>> result(config.binNum);
+    std::vector<std::vector<uint32_t>> result;
     auto start = std::chrono::steady_clock::now();
     for (size_t i = 0; i < queryValues.size(); ++i) {
-      for (auto &bits : result) {
-        bits.reset();
-      }
       filter.bulkContain(queryValues[i], result);
     }
     auto end = std::chrono::steady_clock::now();
@@ -766,13 +810,13 @@ static void benchmark_imcf_large_scale() {
   std::cout << std::string(78, '-') << '\n';
 
   // False positive sampling
-  std::unordered_set<uint16_t> usedFingerprints;
+  std::unordered_set<uint32_t> usedFingerprints;
   usedFingerprints.reserve(values.size() * 2);
   for (auto value : values) {
-    usedFingerprints.insert(filter.reduceTo12bit(value));
+    usedFingerprints.insert(fingerprint_for_bin(filter, 0, value));
   }
 
-  std::vector<std::bitset<16>> fprResult(config.binNum);
+  std::vector<std::vector<uint32_t>> fprResult;
   size_t binsWithHit = 0;
   size_t bitHitCount = 0;
   uint64_t seed = 123456789ULL;
@@ -780,15 +824,12 @@ static void benchmark_imcf_large_scale() {
   for (size_t sample = 0; sample < fprSamples; ++sample) {
     seed = next_absent_with_unique_fingerprint(filter, usedFingerprints,
                                                seed + kGoldenIncrement);
-    usedFingerprints.insert(filter.reduceTo12bit(seed));
-    for (auto &bits : fprResult) {
-      bits.reset();
-    }
+    usedFingerprints.insert(fingerprint_for_bin(filter, 0, seed));
     filter.bulkContain(seed, fprResult);
-    for (const auto &bits : fprResult) {
-      if (bits.any()) {
+    for (const auto &vec : fprResult) {
+      if (!vec.empty()) {
         ++binsWithHit;
-        bitHitCount += bits.count();
+        bitHitCount += vec.size();
       }
     }
   }

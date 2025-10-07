@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cmath>
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -640,11 +641,29 @@ loadFilter(const std::string &input_file,
     throw std::runtime_error("无法打开 IMCF 主档案: " + archivePath.string());
   }
 
+  uint32_t layoutMagic = 0;
+  is.read(reinterpret_cast<char *>(&layoutMagic), sizeof(layoutMagic));
+  if (!is.good()) {
+    throw std::runtime_error("无法读取 IMCF 布局头部，请重新构建数据库。");
+  }
+  if (layoutMagic != chimera::imcf::LayoutHeaderV2::Magic) {
+    throw std::runtime_error(
+        "IMCF 数据库缺少 v2 布局头部，无法加载，请使用当前 Chimera 重新构建数据库。");
+  }
+
   cereal::BinaryInputArchive archive(is);
   archive(imcf);
   archive(indexToTaxid);
   archive(imcfConfig);
   is.close();
+
+  const auto &layout = imcf.layout();
+  if (layout.layoutMajor != chimera::imcf::LayoutHeaderV2::CurrentMajor) {
+    throw std::runtime_error(
+        "IMCF 布局版本不兼容：layout_major=" +
+        std::to_string(layout.layoutMajor) +
+        "，请重新执行 Chimera build。");
+  }
 
   if (imcfConfig.hashVersion != ChimeraBuild::IMCFConfig::CurrentHashVersion) {
     throw std::runtime_error(

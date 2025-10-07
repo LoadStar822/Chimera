@@ -31,6 +31,7 @@
 #include <cereal/types/vector.hpp>
 #include <mutex>
 #include <span>
+#include <cstdint>
 
 #include <utils/Syncmer.hpp>
 
@@ -798,6 +799,12 @@ namespace ChimeraBuild {
 	}
 
 	logStep("Writing filter archive (.imcf)", [&]() {
+		uint32_t magic = chimera::imcf::LayoutHeaderV2::Magic;
+		if (!os.write(reinterpret_cast<const char *>(&magic), sizeof(magic))) {
+			os.close();
+			std::cerr << "写入 IMCF 布局头失败" << std::endl;
+			return false;
+		}
 		cereal::BinaryOutputArchive archive(os);
 		archive(imcf);
 		archive(indexToTaxid);
