@@ -59,3 +59,4 @@ genome_output/
 .cache/
 .clangd
 CMakePresets.json
+.clang-format
