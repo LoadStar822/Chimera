@@ -4,6 +4,7 @@
 #include <ranges>
 #include <span>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include <seqan3/alphabet/concept.hpp>
@@ -24,13 +25,14 @@ struct SyncmerOptions
     bool canonical{true};
 };
 
-template <std::ranges::forward_range rng_t>
-inline std::vector<uint64_t> compute_hashes(rng_t const & sequence,
-                                            size_t const smer_size,
-                                            size_t const kmer_size,
-                                            std::span<const size_t> positions,
-                                            uint64_t const seed = 0x8F3F73B5CF1C9ADEULL,
-                                            bool const canonical = true)
+template <std::ranges::forward_range rng_t, typename callback_t>
+inline void stream_hashes(rng_t const & sequence,
+                          size_t const smer_size,
+                          size_t const kmer_size,
+                          std::span<const size_t> positions,
+                          uint64_t const seed,
+                          bool const canonical,
+                          callback_t && callback)
 {
     using alphabet_t = std::remove_cvref_t<std::ranges::range_value_t<rng_t>>;
     static_assert(seqan3::semialphabet<alphabet_t>, "Sequence must contain SeqAn3 nucleotides");
@@ -59,10 +61,8 @@ inline std::vector<uint64_t> compute_hashes(rng_t const & sequence,
                                                       kmer_size,
                                                       converted_positions,
                                                       seqan3::seed{seed});
-        std::vector<uint64_t> values;
         for (auto const value : view)
-            values.push_back(static_cast<uint64_t>(value));
-        return values;
+            std::forward<callback_t>(callback)(static_cast<uint64_t>(value));
     }
     else
     {
@@ -70,11 +70,31 @@ inline std::vector<uint64_t> compute_hashes(rng_t const & sequence,
                                                                  smer_size,
                                                                  kmer_size,
                                                                  converted_positions);
-        std::vector<uint64_t> values;
         for (auto const value : view)
-            values.push_back(static_cast<uint64_t>(value));
-        return values;
+            std::forward<callback_t>(callback)(static_cast<uint64_t>(value));
     }
+}
+
+template <std::ranges::forward_range rng_t>
+inline std::vector<uint64_t> compute_hashes(rng_t const & sequence,
+                                            size_t const smer_size,
+                                            size_t const kmer_size,
+                                            std::span<const size_t> positions,
+                                            uint64_t const seed = 0x8F3F73B5CF1C9ADEULL,
+                                            bool const canonical = true)
+{
+    std::vector<uint64_t> values;
+    stream_hashes(sequence,
+                  smer_size,
+                  kmer_size,
+                  positions,
+                  seed,
+                  canonical,
+                  [&](uint64_t hash)
+                  {
+                      values.push_back(hash);
+                  });
+    return values;
 }
 
 inline std::vector<uint64_t> compute_hashes(seqan3::dna5_vector const & sequence,

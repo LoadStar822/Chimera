@@ -438,6 +438,12 @@ class InterleavedMergedCuckooFilter {
     uint8_t fBits = fingerprintBits(bin);
     uint32_t packed = (speciesIdx & spMask) << fBits;
     packed |= (fingerprint & fpMask);
+    if (layoutHeader.laneBits < 32) {
+      uint32_t laneMask = (layoutHeader.laneBits == 0)
+                              ? 0u
+                              : ((1u << layoutHeader.laneBits) - 1u);
+      packed &= laneMask;
+    }
     return packed;
   }
 
@@ -682,8 +688,9 @@ public:
 
     layoutHeader = LayoutHeaderV2{};
     layoutHeader.bucketEntries = static_cast<uint8_t>(tagNum);
-    layoutHeader.laneBits = 32;
-    layoutHeader.routeFingerprintBits = layoutHeader.laneBits;
+    layoutHeader.laneBits = 16;
+    layoutHeader.routeFingerprintBits =
+        static_cast<uint8_t>(std::min<uint8_t>(layoutHeader.laneBits, 12));
     layoutHeader.fpHashKind = 1;
     layoutHeader.stashMode = 0;
     layoutHeader.fpSalt = config.fpSalt;

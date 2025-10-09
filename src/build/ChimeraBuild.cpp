@@ -485,6 +485,7 @@ namespace ChimeraBuild {
 	std::error_code ec;
 	fs::remove_all(scratchDir, ec);
 	fs::create_directories(scratchDir);
+	const auto sampling_start = std::chrono::steady_clock::now();
 
 	auto make_temp_path = [&](const std::string& taxid, size_t ordinal) {
 		std::string safe = taxid;
@@ -580,6 +581,9 @@ namespace ChimeraBuild {
 		FileInfo localFileInfo{};
 		BottomKSampler sampler(max_hashes);
 		robin_hood::unordered_flat_set<uint64_t> perReadSeen;
+		if (max_hashes > 0) {
+			perReadSeen.reserve(max_hashes);
+		}
 		SpaceSaving localHeavy(enable_toxic_filter ? heavy_capacity : 0);
 
 		for (const auto& filename : files) {
@@ -596,19 +600,24 @@ namespace ChimeraBuild {
 					localFileInfo.sequenceNum++;
 					localFileInfo.bpLength += seq.size();
 
-					perReadSeen.clear();
-					auto hashes = chimera::syncmer::compute_hashes(
-					    seq, config.smer_size, config.kmer_size, syncmer_pos_span, syncmer_seed, true);
-					for (uint64_t hash : hashes) {
-						if (perReadSeen.insert(hash).second) {
-							sampler.insert(hash);
-						}
-						if (enable_toxic_filter) {
-							localHeavy.add(hash);
-						}
-					}
+			perReadSeen.clear();
+			chimera::syncmer::stream_hashes(
+			    seq,
+			    config.smer_size,
+			    config.kmer_size,
+			    syncmer_pos_span,
+			    syncmer_seed,
+			    true,
+			    [&](uint64_t hash) {
+				if (perReadSeen.insert(hash).second) {
+					sampler.insert(hash);
 				}
-			} catch (const std::exception& ex) {
+				if (enable_toxic_filter) {
+					localHeavy.add(hash);
+				}
+			    });
+			}
+		} catch (const std::exception& ex) {
 #pragma omp critical(syncmer_log)
 				std::cerr << "读取序列文件失败 " << filename << ": " << ex.what() << std::endl;
 				std::lock_guard<std::mutex> lock(fileInfo_mutex);
@@ -641,6 +650,7 @@ namespace ChimeraBuild {
 			fileInfo.bpLength += localFileInfo.bpLength;
 		}
 	}
+	const auto sampling_end = std::chrono::steady_clock::now();
 
 	robin_hood::unordered_flat_set<uint64_t> toxic_hashes;
 	uint64_t min_count_threshold = 0;
@@ -745,6 +755,7 @@ namespace ChimeraBuild {
 			}
 		}
 	}
+	const auto toxic_select_end = std::chrono::steady_clock::now();
 
 	const bool has_toxic_hashes = !toxic_hashes.empty();
 	size_t safety_base = 0;
@@ -849,6 +860,23 @@ sampledHashFiles.reserve(index_to_taxid.size());
 			std::lock_guard<std::mutex> lock(raw_mutex);
 			sampledHashFiles.emplace(taxid, std::move(tmpFile));
 		}
+	}
+	const auto apply_end = std::chrono::steady_clock::now();
+
+	if (config.verbose)
+	{
+		const auto sampling_ms = std::chrono::duration_cast<std::chrono::milliseconds>(sampling_end - sampling_start).count();
+		const auto toxic_select_ms = std::chrono::duration_cast<std::chrono::milliseconds>(toxic_select_end - sampling_end).count();
+		const auto apply_ms = std::chrono::duration_cast<std::chrono::milliseconds>(apply_end - toxic_select_end).count();
+		const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(apply_end - sampling_start).count();
+		std::cout << "[syncmer] 底层采样耗时: ";
+		print_build_time(sampling_ms);
+		std::cout << "[syncmer] 毒性候选筛选耗时: ";
+		print_build_time(toxic_select_ms);
+		std::cout << "[syncmer] 结果写入/裁剪耗时: ";
+		print_build_time(apply_ms);
+		std::cout << "[syncmer] syncmer_count 总耗时: ";
+		print_build_time(total_ms);
 	}
 
 	if (config.verbose && has_toxic_hashes)
