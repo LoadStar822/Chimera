@@ -108,11 +108,6 @@ target_link_libraries(Chimera
     Threads::Threads
 )
 
-target_compile_definitions(Chimera
-    PRIVATE
-    IMCF_MIRROR64
-)
-
 # 设置包含目录
 target_include_directories(Chimera
     PUBLIC
@@ -148,11 +143,6 @@ target_link_libraries(imcf_filter_tests
     ZLIB::ZLIB
     seqan3::seqan3
     Threads::Threads
-)
-
-target_compile_definitions(imcf_filter_tests
-    PRIVATE
-    IMCF_MIRROR64
 )
 
 if (OpenMP_CXX_FOUND)
@@ -191,11 +181,6 @@ target_link_libraries(syncmer_tests
     ZLIB::ZLIB
     seqan3::seqan3
     Threads::Threads
-)
-
-target_compile_definitions(syncmer_tests
-    PRIVATE
-    IMCF_MIRROR64
 )
 
 if (OpenMP_CXX_FOUND)

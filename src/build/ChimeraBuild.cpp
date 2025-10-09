@@ -22,6 +22,7 @@
 #include <future>
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <sstream>
 #include <iomanip>
@@ -36,6 +37,8 @@
 #include <cstdint>
 
 #include <utils/Syncmer.hpp>
+
+namespace fs = std::filesystem;
 
 namespace ChimeraBuild {
 	static inline uint64_t mix64(uint64_t value) {
@@ -448,14 +451,17 @@ namespace ChimeraBuild {
 	 * @param config The build configuration.
 	 * @param inputFiles The map of input files.
 	 * @param hashCount The map to store the hash count.
+	 * @param sampledHashFiles 临时文件表，用于存放各 taxid 的采样 hash。
 	 * @param fileInfo The struct to store file information.
+	 * @param scratchDir 输出参数，指向创建的临时目录。
 	 */
 	void syncmer_count(
-	BuildConfig& config,
-	robin_hood::unordered_flat_map<std::string, std::vector<std::string>>& inputFiles,
-	robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
-	robin_hood::unordered_flat_map<std::string, std::vector<uint64_t>>& sampledHashes,
-	FileInfo& fileInfo)
+		BuildConfig& config,
+		robin_hood::unordered_flat_map<std::string, std::vector<std::string>>& inputFiles,
+		robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
+		robin_hood::unordered_flat_map<std::string, std::filesystem::path>& sampledHashFiles,
+		FileInfo& fileInfo,
+		std::filesystem::path& scratchDir)
 {
 	if (config.max_hashes_per_taxid == 0)
 	{
@@ -466,7 +472,32 @@ namespace ChimeraBuild {
 		std::cerr << "Warning: adaptive cutoff 已被 bottom-k 采样忽略" << std::endl;
 	}
 
-	sampledHashes.clear();
+	sampledHashFiles.clear();
+
+	fs::path outputPath{ config.output_file };
+	fs::path baseDir = outputPath.has_parent_path() ? outputPath.parent_path() : fs::current_path();
+	std::string stem = outputPath.has_filename() ? outputPath.filename().string() : "ChimeraDB";
+	if (stem.empty()) {
+		stem = "ChimeraDB";
+	}
+	std::string scratchName = stem + ".syncmer.tmp";
+	scratchDir = baseDir / scratchName;
+	std::error_code ec;
+	fs::remove_all(scratchDir, ec);
+	fs::create_directories(scratchDir);
+
+	auto make_temp_path = [&](const std::string& taxid, size_t ordinal) {
+		std::string safe = taxid;
+		for (char& ch : safe) {
+			unsigned char uch = static_cast<unsigned char>(ch);
+			if (!std::isalnum(uch) && ch != '-' && ch != '_') {
+				ch = '_';
+			}
+		}
+		std::ostringstream oss;
+		oss << ordinal << '_' << safe << ".syncbin";
+		return scratchDir / oss.str();
+	};
 
 	const std::array<size_t, 1> syncmer_positions{ static_cast<size_t>(config.syncmer_position) };
 	const std::span<const size_t> syncmer_pos_span(syncmer_positions);
@@ -510,83 +541,97 @@ namespace ChimeraBuild {
 	}
 	const bool enable_toxic_filter = heavy_capacity > 0;
 
-	std::vector<std::pair<std::string, std::string>> taxid_file_pairs;
-	robin_hood::unordered_flat_map<std::string, size_t> taxid_to_index;
 	std::vector<std::string> index_to_taxid;
-	size_t index = 0;
-	for (auto& [taxid, files] : inputFiles)
-	{
-		for (auto& file : files)
-		{
-			taxid_file_pairs.emplace_back(taxid, file);
-		}
-		taxid_to_index[taxid] = index++;
+	index_to_taxid.reserve(inputFiles.size());
+	for (auto& [taxid, _] : inputFiles) {
 		index_to_taxid.push_back(taxid);
-	}
-	std::vector<std::mutex> taxidMutexes(index);
-	std::vector<BottomKSampler> taxidSamplers(index);
-	for (auto& sampler : taxidSamplers)
-	{
-		sampler.configure(max_hashes);
 	}
 
 	std::mutex fileInfo_mutex;
 	std::mutex heavy_mutex;
 	SpaceSaving globalHeavy(heavy_capacity);
+	std::mutex hash_mutex;
+	std::mutex raw_mutex;
+	robin_hood::unordered_flat_map<std::string, fs::path> rawSampleFiles;
 
-	#pragma omp parallel for schedule(dynamic)
-	for (size_t idx = 0; idx < taxid_file_pairs.size(); ++idx)
-	{
-		const auto& [taxid, filename] = taxid_file_pairs[idx];
-		size_t taxid_index = taxid_to_index[taxid];
+	auto write_vector_to_file = [](const fs::path& path, const std::vector<uint64_t>& data) {
+		std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
+		if (!ofs.is_open()) {
+			throw std::runtime_error("无法写入临时 syncmer 文件: " + path.string());
+		}
+		if (!data.empty()) {
+			ofs.write(reinterpret_cast<const char*>(data.data()),
+			          static_cast<std::streamsize>(data.size() * sizeof(uint64_t)));
+		}
+		if (!ofs) {
+			throw std::runtime_error("写入临时 syncmer 文件失败: " + path.string());
+		}
+	};
+
+#pragma omp parallel for schedule(dynamic)
+	for (size_t taxIdx = 0; taxIdx < index_to_taxid.size(); ++taxIdx) {
+		const auto& taxid = index_to_taxid[taxIdx];
+		auto filesIt = inputFiles.find(taxid);
+		if (filesIt == inputFiles.end()) {
+			continue;
+		}
+		const auto& files = filesIt->second;
 
 		FileInfo localFileInfo{};
-		BottomKSampler localSampler(max_hashes);
+		BottomKSampler sampler(max_hashes);
 		robin_hood::unordered_flat_set<uint64_t> perReadSeen;
-		SpaceSaving localHeavy(heavy_capacity);
+		SpaceSaving localHeavy(enable_toxic_filter ? heavy_capacity : 0);
 
-		try
-		{
-			seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ filename };
-			for (auto& record : fin)
-			{
-				auto& seq = record.sequence();
-				if (seq.size() < config.min_length)
-				{
-					localFileInfo.skippedSeqNum++;
-					continue;
-				}
-				localFileInfo.sequenceNum++;
-				localFileInfo.bpLength += seq.size();
-
-				perReadSeen.clear();
-				auto hashes = chimera::syncmer::compute_hashes(
-				    seq, config.smer_size, config.kmer_size, syncmer_pos_span, syncmer_seed, true);
-				for (uint64_t hash : hashes)
-				{
-					const bool first_in_read = perReadSeen.insert(hash).second;
-					if (first_in_read)
-					{
-						localSampler.insert(hash);
+		for (const auto& filename : files) {
+			try {
+				seqan3::sequence_file_input<raptor::dna4_traits,
+				                            seqan3::fields<seqan3::field::id, seqan3::field::seq>>
+				    fin{filename};
+				for (auto& record : fin) {
+					auto& seq = record.sequence();
+					if (seq.size() < config.min_length) {
+						localFileInfo.skippedSeqNum++;
+						continue;
 					}
-					if (enable_toxic_filter)
-					{
-						localHeavy.add(hash);
+					localFileInfo.sequenceNum++;
+					localFileInfo.bpLength += seq.size();
+
+					perReadSeen.clear();
+					auto hashes = chimera::syncmer::compute_hashes(
+					    seq, config.smer_size, config.kmer_size, syncmer_pos_span, syncmer_seed, true);
+					for (uint64_t hash : hashes) {
+						if (perReadSeen.insert(hash).second) {
+							sampler.insert(hash);
+						}
+						if (enable_toxic_filter) {
+							localHeavy.add(hash);
+						}
 					}
 				}
+			} catch (const std::exception& ex) {
+#pragma omp critical(syncmer_log)
+				std::cerr << "读取序列文件失败 " << filename << ": " << ex.what() << std::endl;
+				std::lock_guard<std::mutex> lock(fileInfo_mutex);
+				fileInfo.skippedNum++;
 			}
 		}
-		catch (const std::exception& ex)
-		{
-		#pragma omp critical(syncmer_log)
-			std::cerr << "读取序列文件失败 " << filename << ": " << ex.what() << std::endl;
-			std::lock_guard<std::mutex> lock(fileInfo_mutex);
-			fileInfo.skippedNum++;
-		}
+
+		auto values = sampler.release_sorted();
+		fs::path rawPath = make_temp_path(taxid, taxIdx);
+		write_vector_to_file(rawPath, values);
 
 		{
-			std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index]);
-			taxidSamplers[taxid_index].merge(localSampler);
+			std::lock_guard<std::mutex> lock(hash_mutex);
+			hashCount[taxid] = static_cast<uint64_t>(values.size());
+		}
+		{
+			std::lock_guard<std::mutex> lock(raw_mutex);
+			rawSampleFiles.emplace(taxid, std::move(rawPath));
+		}
+
+		if (enable_toxic_filter && localHeavy.total_weight() > 0) {
+			std::lock_guard<std::mutex> heavy_lock(heavy_mutex);
+			globalHeavy.merge(localHeavy);
 		}
 
 		{
@@ -594,12 +639,6 @@ namespace ChimeraBuild {
 			fileInfo.skippedSeqNum += localFileInfo.skippedSeqNum;
 			fileInfo.sequenceNum += localFileInfo.sequenceNum;
 			fileInfo.bpLength += localFileInfo.bpLength;
-		}
-
-		if (enable_toxic_filter && localHeavy.total_weight() > 0)
-		{
-			std::lock_guard<std::mutex> heavy_lock(heavy_mutex);
-			globalHeavy.merge(localHeavy);
 		}
 	}
 
@@ -724,61 +763,91 @@ namespace ChimeraBuild {
 		}
 	}
 
-	sampledHashes.reserve(index_to_taxid.size());
+sampledHashFiles.reserve(index_to_taxid.size());
 	size_t taxa_filtered_count = 0;
 	size_t taxa_safety_hits = 0;
 	uint64_t hashes_removed_total = 0;
-	for (size_t i = 0; i < index_to_taxid.size(); ++i)
-	{
-		auto values = taxidSamplers[i].release_sorted();
+	auto read_vector_from_file = [](const fs::path& path) -> std::vector<uint64_t> {
+		std::ifstream ifs(path, std::ios::binary);
+		if (!ifs.is_open()) {
+			throw std::runtime_error("无法读取临时 syncmer 文件: " + path.string());
+		}
+		ifs.seekg(0, std::ios::end);
+		std::streamsize bytes = ifs.tellg();
+		ifs.seekg(0, std::ios::beg);
+		if (bytes <= 0) {
+			return {};
+		}
+		size_t count = static_cast<size_t>(bytes) / sizeof(uint64_t);
+		std::vector<uint64_t> data(count);
+		ifs.read(reinterpret_cast<char*>(data.data()),
+		         static_cast<std::streamsize>(count * sizeof(uint64_t)));
+		if (!ifs) {
+			throw std::runtime_error("读取临时 syncmer 文件失败: " + path.string());
+		}
+		return data;
+	};
+
+	for (size_t i = 0; i < index_to_taxid.size(); ++i) {
+		const std::string& taxid = index_to_taxid[i];
+		auto rawIt = rawSampleFiles.find(taxid);
+		if (rawIt == rawSampleFiles.end()) {
+			continue;
+		}
+		fs::path tmpFile = rawIt->second;
+		auto values = read_vector_from_file(tmpFile);
 		const size_t original_size = values.size();
-		if (has_toxic_hashes)
-		{
+
+		if (has_toxic_hashes) {
 			std::vector<uint64_t> filtered;
 			filtered.reserve(values.size());
-			for (uint64_t hash : values)
-			{
-				if (toxic_hashes.find(hash) == toxic_hashes.end())
-				{
+			for (uint64_t hash : values) {
+				if (toxic_hashes.find(hash) == toxic_hashes.end()) {
 					filtered.push_back(hash);
 				}
 			}
 			size_t min_keep = config.toxic_safety_min;
-			if (config.toxic_safety_fraction > 0.0 && original_size > 0)
-			{
-				const double scaled = static_cast<double>(original_size) * config.toxic_safety_fraction;
+			if (config.toxic_safety_fraction > 0.0 && original_size > 0) {
+				const double scaled =
+				    static_cast<double>(original_size) * config.toxic_safety_fraction;
 				const size_t fractional_keep = static_cast<size_t>(std::ceil(scaled));
-				if (fractional_keep > min_keep)
-				{
+				if (fractional_keep > min_keep) {
 					min_keep = fractional_keep;
 				}
 			}
-			if (min_keep > original_size)
-			{
+			if (min_keep > original_size) {
 				min_keep = original_size;
 			}
-			if (filtered.size() < min_keep)
-			{
-				hashCount[index_to_taxid[i]] = static_cast<uint64_t>(values.size());
-				sampledHashes.emplace(index_to_taxid[i], std::move(values));
-				++taxa_safety_hits;
-			}
-			else
-			{
-				const size_t removed_here = original_size - filtered.size();
-				if (removed_here > 0)
+			if (filtered.size() < min_keep) {
 				{
+					std::lock_guard<std::mutex> lock(hash_mutex);
+					hashCount[taxid] = static_cast<uint64_t>(values.size());
+				}
+				write_vector_to_file(tmpFile, values);
+				++taxa_safety_hits;
+			} else {
+				const size_t removed_here = original_size - filtered.size();
+				if (removed_here > 0) {
 					hashes_removed_total += static_cast<uint64_t>(removed_here);
 					++taxa_filtered_count;
 				}
-				hashCount[index_to_taxid[i]] = static_cast<uint64_t>(filtered.size());
-				sampledHashes.emplace(index_to_taxid[i], std::move(filtered));
+				{
+					std::lock_guard<std::mutex> lock(hash_mutex);
+					hashCount[taxid] = static_cast<uint64_t>(filtered.size());
+				}
+				write_vector_to_file(tmpFile, filtered);
 			}
+		} else {
+			{
+				std::lock_guard<std::mutex> lock(hash_mutex);
+				hashCount[taxid] = static_cast<uint64_t>(values.size());
+			}
+			write_vector_to_file(tmpFile, values);
 		}
-		else
+
 		{
-			hashCount[index_to_taxid[i]] = static_cast<uint64_t>(values.size());
-			sampledHashes.emplace(index_to_taxid[i], std::move(values));
+			std::lock_guard<std::mutex> lock(raw_mutex);
+			sampledHashFiles.emplace(taxid, std::move(tmpFile));
 		}
 	}
 
@@ -847,13 +916,13 @@ namespace ChimeraBuild {
 	 * @param imcf 已初始化的 IMCF 对象。
 	 * @param groups shard 规划结果。
 	 * @param hashCount 每个 taxid 对应的采样数量。
-	 * @param sampledHashes bottom-k 采样出的哈希集合。
+	 * @param sampledHashFiles bottom-k 采样出的哈希集合在磁盘上的临时文件。
 	 */
 	std::vector<std::vector<std::string>> buildIMCF(
 		chimera::imcf::InterleavedMergedCuckooFilter& imcf,
 		const std::vector<chimera::imcf::Group>& groups,
 		const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
-		const robin_hood::unordered_flat_map<std::string, std::vector<uint64_t>>& sampledHashes)
+		const robin_hood::unordered_flat_map<std::string, std::filesystem::path>& sampledHashFiles)
 	{
 		std::vector<std::vector<std::string>> indexToTaxid(groups.size());
 		robin_hood::unordered_flat_map<std::string, std::vector<TaxidShardPlan>> shardPlan;
@@ -933,13 +1002,19 @@ namespace ChimeraBuild {
 			const auto& entry = shardEntriesView[entryIdx];
 			const std::string& taxid = entry.taxid;
 			const auto& plans = *entry.plans;
-			auto hashesIt = sampledHashes.find(taxid);
-			if (hashesIt == sampledHashes.end()) {
-	#pragma omp critical(imcf_log)
+			auto fileIt = sampledHashFiles.find(taxid);
+			if (fileIt == sampledHashFiles.end()) {
+#pragma omp critical(imcf_log)
 				std::cerr << "Warning: 无采样数据可用于 taxid " << taxid << std::endl;
 				continue;
 			}
-			const auto& hashes = hashesIt->second;
+			const fs::path& hashFile = fileIt->second;
+			std::ifstream hashStream(hashFile, std::ios::binary);
+			if (!hashStream.is_open()) {
+#pragma omp critical(imcf_log)
+				std::cerr << "Warning: 无法打开 taxid " << taxid << " 的 syncmer 临时文件: " << hashFile << std::endl;
+				continue;
+			}
 
 			std::vector<uint64_t> remainingCounts(plans.size());
 			for (size_t i = 0; i < plans.size(); ++i) {
@@ -1001,27 +1076,41 @@ namespace ChimeraBuild {
 			};
 
 			bool overflow = false;
-			for (uint64_t hash : hashes) {
-				size_t shard = pickShard(hash);
-				if (shard >= plans.size()) {
-	#pragma omp critical(imcf_log)
-					std::cerr << "Warning: taxid " << taxid
-						<< " produced more syncmers than expected; extra entries ignored" << std::endl;
-					overflow = true;
+			std::vector<uint64_t> ioBuffer(1u << 14);
+			while (!overflow && hashStream) {
+				hashStream.read(reinterpret_cast<char*>(ioBuffer.data()),
+					static_cast<std::streamsize>(ioBuffer.size() * sizeof(uint64_t)));
+				std::streamsize bytesRead = hashStream.gcount();
+				if (bytesRead <= 0) {
 					break;
 				}
-				slotBuffers[shard].push_back(hash);
-				if (slotBuffers[shard].size() >= kFlushThreshold) {
-					flushSlot(shard);
-				}
-				if (remainingCounts[shard] > 0) {
-					--remainingCounts[shard];
-					--totalRemaining;
-				}
-				if (remainingCounts[shard] == 0) {
-					flushSlot(shard);
+				size_t count = static_cast<size_t>(bytesRead) / sizeof(uint64_t);
+				for (size_t idx = 0; idx < count; ++idx) {
+					uint64_t hash = ioBuffer[idx];
+					size_t shard = pickShard(hash);
+					if (shard >= plans.size()) {
+#pragma omp critical(imcf_log)
+						std::cerr << "Warning: taxid " << taxid
+							<< " produced more syncmers than expected; extra entries ignored" << std::endl;
+						overflow = true;
+						break;
+					}
+					slotBuffers[shard].push_back(hash);
+					if (slotBuffers[shard].size() >= kFlushThreshold) {
+						flushSlot(shard);
+					}
+					if (remainingCounts[shard] > 0) {
+						--remainingCounts[shard];
+						--totalRemaining;
+					}
+					if (remainingCounts[shard] == 0) {
+						flushSlot(shard);
+					}
 				}
 			}
+			hashStream.close();
+			std::error_code removeEc;
+			fs::remove(hashFile, removeEc);
 
 			for (size_t shardIdx = 0; shardIdx < plans.size(); ++shardIdx) {
 				flushSlot(shardIdx);
@@ -1347,7 +1436,7 @@ namespace ChimeraBuild {
 			return;
 		}
 		robin_hood::unordered_flat_map<std::string, uint64_t> hashCount;
-		robin_hood::unordered_flat_map<std::string, std::vector<uint64_t>> sampledHashes;
+		robin_hood::unordered_flat_map<std::string, std::filesystem::path> sampledHashFiles;
 		robin_hood::unordered_flat_map<std::string, std::vector<std::string>> inputFiles;
 		parseInputFile(config.input_file, inputFiles, hashCount, fileInfo);
 		auto read_end = std::chrono::high_resolution_clock::now();
@@ -1362,7 +1451,8 @@ namespace ChimeraBuild {
 		{
 			auto calculate_start = std::chrono::high_resolution_clock::now();
 			std::cout << "Calculating syncmers..." << std::endl;
-				syncmer_count(config, inputFiles, hashCount, sampledHashes, fileInfo);
+			std::filesystem::path scratchDir;
+			syncmer_count(config, inputFiles, hashCount, sampledHashFiles, fileInfo, scratchDir);
 			auto calculate_end = std::chrono::high_resolution_clock::now();
 			auto calculate_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_end - calculate_start).count();
 			if (config.verbose) {
@@ -1399,7 +1489,7 @@ namespace ChimeraBuild {
 			imcfConfig.fpSalt = IMCFConfig::DefaultFingerprintSalt;
 			imcfConfig.hashVersion = IMCFConfig::CurrentHashVersion;
 			chimera::imcf::InterleavedMergedCuckooFilter imcf(groups, imcfConfig);
-				std::vector<std::vector<std::string>> indexToTaxid = buildIMCF(imcf, groups, hashCount, sampledHashes);
+			std::vector<std::vector<std::string>> indexToTaxid = buildIMCF(imcf, groups, hashCount, sampledHashFiles);
 			auto build_end = std::chrono::high_resolution_clock::now();
 			auto build_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(build_end - build_start).count();
 			if (config.verbose) {
@@ -1419,6 +1509,11 @@ namespace ChimeraBuild {
 				std::cout << "Save time: ";
 				print_build_time(save_total_time);
 				std::cout << std::endl;
+			}
+
+			if (!scratchDir.empty()) {
+				std::error_code cleanupEc;
+				fs::remove_all(scratchDir, cleanupEc);
 			}
 		}
 		else {

@@ -494,7 +494,6 @@ void parseReads(moodycamel::ConcurrentQueue<batchReads> &readQueue,
   if (!config.singleFiles.empty()) {
 #pragma omp parallel
     {
-      std::vector<batchReads> localBatches;
       size_t localSeq = 0;
       size_t localFiles = 0;
 
@@ -518,12 +517,8 @@ void parseReads(moodycamel::ConcurrentQueue<batchReads> &readQueue,
             progress->add_total(batch.ids.size());
           }
           localSeq += batch.ids.size();
-          localBatches.emplace_back(std::move(batch));
+          readQueue.enqueue(std::move(batch));
         }
-      }
-
-      for (auto &batch : localBatches) {
-        readQueue.enqueue(std::move(batch));
       }
 
 #pragma omp atomic
@@ -538,7 +533,6 @@ void parseReads(moodycamel::ConcurrentQueue<batchReads> &readQueue,
 
 #pragma omp parallel
     {
-      std::vector<batchReads> localBatches;
       size_t localSeq = 0;
       size_t localFiles = 0;
 
@@ -577,12 +571,8 @@ void parseReads(moodycamel::ConcurrentQueue<batchReads> &readQueue,
             progress->add_total(batch.ids.size());
           }
           localSeq += batch.ids.size();
-          localBatches.emplace_back(std::move(batch));
+          readQueue.enqueue(std::move(batch));
         }
-      }
-
-      for (auto &batch : localBatches) {
-        readQueue.enqueue(std::move(batch));
       }
 
 #pragma omp atomic

@@ -48,6 +48,6 @@ namespace ChimeraBuild {
 		chimera::imcf::InterleavedMergedCuckooFilter& imcf,
 		const std::vector<chimera::imcf::Group>& groups,
 		const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
-		const robin_hood::unordered_flat_map<std::string, std::vector<uint64_t>>& sampledHashes);
+		const robin_hood::unordered_flat_map<std::string, std::filesystem::path>& sampledHashFiles);
 	void run(BuildConfig config);
 }
