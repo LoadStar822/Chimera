@@ -20,7 +20,6 @@
 #include "classifyConfig.hpp"
 #include "kthread.h"
 #include <EM.hpp>
-#include <LCA.hpp>
 #include <VEM.hpp>
 #include <buildConfig.hpp>
 #include <cereal/cereal.hpp>
@@ -39,7 +38,6 @@
 #include <iostream>
 #include <mutex>
 #include <omp.h>
-#include <optional>
 #include <queue>
 #include <robin_hood.h>
 #include <seqan3/alphabet/nucleotide/dna4.hpp>
@@ -57,6 +55,5 @@ namespace ChimeraClassify {
 void run(ClassifyConfig config);
 void postEmDecision(
     std::vector<classifyResult> &results, const DecisionConfig &decisionConfig,
-    const std::unordered_map<std::string, double> &classWeights,
-    std::optional<std::reference_wrapper<LCA>> lca = std::nullopt);
+    const std::unordered_map<std::string, double> &classWeights);
 } // namespace ChimeraClassify

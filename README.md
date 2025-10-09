@@ -33,7 +33,7 @@
 
 **Chimera** is a versatile **metagenomic classification tool** developed by **Qinzhong Tian**, designed to simplify and accelerate the process of analyzing large-scale metagenomic datasets. Chimera integrates efficient algorithms and user-friendly features to deliver fast, accurate, and scalable metagenomic classification.
 
-The current version (1.6) introduces the **Interleaved Merged Cuckoo Filter (IMCF)**, which dramatically reduces database construction memory usage and significantly increases classification speed, all while maintaining nearly unchanged classification accuracy. Version 1.5 previously added the **Hierarchical Interleaved Cuckoo Filter (HICF)**, though it proved less practical compared to the new IMCF. Version 1.4 enhanced classification accuracy by upgrading the previous **Expectation-Maximization (EM) algorithm** to the more advanced **Variational EM algorithm**, improving convergence speed and robustness in complex datasets. **SIMD (Single Instruction, Multiple Data) acceleration** using the **AVX2** instruction set, introduced in version 1.3, continues to further enhance performance by providing compatibility across a range of modern processors. These optimizations significantly speed up computational tasks, improving Chimera’s ability to handle large datasets quickly and efficiently. Version 1.2 brought significant enhancements in classification accuracy and performance through the introduction of a **16-bit interleaved cuckoo filter**. Version 1.1 introduced **abundance analysis**, diversity indices, and the **LCA (Lowest Common Ancestor) algorithm** for more precise classification.
+The current version (1.6) introduces the **Interleaved Merged Cuckoo Filter (IMCF)**, which dramatically reduces database construction memory usage and significantly increases classification speed, all while maintaining nearly unchanged classification accuracy. Version 1.5 previously added the **Hierarchical Interleaved Cuckoo Filter (HICF)**, though it proved less practical compared to the new IMCF. Version 1.4 enhanced classification accuracy by upgrading the previous **Expectation-Maximization (EM) algorithm** to the more advanced **Variational EM algorithm**, improving convergence speed and robustness in complex datasets. **SIMD (Single Instruction, Multiple Data) acceleration** using the **AVX2** instruction set, introduced in version 1.3, continues to further enhance performance by providing compatibility across a range of modern processors. These optimizations significantly speed up computational tasks, improving Chimera’s ability to handle large datasets quickly and efficiently. Version 1.2 brought significant enhancements in classification accuracy and performance through the introduction of a **16-bit interleaved cuckoo filter**. Version 1.1 introduced **abundance analysis**和多样性指数，进一步完善了结果解读能力。
 
 For a detailed comparison of Chimera’s performance against other metagenomic classification tools, please visit our **[benchmark repository](https://github.com/LoadStar822/ChimeraBenchmark)**.
 
@@ -45,7 +45,7 @@ Chimera offers flexibility by supporting **custom parameter configurations**, wh
 
 ### ⚡ Fast and Accurate Species Classification
 
-Chimera is optimized for both **speed and scalability**. The classification engine is **multi-threaded**, making it highly effective at processing large datasets in a short time. Version 1.6's **IMCF** marks a major advancement in speed and memory efficiency. Version 1.4 upgraded the **EM algorithm** to the **Variational EM algorithm**, further improving classification accuracy in challenging datasets. Version 1.3 introduced **SIMD acceleration** with **AVX2** instructions, boosting computational efficiency across platforms. **Version 1.2** introduced the **16-bit interleaved cuckoo filter**, and **version 1.1** added the **LCA algorithm**, enhancing accuracy by resolving ambiguous taxonomic assignments through the use of the Lowest Common Ancestor method.
+Chimera is optimized for both **speed and scalability**. The classification engine is **multi-threaded**, making it highly effective at processing large datasets in a short time. Version 1.6's **IMCF** marks a major advancement in speed and memory efficiency. Version 1.4 upgraded the **EM algorithm** to the **Variational EM algorithm**, further improving classification accuracy in challenging datasets. Version 1.3 introduced **SIMD acceleration** with **AVX2** instructions, boosting computational efficiency across platforms. **Version 1.2** introduced the **16-bit interleaved cuckoo filter**，并在早期版本不断完善后处理逻辑以提高多分类场景的稳健性。
 
 Supported input formats include:
 - Standard formats: **FASTA**, **FASTQ**
@@ -328,11 +328,9 @@ You can select one of the following classification algorithms:
 - `-V` or `--vem` : Use the **Variational EM** algorithm for classification. This is the default classification method if no other algorithm is specified.
 - `--em-iter`: Number of EM iterations (default: `100`).
 - `--em-threshold`: Convergence threshold for EM algorithm (default: `0.001`).
-- `--none`: Do not use LCA or EM for classification. In this case, classification is based solely on the top hit from the database.
+- `--none`: 不运行 EM/VEM，直接使用预筛选得分进行判定。
 - `-f` or `--filter`: Select the type of filter to use (ICF, HICF, IMCF) and default to `IMCF`
 - `-q` or `--quiet`: Suppresses verbose output.
-
-> ⚠️ 注意：`-l/--lca`、`--lca-fallback` 以及 `--skip-postfilter/--no-skip-postfilter` 参数暂时废弃，当前版本的 CLI 不再提供这些开关，内部行为保持原有默认逻辑。
 
 **Examples:**
 For single-end input files:
@@ -425,8 +423,6 @@ Chimera accepts various sequence file formats for classification and generates r
     seq1    12345:10   67890:5
     seq2    12345:8
     ```
-    If **LCA mode** is selected, the taxid classified using LCA will be represented as `taxid:0`. This indicates that the LCA algorithm was applied for classification.
-    
     If **EM mode** is selected, the taxid classified using the EM algorithm will be represented as `taxid:1`.
 
 **Example:**
@@ -612,44 +608,7 @@ For Docker, Chimera is the default entry point. To skip the default `chimera` co
 docker run -it --rm -v "$(pwd):/app/data" --entrypoint Chimera tianqinzhong/chimera -h
 ```
 
-### 3. Where is the taxfile required for LCA, and how do I interpret LCA results or EM reuslts?
-
-If you are using Chimera's built-in `download` function, the `taxfile` is located in the downloaded dataset folder as `tax.info`. For custom datasets, you will need to manually create a `taxfile` in a specific format. Each line of the file represents a taxonomic rank and includes the following fields, separated by tabs:
-
-```
-<taxid>   <parent taxid>   <rank>   <name>
-```
-
-- **taxid**: The unique identifier for the taxonomic entity.
-- **parent taxid**: The taxid of the parent taxon in the hierarchy.
-- **rank**: The taxonomic rank (e.g., species, genus, family, etc.).
-- **name**: The scientific name of the taxon.
-
-For example:
-```
-1       0           no rank        root
-2157    131567      superkingdom   Archaea
-2158    183925      order          Methanobacteriales
-2159    2158        family         Methanobacteriaceae
-2160    2159        genus          Methanobacterium
-2162    2160        species        Methanobacterium formicicum
-```
-
-This example defines a taxonomic hierarchy starting from `root` (no rank) down to the species **Methanobacterium formicicum**.
-
-- **taxid 1** is the root of the hierarchy with no parent (`parent taxid = 0`).
-- **taxid 2157** represents the **Archaea** superkingdom, which belongs to the parent taxon **131567**.
-- Similarly, **taxid 2162** represents the species **Methanobacterium formicicum**, which is a descendant of the genus **Methanobacterium** (`taxid 2160`).
-
-### Interpreting LCA and EM Results
-
-In the classification output:
-- Any result classified using the **LCA algorithm** will be shown as `taxid:0`. This indicates that the Lowest Common Ancestor (LCA) method was applied.
-- Any result classified using the **EM algorithm** will be shown as `taxid:1`. This indicates that the Expectation-Maximization (EM) algorithm was applied for more accurate classification.
-
-Both algorithms aim to improve classification accuracy when direct classification to a specific taxonomic level is challenging.
-
-### 4. What should I do if I encounter the error message: 
+### 3. What should I do if I encounter the error message: 
 
 ```
 terminate called after throwing an instance of 'std::runtime_error'
@@ -663,7 +622,7 @@ This error occurs when the cuckoo filter reaches its capacity and fails to inser
 - **Experiment with Different Values**: The optimal load factor can vary depending on the dataset. You may need to try multiple values to find the best setting that balances space utilization and performance.
 - **Improved Accuracy**: Using a lower load factor can also lead to higher classification accuracy, as it reduces the likelihood of collisions and increases the robustness of the filter.
 
-### 5. How do I choose an appropriate load factor and maximum number of hashes?
+### 4. How do I choose an appropriate load factor and maximum number of hashes?
 
 Selecting the right **load factor** and **maximum number of hashes** is crucial for optimizing both the performance and accuracy of database construction.
 
@@ -700,7 +659,7 @@ We would like to acknowledge the following repositories and libraries that contr
 
 - **[cuckoo filter](https://github.com/efficient/cuckoofilter)**: While Chimera's implementation of the cuckoo filter differs significantly, the original **cuckoo filter** provided the initial inspiration for efficient membership testing, which helped shape Chimera’s approach to fast and scalable classification.
 
-- **[ganon](https://github.com/pirovc/ganon)**: Ganon’s implementation of the **LCA (Lowest Common Ancestor)** algorithm was integrated into Chimera to resolve ambiguous classifications by identifying the most specific shared taxonomic ancestor. This feature improves classification accuracy, particularly in complex datasets with shared sequences across multiple taxa.
+- **[ganon](https://github.com/pirovc/ganon)**: Ganon 在处理多候选分类上的策略为 Chimera 的判定流程提供了重要灵感，帮助我们在复杂数据集中更稳健地解析歧义匹配。
 
 - **[cereal](https://github.com/USCiLab/cereal)**: **cereal** is a C++11 library for serialization, used in Chimera for saving and loading large taxonomic databases efficiently. Its flexibility and ease of integration have made managing persistent data straightforward.
 

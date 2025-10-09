@@ -302,7 +302,6 @@ def parse_arguments():
         default=None,
         help="Allow strong pre-EM evidence to bypass posterior filter",
     )
-    # NOTE: LCA 及后处理相关参数暂时废弃，内部逻辑继续沿用默认值
     classify_parser.add_argument(
         "--output-posterior",
         dest="output_posterior",

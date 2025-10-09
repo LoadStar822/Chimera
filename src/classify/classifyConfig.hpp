@@ -31,7 +31,6 @@
 #include <atomic>
 #include <memory>
 #include "robin_hood.h"
-#include <optional>
 #include <seqan3/alphabet/nucleotide/dna4.hpp>
 #include <seqan3/core/debug_stream.hpp>
 
@@ -60,7 +59,6 @@ namespace dbg {
 		size_t progressStep = 5000;
 		double progressInterval = 1.0;
 		size_t batchSize;
-		bool lca = false;
 		bool em = false;
 		bool vem = false;
 		double emThreshold;
@@ -69,7 +67,6 @@ namespace dbg {
 		double post_margin = 0.03;
 		double post_ratio = 1.30;
 		double post_pi_min = 1e-4;
-		bool lca_fallback = false;
 		bool output_posterior = true;
 		bool skip_post_filter = true;
 	};
@@ -100,7 +97,6 @@ namespace dbg {
 			<< std::setw(20) << "Evidence override:" << config.evidence_override << std::endl
 			<< std::setw(20) << "Filter:" << config.filter << std::endl
 			<< std::setw(20) << "Batch size:" << config.batchSize << std::endl
-			<< std::setw(20) << "LCA:" << config.lca << std::endl
 			<< std::setw(20) << "EM:" << config.em << std::endl
 			<< std::setw(20) << "VEM:" << config.vem << std::endl
 			<< std::setw(20) << "Threads:" << config.threads << std::endl
@@ -112,7 +108,6 @@ namespace dbg {
 			<< std::setw(20) << "Posterior margin:" << config.post_margin << std::endl
 			<< std::setw(20) << "Posterior ratio:" << (std::isnan(config.post_ratio) ? std::string("nan") : std::to_string(config.post_ratio)) << std::endl
 			<< std::setw(20) << "Posterior pi min:" << config.post_pi_min << std::endl
-			<< std::setw(20) << "LCA fallback:" << config.lca_fallback << std::endl
 			<< std::setw(20) << "Output posterior:" << config.output_posterior << std::endl
 			<< std::setw(20) << "Skip post filter:" << config.skip_post_filter << std::endl;
 
@@ -126,7 +121,6 @@ namespace dbg {
 		size_t sequenceNum{ 0 };
 		size_t classifiedNum{ 0 };
 		size_t unclassifiedNum{ 0 };
-		size_t lcaNum = 0;
 		size_t minLen = 0;
 		size_t maxLen = 0;
 		size_t avgLen = 0;
@@ -155,7 +149,6 @@ namespace dbg {
 		double margin_delta = 0.03;
 		double margin_ratio = 1.30;
 		double min_class_weight = 1e-4;
-		bool use_lca_fallback = false;
 		bool evidence_override = true;
 	};
 }

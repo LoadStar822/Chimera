@@ -780,8 +780,7 @@ void saveResult(std::vector<classifyResult> classifyResults,
 
 void postEmDecision(std::vector<classifyResult> &results,
                     const DecisionConfig &decisionConfig,
-                    const std::unordered_map<std::string, double> &classWeights,
-                    std::optional<std::reference_wrapper<LCA>> lca) {
+                    const std::unordered_map<std::string, double> &classWeights) {
   constexpr const char *kUnclassified = "unclassified";
 
   auto format_val = [](double value) {
@@ -838,38 +837,6 @@ void postEmDecision(std::vector<classifyResult> &results,
     };
 
     if (result.posteriors.empty()) {
-      if (decisionConfig.use_lca_fallback) {
-        if (trace && !trace->emInputTop.empty()) {
-          const auto &fallback = trace->emInputTop.front().first;
-          result.taxidCount.clear();
-          result.taxidCount.emplace_back(fallback, 0);
-          trace->passedPost = true;
-          trace->suspiciousPost = false;
-          appendReason("em_fallback_pre_counts");
-          if (trace->deepLogged) {
-            dbg::log("Decision[%s][post]: passed=1 reason=%s",
-                     result.id.c_str(), trace->decisionReason.c_str());
-          }
-          dbg::g.passed_post.fetch_add(1, std::memory_order_relaxed);
-          continue;
-        }
-
-        if (!result.taxidCount.empty() &&
-            result.taxidCount.front().first != kUnclassified) {
-          if (trace) {
-            trace->passedPost = true;
-            trace->suspiciousPost = false;
-            appendReason("em_fallback_pre_result");
-            if (trace->deepLogged) {
-              dbg::log("Decision[%s][post]: passed=1 reason=%s",
-                       result.id.c_str(), trace->decisionReason.c_str());
-            }
-          }
-          dbg::g.passed_post.fetch_add(1, std::memory_order_relaxed);
-          continue;
-        }
-      }
-
       if (trace) {
         trace->passedPost = false;
         trace->suspiciousPost = trace->enteredEm;
@@ -1034,31 +1001,6 @@ void postEmDecision(std::vector<classifyResult> &results,
     }
     appendReason(reason);
 
-    if (decisionConfig.use_lca_fallback && lca &&
-        result.posteriors.size() > 1) {
-      std::vector<std::string> candidates;
-      candidates.reserve(result.posteriors.size());
-      for (const auto &entry : result.posteriors) {
-        candidates.emplace_back(entry.first);
-      }
-      std::string fallback = lca->get().getLCA(candidates);
-      if (!fallback.empty() && fallback != kUnclassified) {
-        result.taxidCount.clear();
-        result.taxidCount.emplace_back(fallback, 0);
-        if (trace) {
-          trace->passedPost = true;
-          trace->suspiciousPost = false;
-          appendReason("lca_fallback");
-          if (trace->deepLogged) {
-            dbg::log("Decision[%s][post]: passed=1 reason=%s",
-                     result.id.c_str(), trace->decisionReason.c_str());
-          }
-        }
-        dbg::g.passed_post.fetch_add(1, std::memory_order_relaxed);
-        continue;
-      }
-    }
-
     if (trace) {
       trace->passedPost = false;
       trace->suspiciousPost = trace->enteredEm;
@@ -1119,7 +1061,7 @@ inline void processSequence(
     std::vector<std::vector<std::string>> &indexToTaxid, const TaxDict &tax,
     ClassifyConfig &config, GroupHeat &heat,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
-    std::vector<classifyResult> &classifyResults, FileInfo &fileInfo, LCA &lca,
+    std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
     ProgressTracker *progress) {
   // Calculate the number of hash values and determine the threshold for
   // classification
@@ -1857,15 +1799,7 @@ inline void processSequence(
     }
 
     fileInfo.classifiedNum++;
-    if (config.lca && result.taxidCount.size() > 1) {
-      std::vector<std::string> taxids;
-      for (auto &[taxid, count] : result.taxidCount) {
-        taxids.push_back(taxid);
-      }
-      std::string lcaTaxid = lca.getLCA(taxids);
-      result.taxidCount.clear();
-      result.taxidCount.emplace_back(lcaTaxid, 0);
-    } else if (result.taxidCount.size() == 1) {
+    if (result.taxidCount.size() == 1) {
       result.taxidCount.clear();
       result.taxidCount.emplace_back(maxCount);
     }
@@ -1894,35 +1828,6 @@ inline void processSequence(
     progress->mark_processed(1);
   }
   classifyResults.emplace_back(std::move(result));
-}
-
-/*
- * @brief 从分类用的 taxonomy 文件构建 LCA 结构。
- *
- * taxonomy 文件假定每行提供 `child parent rank name` 四列，以空格分隔；
- * 这里只关心父子关系，因此只解析前两列并写入 LCA。
- */
-void buildLCA(LCA &lca, const std::string &taxFile) {
-  std::ifstream is(taxFile);
-  if (!is.is_open()) {
-    throw std::runtime_error("Failed to open file: " + taxFile);
-  }
-
-  std::string line;
-  while (std::getline(is, line)) {
-    std::istringstream iss(line);
-    std::string childID;
-    std::string parentID;
-    std::string rank;
-    std::string name;
-    if (!(iss >> childID >> parentID >> rank >> name)) {
-      continue;
-    }
-    lca.addEdge(parentID, childID);
-  }
-
-  is.close();
-  lca.doEulerWalk("1");
 }
 
 // 第二阶段筛选：丢弃未出现在 uniqueTaxids 中的税号，防止噪声 taxid 残留。
@@ -2034,8 +1939,6 @@ void thirdFilteringStep(std::vector<classifyResult> &classifyResults,
  * @param syncmer_seed Seed used when hashing syncmers.
  * @param fileInfo A structure to store information about the processed reads,
  * such as the number of classified and unclassified reads.
- * @param lca A reference to an LCA (Lowest Common Ancestor) structure, used if
- * LCA classification is enabled.
  *
  * @details
  * The function first checks if paired-end reads (`batch.seqs2`) are present. If
@@ -2060,7 +1963,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
                          std::span<const size_t> syncmer_positions,
                          uint64_t syncmer_seed,
                          FileInfo &fileInfo,
-                         LCA &lca, GroupHeat &heat,
+                         GroupHeat &heat,
                          ProgressTracker *progress = nullptr) {
   // Process batch of reads
   std::vector<uint64_t> hashs1;
@@ -2104,7 +2007,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
         }
       }
       processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
-                      heat, imcf, batch.ids[i], classifyResults, fileInfo, lca,
+                      heat, imcf, batch.ids[i], classifyResults, fileInfo,
                       progress);
     }
   } else {
@@ -2136,7 +2039,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
       }
       // Process the hash values for classification
       processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
-                      heat, imcf, batch.ids[i], classifyResults, fileInfo, lca,
+                      heat, imcf, batch.ids[i], classifyResults, fileInfo,
                       progress);
     }
   }
@@ -2171,11 +2074,6 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
   const std::array<size_t, 1> syncmer_positions{ static_cast<size_t>(imcfConfig.syncmerPosition) };
   const std::span<const size_t> syncmer_pos_span(syncmer_positions);
 
-  LCA lca;
-  if (config.lca) {
-    buildLCA(lca, config.taxFile);
-  }
-
 #pragma omp parallel
   {
     batchReads batch;
@@ -2188,8 +2086,7 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
       if (readQueue.try_dequeue(batch)) {
         processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
                      localClassifyResults, syncmer_pos_span, imcfConfig.seed64,
-                     localFileInfo, lca,
-                     heat, progress);
+                     localFileInfo, heat, progress);
         continue;
       }
       if (producer_done.load(std::memory_order_acquire)) {
@@ -2250,8 +2147,7 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
  * and window size.
  * @param readQueue A concurrent queue holding batches of reads to be
  * classified.
- * @param config Configuration settings for the classification, including LCA
- * settings and taxonomic file paths.
+ * @param config Configuration settings for the classification.
  * @param imcf A reference to the Interleaved Merged Cuckoo Filter used for
  * classification.
  * @param indexToTaxid A mapping of indices in the IMCF to taxids for resolving
@@ -2272,11 +2168,6 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
  * filtering step. After all batches are processed, the function applies the
  * `secondFilteringStep` and `thirdFilteringStep` functions to refine the
  * classification results.
- *
- * If LCA (Lowest Common Ancestor) classification is enabled in `config`, an LCA
- * structure is built using the `buildLCA` function with the provided taxonomic
- * file.
- *
  * @note
  * - The function assumes that the `processBatch`, `secondFilteringStep`, and
  * `thirdFilteringStep` functions are defined and correctly implemented.
@@ -2307,12 +2198,6 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
   const std::array<size_t, 1> syncmer_positions{ static_cast<size_t>(imcfConfig.syncmerPosition) };
   const std::span<const size_t> syncmer_pos_span(syncmer_positions);
 
-  // Initialize LCA structure if LCA mode is enabled in the configuration
-  LCA lca;
-  if (config.lca) {
-    buildLCA(lca, config.taxFile);
-  }
-
   // Parallel processing of batches using OpenMP
 #pragma omp parallel
   {
@@ -2325,8 +2210,7 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
     while (readQueue.try_dequeue(batch)) {
       processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
                    localClassifyResults, syncmer_pos_span, imcfConfig.seed64,
-                   localFileInfo, lca,
-                   heat, progress);
+                   localFileInfo, heat, progress);
     }
     // Critical section to merge local results into shared resources
 #pragma omp critical
@@ -2396,7 +2280,7 @@ void run(ClassifyConfig config) {
     config.threads = static_cast<uint16_t>(hardwareThreads);
   }
 
-  if (!config.em && !config.vem && !config.lca) {
+  if (!config.em && !config.vem) {
     config.em = true;
   }
   if (!(config.post_ratio > 0.0)) {
@@ -2523,17 +2407,9 @@ void run(ClassifyConfig config) {
     decisionConfig.margin_delta = config.post_margin;
     decisionConfig.margin_ratio = config.post_ratio;
     decisionConfig.min_class_weight = config.post_pi_min;
-    decisionConfig.use_lca_fallback = config.lca_fallback;
     decisionConfig.evidence_override = config.evidence_override;
 
-    std::optional<std::reference_wrapper<LCA>> fallbackLca{};
-    LCA lcaInstance;
-    if (decisionConfig.use_lca_fallback && !config.taxFile.empty()) {
-      buildLCA(lcaInstance, config.taxFile);
-      fallbackLca = std::ref(lcaInstance);
-    }
-
-    postEmDecision(classifyResults, decisionConfig, classWeights, fallbackLca);
+    postEmDecision(classifyResults, decisionConfig, classWeights);
     fileInfo.classifiedNum = 0;
     fileInfo.unclassifiedNum = 0;
     for (const auto &result : classifyResults) {
@@ -2577,11 +2453,6 @@ void run(ClassifyConfig config) {
               << format_percentage(fileInfo.unclassifiedNum,
                                    fileInfo.sequenceNum)
               << ")" << std::endl;
-    if (config.lca) {
-      std::cout << "Total LCA classification: " << fileInfo.lcaNum << " ("
-                << format_percentage(fileInfo.lcaNum, fileInfo.classifiedNum)
-                << ")" << std::endl;
-    }
     if (rebuildActiveMs > 0) {
       std::cout << "Index rebuild summary:" << std::endl;
       if (rebuildActiveMs > 0) {
