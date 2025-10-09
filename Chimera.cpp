@@ -147,6 +147,29 @@ int main(int argc, char **argv) {
       ->add_option("-M,--max-hashes", buildConfig.max_hashes_per_taxid,
                    "每个 taxid bottom-k 采样数量")
       ->default_val(2000000);
+  build
+      ->add_option("--toxic-quantile", buildConfig.toxic_quantile,
+                   "过滤高频 syncmer 的分位阈值 (0-1]")
+      ->default_val(0.999)
+      ->check(CLI::Range(0.0, 1.0));
+  build
+      ->add_option("--toxic-topN", buildConfig.toxic_top_n,
+                   "优先剔除全库计数前 N 的 hash")
+      ->default_val(0);
+  build
+      ->add_option("--toxic-min-fraction", buildConfig.toxic_min_fraction,
+                   "毒性候选的最低全库占比")
+      ->default_val(0.0001)
+      ->check(CLI::Range(0.0, 1.0));
+  build
+      ->add_option("--toxic-safety-frac", buildConfig.toxic_safety_fraction,
+                   "每个 taxid 最少保留比例")
+      ->default_val(0.1)
+      ->check(CLI::Range(0.0, 1.0));
+  build
+      ->add_option("--toxic-safety-min", buildConfig.toxic_safety_min,
+                   "每个 taxid 最少保留数量")
+      ->default_val(1024);
   build->add_flag("--adaptive-cutoff", buildConfig.adaptive_cutoff,
                   "启用基于文件规模的自适应 cutoff");
   build
@@ -168,6 +191,19 @@ int main(int argc, char **argv) {
     const uint16_t window_span = static_cast<uint16_t>(buildConfig.kmer_size - buildConfig.smer_size + 1);
     if (buildConfig.syncmer_position >= window_span) {
       throw CLI::ValidationError("--syncmer-pos must be < k - s + 1");
+    }
+    if (buildConfig.toxic_top_n == 0 &&
+        (buildConfig.toxic_quantile <= 0.0 || buildConfig.toxic_quantile > 1.0)) {
+      throw CLI::ValidationError("当未指定 --toxic-topN 时，--toxic-quantile 必须落在 (0, 1] 区间");
+    }
+    if (buildConfig.toxic_min_fraction < 0.0 || buildConfig.toxic_min_fraction > 1.0) {
+      throw CLI::ValidationError("--toxic-min-fraction must be between 0 and 1");
+    }
+    if (buildConfig.toxic_safety_fraction < 0.0 || buildConfig.toxic_safety_fraction > 1.0) {
+      throw CLI::ValidationError("--toxic-safety-frac must be between 0 and 1");
+    }
+    if (buildConfig.toxic_top_n > 0 && buildConfig.toxic_quantile == 0.0) {
+      buildConfig.toxic_quantile = 1.0;
     }
   });
 

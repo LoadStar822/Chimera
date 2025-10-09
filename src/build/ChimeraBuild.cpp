@@ -22,6 +22,7 @@
 #include <future>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <sstream>
 #include <iomanip>
 #include <string_view>
@@ -29,6 +30,7 @@
 #include <cereal/archives/binary.hpp>
 #include <cereal/types/string.hpp>
 #include <cereal/types/vector.hpp>
+#include <queue>
 #include <mutex>
 #include <span>
 #include <cstdint>
@@ -123,6 +125,203 @@ namespace ChimeraBuild {
 		size_t capacity_{ 0 };
 		std::vector<uint64_t> heap_;
 		robin_hood::unordered_flat_set<uint64_t> present_;
+	};
+
+	class SpaceSaving {
+	public:
+		struct Entry {
+			uint64_t key{ 0 };
+			uint64_t count{ 0 };
+			uint64_t error{ 0 };
+		};
+
+		SpaceSaving() = default;
+
+		explicit SpaceSaving(size_t capacity)
+		{
+			configure(capacity);
+		}
+
+		void configure(size_t capacity)
+		{
+			capacity_ = capacity;
+			total_weight_ = 0;
+			counters_.clear();
+			index_.clear();
+			min_heap_ = {};
+			counters_.reserve(capacity);
+			index_.reserve(capacity);
+		}
+
+		void add(uint64_t key, uint64_t weight = 1)
+		{
+			if (capacity_ == 0 || weight == 0)
+			{
+				return;
+			}
+
+			total_weight_ += weight;
+
+			auto it = index_.find(key);
+			if (it != index_.end())
+			{
+				const size_t idx = it->second;
+				auto& slot = counters_[idx];
+				slot.count += weight;
+				++slot.version;
+				min_heap_.push({ slot.count, slot.version, idx });
+				maybe_rebuild_heap();
+				return;
+			}
+
+			if (counters_.size() < capacity_)
+			{
+				const size_t idx = counters_.size();
+				counters_.push_back({ key, weight, 0, 1 });
+				index_[key] = idx;
+				min_heap_.push({ counters_[idx].count, counters_[idx].version, idx });
+				maybe_rebuild_heap();
+				return;
+			}
+
+			prune_heap();
+			if (min_heap_.empty())
+			{
+				return;
+			}
+
+			const auto node = min_heap_.top();
+			auto& slot = counters_[node.index];
+			index_.erase(slot.key);
+			const uint64_t previous = slot.count;
+			slot.key = key;
+			slot.error = previous;
+			slot.count = previous + weight;
+			++slot.version;
+			index_[key] = node.index;
+			min_heap_.push({ slot.count, slot.version, node.index });
+			maybe_rebuild_heap();
+		}
+
+		void merge(const SpaceSaving& other)
+		{
+			if (capacity_ == 0)
+			{
+				return;
+			}
+			for (const auto& slot : other.counters_)
+			{
+				if (slot.count == 0)
+				{
+					continue;
+				}
+				add(slot.key, slot.count);
+			}
+		}
+
+		uint64_t total_weight() const noexcept
+		{
+			return total_weight_;
+		}
+
+		std::vector<Entry> entries() const
+		{
+			std::vector<Entry> result;
+			result.reserve(counters_.size());
+			for (const auto& slot : counters_)
+			{
+				if (slot.count == 0)
+				{
+					continue;
+				}
+				result.push_back({ slot.key, slot.count, slot.error });
+			}
+			return result;
+		}
+
+	private:
+		struct Counter {
+			uint64_t key{ 0 };
+			uint64_t count{ 0 };
+			uint64_t error{ 0 };
+			uint64_t version{ 0 };
+		};
+
+		struct HeapNode {
+			uint64_t count;
+			uint64_t version;
+			size_t index;
+		};
+
+		struct MinCompare {
+			bool operator()(const HeapNode& lhs, const HeapNode& rhs) const
+			{
+				if (lhs.count != rhs.count)
+				{
+					return lhs.count > rhs.count;
+				}
+				if (lhs.version != rhs.version)
+				{
+					return lhs.version > rhs.version;
+				}
+				return lhs.index > rhs.index;
+			}
+		};
+
+		void prune_heap()
+		{
+			while (!min_heap_.empty())
+			{
+				const auto node = min_heap_.top();
+				if (node.index >= counters_.size())
+				{
+					min_heap_.pop();
+					continue;
+				}
+				const auto& slot = counters_[node.index];
+				if (slot.version != node.version || slot.count != node.count)
+				{
+					min_heap_.pop();
+					continue;
+				}
+				break;
+			}
+		}
+
+		void maybe_rebuild_heap()
+		{
+			if (counters_.empty())
+			{
+				return;
+			}
+			constexpr size_t HeapGrowthFactor = 8;
+			if (min_heap_.size() <= counters_.size() * HeapGrowthFactor)
+			{
+				return;
+			}
+			rebuild_heap();
+		}
+
+		void rebuild_heap()
+		{
+			std::priority_queue<HeapNode, std::vector<HeapNode>, MinCompare> fresh;
+			for (size_t i = 0; i < counters_.size(); ++i)
+			{
+				const auto& slot = counters_[i];
+				if (slot.count == 0)
+				{
+					continue;
+				}
+				fresh.push({ slot.count, slot.version, i });
+			}
+			min_heap_.swap(fresh);
+		}
+
+		size_t capacity_{ 0 };
+		uint64_t total_weight_{ 0 };
+		std::vector<Counter> counters_;
+		robin_hood::unordered_flat_map<uint64_t, size_t> index_;
+		std::priority_queue<HeapNode, std::vector<HeapNode>, MinCompare> min_heap_;
 	};
 
 	/**
@@ -252,117 +451,364 @@ namespace ChimeraBuild {
 	 * @param fileInfo The struct to store file information.
 	 */
 	void syncmer_count(
-		BuildConfig& config,
-		robin_hood::unordered_flat_map<std::string, std::vector<std::string>>& inputFiles,
-		robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
-		robin_hood::unordered_flat_map<std::string, std::vector<uint64_t>>& sampledHashes,
-		FileInfo& fileInfo)
+	BuildConfig& config,
+	robin_hood::unordered_flat_map<std::string, std::vector<std::string>>& inputFiles,
+	robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
+	robin_hood::unordered_flat_map<std::string, std::vector<uint64_t>>& sampledHashes,
+	FileInfo& fileInfo)
+{
+	if (config.max_hashes_per_taxid == 0)
 	{
-		if (config.max_hashes_per_taxid == 0)
+		throw std::runtime_error("bottom-k 采样要求 --max-hashes > 0");
+	}
+	if (config.adaptive_cutoff)
+	{
+		std::cerr << "Warning: adaptive cutoff 已被 bottom-k 采样忽略" << std::endl;
+	}
+
+	sampledHashes.clear();
+
+	const std::array<size_t, 1> syncmer_positions{ static_cast<size_t>(config.syncmer_position) };
+	const std::span<const size_t> syncmer_pos_span(syncmer_positions);
+	const uint64_t syncmer_seed = ChimeraBuild::adjust_seed(config.kmer_size);
+	const size_t max_hashes = config.max_hashes_per_taxid;
+	const bool has_top_n = config.toxic_top_n > 0;
+	const bool has_quantile = config.toxic_quantile < 1.0;
+	const double toxic_fraction = has_quantile ? (1.0 - config.toxic_quantile) : 0.0;
+	constexpr size_t kMinHeavyCapacity = 1024;
+	constexpr size_t kMaxHeavyCapacity = 1'000'000;
+	size_t heavy_capacity = 0;
+	if (has_top_n)
+	{
+		uint64_t scaled = config.toxic_top_n;
+		if (scaled > std::numeric_limits<uint64_t>::max() / 4ULL)
 		{
-			throw std::runtime_error("bottom-k 采样要求 --max-hashes > 0");
+			scaled = std::numeric_limits<uint64_t>::max();
 		}
-		if (config.adaptive_cutoff)
+		else
 		{
-			std::cerr << "Warning: adaptive cutoff 已被 bottom-k 采样忽略" << std::endl;
+			scaled *= 4ULL;
 		}
-
-		sampledHashes.clear();
-
-		const std::array<size_t, 1> syncmer_positions{ static_cast<size_t>(config.syncmer_position) };
-		const std::span<const size_t> syncmer_pos_span(syncmer_positions);
-		const uint64_t syncmer_seed = ChimeraBuild::adjust_seed(config.kmer_size);
-		const size_t max_hashes = config.max_hashes_per_taxid;
-
-		// Flatten taxid -> files map for parallel iteration
-		std::vector<std::pair<std::string, std::string>> taxid_file_pairs;
-		robin_hood::unordered_flat_map<std::string, size_t> taxid_to_index;
-		std::vector<std::string> index_to_taxid;
-		size_t index = 0;
-		for (auto& [taxid, files] : inputFiles)
+		const uint64_t capped = std::min<uint64_t>(scaled, static_cast<uint64_t>(kMaxHeavyCapacity));
+		heavy_capacity = static_cast<size_t>(std::max<uint64_t>(capped, kMinHeavyCapacity));
+	}
+	else if (has_quantile && toxic_fraction > 0.0)
+	{
+		double estimate = std::ceil((1.0 / toxic_fraction) * 4.0);
+		if (std::isfinite(estimate) && estimate > 0.0)
 		{
-			for (auto& file : files)
+			if (estimate < static_cast<double>(kMinHeavyCapacity))
 			{
-				taxid_file_pairs.emplace_back(taxid, file);
+				estimate = static_cast<double>(kMinHeavyCapacity);
 			}
-			taxid_to_index[taxid] = index++;
-			index_to_taxid.push_back(taxid);
-		}
-		std::vector<std::mutex> taxidMutexes(index);
-		std::vector<BottomKSampler> taxidSamplers(index);
-		for (auto& sampler : taxidSamplers)
-		{
-			sampler.configure(max_hashes);
-		}
-
-		std::mutex fileInfo_mutex;
-
-		// OpenMP parallel processing
-#pragma omp parallel for schedule(dynamic)
-		for (size_t idx = 0; idx < taxid_file_pairs.size(); ++idx)
-		{
-			const auto& [taxid, filename] = taxid_file_pairs[idx];
-			size_t taxid_index = taxid_to_index[taxid];
-
-			FileInfo localFileInfo{};
-			BottomKSampler localSampler(max_hashes);
-			robin_hood::unordered_flat_set<uint64_t> perReadSeen;
-
-			try
+			if (estimate > static_cast<double>(kMaxHeavyCapacity))
 			{
-				seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ filename };
-				for (auto& record : fin)
-				{
-					auto& seq = record.sequence();
-					if (seq.size() < config.min_length)
-					{
-						localFileInfo.skippedSeqNum++;
-						continue;
-					}
-					localFileInfo.sequenceNum++;
-					localFileInfo.bpLength += seq.size();
+				estimate = static_cast<double>(kMaxHeavyCapacity);
+			}
+			heavy_capacity = static_cast<size_t>(estimate);
+		}
+	}
+	const bool enable_toxic_filter = heavy_capacity > 0;
 
-					perReadSeen.clear();
-					auto hashes = chimera::syncmer::compute_hashes(
-					    seq, config.smer_size, config.kmer_size, syncmer_pos_span, syncmer_seed, true);
-					for (uint64_t hash : hashes)
+	std::vector<std::pair<std::string, std::string>> taxid_file_pairs;
+	robin_hood::unordered_flat_map<std::string, size_t> taxid_to_index;
+	std::vector<std::string> index_to_taxid;
+	size_t index = 0;
+	for (auto& [taxid, files] : inputFiles)
+	{
+		for (auto& file : files)
+		{
+			taxid_file_pairs.emplace_back(taxid, file);
+		}
+		taxid_to_index[taxid] = index++;
+		index_to_taxid.push_back(taxid);
+	}
+	std::vector<std::mutex> taxidMutexes(index);
+	std::vector<BottomKSampler> taxidSamplers(index);
+	for (auto& sampler : taxidSamplers)
+	{
+		sampler.configure(max_hashes);
+	}
+
+	std::mutex fileInfo_mutex;
+	std::mutex heavy_mutex;
+	SpaceSaving globalHeavy(heavy_capacity);
+
+	#pragma omp parallel for schedule(dynamic)
+	for (size_t idx = 0; idx < taxid_file_pairs.size(); ++idx)
+	{
+		const auto& [taxid, filename] = taxid_file_pairs[idx];
+		size_t taxid_index = taxid_to_index[taxid];
+
+		FileInfo localFileInfo{};
+		BottomKSampler localSampler(max_hashes);
+		robin_hood::unordered_flat_set<uint64_t> perReadSeen;
+		SpaceSaving localHeavy(heavy_capacity);
+
+		try
+		{
+			seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ filename };
+			for (auto& record : fin)
+			{
+				auto& seq = record.sequence();
+				if (seq.size() < config.min_length)
+				{
+					localFileInfo.skippedSeqNum++;
+					continue;
+				}
+				localFileInfo.sequenceNum++;
+				localFileInfo.bpLength += seq.size();
+
+				perReadSeen.clear();
+				auto hashes = chimera::syncmer::compute_hashes(
+				    seq, config.smer_size, config.kmer_size, syncmer_pos_span, syncmer_seed, true);
+				for (uint64_t hash : hashes)
+				{
+					const bool first_in_read = perReadSeen.insert(hash).second;
+					if (first_in_read)
 					{
-						if (perReadSeen.insert(hash).second)
+						localSampler.insert(hash);
+					}
+					if (enable_toxic_filter)
+					{
+						localHeavy.add(hash);
+					}
+				}
+			}
+		}
+		catch (const std::exception& ex)
+		{
+		#pragma omp critical(syncmer_log)
+			std::cerr << "读取序列文件失败 " << filename << ": " << ex.what() << std::endl;
+			std::lock_guard<std::mutex> lock(fileInfo_mutex);
+			fileInfo.skippedNum++;
+		}
+
+		{
+			std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index]);
+			taxidSamplers[taxid_index].merge(localSampler);
+		}
+
+		{
+			std::lock_guard<std::mutex> lock(fileInfo_mutex);
+			fileInfo.skippedSeqNum += localFileInfo.skippedSeqNum;
+			fileInfo.sequenceNum += localFileInfo.sequenceNum;
+			fileInfo.bpLength += localFileInfo.bpLength;
+		}
+
+		if (enable_toxic_filter && localHeavy.total_weight() > 0)
+		{
+			std::lock_guard<std::mutex> heavy_lock(heavy_mutex);
+			globalHeavy.merge(localHeavy);
+		}
+	}
+
+	robin_hood::unordered_flat_set<uint64_t> toxic_hashes;
+	uint64_t min_count_threshold = 0;
+	size_t candidate_count = 0;
+	uint64_t target_weight = 0;
+	uint64_t removed_weight = 0;
+	bool used_topn = false;
+	bool used_quantile = false;
+	if (enable_toxic_filter)
+	{
+		auto entries = globalHeavy.entries();
+		if (!entries.empty())
+		{
+			std::sort(entries.begin(), entries.end(), [](const SpaceSaving::Entry& lhs, const SpaceSaving::Entry& rhs)
+			{
+				if (lhs.count != rhs.count)
+				{
+					return lhs.count > rhs.count;
+				}
+				return lhs.key < rhs.key;
+			});
+
+			const uint64_t total_seen = globalHeavy.total_weight();
+			if (config.toxic_min_fraction > 0.0 && total_seen > 0)
+			{
+				const double scaled = static_cast<double>(total_seen) * config.toxic_min_fraction;
+				min_count_threshold = static_cast<uint64_t>(std::ceil(scaled));
+				if (min_count_threshold == 0)
+				{
+					min_count_threshold = 1;
+				}
+			}
+
+			std::vector<SpaceSaving::Entry> candidates;
+			candidates.reserve(entries.size());
+			for (const auto& entry : entries)
+			{
+				if (entry.count >= min_count_threshold)
+				{
+					candidates.push_back(entry);
+				}
+			}
+
+			if (!candidates.empty())
+			{
+				candidate_count = candidates.size();
+				if (has_top_n)
+				{
+					const uint64_t top_n = config.toxic_top_n;
+					const size_t limit = static_cast<size_t>(std::min<uint64_t>(top_n, static_cast<uint64_t>(candidates.size())));
+					if (limit > 0)
+					{
+						toxic_hashes.reserve(limit);
+						for (size_t i = 0; i < limit; ++i)
 						{
-							localSampler.insert(hash);
+							toxic_hashes.insert(candidates[i].key);
+							removed_weight += candidates[i].count;
+						}
+						used_topn = true;
+					}
+				}
+				else if (has_quantile)
+				{
+					const double removal_fraction = std::max(0.0, 1.0 - config.toxic_quantile);
+					if (removal_fraction > 0.0 && total_seen > 0)
+					{
+						target_weight = static_cast<uint64_t>(std::ceil(removal_fraction * static_cast<double>(total_seen)));
+						if (target_weight == 0)
+						{
+							target_weight = 1;
+						}
+						std::sort(candidates.begin(), candidates.end(), [](const SpaceSaving::Entry& lhs, const SpaceSaving::Entry& rhs)
+						{
+							const uint64_t lhs_base = lhs.count > lhs.error ? lhs.count - lhs.error : 0;
+							const uint64_t rhs_base = rhs.count > rhs.error ? rhs.count - rhs.error : 0;
+							if (lhs_base != rhs_base)
+							{
+								return lhs_base > rhs_base;
+							}
+							return lhs.key < rhs.key;
+						});
+						toxic_hashes.reserve(candidates.size());
+						for (const auto& entry : candidates)
+						{
+							if (entry.count == 0)
+							{
+								continue;
+							}
+							toxic_hashes.insert(entry.key);
+							removed_weight += entry.count;
+							if (removed_weight >= target_weight)
+							{
+								break;
+							}
+						}
+						if (removed_weight > 0)
+						{
+							used_quantile = true;
 						}
 					}
 				}
 			}
-			catch (const std::exception& ex)
-			{
-		#pragma omp critical(syncmer_log)
-				std::cerr << "读取序列文件失败 " << filename << ": " << ex.what() << std::endl;
-				std::lock_guard<std::mutex> lock(fileInfo_mutex);
-				fileInfo.skippedNum++;
-			}
+		}
+	}
 
-			{
-				std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index]);
-				taxidSamplers[taxid_index].merge(localSampler);
-			}
+	const bool has_toxic_hashes = !toxic_hashes.empty();
+	size_t safety_base = 0;
+	if (has_toxic_hashes)
+	{
+		size_t fraction_floor = 0;
+		if (config.toxic_safety_fraction > 0.0)
+		{
+			const double scaled = static_cast<double>(max_hashes) * config.toxic_safety_fraction;
+			fraction_floor = static_cast<size_t>(std::ceil(scaled));
+		}
+		safety_base = std::max(fraction_floor, static_cast<size_t>(config.toxic_safety_min));
+		if (safety_base > max_hashes)
+		{
+			safety_base = max_hashes;
+		}
+	}
 
+	sampledHashes.reserve(index_to_taxid.size());
+	size_t taxa_filtered_count = 0;
+	size_t taxa_safety_hits = 0;
+	uint64_t hashes_removed_total = 0;
+	for (size_t i = 0; i < index_to_taxid.size(); ++i)
+	{
+		auto values = taxidSamplers[i].release_sorted();
+		const size_t original_size = values.size();
+		if (has_toxic_hashes)
+		{
+			std::vector<uint64_t> filtered;
+			filtered.reserve(values.size());
+			for (uint64_t hash : values)
 			{
-				std::lock_guard<std::mutex> lock(fileInfo_mutex);
-				fileInfo.skippedSeqNum += localFileInfo.skippedSeqNum;
-				fileInfo.sequenceNum += localFileInfo.sequenceNum;
-				fileInfo.bpLength += localFileInfo.bpLength;
+				if (toxic_hashes.find(hash) == toxic_hashes.end())
+				{
+					filtered.push_back(hash);
+				}
+			}
+			size_t min_keep = config.toxic_safety_min;
+			if (config.toxic_safety_fraction > 0.0 && original_size > 0)
+			{
+				const double scaled = static_cast<double>(original_size) * config.toxic_safety_fraction;
+				const size_t fractional_keep = static_cast<size_t>(std::ceil(scaled));
+				if (fractional_keep > min_keep)
+				{
+					min_keep = fractional_keep;
+				}
+			}
+			if (min_keep > original_size)
+			{
+				min_keep = original_size;
+			}
+			if (filtered.size() < min_keep)
+			{
+				hashCount[index_to_taxid[i]] = static_cast<uint64_t>(values.size());
+				sampledHashes.emplace(index_to_taxid[i], std::move(values));
+				++taxa_safety_hits;
+			}
+			else
+			{
+				const size_t removed_here = original_size - filtered.size();
+				if (removed_here > 0)
+				{
+					hashes_removed_total += static_cast<uint64_t>(removed_here);
+					++taxa_filtered_count;
+				}
+				hashCount[index_to_taxid[i]] = static_cast<uint64_t>(filtered.size());
+				sampledHashes.emplace(index_to_taxid[i], std::move(filtered));
 			}
 		}
-
-		sampledHashes.reserve(index_to_taxid.size());
-		for (size_t i = 0; i < index_to_taxid.size(); ++i)
+		else
 		{
-			auto values = taxidSamplers[i].release_sorted();
 			hashCount[index_to_taxid[i]] = static_cast<uint64_t>(values.size());
 			sampledHashes.emplace(index_to_taxid[i], std::move(values));
 		}
 	}
+
+	if (config.verbose && has_toxic_hashes)
+	{
+		std::cerr << "[chimera] 毒 syncmer 过滤: 黑名单 " << toxic_hashes.size()
+			<< " 个 hash（候选 " << candidate_count
+			<< "，容量 " << heavy_capacity
+			<< "，频率阈值 " << min_count_threshold;
+		if (used_topn)
+		{
+			std::cerr << "，模式 topN";
+		}
+		else if (used_quantile)
+		{
+			const double weight_ratio = (globalHeavy.total_weight() > 0)
+				? static_cast<double>(removed_weight) / static_cast<double>(globalHeavy.total_weight())
+				: 0.0;
+			std::ostringstream ratio_stream;
+			ratio_stream << std::fixed << std::setprecision(4) << weight_ratio;
+			std::cerr << "，模式 quantile，目标权重 "
+				<< target_weight << "，实际裁剪权重 " << removed_weight
+				<< " (" << ratio_stream.str() << ")";
+		}
+		std::cerr << "），被过滤 taxid 数 " << taxa_filtered_count
+			<< "，合计剔除 " << hashes_removed_total
+			<< " 个采样 hash，安全网回退 " << taxa_safety_hits << " 次" << std::endl;
+	}
+}
+
 
 	/**
 	* Get the maximum value from the hashCount map.

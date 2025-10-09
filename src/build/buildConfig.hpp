@@ -47,6 +47,11 @@ namespace ChimeraBuild {
 		double load_factor{ 0.95 };
 		size_t max_hashes_per_taxid = 0;
 		bool adaptive_cutoff = false;
+		double toxic_quantile{ 0.999 };
+		uint64_t toxic_top_n{ 0 };
+		double toxic_min_fraction{ 1e-4 };
+		double toxic_safety_fraction{ 0.1 };
+		uint64_t toxic_safety_min{ 1024 };
 	};
 
 	inline std::ostream& operator<<(std::ostream& os, const BuildConfig& config) {
@@ -66,6 +71,11 @@ namespace ChimeraBuild {
 			<< std::setw(25) << "Load factor:" << config.load_factor << std::endl
 			<< std::setw(25) << "Max hashes per taxid:" << config.max_hashes_per_taxid << std::endl
 			<< std::setw(25) << "Adaptive cutoff:" << std::boolalpha << config.adaptive_cutoff << std::noboolalpha << std::endl
+			<< std::setw(25) << "Toxic quantile:" << config.toxic_quantile << std::endl
+			<< std::setw(25) << "Toxic top-N:" << config.toxic_top_n << std::endl
+			<< std::setw(25) << "Toxic min fraction:" << config.toxic_min_fraction << std::endl
+			<< std::setw(25) << "Toxic safety fraction:" << config.toxic_safety_fraction << std::endl
+			<< std::setw(25) << "Toxic safety min:" << config.toxic_safety_min << std::endl
 			<< std::setw(25) << "Verbose:" << config.verbose << std::endl;
 
 		os << std::string(50, '=') << std::endl;
