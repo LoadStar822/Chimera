@@ -29,6 +29,7 @@
 #include <iomanip>
 #include <string_view>
 #include <chrono>
+#include <ctime>
 #include <cereal/archives/binary.hpp>
 #include <cereal/types/string.hpp>
 #include <cereal/types/vector.hpp>
@@ -462,6 +463,7 @@ namespace ChimeraBuild {
 		BuildConfig& config,
 		robin_hood::unordered_flat_map<std::string, std::vector<std::string>>& inputFiles,
 		robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
+		robin_hood::unordered_flat_map<std::string, uint64_t>& taxidLengths,
 		robin_hood::unordered_flat_map<std::string, std::filesystem::path>& sampledHashFiles,
 		FileInfo& fileInfo,
 		std::filesystem::path& scratchDir)
@@ -556,6 +558,7 @@ namespace ChimeraBuild {
 	SpaceSaving globalHeavy(heavy_capacity);
 	std::mutex hash_mutex;
 	std::mutex raw_mutex;
+	std::mutex length_mutex;
 	robin_hood::unordered_flat_map<std::string, fs::path> rawSampleFiles;
 	std::atomic<long long> sampling_file_ns{ 0 };
 	std::atomic<long long> sampling_hash_ns{ 0 };
@@ -596,22 +599,23 @@ namespace ChimeraBuild {
 		uint64_t thread_hash_unique = 0;
 
 #pragma omp for schedule(dynamic)
-		for (size_t taxIdx = 0; taxIdx < index_to_taxid.size(); ++taxIdx) {
-			const auto& taxid = index_to_taxid[taxIdx];
-			auto filesIt = inputFiles.find(taxid);
-			if (filesIt == inputFiles.end()) {
-				continue;
-			}
-			const auto& files = filesIt->second;
+	for (size_t taxIdx = 0; taxIdx < index_to_taxid.size(); ++taxIdx) {
+		const auto& taxid = index_to_taxid[taxIdx];
+		auto filesIt = inputFiles.find(taxid);
+		if (filesIt == inputFiles.end()) {
+			continue;
+		}
+		const auto& files = filesIt->second;
 
-			FileInfo localFileInfo{};
-			BottomKSampler sampler(max_hashes);
-			SpaceSaving localHeavy(enable_toxic_filter ? heavy_capacity : 0);
-			long long local_file_ns = 0;
-			long long local_stream_ns = 0;
-			uint64_t local_seq_count = 0;
-			uint64_t local_hash_total = 0;
-			uint64_t local_hash_unique = 0;
+		FileInfo localFileInfo{};
+		BottomKSampler sampler(max_hashes);
+		SpaceSaving localHeavy(enable_toxic_filter ? heavy_capacity : 0);
+		long long local_file_ns = 0;
+		long long local_stream_ns = 0;
+		uint64_t local_seq_count = 0;
+		uint64_t local_hash_total = 0;
+		uint64_t local_hash_unique = 0;
+		uint64_t tax_bp = 0;
 
 			for (const auto& filename : files) {
 				try {
@@ -621,13 +625,14 @@ namespace ChimeraBuild {
 					    fin{filename};
 					for (auto& record : fin) {
 						auto& seq = record.sequence();
-						if (seq.size() < config.min_length) {
-							localFileInfo.skippedSeqNum++;
-							continue;
-						}
-						localFileInfo.sequenceNum++;
-						localFileInfo.bpLength += seq.size();
-						++local_seq_count;
+				if (seq.size() < config.min_length) {
+					localFileInfo.skippedSeqNum++;
+					continue;
+				}
+				localFileInfo.sequenceNum++;
+				localFileInfo.bpLength += seq.size();
+				tax_bp += seq.size();
+				++local_seq_count;
 
 						thread_per_read.clear();
 						size_t emitted_total = 0;
@@ -659,6 +664,11 @@ namespace ChimeraBuild {
 					std::lock_guard<std::mutex> lock(fileInfo_mutex);
 					fileInfo.skippedNum++;
 				}
+			}
+
+			if (tax_bp > 0) {
+				std::lock_guard<std::mutex> lock(length_mutex);
+				taxidLengths[taxid] += tax_bp;
 			}
 
 			auto values = sampler.release_sorted();
@@ -1514,14 +1524,241 @@ sampledHashFiles.reserve(index_to_taxid.size());
 				<< static_cast<double>(fileSize) / 1024 << " KB" << std::endl;
 		}
 		else {
-			std::cout << "Filter file size: " << fileSize << " bytes" << std::endl;
+		std::cout << "Filter file size: " << fileSize << " bytes" << std::endl;
+	}
+}
+
+static std::string json_escape(const std::string& value)
+{
+	std::ostringstream oss;
+	for (char ch : value)
+	{
+		switch (ch)
+		{
+		case '\\':
+			oss << "\\\\";
+			break;
+		case '"':
+			oss << "\\\"";
+			break;
+		case '\b':
+			oss << "\\b";
+			break;
+		case '\f':
+			oss << "\\f";
+			break;
+		case '\n':
+			oss << "\\n";
+			break;
+		case '\r':
+			oss << "\\r";
+			break;
+		case '\t':
+			oss << "\\t";
+			break;
+		default:
+			if (static_cast<unsigned char>(ch) < 0x20)
+			{
+				auto code = static_cast<unsigned char>(ch);
+				const char* digits = "0123456789ABCDEF";
+				oss << "\\u00" << digits[(code >> 4) & 0x0F] << digits[code & 0x0F];
+			}
+			else
+			{
+				oss << ch;
+			}
 		}
 	}
+	return oss.str();
+}
 
-	/**
-	* Run the build process with the given build configuration.
-	*
-	* @param config The build configuration.
+static std::string format_timestamp_utc(std::chrono::system_clock::time_point tp)
+{
+	std::time_t time = std::chrono::system_clock::to_time_t(tp);
+	std::tm tm{};
+#if defined(_WIN32)
+	gmtime_s(&tm, &time);
+#else
+	gmtime_r(&time, &tm);
+#endif
+	std::ostringstream oss;
+	oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+	return oss.str();
+}
+
+void writeProfileSnapshot(
+	const BuildConfig& config,
+	const robin_hood::unordered_flat_map<std::string, uint64_t>& taxidLengths)
+{
+	try
+	{
+		fs::path outputBase{ config.output_file };
+		fs::path snapshotPath = outputBase;
+		snapshotPath += ".profile.json";
+		fs::path snapshotDir = snapshotPath.has_parent_path() ? snapshotPath.parent_path() : fs::current_path();
+		std::error_code dirEc;
+		fs::create_directories(snapshotDir, dirEc);
+
+		auto relOrAbs = [](const fs::path& subject, const fs::path& base) -> std::string {
+			std::error_code ec;
+			fs::path rel = fs::relative(subject, base, ec);
+			if (!ec)
+			{
+				std::string repr = rel.generic_string();
+				if (repr.empty())
+				{
+					return std::string{"."};
+				}
+				return repr;
+			}
+			return subject.generic_string();
+		};
+
+		auto canonical = [](const fs::path& path) -> fs::path {
+			std::error_code ec;
+			fs::path resolved = fs::weakly_canonical(path, ec);
+			if (ec)
+			{
+				return fs::absolute(path);
+			}
+			return resolved;
+		};
+
+		fs::path inputPath = canonical(config.input_file);
+		fs::path datasetRoot = inputPath.has_parent_path() ? inputPath.parent_path() : snapshotDir;
+		datasetRoot = canonical(datasetRoot);
+
+		auto locate_file = [&](const std::vector<fs::path>& candidates) -> fs::path {
+			for (const auto& candidate : candidates)
+			{
+				std::error_code existsEc;
+				if (fs::exists(candidate, existsEc))
+				{
+					return canonical(candidate);
+				}
+			}
+			return {};
+		};
+
+		fs::path taxInfoPath = locate_file({ datasetRoot / "tax.info" });
+		fs::path assemblyPath = locate_file({ datasetRoot / "assembly_summary.txt", datasetRoot.parent_path() / "assembly_summary.txt" });
+
+		fs::path imcfPath = canonical(outputBase.string() + ".imcf");
+		fs::path imcfIndexPath = canonical(outputBase.string() + ".imcf.idx");
+
+		std::string datasetRelative = relOrAbs(datasetRoot, snapshotDir);
+		std::string datasetAbsolute = datasetRoot.generic_string();
+		std::string targetRelative = relOrAbs(inputPath, datasetRoot);
+		std::string targetAbsolute = inputPath.generic_string();
+		std::string taxInfoRelative = taxInfoPath.empty() ? std::string{} : relOrAbs(taxInfoPath, datasetRoot);
+		std::string taxInfoAbsolute = taxInfoPath.empty() ? std::string{} : taxInfoPath.generic_string();
+		std::string assemblyRelative = assemblyPath.empty() ? std::string{} : relOrAbs(assemblyPath, datasetRoot);
+		std::string assemblyAbsolute = assemblyPath.empty() ? std::string{} : assemblyPath.generic_string();
+		std::string imcfRelative = relOrAbs(imcfPath, snapshotDir);
+		std::string imcfAbsolute = imcfPath.generic_string();
+		std::string idxRelative = relOrAbs(imcfIndexPath, snapshotDir);
+		std::string idxAbsolute = imcfIndexPath.generic_string();
+
+		std::vector<std::pair<std::string, uint64_t>> lengthEntries;
+		lengthEntries.reserve(taxidLengths.size());
+		for (const auto& kv : taxidLengths)
+		{
+			if (kv.second == 0)
+			{
+				continue;
+			}
+			lengthEntries.emplace_back(kv.first, kv.second);
+		}
+		std::sort(lengthEntries.begin(), lengthEntries.end(), [](const auto& lhs, const auto& rhs) {
+			return lhs.first < rhs.first;
+		});
+
+		std::ostringstream oss;
+		oss << "{\n";
+		oss << "  \"version\": 1,\n";
+		oss << "  \"created_at\": \"" << json_escape(format_timestamp_utc(std::chrono::system_clock::now())) << "\",\n";
+		oss << "  \"build\": {\n";
+		oss << "    \"filter\": \"" << json_escape(config.filter) << "\",\n";
+		oss << "    \"kmer_size\": " << static_cast<int>(config.kmer_size) << ",\n";
+		oss << "    \"smer_size\": " << config.smer_size << ",\n";
+		oss << "    \"syncmer_position\": " << config.syncmer_position << ",\n";
+		oss << "    \"load_factor\": " << config.load_factor << "\n";
+		oss << "  },\n";
+		oss << "  \"database\": {\n";
+		oss << "    \"dataset_root\": {\n";
+		oss << "      \"relative\": \"" << json_escape(datasetRelative) << "\",\n";
+		oss << "      \"absolute\": \"" << json_escape(datasetAbsolute) << "\"\n";
+		oss << "    },\n";
+		oss << "    \"target\": {\n";
+		oss << "      \"relative\": \"" << json_escape(targetRelative) << "\",\n";
+		oss << "      \"absolute\": \"" << json_escape(targetAbsolute) << "\"\n";
+		oss << "    },\n";
+		oss << "    \"tax_info\": {\n";
+		oss << "      \"relative\": " << (taxInfoRelative.empty() ? "null" : ("\"" + json_escape(taxInfoRelative) + "\"")) << ",\n";
+		oss << "      \"absolute\": " << (taxInfoAbsolute.empty() ? "null" : ("\"" + json_escape(taxInfoAbsolute) + "\"")) << "\n";
+		oss << "    },\n";
+		oss << "    \"assembly_summary\": {\n";
+		oss << "      \"relative\": " << (assemblyRelative.empty() ? "null" : ("\"" + json_escape(assemblyRelative) + "\"")) << ",\n";
+		oss << "      \"absolute\": " << (assemblyAbsolute.empty() ? "null" : ("\"" + json_escape(assemblyAbsolute) + "\"")) << "\n";
+		oss << "    },\n";
+		oss << "    \"imcf\": {\n";
+		oss << "      \"relative\": \"" << json_escape(imcfRelative) << "\",\n";
+		oss << "      \"absolute\": \"" << json_escape(imcfAbsolute) << "\"\n";
+		oss << "    },\n";
+		oss << "    \"imcf_index\": {\n";
+		oss << "      \"relative\": \"" << json_escape(idxRelative) << "\",\n";
+		oss << "      \"absolute\": \"" << json_escape(idxAbsolute) << "\"\n";
+		oss << "    }\n";
+		oss << "  },\n";
+		oss << "  \"taxid_lengths\": ";
+		if (lengthEntries.empty())
+		{
+			oss << "{}\n";
+		}
+		else
+		{
+			oss << "{\n";
+			for (size_t i = 0; i < lengthEntries.size(); ++i)
+			{
+				const auto& [taxid, length] = lengthEntries[i];
+				oss << "    \"" << json_escape(taxid) << "\": " << length;
+				if (i + 1 < lengthEntries.size())
+				{
+					oss << ",";
+				}
+				oss << "\n";
+			}
+			oss << "  }\n";
+		}
+		oss << "}\n";
+
+		std::ofstream ofs(snapshotPath, std::ios::binary | std::ios::trunc);
+		if (!ofs.is_open())
+		{
+			std::cerr << "无法写入 profile 快照: " << snapshotPath << std::endl;
+			return;
+		}
+		auto contents = oss.str();
+		ofs.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+		if (!ofs)
+		{
+			std::cerr << "写入 profile 快照失败: " << snapshotPath << std::endl;
+		}
+		else if (config.verbose)
+		{
+			std::cout << "Profile snapshot saved to " << snapshotPath << std::endl;
+		}
+	}
+	catch (const std::exception& ex)
+	{
+		std::cerr << "生成 profile 快照失败: " << ex.what() << std::endl;
+	}
+}
+
+/**
+* Run the build process with the given build configuration.
+*
+* @param config The build configuration.
 	*/
 	void run(BuildConfig config) {
 		if (config.threads == 0) {
@@ -1556,9 +1793,10 @@ sampledHashFiles.reserve(index_to_taxid.size());
 			std::cerr << "Syncmer offset must satisfy 0 <= pos < k - s + 1." << std::endl;
 			return;
 		}
-		robin_hood::unordered_flat_map<std::string, uint64_t> hashCount;
-		robin_hood::unordered_flat_map<std::string, std::filesystem::path> sampledHashFiles;
-		robin_hood::unordered_flat_map<std::string, std::vector<std::string>> inputFiles;
+	robin_hood::unordered_flat_map<std::string, uint64_t> hashCount;
+	robin_hood::unordered_flat_map<std::string, uint64_t> taxidLengths;
+	robin_hood::unordered_flat_map<std::string, std::filesystem::path> sampledHashFiles;
+	robin_hood::unordered_flat_map<std::string, std::vector<std::string>> inputFiles;
 		parseInputFile(config.input_file, inputFiles, hashCount, fileInfo);
 		auto read_end = std::chrono::high_resolution_clock::now();
 		auto read_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(read_end - read_start).count();
@@ -1573,7 +1811,7 @@ sampledHashFiles.reserve(index_to_taxid.size());
 			auto calculate_start = std::chrono::high_resolution_clock::now();
 			std::cout << "Calculating syncmers..." << std::endl;
 			std::filesystem::path scratchDir;
-			syncmer_count(config, inputFiles, hashCount, sampledHashFiles, fileInfo, scratchDir);
+		syncmer_count(config, inputFiles, hashCount, taxidLengths, sampledHashFiles, fileInfo, scratchDir);
 			auto calculate_end = std::chrono::high_resolution_clock::now();
 			auto calculate_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_end - calculate_start).count();
 			if (config.verbose) {
@@ -1623,19 +1861,21 @@ sampledHashFiles.reserve(index_to_taxid.size());
 			auto save_start = std::chrono::high_resolution_clock::now();
 			std::cout << "Saving IMCF..." << std::endl;
 		saveIMCF(imcf, config.output_file, indexToTaxid, imcfConfig,
-		        config.filter == "imcf");
-			auto save_end = std::chrono::high_resolution_clock::now();
-			auto save_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(save_end - save_start).count();
-			if (config.verbose) {
-				std::cout << "Save time: ";
-				print_build_time(save_total_time);
-				std::cout << std::endl;
-			}
+	        config.filter == "imcf");
+		auto save_end = std::chrono::high_resolution_clock::now();
+		auto save_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(save_end - save_start).count();
+		if (config.verbose) {
+			std::cout << "Save time: ";
+			print_build_time(save_total_time);
+			std::cout << std::endl;
+		}
 
-			if (!scratchDir.empty()) {
-				std::error_code cleanupEc;
-				fs::remove_all(scratchDir, cleanupEc);
-			}
+		writeProfileSnapshot(config, taxidLengths);
+
+		if (!scratchDir.empty()) {
+			std::error_code cleanupEc;
+			fs::remove_all(scratchDir, cleanupEc);
+		}
 		}
 		else {
 			throw std::runtime_error("Unsupported filter type: " + config.filter +
