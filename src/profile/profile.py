@@ -29,6 +29,13 @@ LEVEL_ALIASES = {
 
 UNCLASSIFIED = "unclassified"
 
+GLOBAL_EM_MAX_ITER = 60
+GLOBAL_EM_TOL = 3e-6
+GLOBAL_DIRICHLET_ALPHA = 0.05
+GLOBAL_LENGTH_NORMALIZATION = True
+GLOBAL_MIN_LENGTH_BP = 1000
+GLOBAL_MIN_VIRAL_LENGTH_BP = 200
+
 
 @dataclass
 class TaxonRecord:
@@ -194,29 +201,203 @@ def _parse_taxid_weights(line: str) -> Tuple[List[Tuple[int, float]], bool]:
     return items, has_unclassified
 
 
-def _collect_taxid_weights(input_files: Iterable[str]) -> Tuple[Dict[int, float], float, int]:
+def _collect_taxid_weights(
+    input_files: Iterable[str],
+    keep_per_read: bool = False,
+) -> Tuple[Dict[int, float], float, int, Optional[List[List[Tuple[int, float]]]]]:
     taxid_weights: Dict[int, float] = defaultdict(float)
     unclassified_reads = 0.0
     total_lines = 0
+    per_read: Optional[List[List[Tuple[int, float]]]] = [] if keep_per_read else None
     for input_file in input_files:
         with open(input_file, "r", errors="ignore") as infile:
             for line in infile:
                 total_lines += 1
                 items, has_unclassified = _parse_taxid_weights(line)
-                if not items:
+                cleaned: List[Tuple[int, float]] = []
+                for taxid, weight in items:
+                    if math.isnan(weight) or weight <= 0.0:
+                        continue
+                    cleaned.append((taxid, weight))
+                if not cleaned:
+                    if has_unclassified:
+                        unclassified_reads += 1.0
+                    continue
+                sum_weight = sum(weight for _, weight in cleaned)
+                if sum_weight > 0.0:
+                    scale = min(1.0, sum_weight)
+                    if scale != sum_weight:
+                        factor = scale / sum_weight
+                        candidate_weights = [(taxid, weight * factor) for taxid, weight in cleaned]
+                    else:
+                        candidate_weights = cleaned
+                else:
+                    candidate_weights = []
+                if not candidate_weights:
                     if has_unclassified:
                         unclassified_reads += 1.0
                     continue
                 line_weight = 0.0
-                for taxid, weight in items:
-                    if weight <= 0.0 or math.isnan(weight):
-                        continue
+                for taxid, weight in candidate_weights:
                     taxid_weights[taxid] += weight
                     line_weight += weight
                 if has_unclassified:
-                    residue = max(0.0, 1.0 - line_weight) if line_weight <= 1.0 else 0.0
-                    unclassified_reads += residue if residue > 0.0 else 1.0
-    return taxid_weights, unclassified_reads, total_lines
+                    residue = max(0.0, 1.0 - line_weight)
+                    unclassified_reads += residue
+                if per_read is not None:
+                    per_read.append(candidate_weights)
+    return taxid_weights, unclassified_reads, total_lines, per_read
+
+
+def _effective_length(length_bp: Optional[int], *, min_length: int = GLOBAL_MIN_LENGTH_BP) -> Optional[float]:
+    if not length_bp or length_bp <= 0:
+        return None
+    floor = float(min_length)
+    return max(float(length_bp), floor) / 1000.0
+
+
+def _run_global_em(
+    per_read_candidates: Sequence[Sequence[Tuple[int, float]]],
+    initial_weights: Dict[int, float],
+    tax_lengths: Optional[Dict[int, int]] = None,
+    resolver: Optional[TaxonomyResolver] = None,
+    max_iter: int = GLOBAL_EM_MAX_ITER,
+    tol: float = GLOBAL_EM_TOL,
+) -> Dict[int, float]:
+    total_weight = sum(initial_weights.values())
+    if total_weight <= 0.0:
+        return dict(initial_weights)
+    pi: Dict[int, float] = {}
+    epsilon = 1e-12
+    for taxid, weight in initial_weights.items():
+        if weight > 0.0:
+            pi[taxid] = weight / total_weight
+    # Ensure every candidate taxid has a prior
+    missing = False
+    for read in per_read_candidates:
+        for taxid, _ in read:
+            if taxid not in pi:
+                pi[taxid] = epsilon
+                missing = True
+    if missing:
+        norm = sum(pi.values())
+        if norm > 0.0:
+            inv_norm = 1.0 / norm
+            for taxid in pi:
+                pi[taxid] *= inv_norm
+
+    if not pi:
+        return dict(initial_weights)
+
+    dirichlet_alpha = GLOBAL_DIRICHLET_ALPHA
+    if dirichlet_alpha < 0.0:
+        dirichlet_alpha = 0.0
+
+    length_scale_cache: Dict[int, Optional[float]] = {}
+    viral_cache: Dict[int, bool] = {}
+
+    def _resolve_length_scale(taxid: int) -> Optional[float]:
+        if not tax_lengths:
+            return None
+        if taxid in length_scale_cache:
+            return length_scale_cache[taxid]
+        length_bp = tax_lengths.get(taxid)
+        if not length_bp or length_bp <= 0:
+            length_scale_cache[taxid] = None
+            return None
+        min_floor = GLOBAL_MIN_LENGTH_BP
+        if resolver and length_bp < GLOBAL_MIN_LENGTH_BP:
+            if taxid not in viral_cache:
+                lineage = resolver.get_lineage(taxid)
+                viral_cache[taxid] = any(
+                    "virus" in (record.name or "").lower() or "viroid" in (record.name or "").lower()
+                    for record in lineage
+                )
+            if viral_cache.get(taxid):
+                min_floor = GLOBAL_MIN_VIRAL_LENGTH_BP
+        scale = _effective_length(length_bp, min_length=min_floor)
+        length_scale_cache[taxid] = scale
+        return scale
+
+    for _ in range(max_iter):
+        alpha_sum = dirichlet_alpha * len(pi)
+        new_pi: Dict[int, float] = defaultdict(float)
+        total_responsibility = 0.0
+        for read in per_read_candidates:
+            tmp: List[Tuple[int, float]] = []
+            denom = 0.0
+            for taxid, weight in read:
+                if weight <= 0.0 or math.isnan(weight):
+                    continue
+                prior = pi.get(taxid, 0.0)
+                if prior <= 0.0:
+                    continue
+                value = prior * weight
+                if GLOBAL_LENGTH_NORMALIZATION and tax_lengths:
+                    scale = _resolve_length_scale(taxid)
+                    if scale:
+                        value /= scale
+                if value <= 0.0:
+                    continue
+                tmp.append((taxid, value))
+                denom += value
+            if denom <= 0.0:
+                denom = sum(max(weight, 0.0) for _, weight in read)
+                if denom <= 0.0:
+                    continue
+                for taxid, weight in read:
+                    if weight <= 0.0 or math.isnan(weight):
+                        continue
+                    resp = weight / denom
+                    new_pi[taxid] += resp
+                    total_responsibility += resp
+                continue
+            inv_denom = 1.0 / denom
+            for taxid, value in tmp:
+                resp = value * inv_denom
+                new_pi[taxid] += resp
+                total_responsibility += resp
+        if total_responsibility <= 0.0:
+            break
+
+        inv_total = 1.0 / (total_responsibility + alpha_sum) if (total_responsibility + alpha_sum) > 0.0 else 0.0
+        max_delta = 0.0
+        for taxid, value in new_pi.items():
+            value = (value + dirichlet_alpha) * inv_total
+            max_delta = max(max_delta, abs(value - pi.get(taxid, 0.0)))
+            new_pi[taxid] = value
+        for taxid, value in pi.items():
+            if taxid not in new_pi:
+                smoothed = dirichlet_alpha * inv_total if inv_total > 0.0 else 0.0
+                max_delta = max(max_delta, abs(value - smoothed))
+                new_pi[taxid] = smoothed
+        pi = dict(new_pi)
+
+        if pi:
+            tiny_threshold = 1e-12
+            tiny_keys = [taxid for taxid, value in pi.items() if value < tiny_threshold]
+            if len(tiny_keys) == len(pi):
+                keep_taxid = max(pi.items(), key=lambda item: item[1])[0]
+                tiny_keys = [taxid for taxid in tiny_keys if taxid != keep_taxid]
+            removed_mass = 0.0
+            for taxid in tiny_keys:
+                removed_mass += pi.pop(taxid, 0.0)
+            if pi:
+                if removed_mass > 0.0:
+                    norm = sum(pi.values())
+                    if norm > 0.0:
+                        inv_norm = 1.0 / norm
+                        for taxid in list(pi.keys()):
+                            pi[taxid] *= inv_norm
+                max_delta = max(max_delta, removed_mass)
+
+        if max_delta < tol:
+            break
+
+    refined = {taxid: pi_val * total_weight for taxid, pi_val in pi.items()}
+    for taxid in initial_weights:
+        refined.setdefault(taxid, 0.0)
+    return refined
 
 
 def _load_snapshot(snapshot_path: Path) -> Optional[Dict[str, Any]]:
@@ -463,12 +644,16 @@ def _aggregate_levels(
 ) -> Tuple[
     Dict[str, Dict[str, float]],
     Dict[str, Dict[str, float]],
+    Dict[str, Dict[str, float]],
     Dict[int, TaxonRecord],
 ]:
     count_by_level: Dict[str, Dict[str, float]] = {
         level: defaultdict(float) for level in LEVEL_ALIASES
     }
     length_by_level: Dict[str, Dict[str, float]] = {
+        level: defaultdict(float) for level in LEVEL_ALIASES
+    }
+    rpk_by_level: Dict[str, Dict[str, float]] = {
         level: defaultdict(float) for level in LEVEL_ALIASES
     }
     taxon_records: Dict[int, TaxonRecord] = {}
@@ -502,6 +687,7 @@ def _aggregate_levels(
         leaf = next((rec for rec in reversed(lineage) if rec.taxid == taxid), lineage[-1])
         taxon_records[taxid] = leaf
         leaf_length = _resolve_length(taxid, tax_lengths, accession_map, accession_lengths)
+        leaf_rpk = (count / (leaf_length / 1000.0)) if leaf_length and leaf_length > 0 else 0.0
 
         for level, nodes in hits.items():
             if not nodes:
@@ -510,6 +696,8 @@ def _aggregate_levels(
                 count_by_level[level][name] += count
                 if leaf_length:
                     length_by_level[level][name] += leaf_length
+                if leaf_rpk > 0.0:
+                    rpk_by_level[level][name] += leaf_rpk
 
         for level in LEVEL_ALIASES:
             if hits[level]:
@@ -517,15 +705,18 @@ def _aggregate_levels(
             if _should_mark_unclassified(level, has_level):
                 count_by_level[level][UNCLASSIFIED] += count
 
-    return count_by_level, length_by_level, taxon_records
+    return count_by_level, length_by_level, rpk_by_level, taxon_records
 
 
 def process_file(input_files: Iterable[str], output_file: str) -> None:
     inputs = list(input_files)
-    taxid_weights, base_unclassified, total_lines = _collect_taxid_weights(inputs)
-    weighted_total = sum(taxid_weights.values()) + base_unclassified
-    percentage_total = weighted_total if weighted_total > 0 else float(total_lines)
-    rpm_total = total_lines if total_lines > 0 else percentage_total
+    (
+        taxid_weights,
+        base_unclassified,
+        total_lines,
+        per_read_candidates,
+    ) = _collect_taxid_weights(inputs, keep_per_read=True)
+    global_em_applied = False
 
     tax_info_path, assembly_paths, target_paths, snapshot_lengths = _find_metadata_paths(inputs)
     resolver = TaxonomyResolver(tax_info_path)
@@ -541,7 +732,22 @@ def process_file(input_files: Iterable[str], output_file: str) -> None:
     if accession_map and not accession_lengths:
         warnings.warn("未找到 assembly_summary.txt，TPM 将无法计算")
 
-    count_by_level, length_by_level, taxon_records = _aggregate_levels(
+    if per_read_candidates:
+        if any(len(candidates) > 1 for candidates in per_read_candidates):
+            taxid_weights = _run_global_em(
+                per_read_candidates,
+                taxid_weights,
+                tax_lengths,
+                resolver=resolver,
+            )
+            global_em_applied = True
+        per_read_candidates = None
+
+    weighted_total = sum(taxid_weights.values()) + base_unclassified
+    percentage_total = weighted_total if weighted_total > 0 else float(total_lines)
+    rpm_total = total_lines if total_lines > 0 else percentage_total
+
+    count_by_level, length_by_level, rpk_by_level, taxon_records = _aggregate_levels(
         resolver,
         taxid_weights,
         base_unclassified,
@@ -591,7 +797,12 @@ def process_file(input_files: Iterable[str], output_file: str) -> None:
 
     output_path = Path(output_file + ".tsv")
     with open(output_path, "w", encoding="utf-8") as outfile:
-        outfile.write(f"# total_reads={percentage_total:.6f} normalization=tpm\n")
+        outfile.write(
+            f"# raw_reads={total_lines} weighted_total={weighted_total:.6f} normalization=tpm "
+            f"global_em={'on' if global_em_applied else 'off'} "
+            f"length_norm={'on' if GLOBAL_LENGTH_NORMALIZATION else 'off'}\n"
+        )
+        outfile.write("# note: TPM is computed within each table independently\n")
         outfile.write(
             "Taxon\tReads\tRelative Abundance (%)\tReads per Million\tGenome Length (bp)\tRPK\tTPM\t"
             "Shannon Index\tSimpson Index\n"
@@ -620,21 +831,14 @@ def process_file(input_files: Iterable[str], output_file: str) -> None:
             if unclassified_item:
                 items.append(unclassified_item)
 
-            rpk_map: Dict[str, float] = {}
-            total_rpk_level = 0.0
-            for taxon, count in items:
-                length_val = length_by_level[level].get(taxon)
-                if length_val and length_val > 0:
-                    rpk_map[taxon] = count / (length_val / 1000)
-                    total_rpk_level += rpk_map[taxon]
-                else:
-                    rpk_map[taxon] = 0.0
+            rpk_counter = rpk_by_level[level]
+            total_rpk_level = sum(value for value in rpk_counter.values() if value > 0.0)
 
             for taxon, count in items:
                 relative_level = (count / total_count * 100) if total_count > 0 else 0.0
                 rpm = (count / rpm_total * 1_000_000) if rpm_total > 0 else 0.0
                 length_val = length_by_level[level].get(taxon)
-                rpk = rpk_map[taxon]
+                rpk = rpk_counter.get(taxon, 0.0)
                 tpm = (rpk / total_rpk_level * 1_000_000) if total_rpk_level > 0 and rpk > 0 else 0.0
                 length_str = str(int(length_val)) if length_val and length_val > 0 else ""
                 outfile.write(
