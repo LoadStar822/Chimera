@@ -22,6 +22,7 @@
 #include <future>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <sstream>
@@ -63,7 +64,9 @@ namespace ChimeraBuild {
 		{
 			capacity_ = capacity;
 			heap_.clear();
+			heap_.reserve(capacity_);
 			present_.clear();
+			present_.reserve(capacity_);
 		}
 
 		void insert(uint64_t value)
@@ -73,8 +76,7 @@ namespace ChimeraBuild {
 				return;
 			}
 
-			auto [_, inserted] = present_.insert(value);
-			if (!inserted)
+			if (present_.find(value) != present_.end())
 			{
 				return;
 			}
@@ -83,21 +85,22 @@ namespace ChimeraBuild {
 			{
 				heap_.push_back(value);
 				std::push_heap(heap_.begin(), heap_.end());
+				present_.insert(value);
 				return;
 			}
 
 			// Heap is full; keep the new value only if it is smaller than the current maximum.
 			if (value >= heap_.front())
 			{
-				present_.erase(value);
 				return;
 			}
 
 			const uint64_t removed = heap_.front();
+			present_.erase(removed);
 			std::pop_heap(heap_.begin(), heap_.end());
 			heap_.back() = value;
 			std::push_heap(heap_.begin(), heap_.end());
-			present_.erase(removed);
+			present_.insert(value);
 		}
 
 		void merge(const BottomKSampler& other)
@@ -554,6 +557,11 @@ namespace ChimeraBuild {
 	std::mutex hash_mutex;
 	std::mutex raw_mutex;
 	robin_hood::unordered_flat_map<std::string, fs::path> rawSampleFiles;
+	std::atomic<long long> sampling_file_ns{ 0 };
+	std::atomic<long long> sampling_hash_ns{ 0 };
+	std::atomic<uint64_t> sampling_seq_count{ 0 };
+	std::atomic<uint64_t> sampling_hash_total{ 0 };
+	std::atomic<uint64_t> sampling_hash_unique{ 0 };
 
 	auto write_vector_to_file = [](const fs::path& path, const std::vector<uint64_t>& data) {
 		std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
@@ -569,86 +577,127 @@ namespace ChimeraBuild {
 		}
 	};
 
-#pragma omp parallel for schedule(dynamic)
-	for (size_t taxIdx = 0; taxIdx < index_to_taxid.size(); ++taxIdx) {
-		const auto& taxid = index_to_taxid[taxIdx];
-		auto filesIt = inputFiles.find(taxid);
-		if (filesIt == inputFiles.end()) {
-			continue;
+#pragma omp parallel
+	{
+		chimera::syncmer::SyncmerRunner thread_runner{config.smer_size,
+		                                            config.kmer_size,
+		                                            syncmer_pos_span,
+		                                            syncmer_seed,
+		                                            true};
+		robin_hood::unordered_flat_set<uint64_t> thread_per_read;
+		if (max_hashes > 0)
+		{
+			thread_per_read.reserve(max_hashes);
 		}
-		const auto& files = filesIt->second;
+		long long thread_file_ns = 0;
+		long long thread_stream_ns = 0;
+		uint64_t thread_seq_count = 0;
+		uint64_t thread_hash_total = 0;
+		uint64_t thread_hash_unique = 0;
 
-		FileInfo localFileInfo{};
-		BottomKSampler sampler(max_hashes);
-		robin_hood::unordered_flat_set<uint64_t> perReadSeen;
-		if (max_hashes > 0) {
-			perReadSeen.reserve(max_hashes);
-		}
-		SpaceSaving localHeavy(enable_toxic_filter ? heavy_capacity : 0);
+#pragma omp for schedule(dynamic)
+		for (size_t taxIdx = 0; taxIdx < index_to_taxid.size(); ++taxIdx) {
+			const auto& taxid = index_to_taxid[taxIdx];
+			auto filesIt = inputFiles.find(taxid);
+			if (filesIt == inputFiles.end()) {
+				continue;
+			}
+			const auto& files = filesIt->second;
 
-		for (const auto& filename : files) {
-			try {
-				seqan3::sequence_file_input<raptor::dna4_traits,
-				                            seqan3::fields<seqan3::field::id, seqan3::field::seq>>
-				    fin{filename};
-				for (auto& record : fin) {
-					auto& seq = record.sequence();
-					if (seq.size() < config.min_length) {
-						localFileInfo.skippedSeqNum++;
-						continue;
+			FileInfo localFileInfo{};
+			BottomKSampler sampler(max_hashes);
+			SpaceSaving localHeavy(enable_toxic_filter ? heavy_capacity : 0);
+			long long local_file_ns = 0;
+			long long local_stream_ns = 0;
+			uint64_t local_seq_count = 0;
+			uint64_t local_hash_total = 0;
+			uint64_t local_hash_unique = 0;
+
+			for (const auto& filename : files) {
+				try {
+					auto file_begin = std::chrono::steady_clock::now();
+					seqan3::sequence_file_input<raptor::dna4_traits,
+					                            seqan3::fields<seqan3::field::id, seqan3::field::seq>>
+					    fin{filename};
+					for (auto& record : fin) {
+						auto& seq = record.sequence();
+						if (seq.size() < config.min_length) {
+							localFileInfo.skippedSeqNum++;
+							continue;
+						}
+						localFileInfo.sequenceNum++;
+						localFileInfo.bpLength += seq.size();
+						++local_seq_count;
+
+						thread_per_read.clear();
+						size_t emitted_total = 0;
+						size_t emitted_unique = 0;
+						auto stream_begin = std::chrono::steady_clock::now();
+						thread_runner.for_each(
+						    seq,
+						    [&](uint64_t hash) {
+							++emitted_total;
+							const bool inserted = thread_per_read.insert(hash).second;
+							if (inserted) {
+								++emitted_unique;
+								sampler.insert(hash);
+							}
+							if (enable_toxic_filter) {
+								localHeavy.add(hash);
+							}
+						    });
+						auto stream_end = std::chrono::steady_clock::now();
+						local_stream_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(stream_end - stream_begin).count();
+						local_hash_total += static_cast<uint64_t>(emitted_total);
+						local_hash_unique += static_cast<uint64_t>(emitted_unique);
 					}
-					localFileInfo.sequenceNum++;
-					localFileInfo.bpLength += seq.size();
-
-			perReadSeen.clear();
-			chimera::syncmer::stream_hashes(
-			    seq,
-			    config.smer_size,
-			    config.kmer_size,
-			    syncmer_pos_span,
-			    syncmer_seed,
-			    true,
-			    [&](uint64_t hash) {
-				if (perReadSeen.insert(hash).second) {
-					sampler.insert(hash);
-				}
-				if (enable_toxic_filter) {
-					localHeavy.add(hash);
-				}
-			    });
-			}
-		} catch (const std::exception& ex) {
+					auto file_end = std::chrono::steady_clock::now();
+					local_file_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(file_end - file_begin).count();
+				} catch (const std::exception& ex) {
 #pragma omp critical(syncmer_log)
-				std::cerr << "读取序列文件失败 " << filename << ": " << ex.what() << std::endl;
-				std::lock_guard<std::mutex> lock(fileInfo_mutex);
-				fileInfo.skippedNum++;
+					std::cerr << "读取序列文件失败 " << filename << ": " << ex.what() << std::endl;
+					std::lock_guard<std::mutex> lock(fileInfo_mutex);
+					fileInfo.skippedNum++;
+				}
 			}
+
+			auto values = sampler.release_sorted();
+			fs::path rawPath = make_temp_path(taxid, taxIdx);
+			write_vector_to_file(rawPath, values);
+
+			{
+				std::lock_guard<std::mutex> lock(hash_mutex);
+				hashCount[taxid] = static_cast<uint64_t>(values.size());
+			}
+			{
+				std::lock_guard<std::mutex> lock(raw_mutex);
+				rawSampleFiles.emplace(taxid, std::move(rawPath));
+			}
+
+			if (enable_toxic_filter && localHeavy.total_weight() > 0) {
+				std::lock_guard<std::mutex> heavy_lock(heavy_mutex);
+				globalHeavy.merge(localHeavy);
+			}
+
+			{
+				std::lock_guard<std::mutex> lock(fileInfo_mutex);
+				fileInfo.skippedSeqNum += localFileInfo.skippedSeqNum;
+				fileInfo.sequenceNum += localFileInfo.sequenceNum;
+				fileInfo.bpLength += localFileInfo.bpLength;
+			}
+
+			thread_file_ns += local_file_ns;
+			thread_stream_ns += local_stream_ns;
+			thread_seq_count += local_seq_count;
+			thread_hash_total += local_hash_total;
+			thread_hash_unique += local_hash_unique;
 		}
 
-		auto values = sampler.release_sorted();
-		fs::path rawPath = make_temp_path(taxid, taxIdx);
-		write_vector_to_file(rawPath, values);
-
-		{
-			std::lock_guard<std::mutex> lock(hash_mutex);
-			hashCount[taxid] = static_cast<uint64_t>(values.size());
-		}
-		{
-			std::lock_guard<std::mutex> lock(raw_mutex);
-			rawSampleFiles.emplace(taxid, std::move(rawPath));
-		}
-
-		if (enable_toxic_filter && localHeavy.total_weight() > 0) {
-			std::lock_guard<std::mutex> heavy_lock(heavy_mutex);
-			globalHeavy.merge(localHeavy);
-		}
-
-		{
-			std::lock_guard<std::mutex> lock(fileInfo_mutex);
-			fileInfo.skippedSeqNum += localFileInfo.skippedSeqNum;
-			fileInfo.sequenceNum += localFileInfo.sequenceNum;
-			fileInfo.bpLength += localFileInfo.bpLength;
-		}
+		sampling_file_ns.fetch_add(thread_file_ns, std::memory_order_relaxed);
+		sampling_hash_ns.fetch_add(thread_stream_ns, std::memory_order_relaxed);
+		sampling_seq_count.fetch_add(thread_seq_count, std::memory_order_relaxed);
+		sampling_hash_total.fetch_add(thread_hash_total, std::memory_order_relaxed);
+		sampling_hash_unique.fetch_add(thread_hash_unique, std::memory_order_relaxed);
 	}
 	const auto sampling_end = std::chrono::steady_clock::now();
 
@@ -869,6 +918,50 @@ sampledHashFiles.reserve(index_to_taxid.size());
 		const auto toxic_select_ms = std::chrono::duration_cast<std::chrono::milliseconds>(toxic_select_end - sampling_end).count();
 		const auto apply_ms = std::chrono::duration_cast<std::chrono::milliseconds>(apply_end - toxic_select_end).count();
 		const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(apply_end - sampling_start).count();
+		const long long file_ns_total = sampling_file_ns.load(std::memory_order_relaxed);
+		const long long stream_ns_total = sampling_hash_ns.load(std::memory_order_relaxed);
+		long long overhead_ns = file_ns_total - stream_ns_total;
+		if (overhead_ns < 0)
+		{
+			overhead_ns = 0;
+		}
+		if (file_ns_total > 0 || stream_ns_total > 0)
+		{
+			double wall_scale = 0.0;
+			if (file_ns_total > 0 && sampling_ms > 0)
+			{
+				wall_scale = static_cast<double>(sampling_ms) / static_cast<double>(file_ns_total);
+			}
+			long long stream_wall_ms = 0;
+			if (stream_ns_total > 0 && wall_scale > 0.0)
+			{
+				stream_wall_ms = static_cast<long long>(std::llround(static_cast<double>(stream_ns_total) * wall_scale));
+				if (stream_wall_ms > sampling_ms)
+				{
+					stream_wall_ms = sampling_ms;
+				}
+			}
+			long long overhead_wall_ms = sampling_ms - stream_wall_ms;
+			if (overhead_wall_ms < 0)
+			{
+				overhead_wall_ms = 0;
+			}
+			std::cout << "[syncmer] 序列读取+遍历耗时(墙钟): ";
+			print_build_time(sampling_ms);
+			std::cout << "[syncmer] syncmer 哈希耗时(墙钟估计): ";
+			print_build_time(stream_wall_ms);
+			if (overhead_wall_ms > 0)
+			{
+				std::cout << "[syncmer] 哈希外部逻辑耗时(墙钟估计): ";
+				print_build_time(overhead_wall_ms);
+			}
+			const uint64_t seq_total = sampling_seq_count.load(std::memory_order_relaxed);
+			const uint64_t hash_total = sampling_hash_total.load(std::memory_order_relaxed);
+			const uint64_t hash_unique = sampling_hash_unique.load(std::memory_order_relaxed);
+			std::cout << "[syncmer] 采样统计: 序列 "
+			          << seq_total << " 条，syncmer 总数 "
+			          << hash_total << "，去重复 " << hash_unique << std::endl;
+		}
 		std::cout << "[syncmer] 底层采样耗时: ";
 		print_build_time(sampling_ms);
 		std::cout << "[syncmer] 毒性候选筛选耗时: ";
