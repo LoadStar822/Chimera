@@ -103,7 +103,38 @@ def parse_arguments():
         help="Number of threads for building",
     )
     build_parser.add_argument(
-        "--load-factor", type=float, default=0.9, help="IMCF 滤器的负载因子"
+        "--load-factor", type=float, default=0.85, help="IMCF 滤器的负载因子"
+    )
+    build_parser.add_argument(
+        "--toxic-quantile",
+        type=float,
+        default=0.999,
+        help="过滤高频 syncmer 的分位阈值 (0-1]",
+    )
+    build_parser.add_argument(
+        "--toxic-topN",
+        dest="toxic_topn",
+        type=int,
+        default=0,
+        help="优先剔除全库计数前 N 的 hash",
+    )
+    build_parser.add_argument(
+        "--toxic-min-fraction",
+        type=float,
+        default=0.0001,
+        help="毒性候选的最低全库占比",
+    )
+    build_parser.add_argument(
+        "--toxic-safety-frac",
+        type=float,
+        default=0.1,
+        help="每个 taxid 最少保留比例",
+    )
+    build_parser.add_argument(
+        "--toxic-safety-min",
+        type=int,
+        default=1024,
+        help="每个 taxid 最少保留数量",
     )
     build_parser.add_argument(
         "-M",
@@ -172,7 +203,38 @@ def parse_arguments():
         help="Number of threads for building",
     )
     download_build_parser.add_argument(
-        "--load-factor", type=float, default=0.9, help="IMCF 滤器的负载因子"
+        "--load-factor", type=float, default=0.85, help="IMCF 滤器的负载因子"
+    )
+    download_build_parser.add_argument(
+        "--toxic-quantile",
+        type=float,
+        default=0.999,
+        help="过滤高频 syncmer 的分位阈值 (0-1]",
+    )
+    download_build_parser.add_argument(
+        "--toxic-topN",
+        dest="toxic_topn",
+        type=int,
+        default=0,
+        help="优先剔除全库计数前 N 的 hash",
+    )
+    download_build_parser.add_argument(
+        "--toxic-min-fraction",
+        type=float,
+        default=0.0001,
+        help="毒性候选的最低全库占比",
+    )
+    download_build_parser.add_argument(
+        "--toxic-safety-frac",
+        type=float,
+        default=0.1,
+        help="每个 taxid 最少保留比例",
+    )
+    download_build_parser.add_argument(
+        "--toxic-safety-min",
+        type=int,
+        default=1024,
+        help="每个 taxid 最少保留数量",
     )
     download_build_parser.add_argument(
         "-M",
@@ -238,7 +300,7 @@ def parse_arguments():
         "--first-filter-beta",
         type=float,
         default=None,
-        help="Beta multiplier for first-stage filter (default 0.75)",
+        help="Beta multiplier for first-stage filter (default 0.80)",
     )
     classify_parser.add_argument(
         "--pre-em-topk",
@@ -381,6 +443,26 @@ def parse_arguments():
         window_span = args.kmer - args.syncmer_s + 1
         if args.syncmer_pos < 0 or args.syncmer_pos >= window_span:
             parser.error("--syncmer-pos must satisfy 0 <= pos < k - s + 1")
+        if args.toxic_topn < 0:
+            parser.error("--toxic-topN 必须为非负整数")
+        if args.toxic_topn == 0:
+            if not (0 < args.toxic_quantile <= 1.0):
+                parser.error(
+                    "当未指定 --toxic-topN 时，--toxic-quantile 必须落在 (0, 1] 区间"
+                )
+        else:
+            if not (0 <= args.toxic_quantile <= 1.0):
+                parser.error("--toxic-quantile 必须落在 [0, 1] 区间")
+            if args.toxic_quantile == 0:
+                args.toxic_quantile = 1.0
+        for value, name in [
+            (args.toxic_min_fraction, "--toxic-min-fraction"),
+            (args.toxic_safety_frac, "--toxic-safety-frac"),
+        ]:
+            if not (0.0 <= value <= 1.0):
+                parser.error(f"{name} 必须落在 [0, 1] 区间")
+        if args.toxic_safety_min < 0:
+            parser.error("--toxic-safety-min 必须为非负整数")
 
     return args
 
@@ -449,10 +531,15 @@ def run_chimera(args, chimera_path):
         command.extend(["-l", str(args.min_length)])
         command.extend(["-t", str(args.threads)])
         command.extend(["--load-factor", str(args.load_factor)])
+        command.extend(["--toxic-quantile", str(args.toxic_quantile)])
+        command.extend(["--toxic-topN", str(args.toxic_topn)])
+        command.extend(["--toxic-min-fraction", str(args.toxic_min_fraction)])
+        command.extend(["--toxic-safety-frac", str(args.toxic_safety_frac)])
+        command.extend(["--toxic-safety-min", str(args.toxic_safety_min)])
+        command.extend(["-M", str(args.max_hashes)])
         command.extend(["-f", args.filter])
         if args.adaptive_cutoff:
             command.append("--adaptive-cutoff")
-        command.extend(["-M", str(args.max_hashes)])
         if args.quiet:
             command.append("-q")
 

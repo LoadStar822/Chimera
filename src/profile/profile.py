@@ -225,12 +225,15 @@ def _collect_taxid_weights(
                     continue
                 sum_weight = sum(weight for _, weight in cleaned)
                 if sum_weight > 0.0:
-                    scale = min(1.0, sum_weight)
-                    if scale != sum_weight:
-                        factor = scale / sum_weight
+                    if sum_weight > 1.0:
+                        factor = 1.0 / sum_weight
                         candidate_weights = [(taxid, weight * factor) for taxid, weight in cleaned]
                     else:
-                        candidate_weights = cleaned
+                        if not has_unclassified:
+                            factor = 1.0 / sum_weight
+                            candidate_weights = [(taxid, weight * factor) for taxid, weight in cleaned]
+                        else:
+                            candidate_weights = cleaned
                 else:
                     candidate_weights = []
                 if not candidate_weights:
@@ -254,6 +257,21 @@ def _effective_length(length_bp: Optional[int], *, min_length: int = GLOBAL_MIN_
         return None
     floor = float(min_length)
     return max(float(length_bp), floor) / 1000.0
+
+
+def _is_viral_lineage(resolver: Optional[TaxonomyResolver], taxid: int) -> bool:
+    if resolver is None or taxid <= 0:
+        return False
+    lineage = resolver.get_lineage(taxid)
+    for record in lineage:
+        name_lower = (record.name or "").lower()
+        if record.taxid == 10239:
+            return True
+        if record.rank in ("realm", "clade") and name_lower.endswith("viria"):
+            return True
+        if "virus" in name_lower or "viroid" in name_lower:
+            return True
+    return False
 
 
 def _run_global_em(
@@ -308,11 +326,7 @@ def _run_global_em(
         min_floor = GLOBAL_MIN_LENGTH_BP
         if resolver and length_bp < GLOBAL_MIN_LENGTH_BP:
             if taxid not in viral_cache:
-                lineage = resolver.get_lineage(taxid)
-                viral_cache[taxid] = any(
-                    "virus" in (record.name or "").lower() or "viroid" in (record.name or "").lower()
-                    for record in lineage
-                )
+                viral_cache[taxid] = _is_viral_lineage(resolver, taxid)
             if viral_cache.get(taxid):
                 min_floor = GLOBAL_MIN_VIRAL_LENGTH_BP
         scale = _effective_length(length_bp, min_length=min_floor)
@@ -744,7 +758,7 @@ def process_file(input_files: Iterable[str], output_file: str) -> None:
         per_read_candidates = None
 
     weighted_total = sum(taxid_weights.values()) + base_unclassified
-    percentage_total = weighted_total if weighted_total > 0 else float(total_lines)
+    percentage_total = float(total_lines) if total_lines > 0 else weighted_total
     rpm_total = total_lines if total_lines > 0 else percentage_total
 
     count_by_level, length_by_level, rpk_by_level, taxon_records = _aggregate_levels(
