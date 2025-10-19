@@ -177,6 +177,14 @@ int main(int argc, char **argv) {
                    "构建使用的滤器类型 (imcf)")
       ->check(CLI::IsMember({"imcf"}))
       ->default_val("imcf");
+  build
+      ->add_option("--taxonomy-kind", buildConfig.taxonomy_kind,
+                   "taxonomy 数据源 (ncbi/gtdb 等)")
+      ->default_val("auto");
+  build
+      ->add_option("--taxonomy-version", buildConfig.taxonomy_version,
+                   "taxonomy 数据版本标识，例如 ncbi-taxdump-2025-09-15 或 gtdb-rs226")
+      ->default_val("auto");
   build->add_flag("-q,--quiet", buildConfig.verbose, "Quiet output")
       ->default_val(true)
       ->disable_flag_override();
@@ -282,6 +290,14 @@ int main(int argc, char **argv) {
                    "分类使用的滤器类型 (imcf)")
       ->default_val("imcf")
       ->check(CLI::IsMember({"imcf"}));
+  classify
+      ->add_option("--taxonomy-kind", classifyConfig.taxonomyKind,
+                   "期望的 taxonomy 数据源 (ncbi/gtdb 等)")
+      ->default_val("auto");
+  classify
+      ->add_option("--taxonomy-version", classifyConfig.taxonomyVersion,
+                   "期望的 taxonomy 数据版本号，例如 ncbi-taxdump-2025-09-15")
+      ->default_val("auto");
   classify
       ->add_option("-b,--batch-size", classifyConfig.batchSize,
                    "Batch size for classifying")

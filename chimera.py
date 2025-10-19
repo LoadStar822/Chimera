@@ -360,9 +360,15 @@ def parse_arguments():
     classify_parser.add_argument(
         "--evidence-override",
         dest="evidence_override",
-        action=argparse.BooleanOptionalAction,
+        action="store_true",
         default=None,
         help="Allow strong pre-EM evidence to bypass posterior filter",
+    )
+    classify_parser.add_argument(
+        "--no-evidence-override",
+        dest="evidence_override",
+        action="store_false",
+        help="Disable the evidence override heuristic",
     )
     classify_parser.add_argument(
         "--output-posterior",

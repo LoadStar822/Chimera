@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cmath>
 #include <array>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -609,7 +610,8 @@ IMCFIndexStatus
 loadFilter(const std::string &input_file,
            chimera::imcf::InterleavedMergedCuckooFilter &imcf,
            ChimeraBuild::IMCFConfig &imcfConfig,
-           std::vector<std::vector<std::string>> &indexToTaxid) {
+           std::vector<std::vector<std::string>> &indexToTaxid,
+           ClassifyConfig &expectedConfig) {
   namespace fs = std::filesystem;
   using Clock = std::chrono::steady_clock;
 
@@ -671,6 +673,45 @@ loadFilter(const std::string &input_file,
         "IMCF 数据库指纹盐值与当前实现不一致，检测到 fp_salt=" +
         std::to_string(imcfConfig.fpSalt) +
         "，请重新构建数据库或升级程序。");
+  }
+  auto to_lower = [](std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return value;
+  };
+  std::string storedKind = to_lower(imcfConfig.taxonomyKind);
+  if (storedKind.empty()) {
+    storedKind = "ncbi";
+  }
+  std::string expectedKind = to_lower(expectedConfig.taxonomyKind);
+  const bool kindAuto = expectedKind.empty() || expectedKind == "auto";
+  if (kindAuto) {
+    expectedConfig.taxonomyKind = storedKind;
+  } else if (!storedKind.empty() && storedKind != expectedKind) {
+    throw std::runtime_error(
+        "IMCF taxonomy_kind 不匹配，数据库记录为 '" + imcfConfig.taxonomyKind +
+        "'，当前运行期望 '" + expectedConfig.taxonomyKind +
+        "'。请确认使用的数据库与分类参数一致。");
+  }
+
+  std::string storedVersion = imcfConfig.taxonomyVersion;
+  if (storedVersion.empty()) {
+    storedVersion = (storedKind == "gtdb") ? "gtdb-unknown" : "ncbi-taxdump";
+    imcfConfig.taxonomyVersion = storedVersion;
+  }
+  std::string expectedVersion = expectedConfig.taxonomyVersion;
+  const bool versionAuto = expectedVersion.empty() || expectedVersion == "auto";
+  if (versionAuto) {
+    expectedConfig.taxonomyVersion = storedVersion;
+  } else if (!storedVersion.empty() && storedVersion != expectedVersion) {
+    throw std::runtime_error(
+        "IMCF taxonomy_version 不匹配，数据库记录为 '" + imcfConfig.taxonomyVersion +
+        "'，当前运行期望 '" + expectedConfig.taxonomyVersion +
+        "'。请确认使用相同版本的 taxonomy 数据。");
+  }
+  if (expectedConfig.verbose && (kindAuto || versionAuto)) {
+    std::cout << "Using taxonomy: kind=" << expectedConfig.taxonomyKind
+              << ", version=" << expectedConfig.taxonomyVersion << std::endl;
   }
   auto timed = [](auto &&fn) {
     auto start = Clock::now();
@@ -2311,7 +2352,7 @@ void run(ClassifyConfig config) {
     chimera::imcf::InterleavedMergedCuckooFilter imcf;
     ChimeraBuild::IMCFConfig imcfConfig;
     auto indexStatus =
-        loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid);
+        loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid, config);
     if (indexStatus.builtActive) {
       rebuildActiveMs = indexStatus.activeMs;
       std::cout

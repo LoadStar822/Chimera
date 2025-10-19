@@ -62,3 +62,4 @@ CMakePresets.json
 .clang-format
 bench/atcc_pipeline.py
 bench/__pycache__/atcc_pipeline.cpython-311.pyc
+chimera_trace.log

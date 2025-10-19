@@ -39,16 +39,17 @@ GLOBAL_MIN_VIRAL_LENGTH_BP = 200
 
 @dataclass
 class TaxonRecord:
-    taxid: int
-    parent: Optional[int]
+    taxid: str
+    parent: Optional[str]
     rank: str
     name: str
 
 
 class TaxonomyResolver:
     def __init__(self, tax_info: Optional[Path] = None) -> None:
-        self._records: Dict[int, TaxonRecord] = {}
+        self._records: Dict[str, TaxonRecord] = {}
         self._ncbi: Optional[Any] = None
+        self._gtdb_style = False
         if tax_info and tax_info.exists():
             self._load_tax_info(tax_info)
         if NCBITaxa is not None:
@@ -63,30 +64,63 @@ class TaxonomyResolver:
                 parts = line.rstrip("\n").split("\t")
                 if len(parts) != 4:
                     continue
-                try:
-                    taxid = int(parts[0])
-                    parent = int(parts[1]) if parts[1] else None
-                except ValueError:
+                taxid = parts[0].strip()
+                if not taxid:
                     continue
+                parent_raw = parts[1].strip()
+                parent = parent_raw if parent_raw else None
                 rank = parts[2].lower()
                 name = parts[3]
+                if not self._gtdb_style and taxid[:3].lower() in {"s__", "g__", "f__", "o__", "c__", "p__", "d__", "r__", "k__", "a__"}:
+                    self._gtdb_style = True
                 self._records[taxid] = TaxonRecord(
                     taxid=taxid,
-                    parent=parent if parent and parent > 0 else None,
+                    parent=parent if parent and parent != taxid else None,
                     rank=rank,
                     name=name,
                 )
 
-    def get_lineage(self, taxid: int) -> List[TaxonRecord]:
-        if taxid <= 0:
+    def get_lineage(self, taxid: str) -> List[TaxonRecord]:
+        if not taxid:
             return []
+        lineage: List[TaxonRecord] = []
         if self._records:
             lineage = self._lineage_from_records(taxid)
             if lineage and lineage[-1].taxid == taxid:
                 return lineage
-        return self._lineage_from_ncbi(taxid)
+            if self._gtdb_style and "__" in taxid:
+                prefix, _, name = taxid.partition("__")
+                prefix = prefix.lower()
+                fallback_order = {
+                    "s": "g",
+                    "g": "f",
+                    "f": "o",
+                    "o": "c",
+                    "c": "p",
+                    "p": "d",
+                    "d": "r",
+                    "r": "k",
+                    "k": "a"
+                }
+                visited = set()
+                while prefix in fallback_order and name:
+                    prefix = fallback_order[prefix]
+                    candidate = f"{prefix}__{name}"
+                    if candidate in visited:
+                        break
+                    visited.add(candidate)
+                    lineage = self._lineage_from_records(candidate)
+                    if lineage and lineage[-1].taxid == candidate:
+                        return lineage
+        if self._ncbi is not None:
+            try:
+                numeric_taxid = int(taxid)
+            except (ValueError, TypeError):
+                return lineage
+            return self._lineage_from_ncbi(numeric_taxid)
+        return lineage
 
-    def _lineage_from_records(self, taxid: int) -> List[TaxonRecord]:
+    def _lineage_from_records(self, taxid: str) -> List[TaxonRecord]:
         lineage: List[TaxonRecord] = []
         current = taxid
         seen = set()
@@ -111,12 +145,13 @@ class TaxonomyResolver:
         except Exception:
             return []
         records: List[TaxonRecord] = []
-        parent: Optional[int] = None
+        parent: Optional[str] = None
         for node in lineage:
             rank = (rank_map.get(node) or "").lower()
             name = name_map.get(node) or ""
-            records.append(TaxonRecord(taxid=node, parent=parent, rank=rank, name=name))
-            parent = node
+            node_str = str(node)
+            records.append(TaxonRecord(taxid=node_str, parent=parent, rank=rank, name=name))
+            parent = node_str
         return records
 
     def has_taxonomy(self) -> bool:
@@ -164,14 +199,14 @@ def calculate_simpson_index(taxon_dict: Dict[str, float]) -> float:
     return 1.0 - simpson_index
 
 
-def _parse_taxid_weights(line: str) -> Tuple[List[Tuple[int, float]], bool]:
+def _parse_taxid_weights(line: str) -> Tuple[List[Tuple[str, float]], bool]:
     line = line.strip()
     if not line:
         return [], False
     parts = [token.strip() for token in line.split("\t") if token.strip()]
     if len(parts) < 2:
         return [], False
-    items: List[Tuple[int, float]] = []
+    items: List[Tuple[str, float]] = []
     has_unclassified = False
     for token in parts[1:]:
         if not token:
@@ -186,9 +221,8 @@ def _parse_taxid_weights(line: str) -> Tuple[List[Tuple[int, float]], bool]:
             taxid_token, weight_token = token.split(":", 1)
         else:
             taxid_token, weight_token = token, ""
-        try:
-            taxid = int(taxid_token)
-        except ValueError:
+        taxid = taxid_token.strip()
+        if not taxid:
             continue
         if weight_token:
             try:
@@ -204,17 +238,17 @@ def _parse_taxid_weights(line: str) -> Tuple[List[Tuple[int, float]], bool]:
 def _collect_taxid_weights(
     input_files: Iterable[str],
     keep_per_read: bool = False,
-) -> Tuple[Dict[int, float], float, int, Optional[List[List[Tuple[int, float]]]]]:
-    taxid_weights: Dict[int, float] = defaultdict(float)
+) -> Tuple[Dict[str, float], float, int, Optional[List[List[Tuple[str, float]]]]]:
+    taxid_weights: Dict[str, float] = defaultdict(float)
     unclassified_reads = 0.0
     total_lines = 0
-    per_read: Optional[List[List[Tuple[int, float]]]] = [] if keep_per_read else None
+    per_read: Optional[List[List[Tuple[str, float]]]] = [] if keep_per_read else None
     for input_file in input_files:
         with open(input_file, "r", errors="ignore") as infile:
             for line in infile:
                 total_lines += 1
                 items, has_unclassified = _parse_taxid_weights(line)
-                cleaned: List[Tuple[int, float]] = []
+                cleaned: List[Tuple[str, float]] = []
                 for taxid, weight in items:
                     if math.isnan(weight) or weight <= 0.0:
                         continue
@@ -259,13 +293,13 @@ def _effective_length(length_bp: Optional[int], *, min_length: int = GLOBAL_MIN_
     return max(float(length_bp), floor) / 1000.0
 
 
-def _is_viral_lineage(resolver: Optional[TaxonomyResolver], taxid: int) -> bool:
-    if resolver is None or taxid <= 0:
+def _is_viral_lineage(resolver: Optional[TaxonomyResolver], taxid: str) -> bool:
+    if resolver is None or not taxid:
         return False
     lineage = resolver.get_lineage(taxid)
     for record in lineage:
         name_lower = (record.name or "").lower()
-        if record.taxid == 10239:
+        if record.taxid == "10239":
             return True
         if record.rank in ("realm", "clade") and name_lower.endswith("viria"):
             return True
@@ -275,17 +309,17 @@ def _is_viral_lineage(resolver: Optional[TaxonomyResolver], taxid: int) -> bool:
 
 
 def _run_global_em(
-    per_read_candidates: Sequence[Sequence[Tuple[int, float]]],
-    initial_weights: Dict[int, float],
-    tax_lengths: Optional[Dict[int, int]] = None,
+    per_read_candidates: Sequence[Sequence[Tuple[str, float]]],
+    initial_weights: Dict[str, float],
+    tax_lengths: Optional[Dict[str, int]] = None,
     resolver: Optional[TaxonomyResolver] = None,
     max_iter: int = GLOBAL_EM_MAX_ITER,
     tol: float = GLOBAL_EM_TOL,
-) -> Dict[int, float]:
+) -> Dict[str, float]:
     total_weight = sum(initial_weights.values())
     if total_weight <= 0.0:
         return dict(initial_weights)
-    pi: Dict[int, float] = {}
+    pi: Dict[str, float] = {}
     epsilon = 1e-12
     for taxid, weight in initial_weights.items():
         if weight > 0.0:
@@ -311,10 +345,10 @@ def _run_global_em(
     if dirichlet_alpha < 0.0:
         dirichlet_alpha = 0.0
 
-    length_scale_cache: Dict[int, Optional[float]] = {}
-    viral_cache: Dict[int, bool] = {}
+    length_scale_cache: Dict[str, Optional[float]] = {}
+    viral_cache: Dict[str, bool] = {}
 
-    def _resolve_length_scale(taxid: int) -> Optional[float]:
+    def _resolve_length_scale(taxid: str) -> Optional[float]:
         if not tax_lengths:
             return None
         if taxid in length_scale_cache:
@@ -335,10 +369,10 @@ def _run_global_em(
 
     for _ in range(max_iter):
         alpha_sum = dirichlet_alpha * len(pi)
-        new_pi: Dict[int, float] = defaultdict(float)
+        new_pi: Dict[str, float] = defaultdict(float)
         total_responsibility = 0.0
         for read in per_read_candidates:
-            tmp: List[Tuple[int, float]] = []
+            tmp: List[Tuple[str, float]] = []
             denom = 0.0
             for taxid, weight in read:
                 if weight <= 0.0 or math.isnan(weight):
@@ -457,7 +491,7 @@ def _append_unique(paths: List[Path], candidate: Path) -> None:
 
 def _find_metadata_paths(
     input_files: Sequence[str],
-) -> Tuple[Optional[Path], List[Path], List[Path], Dict[int, int]]:
+) -> Tuple[Optional[Path], List[Path], List[Path], Dict[str, int]]:
     seen_dirs: Set[Path] = set()
     dir_queue: List[Path] = []
 
@@ -487,7 +521,7 @@ def _find_metadata_paths(
     tax_info_path: Optional[Path] = None
     assembly_paths: List[Path] = []
     target_paths: List[Path] = []
-    length_overrides: Dict[int, int] = {}
+    length_overrides: Dict[str, int] = {}
     processed_snapshots: Set[Path] = set()
 
     index = 0
@@ -554,8 +588,10 @@ def _find_metadata_paths(
             lengths = data.get("taxid_lengths")
             if isinstance(lengths, dict):
                 for key, value in lengths.items():
+                    taxid = str(key).strip()
+                    if not taxid:
+                        continue
                     try:
-                        taxid = int(key)
                         length_val = int(value)
                     except (TypeError, ValueError):
                         continue
@@ -565,17 +601,16 @@ def _find_metadata_paths(
     return tax_info_path, assembly_paths, target_paths, length_overrides
 
 
-def _load_target_accessions(target_paths: Sequence[Path]) -> Dict[int, List[str]]:
-    mapping: Dict[int, List[str]] = defaultdict(list)
+def _load_target_accessions(target_paths: Sequence[Path]) -> Dict[str, List[str]]:
+    mapping: Dict[str, List[str]] = defaultdict(list)
     for path in target_paths:
         with open(path, "r", encoding="utf-8", errors="ignore") as infile:
             for line in infile:
                 parts = line.rstrip("\n").split("\t")
                 if len(parts) < 2:
                     continue
-                try:
-                    taxid = int(parts[1])
-                except ValueError:
+                taxid = parts[1].strip()
+                if not taxid:
                     continue
                 accession = Path(parts[0]).name
                 if accession.endswith(".gz"):
@@ -591,8 +626,8 @@ def _load_target_accessions(target_paths: Sequence[Path]) -> Dict[int, List[str]
     return mapping
 
 
-def _load_genome_lengths(assembly_paths: Sequence[Path]) -> Tuple[Dict[int, int], Dict[str, int]]:
-    length_by_taxid: Dict[int, int] = defaultdict(int)
+def _load_genome_lengths(assembly_paths: Sequence[Path]) -> Tuple[Dict[str, int], Dict[str, int]]:
+    length_by_taxid: Dict[str, int] = defaultdict(int)
     length_by_accession: Dict[str, int] = {}
     seen_accessions = set()
     for path in assembly_paths:
@@ -608,9 +643,12 @@ def _load_genome_lengths(assembly_paths: Sequence[Path]) -> Tuple[Dict[int, int]
                     continue
                 seen_accessions.add(accession)
                 try:
-                    taxid = int(row[5])
+                    taxid_raw = row[5]
                     length = int(float(row[25]))
                 except (ValueError, IndexError):
+                    continue
+                taxid = str(taxid_raw).strip()
+                if not taxid:
                     continue
                 if length <= 0:
                     continue
@@ -620,9 +658,9 @@ def _load_genome_lengths(assembly_paths: Sequence[Path]) -> Tuple[Dict[int, int]
 
 
 def _resolve_length(
-    taxid: int,
-    tax_lengths: Dict[int, int],
-    accession_map: Dict[int, List[str]],
+    taxid: str,
+    tax_lengths: Dict[str, int],
+    accession_map: Dict[str, List[str]],
     accession_lengths: Dict[str, int],
 ) -> Optional[int]:
     if accession_map:
@@ -650,16 +688,16 @@ def _format_count(value: float) -> str:
 
 def _aggregate_levels(
     resolver: TaxonomyResolver,
-    taxid_weights: Dict[int, float],
+    taxid_weights: Dict[str, float],
     base_unclassified: float,
-    tax_lengths: Dict[int, int],
-    accession_map: Dict[int, List[str]],
+    tax_lengths: Dict[str, int],
+    accession_map: Dict[str, List[str]],
     accession_lengths: Dict[str, int],
 ) -> Tuple[
     Dict[str, Dict[str, float]],
     Dict[str, Dict[str, float]],
     Dict[str, Dict[str, float]],
-    Dict[int, TaxonRecord],
+    Dict[str, TaxonRecord],
 ]:
     count_by_level: Dict[str, Dict[str, float]] = {
         level: defaultdict(float) for level in LEVEL_ALIASES
@@ -670,11 +708,12 @@ def _aggregate_levels(
     rpk_by_level: Dict[str, Dict[str, float]] = {
         level: defaultdict(float) for level in LEVEL_ALIASES
     }
-    taxon_records: Dict[int, TaxonRecord] = {}
+    taxon_records: Dict[str, TaxonRecord] = {}
 
     if base_unclassified:
         for level in count_by_level:
-            count_by_level[level][UNCLASSIFIED] += base_unclassified
+            current = count_by_level[level].get(UNCLASSIFIED, 0.0)
+            count_by_level[level][UNCLASSIFIED] = current + base_unclassified
 
     for taxid, count in taxid_weights.items():
         if count <= 0.0:
@@ -682,11 +721,12 @@ def _aggregate_levels(
         lineage = resolver.get_lineage(taxid)
         if not lineage:
             for level in count_by_level:
-                count_by_level[level][UNCLASSIFIED] += count
+                current = count_by_level[level].get(UNCLASSIFIED, 0.0)
+                count_by_level[level][UNCLASSIFIED] = current + count
             continue
 
         has_level = {level: False for level in LEVEL_ALIASES}
-        hits: Dict[str, List[Tuple[int, str]]] = {level: [] for level in LEVEL_ALIASES}
+        hits: Dict[str, List[Tuple[str, str]]] = {level: [] for level in LEVEL_ALIASES}
 
         for record in lineage:
             normalized = _normalize_rank(record.rank)
@@ -717,7 +757,8 @@ def _aggregate_levels(
             if hits[level]:
                 continue
             if _should_mark_unclassified(level, has_level):
-                count_by_level[level][UNCLASSIFIED] += count
+                current = count_by_level[level].get(UNCLASSIFIED, 0.0)
+                count_by_level[level][UNCLASSIFIED] = current + count
 
     return count_by_level, length_by_level, rpk_by_level, taxon_records
 
@@ -772,7 +813,7 @@ def process_file(input_files: Iterable[str], output_file: str) -> None:
 
     level_totals = {level: sum(counter.values()) for level, counter in count_by_level.items()}
 
-    taxa_rows: List[Tuple[int, str, str, float, float, float, Optional[int], float]] = []
+    taxa_rows: List[Tuple[str, str, str, float, float, float, Optional[int], float]] = []
     for taxid, count in taxid_weights.items():
         record = taxon_records.get(taxid)
         name = record.name if record and record.name else str(taxid)

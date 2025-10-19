@@ -37,6 +37,8 @@
 #include <mutex>
 #include <span>
 #include <cstdint>
+#include <fstream>
+#include <optional>
 
 #include <utils/Syncmer.hpp>
 
@@ -47,11 +49,104 @@ namespace ChimeraBuild {
 		return XXH3_64bits(&value, sizeof(value));
 	}
 
+	struct TaxonomyMetadataInfo {
+		std::string kind;
+		std::string version;
+		fs::path source;
+	};
+
+	static std::string trim_copy(const std::string& text)
+	{
+		auto begin = text.begin();
+		auto end = text.end();
+		auto is_space = [](unsigned char ch) { return std::isspace(ch) != 0; };
+		begin = std::find_if_not(begin, end, is_space);
+		if (begin == end)
+		{
+			return std::string{};
+		}
+		auto rbegin = std::find_if_not(std::make_reverse_iterator(end), std::make_reverse_iterator(begin), is_space);
+		return std::string(begin, rbegin.base());
+	}
+
+	static std::optional<TaxonomyMetadataInfo> load_taxonomy_metadata_file(const fs::path& candidate)
+	{
+		std::ifstream meta(candidate);
+		if (!meta.is_open())
+		{
+			return std::nullopt;
+		}
+		TaxonomyMetadataInfo info{};
+		info.source = candidate;
+		std::string line;
+		while (std::getline(meta, line))
+		{
+			auto pos = line.find('=');
+			if (pos == std::string::npos)
+			{
+				continue;
+			}
+			std::string key = trim_copy(line.substr(0, pos));
+			std::string value = trim_copy(line.substr(pos + 1));
+			if (key == "taxonomy_kind" && !value.empty())
+			{
+				info.kind = value;
+			}
+			else if (key == "taxonomy_version" && !value.empty())
+			{
+				info.version = value;
+			}
+		}
+		if (info.kind.empty() && info.version.empty())
+		{
+			return std::nullopt;
+		}
+		return info;
+	}
+
+	static std::optional<TaxonomyMetadataInfo> locate_taxonomy_metadata(const fs::path& datasetRoot)
+	{
+		std::vector<fs::path> candidates = {
+			datasetRoot / "taxonomy.meta",
+			datasetRoot / "taxonomy.meta.txt",
+			datasetRoot / "taxonomy.meta.json"
+		};
+		fs::path parent = datasetRoot.has_parent_path() ? datasetRoot.parent_path() : fs::path{};
+		if (!parent.empty())
+		{
+			candidates.push_back(parent / "taxonomy.meta");
+		}
+		for (const auto& candidate : candidates)
+		{
+			if (candidate.empty())
+			{
+				continue;
+			}
+			auto info = load_taxonomy_metadata_file(candidate);
+			if (info)
+			{
+				return info;
+			}
+		}
+		return std::nullopt;
+	}
+
 	struct TaxidShardPlan {
 		size_t groupIndex;
 		size_t slotIndex;
 		uint64_t expectedCount;
 	};
+
+	static fs::path canonical_path(const fs::path& path)
+	{
+		std::error_code ec;
+		fs::path resolved = fs::weakly_canonical(path, ec);
+		if (ec)
+		{
+			return fs::absolute(path);
+		}
+		return resolved;
+	}
 
 	class BottomKSampler {
 	public:
@@ -1614,19 +1709,10 @@ void writeProfileSnapshot(
 			return subject.generic_string();
 		};
 
-		auto canonical = [](const fs::path& path) -> fs::path {
-			std::error_code ec;
-			fs::path resolved = fs::weakly_canonical(path, ec);
-			if (ec)
-			{
-				return fs::absolute(path);
-			}
-			return resolved;
-		};
+	fs::path inputPath = canonical_path(config.input_file);
+	fs::path datasetRoot = inputPath.has_parent_path() ? inputPath.parent_path() : snapshotDir;
+	datasetRoot = canonical_path(datasetRoot);
 
-		fs::path inputPath = canonical(config.input_file);
-		fs::path datasetRoot = inputPath.has_parent_path() ? inputPath.parent_path() : snapshotDir;
-		datasetRoot = canonical(datasetRoot);
 
 		auto locate_file = [&](const std::vector<fs::path>& candidates) -> fs::path {
 			for (const auto& candidate : candidates)
@@ -1634,7 +1720,7 @@ void writeProfileSnapshot(
 				std::error_code existsEc;
 				if (fs::exists(candidate, existsEc))
 				{
-					return canonical(candidate);
+					return canonical_path(candidate);
 				}
 			}
 			return {};
@@ -1643,8 +1729,8 @@ void writeProfileSnapshot(
 		fs::path taxInfoPath = locate_file({ datasetRoot / "tax.info" });
 		fs::path assemblyPath = locate_file({ datasetRoot / "assembly_summary.txt", datasetRoot.parent_path() / "assembly_summary.txt" });
 
-		fs::path imcfPath = canonical(outputBase.string() + ".imcf");
-		fs::path imcfIndexPath = canonical(outputBase.string() + ".imcf.idx");
+		fs::path imcfPath = canonical_path(outputBase.string() + ".imcf");
+		fs::path imcfIndexPath = canonical_path(outputBase.string() + ".imcf.idx");
 
 		std::string datasetRelative = relOrAbs(datasetRoot, snapshotDir);
 		std::string datasetAbsolute = datasetRoot.generic_string();
@@ -1700,6 +1786,10 @@ void writeProfileSnapshot(
 		oss << "    \"assembly_summary\": {\n";
 		oss << "      \"relative\": " << (assemblyRelative.empty() ? "null" : ("\"" + json_escape(assemblyRelative) + "\"")) << ",\n";
 		oss << "      \"absolute\": " << (assemblyAbsolute.empty() ? "null" : ("\"" + json_escape(assemblyAbsolute) + "\"")) << "\n";
+		oss << "    },\n";
+		oss << "    \"taxonomy\": {\n";
+		oss << "      \"kind\": \"" << json_escape(config.taxonomy_kind) << "\",\n";
+		oss << "      \"version\": \"" << json_escape(config.taxonomy_version) << "\"\n";
 		oss << "    },\n";
 		oss << "    \"imcf\": {\n";
 		oss << "      \"relative\": \"" << json_escape(imcfRelative) << "\",\n";
@@ -1797,8 +1887,107 @@ void writeProfileSnapshot(
 	robin_hood::unordered_flat_map<std::string, uint64_t> taxidLengths;
 	robin_hood::unordered_flat_map<std::string, std::filesystem::path> sampledHashFiles;
 	robin_hood::unordered_flat_map<std::string, std::vector<std::string>> inputFiles;
-		parseInputFile(config.input_file, inputFiles, hashCount, fileInfo);
-		auto read_end = std::chrono::high_resolution_clock::now();
+	parseInputFile(config.input_file, inputFiles, hashCount, fileInfo);
+	auto normalize_lower = [](std::string value) {
+		std::transform(value.begin(), value.end(), value.begin(),
+			[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+		return value;
+	};
+	config.taxonomy_kind = normalize_lower(config.taxonomy_kind);
+	config.taxonomy_version = normalize_lower(config.taxonomy_version);
+	if (config.taxonomy_kind.empty()) {
+		config.taxonomy_kind = "auto";
+	}
+	if (config.taxonomy_version.empty()) {
+		config.taxonomy_version = "auto";
+	}
+	bool kindWasAuto = (config.taxonomy_kind == "auto");
+	bool versionWasAuto = (config.taxonomy_version == "auto");
+	auto guess_taxonomy_kind = [](const robin_hood::unordered_flat_map<std::string, std::vector<std::string>>& subjects) -> std::string {
+		for (const auto& kv : subjects)
+		{
+			const std::string& taxid = kv.first;
+			if (taxid.empty())
+			{
+				continue;
+			}
+			const bool numeric = std::all_of(taxid.begin(), taxid.end(), [](unsigned char ch) { return std::isdigit(ch); });
+			if (!numeric || taxid.find("__") != std::string::npos)
+			{
+				return "gtdb";
+			}
+		}
+		return "ncbi";
+	};
+	if (config.taxonomy_kind == "auto")
+	{
+		config.taxonomy_kind = guess_taxonomy_kind(inputFiles);
+	}
+	if (config.taxonomy_version == "auto")
+	{
+		if (config.taxonomy_kind == "gtdb")
+		{
+			config.taxonomy_version = "gtdb-unknown";
+		}
+		else
+		{
+			config.taxonomy_version = "ncbi-taxdump";
+		}
+	}
+	fs::path metadataSearchRoot;
+	fs::path inputPath = fs::path(config.input_file);
+	if (!config.input_file.empty() && inputPath.has_parent_path())
+	{
+		metadataSearchRoot = canonical_path(inputPath.parent_path());
+	}
+	else
+	{
+		metadataSearchRoot = canonical_path(fs::current_path());
+	}
+	auto metadataInfo = locate_taxonomy_metadata(metadataSearchRoot);
+	if (metadataInfo)
+	{
+		bool applied = false;
+		std::string metaKind = normalize_lower(metadataInfo->kind);
+		std::string metaVersion = normalize_lower(metadataInfo->version);
+		if (!metaKind.empty())
+		{
+			if (kindWasAuto || config.taxonomy_kind == metaKind)
+			{
+				config.taxonomy_kind = metaKind;
+				applied = true;
+			}
+			else if (config.verbose && config.taxonomy_kind != metaKind)
+			{
+				std::cout << "Warning: taxonomy metadata kind ('" << metaKind
+					<< "') 与当前配置 ('" << config.taxonomy_kind << "') 不一致" << std::endl;
+			}
+		}
+		if (!metaVersion.empty())
+		{
+			bool acceptVersion = versionWasAuto || config.taxonomy_version == "gtdb-unknown" || config.taxonomy_version == metaVersion;
+			if (acceptVersion)
+			{
+				config.taxonomy_version = metaVersion;
+				applied = true;
+			}
+			else if (config.verbose && config.taxonomy_version != metaVersion)
+			{
+				std::cout << "Warning: taxonomy metadata version ('" << metaVersion
+					<< "') 与当前配置 ('" << config.taxonomy_version << "') 不一致" << std::endl;
+			}
+		}
+		if (config.verbose && applied)
+		{
+			std::cout << "Using taxonomy metadata from " << metadataInfo->source << std::endl;
+		}
+	}
+	if (config.verbose)
+	{
+		std::cout << "Detected taxonomy: kind=" << config.taxonomy_kind
+			<< ", version=" << config.taxonomy_version << std::endl;
+	}
+	auto read_end = std::chrono::high_resolution_clock::now();
 		auto read_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(read_end - read_start).count();
 		if (config.verbose) {
 			std::cout << "Read time: ";
@@ -1847,6 +2036,8 @@ void writeProfileSnapshot(
 			imcfConfig.seed64 = ChimeraBuild::adjust_seed(config.kmer_size);
 			imcfConfig.fpSalt = IMCFConfig::DefaultFingerprintSalt;
 			imcfConfig.hashVersion = IMCFConfig::CurrentHashVersion;
+			imcfConfig.taxonomyKind = config.taxonomy_kind;
+			imcfConfig.taxonomyVersion = config.taxonomy_version;
 			chimera::imcf::InterleavedMergedCuckooFilter imcf(groups, imcfConfig);
 			std::vector<std::vector<std::string>> indexToTaxid = buildIMCF(imcf, groups, hashCount, sampledHashFiles);
 			auto build_end = std::chrono::high_resolution_clock::now();

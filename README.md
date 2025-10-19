@@ -83,7 +83,7 @@ For users who prefer to build Chimera from source, here are the detailed steps. 
 Before building Chimera, ensure you have the following dependencies installed:
 
 - **Ubuntu 20.04** (or equivalent Linux distribution)
-- **Python 3.8** (required, installable via PPA for older distributions)
+- **Python 3.10** (required, installable via PPA for older distributions)
 - **CMake** (for compiling C++ components)
 - **Krona Tools** (for visualization)
 - **Essential build tools** (e.g., GCC, Make)
@@ -99,7 +99,7 @@ Before building Chimera, ensure you have the following dependencies installed:
    sudo apt-get install -y software-properties-common
    sudo add-apt-repository ppa:deadsnakes/ppa
    sudo apt-get update
-   sudo apt-get install -y python3.8 python3.8-dev python3.8-distutils python3-pip build-essential cmake git libbz2-dev zlib1g-dev libgcc-11-dev libstdc++-11-dev openssl libssl-dev wget bc parallel locales
+   sudo apt-get install -y python3.10 python3.10-dev python3.10-distutils python3-pip build-essential cmake git libbz2-dev zlib1g-dev libgcc-11-dev libstdc++-11-dev openssl libssl-dev wget bc parallel locales
    ```
 
 2. **Install Python libraries**:
@@ -107,8 +107,8 @@ Before building Chimera, ensure you have the following dependencies installed:
    Upgrade `pip` and install the required Python packages:
 
    ```bash
-   python3.8 -m pip install --upgrade pip
-   python3.8 -m pip install pandas multitax
+   python3.10 -m pip install --upgrade pip
+   python3.10 -m pip install pandas multitax
    ```
 
 3. **Install Krona Tools**:
@@ -152,7 +152,7 @@ Before building Chimera, ensure you have the following dependencies installed:
    After installation, you can run Chimera from the source directory using Python:
 
    ```bash
-   python3.8 -m chimera -v
+   python3.10 -m chimera -v
    ```
 
 Alternatively, after installing, you can run Chimera globally using the installed `chimera.py`:
@@ -167,9 +167,9 @@ This completes the source installation. You should now be able to use Chimera fo
 
 To install Chimera via Conda, follow these steps:
 
-1. Create a new Conda environment with Python 3.8:
+1. Create a new Conda environment with Python 3.10:
    ```bash
-   conda create -n chimera python=3.8
+   conda create -n chimera python=3.10
    conda activate chimera
    ```
 
