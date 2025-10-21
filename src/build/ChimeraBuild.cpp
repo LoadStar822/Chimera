@@ -69,6 +69,101 @@ namespace ChimeraBuild {
 		return std::string(begin, rbegin.base());
 	}
 
+	static std::optional<std::string> extract_json_string(const std::string& content, const std::string& key)
+	{
+		const std::string pattern = "\"" + key + "\"";
+		size_t searchPos = 0;
+		while (true)
+		{
+			size_t keyPos = content.find(pattern, searchPos);
+			if (keyPos == std::string::npos)
+			{
+				return std::nullopt;
+			}
+			size_t colonPos = content.find(':', keyPos + pattern.size());
+			if (colonPos == std::string::npos)
+			{
+				return std::nullopt;
+			}
+			size_t valuePos = colonPos + 1;
+			while (valuePos < content.size() && std::isspace(static_cast<unsigned char>(content[valuePos])) != 0)
+			{
+				++valuePos;
+			}
+			if (valuePos >= content.size())
+			{
+				return std::nullopt;
+			}
+			if (content[valuePos] != '"')
+			{
+				searchPos = colonPos + 1;
+				continue;
+			}
+			++valuePos;
+			std::string value;
+			bool escaped = false;
+			for (; valuePos < content.size(); ++valuePos)
+			{
+				char ch = content[valuePos];
+				if (escaped)
+				{
+					switch (ch)
+					{
+					case '"':
+						value.push_back('"');
+						break;
+					case '\\':
+						value.push_back('\\');
+						break;
+					case '/':
+						value.push_back('/');
+						break;
+					case 'b':
+						value.push_back('\b');
+						break;
+					case 'f':
+						value.push_back('\f');
+						break;
+					case 'n':
+						value.push_back('\n');
+						break;
+					case 'r':
+						value.push_back('\r');
+						break;
+					case 't':
+						value.push_back('\t');
+						break;
+					case 'u':
+						value.push_back('\\');
+						value.push_back('u');
+						for (size_t j = 0; j < 4 && valuePos + 1 < content.size(); ++j)
+						{
+							++valuePos;
+							value.push_back(content[valuePos]);
+						}
+						break;
+					default:
+						value.push_back(ch);
+						break;
+					}
+					escaped = false;
+					continue;
+				}
+				if (ch == '\\')
+				{
+					escaped = true;
+					continue;
+				}
+				if (ch == '"')
+				{
+					return value;
+				}
+				value.push_back(ch);
+			}
+			return std::nullopt;
+		}
+	}
+
 	static std::optional<TaxonomyMetadataInfo> load_taxonomy_metadata_file(const fs::path& candidate)
 	{
 		std::ifstream meta(candidate);
@@ -76,25 +171,55 @@ namespace ChimeraBuild {
 		{
 			return std::nullopt;
 		}
+		std::ostringstream buffer;
+		buffer << meta.rdbuf();
+		std::string content = buffer.str();
+		meta.close();
+
 		TaxonomyMetadataInfo info{};
 		info.source = candidate;
-		std::string line;
-		while (std::getline(meta, line))
+
+		std::string extension = candidate.extension().string();
+		std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+		std::string trimmedContent = trim_copy(content);
+		bool treatAsJson = extension == ".json";
+		if (!trimmedContent.empty() && trimmedContent.front() == '{')
 		{
-			auto pos = line.find('=');
-			if (pos == std::string::npos)
+			treatAsJson = true;
+		}
+
+		if (treatAsJson)
+		{
+			if (auto kind = extract_json_string(content, "taxonomy_kind"))
 			{
-				continue;
+				info.kind = trim_copy(*kind);
 			}
-			std::string key = trim_copy(line.substr(0, pos));
-			std::string value = trim_copy(line.substr(pos + 1));
-			if (key == "taxonomy_kind" && !value.empty())
+			if (auto version = extract_json_string(content, "taxonomy_version"))
 			{
-				info.kind = value;
+				info.version = trim_copy(*version);
 			}
-			else if (key == "taxonomy_version" && !value.empty())
+		}
+		else
+		{
+			std::istringstream lines(content);
+			std::string line;
+			while (std::getline(lines, line))
 			{
-				info.version = value;
+				auto pos = line.find('=');
+				if (pos == std::string::npos)
+				{
+					continue;
+				}
+				std::string key = trim_copy(line.substr(0, pos));
+				std::string value = trim_copy(line.substr(pos + 1));
+				if (key == "taxonomy_kind" && !value.empty())
+				{
+					info.kind = value;
+				}
+				else if (key == "taxonomy_version" && !value.empty())
+				{
+					info.version = value;
+				}
 			}
 		}
 		if (info.kind.empty() && info.version.empty())
@@ -129,6 +254,240 @@ namespace ChimeraBuild {
 			}
 		}
 		return std::nullopt;
+	}
+
+	static std::optional<std::string> identify_gtdb_release_token(const std::string& textLower)
+	{
+		if (textLower.empty())
+		{
+			return std::nullopt;
+		}
+		auto is_digit = [](unsigned char ch) { return std::isdigit(ch) != 0; };
+		auto is_alnum = [](unsigned char ch) { return std::isalnum(ch) != 0; };
+        const std::array<std::string_view, 6> prefixes{ "rs", "rl", "r", "vs", "vl", "v" };
+		for (size_t pos = 0; pos < textLower.size(); ++pos)
+		{
+			for (std::string_view prefix : prefixes)
+			{
+				if (pos + prefix.size() > textLower.size())
+				{
+					continue;
+				}
+				if (textLower.compare(pos, prefix.size(), prefix) != 0)
+				{
+					continue;
+				}
+				if (pos > 0 && is_alnum(static_cast<unsigned char>(textLower[pos - 1])))
+				{
+					continue;
+				}
+				size_t index = pos + prefix.size();
+				if (index >= textLower.size() || !is_digit(static_cast<unsigned char>(textLower[index])))
+				{
+					continue;
+				}
+				const size_t digitsBegin = index;
+				while (index < textLower.size() && is_digit(static_cast<unsigned char>(textLower[index])))
+				{
+					++index;
+				}
+				const size_t digitsCount = index - digitsBegin;
+				if (index < textLower.size() && textLower[index] == '.')
+				{
+					const size_t fractionalStart = index + 1;
+					size_t frac = fractionalStart;
+					while (frac < textLower.size() && is_digit(static_cast<unsigned char>(textLower[frac])))
+					{
+						++frac;
+					}
+					if (frac > fractionalStart)
+					{
+						index = frac;
+					}
+				}
+				char nextCh = (index < textLower.size()) ? textLower[index] : '\0';
+				if (nextCh != '\0' && is_alnum(static_cast<unsigned char>(nextCh)))
+				{
+					continue;
+				}
+                if (digitsCount >= 2)
+                {
+                    std::string token = std::string(textLower.substr(pos, index - pos));
+                    if (!token.empty() && token[0] == 'v')
+                    {
+                        size_t cut = (token.size() >= 2 && (token[1] == 's' || token[1] == 'l')) ? 2 : 1;
+                        std::string body = token.substr(cut);
+                        if (!body.empty())
+                        {
+                            return std::string("rs") + body;
+                        }
+                        continue;
+                    }
+                    if (token.size() >= 2 && token[0] == 'r' && token[1] == 'l')
+                    {
+                        token[1] = 's';
+                        return token;
+                    }
+                    if (token.size() >= 1 && token[0] == 'r')
+                    {
+                        if (token.size() == 1 || token[1] != 's')
+                        {
+                            token.insert(1, 1, 's');
+                        }
+                        return token;
+                    }
+                    return token;
+                }
+			}
+		}
+		return std::nullopt;
+	}
+
+	static std::string detect_gtdb_release_version(const fs::path& root)
+	{
+		if (root.empty())
+		{
+			return {};
+		}
+		const size_t kMaxEntries = 6000;
+		const size_t kMaxDepth = 3;
+		const size_t kMaxFileReads = 32;
+		const size_t kMaxPreviewBytes = 4096;
+		size_t inspectedEntries = 0;
+		size_t inspectedFiles = 0;
+		std::vector<std::pair<fs::path, size_t>> stack;
+		stack.emplace_back(root, size_t{ 0 });
+		auto try_read_version = [](const fs::path& dir) -> std::optional<std::string>
+		{
+			static const std::array<const char*, 2> kVersionFiles = { "VERSION.txt", "version.txt" };
+			for (const char* name : kVersionFiles)
+			{
+				fs::path candidate = dir / name;
+				if (!fs::exists(candidate))
+				{
+					continue;
+				}
+				std::ifstream file(candidate, std::ios::in);
+				if (!file.is_open())
+				{
+					continue;
+				}
+				std::string contents;
+				contents.reserve(4096);
+				char buffer[512];
+				while (file && contents.size() < 4096)
+				{
+					file.read(buffer, sizeof(buffer));
+					std::streamsize got = file.gcount();
+					if (got <= 0)
+					{
+						break;
+					}
+					contents.append(buffer, static_cast<size_t>(got));
+				}
+				std::string lower = contents;
+				std::transform(lower.begin(), lower.end(), lower.begin(),
+					[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+				if (auto token = identify_gtdb_release_token(lower))
+				{
+					return std::string(*token);
+				}
+			}
+			return std::nullopt;
+		};
+
+		while (!stack.empty() && inspectedEntries < kMaxEntries)
+		{
+			auto [current, depth] = stack.back();
+			stack.pop_back();
+			std::error_code dirEc;
+			if (!fs::is_directory(current, dirEc) || dirEc)
+			{
+				continue;
+			}
+			if (auto versionToken = try_read_version(current))
+			{
+				return "gtdb-" + *versionToken;
+			}
+			fs::directory_iterator it(current, dirEc);
+			if (dirEc)
+			{
+				continue;
+			}
+			for (; it != fs::directory_iterator(); ++it)
+			{
+				std::error_code entryEc;
+				const fs::directory_entry& entry = *it;
+				++inspectedEntries;
+				if (inspectedEntries > kMaxEntries)
+				{
+					break;
+				}
+				std::string name = entry.path().filename().string();
+				if (!name.empty())
+				{
+					std::string nameLower = name;
+					std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(),
+						[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+					if (auto token = identify_gtdb_release_token(nameLower))
+					{
+						return "gtdb-" + *token;
+					}
+				}
+				if (entry.is_directory(entryEc) && !entryEc)
+				{
+					if (depth + 1 <= kMaxDepth)
+					{
+						stack.emplace_back(entry.path(), depth + 1);
+					}
+					continue;
+				}
+				if (entry.is_regular_file(entryEc) && !entryEc && depth <= 1 && inspectedFiles < kMaxFileReads)
+				{
+					const std::string ext = entry.path().extension().string();
+					std::string extLower = ext;
+					std::transform(extLower.begin(), extLower.end(), extLower.begin(),
+						[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+					bool interestingExt = extLower.empty() || extLower == ".txt" || extLower == ".tsv" || extLower == ".json" || extLower == ".meta";
+					if (!interestingExt)
+					{
+						continue;
+					}
+					std::ifstream preview(entry.path(), std::ios::in);
+					if (!preview.is_open())
+					{
+						continue;
+					}
+					++inspectedFiles;
+					std::string buffer;
+					buffer.reserve(kMaxPreviewBytes);
+					char chunk[512];
+					size_t totalRead = 0;
+					while (preview && totalRead < kMaxPreviewBytes)
+					{
+						preview.read(chunk, sizeof(chunk));
+						std::streamsize got = preview.gcount();
+						if (got <= 0)
+						{
+							break;
+						}
+						buffer.append(chunk, static_cast<size_t>(got));
+						totalRead += static_cast<size_t>(got);
+					}
+					if (!buffer.empty())
+					{
+						std::string lowerBuffer = buffer;
+						std::transform(lowerBuffer.begin(), lowerBuffer.end(), lowerBuffer.begin(),
+							[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+						if (auto token = identify_gtdb_release_token(lowerBuffer))
+						{
+							return "gtdb-" + *token;
+						}
+					}
+				}
+			}
+		}
+		return {};
 	}
 
 	struct TaxidShardPlan {
@@ -468,16 +827,32 @@ namespace ChimeraBuild {
 		}
 		std::string line;
 		while (std::getline(inputFile, line)) {
-			std::istringstream iss(line);
-			std::string filePath;
-			std::string taxidStr;
-			if (!(iss >> filePath >> taxidStr)) {
-				std::cerr << "Failed to parse line: " << line << std::endl;
+			std::string trimmedLine = trim_copy(line);
+			if (trimmedLine.empty()) {
+				continue;
+			}
+
+			size_t pos = trimmedLine.find('\t');
+			if (pos == std::string::npos) {
+				pos = trimmedLine.find_first_of(" \f\r\v");
+			}
+
+			if (pos == std::string::npos) {
+				std::cerr << "Failed to parse input line (missing separator): " << line << std::endl;
+				fileInfo.invalidNum++;
+				continue;
+			}
+
+			std::string filePathToken = trim_copy(trimmedLine.substr(0, pos));
+			std::string taxidStr = trim_copy(trimmedLine.substr(pos + 1));
+
+			if (filePathToken.empty() || taxidStr.empty()) {
+				std::cerr << "Failed to parse input line (empty field): " << line << std::endl;
 				fileInfo.invalidNum++;
 				continue;
 			}
 			hashCount[taxidStr] = 0;
-			inputFiles[taxidStr].push_back(filePath);
+			inputFiles[taxidStr].push_back(filePathToken);
 			fileInfo.fileNum++;
 		}
 
@@ -1980,6 +2355,32 @@ void writeProfileSnapshot(
 		if (config.verbose && applied)
 		{
 			std::cout << "Using taxonomy metadata from " << metadataInfo->source << std::endl;
+		}
+	}
+	if (config.taxonomy_kind == "gtdb" && (versionWasAuto || config.taxonomy_version == "gtdb-unknown"))
+	{
+		std::vector<fs::path> detectRoots;
+		detectRoots.push_back(metadataSearchRoot);
+		if (metadataInfo && !metadataInfo->source.empty())
+		{
+			detectRoots.push_back(metadataInfo->source.parent_path());
+		}
+		for (const auto& root : detectRoots)
+		{
+			if (root.empty())
+			{
+				continue;
+			}
+			std::string detected = detect_gtdb_release_version(root);
+			if (!detected.empty())
+			{
+				config.taxonomy_version = detected;
+				if (config.verbose)
+				{
+					std::cout << "Detected GTDB release version from " << root << ": " << config.taxonomy_version << std::endl;
+				}
+				break;
+			}
 		}
 	}
 	if (config.verbose)

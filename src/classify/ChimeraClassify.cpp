@@ -681,7 +681,30 @@ loadFilter(const std::string &input_file,
   };
   std::string storedKind = to_lower(imcfConfig.taxonomyKind);
   if (storedKind.empty()) {
-    storedKind = "ncbi";
+    const size_t sampleLimit = 1024;
+    auto looks_like_gtdb = [&]() {
+      size_t inspected = 0;
+      auto is_digit = [](char ch) { return std::isdigit(static_cast<unsigned char>(ch)) != 0; };
+      for (const auto &bucket : indexToTaxid) {
+        for (const auto &taxid : bucket) {
+          if (taxid.empty()) {
+            continue;
+          }
+          if (taxid.find("__") != std::string::npos) {
+            return true;
+          }
+          if (!std::all_of(taxid.begin(), taxid.end(), is_digit)) {
+            return true;
+          }
+          ++inspected;
+          if (inspected >= sampleLimit) {
+            return false;
+          }
+        }
+      }
+      return false;
+    };
+    storedKind = looks_like_gtdb() ? "gtdb" : "ncbi";
   }
   std::string expectedKind = to_lower(expectedConfig.taxonomyKind);
   const bool kindAuto = expectedKind.empty() || expectedKind == "auto";
@@ -742,6 +765,23 @@ loadFilter(const std::string &input_file,
   return status;
 }
 
+// Escape characters that would break the taxid:count formatting in the result
+// TSV. Consumers should unescape '\' followed by ':', '\' or '\t'.
+static std::string escape_taxid_field(const std::string &taxid) {
+  if (taxid.find_first_of(":\t\\") == std::string::npos) {
+    return taxid;
+  }
+  std::string escaped;
+  escaped.reserve(taxid.size() * 2);
+  for (char ch : taxid) {
+    if (ch == '\\' || ch == ':' || ch == '\t') {
+      escaped.push_back('\\');
+    }
+    escaped.push_back(ch);
+  }
+  return escaped;
+}
+
 /**
  * @brief Save the classification results to an output file.
  *
@@ -783,10 +823,13 @@ void saveResult(std::vector<classifyResult> classifyResults,
       auto oldFlags = os.flags();
       auto oldPrecision = os.precision();
       os.setf(std::ios::fixed, std::ios::floatfield);
-      os << std::setprecision(4) << result.posteriors.front().first << ':'
+      const std::string topTaxid = escape_taxid_field(result.posteriors.front().first);
+      os << std::setprecision(4) << topTaxid << ':'
          << result.posteriors.front().second;
       if (result.posteriors.size() > 1) {
-        os << '\t' << "POST_TOP2=" << result.posteriors[1].first << ':'
+        const std::string altTaxid =
+            escape_taxid_field(result.posteriors[1].first);
+        os << '\t' << "POST_TOP2=" << altTaxid << ':'
            << result.posteriors[1].second;
       }
       os.flags(oldFlags);
@@ -799,7 +842,7 @@ void saveResult(std::vector<classifyResult> classifyResults,
           os << taxid;
           continue;
         }
-        os << taxid << ':' << count << '\t';
+        os << escape_taxid_field(taxid) << ':' << count << '\t';
       }
     }
     os << '\n';
