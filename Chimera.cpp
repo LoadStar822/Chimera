@@ -131,6 +131,46 @@ int main(int argc, char **argv) {
       ->add_option("-P,--syncmer-pos", buildConfig.syncmer_position,
                    "Syncmer minimal s-mer offset (0-based)")
       ->default_val(7);
+  build->add_flag("--disable-strobemer",
+                  [&buildConfig](size_t count) {
+                    if (count > 0) {
+                      buildConfig.enable_strobemers = false;
+                    }
+                  },
+                  "禁用 strobemer 双特征流");
+  build
+      ->add_option("--strobe-wmin", buildConfig.strobemer_w_min,
+                   "Strobemer 窗口下界 (0 表示自动)")
+      ->default_val(0);
+  build
+      ->add_option("--strobe-wmax", buildConfig.strobemer_w_max,
+                   "Strobemer 窗口上界 (0 表示自动)")
+      ->default_val(0);
+  build
+      ->add_option("--strobe-q", buildConfig.strobemer_q,
+                   "Strobemer popcount q 掩码 (0 表示自动)")
+      ->default_val(0);
+  build
+      ->add_option("--strobe-maxdist", buildConfig.strobemer_max_dist,
+                   "Strobemer 最大跨距 (0 表示自动)")
+      ->default_val(0);
+  build
+      ->add_option("--strobe-aux-len", buildConfig.strobemer_aux_len,
+                   "Strobemer aux_len (默认 15，用于主哈希掩码)")
+      ->default_val(15);
+  build
+      ->add_option("--strobe-weight", buildConfig.strobemer_weight,
+                   "Strobemer 事件权重 (0 表示自动)")
+      ->default_val(0.0);
+  build
+      ->add_option("--strobe-ratio", buildConfig.strobemer_ratio,
+                   "Strobemer 采样配额占比 [0,1]，默认 0.6")
+      ->default_val(0.6)
+      ->check(CLI::Range(0.0, 1.0));
+  build
+      ->add_option("--strobe-seed", buildConfig.strobemer_seed,
+                   "Strobemer 额外哈希种子 (0 表示自动派生)")
+      ->default_val(0ULL);
   build
       ->add_option("-l,--min-length", buildConfig.min_length,
                    "Minimum length sequence for building")
@@ -213,6 +253,36 @@ int main(int argc, char **argv) {
     if (buildConfig.toxic_top_n > 0 && buildConfig.toxic_quantile == 0.0) {
       buildConfig.toxic_quantile = 1.0;
     }
+    if (buildConfig.strobemer_ratio < 0.0 || buildConfig.strobemer_ratio > 1.0) {
+      throw CLI::ValidationError("--strobe-ratio must be between 0 and 1");
+    }
+    const bool manual_strobe =
+        buildConfig.strobemer_w_min > 0 || buildConfig.strobemer_w_max > 0 ||
+        buildConfig.strobemer_q > 0 || buildConfig.strobemer_max_dist > 0 ||
+        buildConfig.strobemer_weight > 0.0 || buildConfig.strobemer_seed != 0;
+    buildConfig.strobemer_auto = !manual_strobe;
+    if (buildConfig.enable_strobemers && !buildConfig.strobemer_auto) {
+      if (buildConfig.strobemer_w_min == 0 || buildConfig.strobemer_w_max == 0) {
+        throw CLI::ValidationError("手动指定 strobemer 参数时必须提供 --strobe-wmin 与 --strobe-wmax");
+      }
+      if (buildConfig.strobemer_w_min > buildConfig.strobemer_w_max) {
+        throw CLI::ValidationError("--strobe-wmin must be <= --strobe-wmax");
+      }
+      if (buildConfig.strobemer_q == 0) {
+        throw CLI::ValidationError("手动模式下 --strobe-q 不能为 0");
+      }
+      if (buildConfig.strobemer_max_dist == 0) {
+        throw CLI::ValidationError("手动模式下 --strobe-maxdist 不能为 0");
+      }
+      if (buildConfig.strobemer_weight <= 0.0) {
+        throw CLI::ValidationError("手动模式下 --strobe-weight 必须大于 0");
+      }
+    }
+    if (!buildConfig.enable_strobemers) {
+      buildConfig.strobemer_ratio = 0.0;
+    } else if (buildConfig.strobemer_ratio == 0.0 && buildConfig.strobemer_auto) {
+      buildConfig.strobemer_ratio = 0.6;
+    }
   });
 
   // Classify
@@ -235,10 +305,35 @@ int main(int argc, char **argv) {
 
   // Custom validation function to ensure that the --paired option must have an
   // even number of files
-  classify->callback([pairedOpt]() {
+  classify->callback([pairedOpt, &classifyConfig]() {
     if (pairedOpt->count() > 0 && pairedOpt->count() % 2 != 0) {
       throw CLI::ValidationError(
           "--paired option must have an even number of input files");
+    }
+    const bool manual_strobe =
+        classifyConfig.strobemer_w_min > 0 || classifyConfig.strobemer_w_max > 0 ||
+        classifyConfig.strobemer_q > 0 || classifyConfig.strobemer_max_dist > 0 ||
+        classifyConfig.strobemer_weight > 0.0 || classifyConfig.strobemer_seed != 0;
+    classifyConfig.strobemer_auto = !manual_strobe;
+    if (classifyConfig.enable_strobemers && !classifyConfig.strobemer_auto) {
+      if (classifyConfig.strobemer_w_min == 0 || classifyConfig.strobemer_w_max == 0) {
+        throw CLI::ValidationError("手动指定 strobemer 参数时必须提供 --strobe-wmin 与 --strobe-wmax");
+      }
+      if (classifyConfig.strobemer_w_min > classifyConfig.strobemer_w_max) {
+        throw CLI::ValidationError("--strobe-wmin must be <= --strobe-wmax");
+      }
+      if (classifyConfig.strobemer_q == 0) {
+        throw CLI::ValidationError("手动模式下 --strobe-q 不能为 0");
+      }
+      if (classifyConfig.strobemer_max_dist == 0) {
+        throw CLI::ValidationError("手动模式下 --strobe-maxdist 不能为 0");
+      }
+      if (classifyConfig.strobemer_weight <= 0.0) {
+        throw CLI::ValidationError("手动模式下 --strobe-weight 必须大于 0");
+      }
+    }
+    if (!classifyConfig.enable_strobemers) {
+      classifyConfig.strobemer_weight = 0.0;
     }
   });
 
@@ -298,6 +393,41 @@ int main(int argc, char **argv) {
       ->add_option("--taxonomy-version", classifyConfig.taxonomyVersion,
                    "期望的 taxonomy 数据版本号，例如 ncbi-taxdump-2025-09-15")
       ->default_val("auto");
+  classify->add_flag("--disable-strobemer",
+                     [&classifyConfig](size_t count) {
+                       if (count > 0) {
+                         classifyConfig.enable_strobemers = false;
+                       }
+                     },
+                     "禁用 strobemer 特征");
+  classify
+      ->add_option("--strobe-wmin", classifyConfig.strobemer_w_min,
+                   "Strobemer 窗口下界 (0 表示按读长自适应)")
+      ->default_val(0);
+  classify
+      ->add_option("--strobe-wmax", classifyConfig.strobemer_w_max,
+                   "Strobemer 窗口上界 (0 表示按读长自适应)")
+      ->default_val(0);
+  classify
+      ->add_option("--strobe-q", classifyConfig.strobemer_q,
+                   "Strobemer popcount 掩码 (0 表示按读长自适应)")
+      ->default_val(0);
+  classify
+      ->add_option("--strobe-maxdist", classifyConfig.strobemer_max_dist,
+                   "Strobemer 最大跨距 (0 表示按读长自适应)")
+      ->default_val(0);
+  classify
+      ->add_option("--strobe-aux-len", classifyConfig.strobemer_aux_len,
+                   "Strobemer aux_len (0 表示使用数据库配置)")
+      ->default_val(0);
+  classify
+      ->add_option("--strobe-weight", classifyConfig.strobemer_weight,
+                   "Strobemer 事件权重 (0 表示按读长自适应)")
+      ->default_val(0.0);
+  classify
+      ->add_option("--strobe-seed", classifyConfig.strobemer_seed,
+                   "Strobemer 混合哈希种子 (0 表示使用数据库里的配置)")
+      ->default_val(0ULL);
   classify
       ->add_option("-b,--batch-size", classifyConfig.batchSize,
                    "Batch size for classifying")

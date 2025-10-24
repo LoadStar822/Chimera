@@ -41,6 +41,7 @@
 #include <optional>
 
 #include <utils/Syncmer.hpp>
+#include <utils/Strobemer.hpp>
 
 namespace fs = std::filesystem;
 
@@ -920,7 +921,7 @@ namespace ChimeraBuild {
 	}
 
 	/**
-	 * Count syncmers for each taxid and its associated files.
+	 * Count hashed features (syncmer + strobemer) for each taxid and its associated files.
 	 *
 	 * @param config The build configuration.
 	 * @param inputFiles The map of input files.
@@ -929,7 +930,7 @@ namespace ChimeraBuild {
 	 * @param fileInfo The struct to store file information.
 	 * @param scratchDir 输出参数，指向创建的临时目录。
 	 */
-	void syncmer_count(
+	void feature_count(
 		BuildConfig& config,
 		robin_hood::unordered_flat_map<std::string, std::vector<std::string>>& inputFiles,
 		robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
@@ -955,7 +956,7 @@ namespace ChimeraBuild {
 	if (stem.empty()) {
 		stem = "ChimeraDB";
 	}
-	std::string scratchName = stem + ".syncmer.tmp";
+	std::string scratchName = stem + ".feature.tmp";
 	scratchDir = baseDir / scratchName;
 	std::error_code ec;
 	fs::remove_all(scratchDir, ec);
@@ -971,17 +972,63 @@ namespace ChimeraBuild {
 			}
 		}
 		std::ostringstream oss;
-		oss << ordinal << '_' << safe << ".syncbin";
+		oss << ordinal << '_' << safe << ".featbin";
 		return scratchDir / oss.str();
 	};
 
 	const std::array<size_t, 1> syncmer_positions{ static_cast<size_t>(config.syncmer_position) };
 	const std::span<const size_t> syncmer_pos_span(syncmer_positions);
 	const uint64_t syncmer_seed = ChimeraBuild::adjust_seed(config.kmer_size);
+	const uint64_t strobemer_seed = config.strobemer_seed != 0
+	    ? ChimeraBuild::adjust_seed(config.kmer_size, config.strobemer_seed)
+	    : ChimeraBuild::adjust_seed(config.kmer_size, 0x6F37B5E1C943A7DDULL);
+	const bool enable_strobes = config.enable_strobemers;
+	const bool strobe_auto = enable_strobes && config.strobemer_auto;
 	const size_t max_hashes = config.max_hashes_per_taxid;
 	const bool has_top_n = config.toxic_top_n > 0;
 	const bool has_quantile = config.toxic_quantile < 1.0;
 	const double toxic_fraction = has_quantile ? (1.0 - config.toxic_quantile) : 0.0;
+	double strobe_ratio = enable_strobes ? config.strobemer_ratio : 0.0;
+	if (enable_strobes) {
+		if (strobe_ratio <= 0.0) {
+			strobe_ratio = 0.6;
+		}
+		strobe_ratio = std::clamp(strobe_ratio, 0.0, 1.0);
+	} else {
+		strobe_ratio = 0.0;
+	}
+	size_t strobe_capacity = enable_strobes ? static_cast<size_t>(std::llround(static_cast<double>(max_hashes) * strobe_ratio)) : 0;
+	if (enable_strobes) {
+		if (strobe_capacity >= max_hashes) {
+			strobe_capacity = max_hashes;
+		}
+	}
+	size_t sync_capacity = max_hashes;
+	if (enable_strobes) {
+		if (strobe_capacity >= max_hashes) {
+			sync_capacity = 0;
+			strobe_capacity = max_hashes;
+		} else {
+			sync_capacity = max_hashes - strobe_capacity;
+			if (sync_capacity == 0 && strobe_capacity < max_hashes) {
+				sync_capacity = 1;
+				if (strobe_capacity > 0) {
+					--strobe_capacity;
+				}
+			}
+		}
+	}
+	config.strobemer_ratio = strobe_ratio;
+	config.strobemer_seed = strobemer_seed;
+	chimera::strobemer::StrobeParams manual_strobe_params{
+	    config.kmer_size,
+	    config.smer_size,
+	    config.strobemer_w_min,
+	    config.strobemer_w_max,
+	    config.strobemer_q,
+	    config.strobemer_max_dist,
+	    config.strobemer_aux_len == 0 ? static_cast<uint16_t>(15) : config.strobemer_aux_len,
+	    strobemer_seed };
 	constexpr size_t kMinHeavyCapacity = 1024;
 	constexpr size_t kMaxHeavyCapacity = 1'000'000;
 	size_t heavy_capacity = 0;
@@ -1025,7 +1072,8 @@ namespace ChimeraBuild {
 
 	std::mutex fileInfo_mutex;
 	std::mutex heavy_mutex;
-	SpaceSaving globalHeavy(heavy_capacity);
+	SpaceSaving globalHeavySync(enable_toxic_filter ? heavy_capacity : 0);
+	SpaceSaving globalHeavyStrobe((enable_toxic_filter && enable_strobes) ? heavy_capacity : 0);
 	std::mutex hash_mutex;
 	std::mutex raw_mutex;
 	std::mutex length_mutex;
@@ -1037,30 +1085,35 @@ namespace ChimeraBuild {
 	std::atomic<uint64_t> sampling_hash_unique{ 0 };
 
 	auto write_vector_to_file = [](const fs::path& path, const std::vector<uint64_t>& data) {
-		std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
-		if (!ofs.is_open()) {
-			throw std::runtime_error("无法写入临时 syncmer 文件: " + path.string());
-		}
+	std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
+	if (!ofs.is_open()) {
+		throw std::runtime_error("无法写入临时特征文件: " + path.string());
+	}
 		if (!data.empty()) {
 			ofs.write(reinterpret_cast<const char*>(data.data()),
 			          static_cast<std::streamsize>(data.size() * sizeof(uint64_t)));
 		}
 		if (!ofs) {
-			throw std::runtime_error("写入临时 syncmer 文件失败: " + path.string());
+		throw std::runtime_error("写入临时特征文件失败: " + path.string());
 		}
 	};
 
 #pragma omp parallel
 	{
-		chimera::syncmer::SyncmerRunner thread_runner{config.smer_size,
-		                                            config.kmer_size,
-		                                            syncmer_pos_span,
-		                                            syncmer_seed,
-		                                            true};
-		robin_hood::unordered_flat_set<uint64_t> thread_per_read;
-		if (max_hashes > 0)
+		chimera::syncmer::SyncmerRunner thread_sync_runner{config.smer_size,
+		                                                   config.kmer_size,
+		                                                   syncmer_pos_span,
+		                                                   syncmer_seed,
+		                                                   true};
+		robin_hood::unordered_flat_set<uint64_t> per_read_sync;
+		robin_hood::unordered_flat_set<uint64_t> per_read_strobe;
+		if (sync_capacity > 0)
 		{
-			thread_per_read.reserve(max_hashes);
+			per_read_sync.reserve(sync_capacity);
+		}
+		if (strobe_capacity > 0)
+		{
+			per_read_strobe.reserve(strobe_capacity);
 		}
 		long long thread_file_ns = 0;
 		long long thread_stream_ns = 0;
@@ -1078,8 +1131,10 @@ namespace ChimeraBuild {
 		const auto& files = filesIt->second;
 
 		FileInfo localFileInfo{};
-		BottomKSampler sampler(max_hashes);
-		SpaceSaving localHeavy(enable_toxic_filter ? heavy_capacity : 0);
+		BottomKSampler sampler_sync(sync_capacity);
+		BottomKSampler sampler_strobe(strobe_capacity);
+		SpaceSaving localHeavySync(enable_toxic_filter ? heavy_capacity : 0);
+		SpaceSaving localHeavyStrobe((enable_toxic_filter && enable_strobes) ? heavy_capacity : 0);
 		long long local_file_ns = 0;
 		long long local_stream_ns = 0;
 		uint64_t local_seq_count = 0;
@@ -1104,32 +1159,71 @@ namespace ChimeraBuild {
 				tax_bp += seq.size();
 				++local_seq_count;
 
-						thread_per_read.clear();
-						size_t emitted_total = 0;
-						size_t emitted_unique = 0;
+						per_read_sync.clear();
+						per_read_strobe.clear();
+						size_t emitted_total_sync = 0;
+						size_t emitted_unique_sync = 0;
+						size_t emitted_total_strobe = 0;
+						size_t emitted_unique_strobe = 0;
 						auto stream_begin = std::chrono::steady_clock::now();
-						thread_runner.for_each(
+						thread_sync_runner.for_each(
 						    seq,
 						    [&](uint64_t hash) {
-							++emitted_total;
-							const bool inserted = thread_per_read.insert(hash).second;
-							if (inserted) {
-								++emitted_unique;
-								sampler.insert(hash);
-							}
-							if (enable_toxic_filter) {
-								localHeavy.add(hash);
-							}
+							    const uint64_t keyed = chimera::strobemer::encode_key(false, hash);
+							    ++emitted_total_sync;
+							    const bool inserted = per_read_sync.insert(keyed).second;
+							    if (inserted) {
+								    ++emitted_unique_sync;
+								    if (sync_capacity > 0) {
+									    sampler_sync.insert(keyed);
+								    }
+								    if (enable_toxic_filter) {
+									    localHeavySync.add(keyed);
+								    }
+							    }
 						    });
+							if (enable_strobes) {
+								chimera::strobemer::StrobeParams strobe_params = manual_strobe_params;
+								if (strobe_auto) {
+									auto profile = chimera::strobemer::auto_profile_from_read(seq.size(), config.kmer_size, strobemer_seed);
+									strobe_params = chimera::strobemer::override_params(profile.params, manual_strobe_params);
+								}
+								else {
+									strobe_params.k = config.kmer_size;
+									strobe_params.s = config.smer_size;
+									if (strobe_params.w_min == 0) strobe_params.w_min = 32;
+									if (strobe_params.w_max == 0) strobe_params.w_max = 72;
+									if (strobe_params.q == 0) strobe_params.q = 9;
+									if (strobe_params.max_dist == 0) strobe_params.max_dist = 180;
+								}
+								chimera::strobemer::sanitize_params(strobe_params);
+								chimera::strobemer::StrobemerRunner strobe_runner{strobe_params};
+								strobe_runner.for_each(
+								    seq,
+								    [&](uint64_t hash) {
+									    const uint64_t keyed = chimera::strobemer::encode_key(true, hash);
+								    ++emitted_total_strobe;
+								    const bool inserted = per_read_strobe.insert(keyed).second;
+								    if (inserted) {
+									    ++emitted_unique_strobe;
+									    if (strobe_capacity > 0) {
+										    sampler_strobe.insert(keyed);
+									    }
+									    if (enable_toxic_filter) {
+										    localHeavyStrobe.add(keyed);
+									    }
+								    }
+							    });
+						}
 						auto stream_end = std::chrono::steady_clock::now();
 						local_stream_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(stream_end - stream_begin).count();
-						local_hash_total += static_cast<uint64_t>(emitted_total);
-						local_hash_unique += static_cast<uint64_t>(emitted_unique);
+						local_hash_total += static_cast<uint64_t>(emitted_total_sync + emitted_total_strobe);
+						local_hash_unique += static_cast<uint64_t>(emitted_unique_sync + emitted_unique_strobe);
 					}
 					auto file_end = std::chrono::steady_clock::now();
 					local_file_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(file_end - file_begin).count();
 				} catch (const std::exception& ex) {
-#pragma omp critical(syncmer_log)
+#pragma omp critical(feature_log)
 					std::cerr << "读取序列文件失败 " << filename << ": " << ex.what() << std::endl;
 					std::lock_guard<std::mutex> lock(fileInfo_mutex);
 					fileInfo.skippedNum++;
@@ -1141,7 +1235,13 @@ namespace ChimeraBuild {
 				taxidLengths[taxid] += tax_bp;
 			}
 
-			auto values = sampler.release_sorted();
+			auto values_sync = sampler_sync.release_sorted();
+			auto values_strobe = sampler_strobe.release_sorted();
+			std::vector<uint64_t> values;
+			values.reserve(values_sync.size() + values_strobe.size());
+			values.insert(values.end(), values_sync.begin(), values_sync.end());
+			values.insert(values.end(), values_strobe.begin(), values_strobe.end());
+			std::sort(values.begin(), values.end());
 			fs::path rawPath = make_temp_path(taxid, taxIdx);
 			write_vector_to_file(rawPath, values);
 
@@ -1154,9 +1254,14 @@ namespace ChimeraBuild {
 				rawSampleFiles.emplace(taxid, std::move(rawPath));
 			}
 
-			if (enable_toxic_filter && localHeavy.total_weight() > 0) {
+			if (enable_toxic_filter) {
 				std::lock_guard<std::mutex> heavy_lock(heavy_mutex);
-				globalHeavy.merge(localHeavy);
+				if (localHeavySync.total_weight() > 0) {
+					globalHeavySync.merge(localHeavySync);
+				}
+				if (enable_strobes && localHeavyStrobe.total_weight() > 0) {
+					globalHeavyStrobe.merge(localHeavyStrobe);
+				}
 			}
 
 			{
@@ -1182,17 +1287,28 @@ namespace ChimeraBuild {
 	const auto sampling_end = std::chrono::steady_clock::now();
 
 	robin_hood::unordered_flat_set<uint64_t> toxic_hashes;
-	uint64_t min_count_threshold = 0;
-	size_t candidate_count = 0;
-	uint64_t target_weight = 0;
-	uint64_t removed_weight = 0;
-	bool used_topn = false;
-	bool used_quantile = false;
+	struct ToxicSummary {
+		uint64_t min_threshold{ 0 };
+		size_t candidate_count{ 0 };
+		uint64_t target_weight{ 0 };
+		uint64_t removed_weight{ 0 };
+		bool used_topn{ false };
+		bool used_quantile{ false };
+	};
+	ToxicSummary sync_summary;
+	ToxicSummary strobe_summary;
 	if (enable_toxic_filter)
 	{
-		auto entries = globalHeavy.entries();
-		if (!entries.empty())
-		{
+  auto evaluate_toxic = [&](SpaceSaving& global, ToxicSummary& summary) {
+			if (global.total_weight() == 0)
+			{
+				return;
+			}
+			auto entries = global.entries();
+			if (entries.empty())
+			{
+				return;
+			}
 			std::sort(entries.begin(), entries.end(), [](const SpaceSaving::Entry& lhs, const SpaceSaving::Entry& rhs)
 			{
 				if (lhs.count != rhs.count)
@@ -1202,14 +1318,15 @@ namespace ChimeraBuild {
 				return lhs.key < rhs.key;
 			});
 
-			const uint64_t total_seen = globalHeavy.total_weight();
+			const uint64_t total_seen = global.total_weight();
+			uint64_t min_threshold = 0;
 			if (config.toxic_min_fraction > 0.0 && total_seen > 0)
 			{
 				const double scaled = static_cast<double>(total_seen) * config.toxic_min_fraction;
-				min_count_threshold = static_cast<uint64_t>(std::ceil(scaled));
-				if (min_count_threshold == 0)
+				min_threshold = static_cast<uint64_t>(std::ceil(scaled));
+				if (min_threshold == 0)
 				{
-					min_count_threshold = 1;
+					min_threshold = 1;
 				}
 			}
 
@@ -1217,71 +1334,80 @@ namespace ChimeraBuild {
 			candidates.reserve(entries.size());
 			for (const auto& entry : entries)
 			{
-				if (entry.count >= min_count_threshold)
+				if (entry.count >= min_threshold)
 				{
 					candidates.push_back(entry);
 				}
 			}
 
-			if (!candidates.empty())
+			if (candidates.empty())
 			{
-				candidate_count = candidates.size();
-				if (has_top_n)
+				return;
+			}
+
+			summary.min_threshold = min_threshold;
+			summary.candidate_count = candidates.size();
+
+			if (has_top_n)
+			{
+				const size_t limit = static_cast<size_t>(std::min<uint64_t>(config.toxic_top_n, static_cast<uint64_t>(candidates.size())));
+				if (limit > 0)
 				{
-					const uint64_t top_n = config.toxic_top_n;
-					const size_t limit = static_cast<size_t>(std::min<uint64_t>(top_n, static_cast<uint64_t>(candidates.size())));
-					if (limit > 0)
+					for (size_t i = 0; i < limit; ++i)
 					{
-						toxic_hashes.reserve(limit);
-						for (size_t i = 0; i < limit; ++i)
-						{
-							toxic_hashes.insert(candidates[i].key);
-							removed_weight += candidates[i].count;
-						}
-						used_topn = true;
+						toxic_hashes.insert(candidates[i].key);
+						summary.removed_weight += candidates[i].count;
 					}
+					summary.used_topn = true;
 				}
-				else if (has_quantile)
+				return;
+			}
+
+			if (has_quantile)
+			{
+				const double removal_fraction = std::max(0.0, 1.0 - config.toxic_quantile);
+				if (removal_fraction > 0.0 && total_seen > 0)
 				{
-					const double removal_fraction = std::max(0.0, 1.0 - config.toxic_quantile);
-					if (removal_fraction > 0.0 && total_seen > 0)
+					summary.target_weight = static_cast<uint64_t>(std::ceil(removal_fraction * static_cast<double>(total_seen)));
+					if (summary.target_weight == 0)
 					{
-						target_weight = static_cast<uint64_t>(std::ceil(removal_fraction * static_cast<double>(total_seen)));
-						if (target_weight == 0)
+						summary.target_weight = 1;
+					}
+					std::sort(candidates.begin(), candidates.end(), [](const SpaceSaving::Entry& lhs, const SpaceSaving::Entry& rhs)
+					{
+						const uint64_t lhs_base = lhs.count > lhs.error ? lhs.count - lhs.error : 0;
+						const uint64_t rhs_base = rhs.count > rhs.error ? rhs.count - rhs.error : 0;
+						if (lhs_base != rhs_base)
 						{
-							target_weight = 1;
+							return lhs_base > rhs_base;
 						}
-						std::sort(candidates.begin(), candidates.end(), [](const SpaceSaving::Entry& lhs, const SpaceSaving::Entry& rhs)
+						return lhs.key < rhs.key;
+					});
+					for (const auto& entry : candidates)
+					{
+						if (entry.count == 0)
 						{
-							const uint64_t lhs_base = lhs.count > lhs.error ? lhs.count - lhs.error : 0;
-							const uint64_t rhs_base = rhs.count > rhs.error ? rhs.count - rhs.error : 0;
-							if (lhs_base != rhs_base)
-							{
-								return lhs_base > rhs_base;
-							}
-							return lhs.key < rhs.key;
-						});
-						toxic_hashes.reserve(candidates.size());
-						for (const auto& entry : candidates)
-						{
-							if (entry.count == 0)
-							{
-								continue;
-							}
-							toxic_hashes.insert(entry.key);
-							removed_weight += entry.count;
-							if (removed_weight >= target_weight)
-							{
-								break;
-							}
+							continue;
 						}
-						if (removed_weight > 0)
+						toxic_hashes.insert(entry.key);
+						summary.removed_weight += entry.count;
+						if (summary.removed_weight >= summary.target_weight)
 						{
-							used_quantile = true;
+							break;
 						}
+					}
+					if (summary.removed_weight > 0)
+					{
+						summary.used_quantile = true;
 					}
 				}
 			}
+		};
+
+		evaluate_toxic(globalHeavySync, sync_summary);
+		if (enable_strobes)
+		{
+			evaluate_toxic(globalHeavyStrobe, strobe_summary);
 		}
 	}
 	const auto toxic_select_end = std::chrono::steady_clock::now();
@@ -1310,7 +1436,7 @@ sampledHashFiles.reserve(index_to_taxid.size());
 	auto read_vector_from_file = [](const fs::path& path) -> std::vector<uint64_t> {
 		std::ifstream ifs(path, std::ios::binary);
 		if (!ifs.is_open()) {
-			throw std::runtime_error("无法读取临时 syncmer 文件: " + path.string());
+			throw std::runtime_error("无法读取临时特征文件: " + path.string());
 		}
 		ifs.seekg(0, std::ios::end);
 		std::streamsize bytes = ifs.tellg();
@@ -1323,7 +1449,7 @@ sampledHashFiles.reserve(index_to_taxid.size());
 		ifs.read(reinterpret_cast<char*>(data.data()),
 		         static_cast<std::streamsize>(count * sizeof(uint64_t)));
 		if (!ifs) {
-			throw std::runtime_error("读取临时 syncmer 文件失败: " + path.string());
+			throw std::runtime_error("读取临时特征文件失败: " + path.string());
 		}
 		return data;
 	};
@@ -1426,56 +1552,62 @@ sampledHashFiles.reserve(index_to_taxid.size());
 			{
 				overhead_wall_ms = 0;
 			}
-			std::cout << "[syncmer] 序列读取+遍历耗时(墙钟): ";
+			std::cout << "[feature] 序列读取+遍历耗时(墙钟): ";
 			print_build_time(sampling_ms);
-			std::cout << "[syncmer] syncmer 哈希耗时(墙钟估计): ";
+			std::cout << "[feature] 特征哈希耗时(墙钟估计): ";
 			print_build_time(stream_wall_ms);
 			if (overhead_wall_ms > 0)
 			{
-				std::cout << "[syncmer] 哈希外部逻辑耗时(墙钟估计): ";
+				std::cout << "[feature] 哈希外部逻辑耗时(墙钟估计): ";
 				print_build_time(overhead_wall_ms);
 			}
 			const uint64_t seq_total = sampling_seq_count.load(std::memory_order_relaxed);
 			const uint64_t hash_total = sampling_hash_total.load(std::memory_order_relaxed);
 			const uint64_t hash_unique = sampling_hash_unique.load(std::memory_order_relaxed);
-			std::cout << "[syncmer] 采样统计: 序列 "
-			          << seq_total << " 条，syncmer 总数 "
+			std::cout << "[feature] 采样统计: 序列 "
+			          << seq_total << " 条，特征总数 "
 			          << hash_total << "，去重复 " << hash_unique << std::endl;
 		}
-		std::cout << "[syncmer] 底层采样耗时: ";
+		std::cout << "[feature] 底层采样耗时: ";
 		print_build_time(sampling_ms);
-		std::cout << "[syncmer] 毒性候选筛选耗时: ";
+		std::cout << "[feature] 毒性候选筛选耗时: ";
 		print_build_time(toxic_select_ms);
-		std::cout << "[syncmer] 结果写入/裁剪耗时: ";
+		std::cout << "[feature] 结果写入/裁剪耗时: ";
 		print_build_time(apply_ms);
-		std::cout << "[syncmer] syncmer_count 总耗时: ";
+		std::cout << "[feature] feature_count 总耗时: ";
 		print_build_time(total_ms);
 	}
 
 	if (config.verbose && has_toxic_hashes)
 	{
-		std::cerr << "[chimera] 毒 syncmer 过滤: 黑名单 " << toxic_hashes.size()
-			<< " 个 hash（候选 " << candidate_count
-			<< "，容量 " << heavy_capacity
-			<< "，频率阈值 " << min_count_threshold;
-		if (used_topn)
+		const size_t candidate_total = sync_summary.candidate_count + strobe_summary.candidate_count;
+		const uint64_t removed_total = sync_summary.removed_weight + strobe_summary.removed_weight;
+		const uint64_t target_total = sync_summary.target_weight + strobe_summary.target_weight;
+		const bool used_topn_any = sync_summary.used_topn || strobe_summary.used_topn;
+		const bool used_quantile_any = sync_summary.used_quantile || strobe_summary.used_quantile;
+		const uint64_t total_weight_all = globalHeavySync.total_weight() + globalHeavyStrobe.total_weight();
+		std::cerr << "[chimera] 毒特征过滤: 黑名单 " << toxic_hashes.size()
+		          << " 个键（sync 候选 " << sync_summary.candidate_count
+		          << ", strobe 候选 " << strobe_summary.candidate_count
+		          << "，容量 " << heavy_capacity << ")";
+		if (used_topn_any)
 		{
 			std::cerr << "，模式 topN";
 		}
-		else if (used_quantile)
+		else if (used_quantile_any)
 		{
-			const double weight_ratio = (globalHeavy.total_weight() > 0)
-				? static_cast<double>(removed_weight) / static_cast<double>(globalHeavy.total_weight())
+			const double weight_ratio = (total_weight_all > 0)
+				? static_cast<double>(removed_total) / static_cast<double>(total_weight_all)
 				: 0.0;
 			std::ostringstream ratio_stream;
 			ratio_stream << std::fixed << std::setprecision(4) << weight_ratio;
 			std::cerr << "，模式 quantile，目标权重 "
-				<< target_weight << "，实际裁剪权重 " << removed_weight
-				<< " (" << ratio_stream.str() << ")";
+			          << target_total << "，实际裁剪权重 " << removed_total
+			          << " (" << ratio_stream.str() << ")";
 		}
-		std::cerr << "），被过滤 taxid 数 " << taxa_filtered_count
-			<< "，合计剔除 " << hashes_removed_total
-			<< " 个采样 hash，安全网回退 " << taxa_safety_hits << " 次" << std::endl;
+		std::cerr << "，被过滤 taxid 数 " << taxa_filtered_count
+		          << "，合计剔除 " << hashes_removed_total
+		          << " 个采样特征，安全网回退 " << taxa_safety_hits << " 次" << std::endl;
 	}
 }
 
@@ -1565,7 +1697,7 @@ sampledHashFiles.reserve(index_to_taxid.size());
 			double ratio = expected == 0 ? (delta == 0 ? 0.0 : std::numeric_limits<double>::infinity())
 				: static_cast<double>(absDelta) / static_cast<double>(expected);
 				if (ratio > kShardToleranceRatio) {
-					std::cerr << "Warning: syncmer count mismatch for taxid " << taxid
+				std::cerr << "Warning: feature count mismatch for taxid " << taxid
 						<< ": expected=" << expected << ", planned=" << shardTotal
 						<< ", delta=" << delta << " (" << std::fixed << std::setprecision(4)
 						<< ratio * 100.0 << "%)" << std::endl;
@@ -1613,7 +1745,7 @@ sampledHashFiles.reserve(index_to_taxid.size());
 			std::ifstream hashStream(hashFile, std::ios::binary);
 			if (!hashStream.is_open()) {
 #pragma omp critical(imcf_log)
-				std::cerr << "Warning: 无法打开 taxid " << taxid << " 的 syncmer 临时文件: " << hashFile << std::endl;
+			std::cerr << "Warning: 无法打开 taxid " << taxid << " 的特征临时文件: " << hashFile << std::endl;
 				continue;
 			}
 
@@ -1692,7 +1824,7 @@ sampledHashFiles.reserve(index_to_taxid.size());
 					if (shard >= plans.size()) {
 #pragma omp critical(imcf_log)
 						std::cerr << "Warning: taxid " << taxid
-							<< " produced more syncmers than expected; extra entries ignored" << std::endl;
+					<< " produced more features than expected; extra entries ignored" << std::endl;
 						overflow = true;
 						break;
 					}
@@ -1721,7 +1853,7 @@ sampledHashFiles.reserve(index_to_taxid.size());
 			if (missing != 0) {
 #pragma omp critical(imcf_log)
 				std::cerr << "Warning: taxid " << taxid
-					<< " ended with " << missing << " syncmers short of expected quota" << std::endl;
+					<< " ended with " << missing << " features short of expected quota" << std::endl;
 			}
 		}
 
@@ -2136,14 +2268,25 @@ void writeProfileSnapshot(
 
 		std::ostringstream oss;
 		oss << "{\n";
-		oss << "  \"version\": 1,\n";
+		oss << "  \"version\": 2,\n";
 		oss << "  \"created_at\": \"" << json_escape(format_timestamp_utc(std::chrono::system_clock::now())) << "\",\n";
 		oss << "  \"build\": {\n";
 		oss << "    \"filter\": \"" << json_escape(config.filter) << "\",\n";
 		oss << "    \"kmer_size\": " << static_cast<int>(config.kmer_size) << ",\n";
 		oss << "    \"smer_size\": " << config.smer_size << ",\n";
 		oss << "    \"syncmer_position\": " << config.syncmer_position << ",\n";
-		oss << "    \"load_factor\": " << config.load_factor << "\n";
+		oss << "    \"load_factor\": " << config.load_factor << ",\n";
+		oss << "    \"strobemer\": {\n";
+		oss << "      \"enabled\": " << (config.enable_strobemers ? "true" : "false") << ",\n";
+		oss << "      \"auto\": " << (config.strobemer_auto ? "true" : "false") << ",\n";
+		oss << "      \"w_min\": " << config.strobemer_w_min << ",\n";
+		oss << "      \"w_max\": " << config.strobemer_w_max << ",\n";
+		oss << "      \"q\": " << config.strobemer_q << ",\n";
+		oss << "      \"max_dist\": " << config.strobemer_max_dist << ",\n";
+		oss << "      \"aux_len\": " << config.strobemer_aux_len << ",\n";
+		oss << "      \"ratio\": " << config.strobemer_ratio << ",\n";
+		oss << "      \"weight\": " << config.strobemer_weight << "\n";
+		oss << "    }\n";
 		oss << "  },\n";
 		oss << "  \"database\": {\n";
 		oss << "    \"dataset_root\": {\n";
@@ -2399,9 +2542,9 @@ void writeProfileSnapshot(
 		if (config.filter == "imcf")
 		{
 			auto calculate_start = std::chrono::high_resolution_clock::now();
-			std::cout << "Calculating syncmers..." << std::endl;
+		std::cout << "Calculating features..." << std::endl;
 			std::filesystem::path scratchDir;
-		syncmer_count(config, inputFiles, hashCount, taxidLengths, sampledHashFiles, fileInfo, scratchDir);
+		feature_count(config, inputFiles, hashCount, taxidLengths, sampledHashFiles, fileInfo, scratchDir);
 			auto calculate_end = std::chrono::high_resolution_clock::now();
 			auto calculate_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_end - calculate_start).count();
 			if (config.verbose) {
@@ -2429,16 +2572,26 @@ void writeProfileSnapshot(
 
 			auto build_start = std::chrono::high_resolution_clock::now();
 			std::cout << "Building IMCF..." << std::endl;
-			IMCFConfig imcfConfig;
-			imcfConfig.loadFactor = config.load_factor;
-			imcfConfig.kmerSize = config.kmer_size;
-			imcfConfig.smerSize = config.smer_size;
-			imcfConfig.syncmerPosition = config.syncmer_position;
-			imcfConfig.seed64 = ChimeraBuild::adjust_seed(config.kmer_size);
-			imcfConfig.fpSalt = IMCFConfig::DefaultFingerprintSalt;
-			imcfConfig.hashVersion = IMCFConfig::CurrentHashVersion;
-			imcfConfig.taxonomyKind = config.taxonomy_kind;
-			imcfConfig.taxonomyVersion = config.taxonomy_version;
+		IMCFConfig imcfConfig;
+		imcfConfig.loadFactor = config.load_factor;
+		imcfConfig.kmerSize = config.kmer_size;
+		imcfConfig.smerSize = config.smer_size;
+		imcfConfig.syncmerPosition = config.syncmer_position;
+		imcfConfig.seed64 = ChimeraBuild::adjust_seed(config.kmer_size);
+		imcfConfig.fpSalt = IMCFConfig::DefaultFingerprintSalt;
+		imcfConfig.hashVersion = IMCFConfig::CurrentHashVersion;
+		imcfConfig.taxonomyKind = config.taxonomy_kind;
+		imcfConfig.taxonomyVersion = config.taxonomy_version;
+		imcfConfig.enableStrobemers = config.enable_strobemers;
+		imcfConfig.strobemerAuto = config.strobemer_auto;
+		imcfConfig.strobemerWMin = config.strobemer_w_min;
+		imcfConfig.strobemerWMax = config.strobemer_w_max;
+		imcfConfig.strobemerQ = config.strobemer_q;
+		imcfConfig.strobemerMaxDist = config.strobemer_max_dist;
+		imcfConfig.strobemerAuxLen = config.strobemer_aux_len;
+		imcfConfig.strobemerWeight = config.strobemer_weight;
+		imcfConfig.strobemerRatio = config.strobemer_ratio;
+		imcfConfig.strobemerSeed = config.strobemer_seed;
 			chimera::imcf::InterleavedMergedCuckooFilter imcf(groups, imcfConfig);
 			std::vector<std::vector<std::string>> indexToTaxid = buildIMCF(imcf, groups, hashCount, sampledHashFiles);
 			auto build_end = std::chrono::high_resolution_clock::now();

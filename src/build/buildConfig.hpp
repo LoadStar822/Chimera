@@ -56,6 +56,16 @@ namespace ChimeraBuild {
 		double toxic_min_fraction{ 1e-4 };
 		double toxic_safety_fraction{ 0.1 };
 		uint64_t toxic_safety_min{ 1024 };
+		bool enable_strobemers{ true };
+		bool strobemer_auto{ true };
+		uint16_t strobemer_w_min{ 0 };
+		uint16_t strobemer_w_max{ 0 };
+		uint16_t strobemer_q{ 0 };
+		uint32_t strobemer_max_dist{ 0 };
+		uint16_t strobemer_aux_len{ 15 };
+		double strobemer_weight{ 0.0 };
+		double strobemer_ratio{ 0.6 };
+		uint64_t strobemer_seed{ 0x6F37B5E1C943A7DDULL };
 	};
 
 	inline std::ostream& operator<<(std::ostream& os, const BuildConfig& config) {
@@ -82,6 +92,16 @@ namespace ChimeraBuild {
 			<< std::setw(25) << "Toxic min fraction:" << config.toxic_min_fraction << std::endl
 			<< std::setw(25) << "Toxic safety fraction:" << config.toxic_safety_fraction << std::endl
 			<< std::setw(25) << "Toxic safety min:" << config.toxic_safety_min << std::endl
+			<< std::setw(25) << "Enable strobemers:" << config.enable_strobemers << std::endl
+			<< std::setw(25) << "Strobemer auto:" << config.strobemer_auto << std::endl
+			<< std::setw(25) << "Strobemer w_min:" << config.strobemer_w_min << std::endl
+			<< std::setw(25) << "Strobemer w_max:" << config.strobemer_w_max << std::endl
+			<< std::setw(25) << "Strobemer q:" << config.strobemer_q << std::endl
+			<< std::setw(25) << "Strobemer max dist:" << config.strobemer_max_dist << std::endl
+			<< std::setw(25) << "Strobemer aux len:" << config.strobemer_aux_len << std::endl
+			<< std::setw(25) << "Strobemer weight:" << config.strobemer_weight << std::endl
+			<< std::setw(25) << "Strobemer ratio:" << config.strobemer_ratio << std::endl
+			<< std::setw(25) << "Strobemer seed:" << config.strobemer_seed << std::endl
 			<< std::setw(25) << "Verbose:" << config.verbose << std::endl;
 
 		os << std::string(50, '=') << std::endl;
@@ -108,7 +128,7 @@ namespace ChimeraBuild {
 
 	struct IMCFConfig {
 		inline static constexpr uint64_t DefaultFingerprintSalt = 0xD1B54A32D192ED03ULL;
-		inline static constexpr uint8_t CurrentHashVersion = 2;
+		inline static constexpr uint8_t CurrentHashVersion = 3;
 
 		size_t binNum{};
 		size_t binSize{};
@@ -122,6 +142,16 @@ namespace ChimeraBuild {
 		uint8_t hashVersion{ 0 };
 		std::string taxonomyKind{ "ncbi" };
 		std::string taxonomyVersion{ "ncbi-taxdump" };
+		bool enableStrobemers{ false };
+		bool strobemerAuto{ true };
+		uint16_t strobemerWMin{ 0 };
+		uint16_t strobemerWMax{ 0 };
+		uint16_t strobemerQ{ 0 };
+		uint32_t strobemerMaxDist{ 0 };
+		uint16_t strobemerAuxLen{ 15 };
+		double strobemerWeight{ 0.0 };
+		double strobemerRatio{ 0.6 };
+		uint64_t strobemerSeed{ 0 };
 
 		template <class Archive>
 		void save(Archive& archive, const std::uint32_t version) const {
@@ -129,6 +159,11 @@ namespace ChimeraBuild {
 				kmerSize, smerSize, syncmerPosition, seed64, fpSalt, hashVersion);
 			if (version >= 1) {
 				archive(taxonomyKind, taxonomyVersion);
+			}
+			if (version >= 2) {
+				archive(enableStrobemers, strobemerAuto, strobemerWMin, strobemerWMax,
+				        strobemerQ, strobemerMaxDist, strobemerAuxLen,
+				        strobemerWeight, strobemerRatio, strobemerSeed);
 			}
 		}
 
@@ -143,10 +178,24 @@ namespace ChimeraBuild {
 				taxonomyKind = "ncbi";
 				taxonomyVersion = "ncbi-taxdump";
 			}
+			if (version >= 2) {
+				archive(enableStrobemers, strobemerAuto, strobemerWMin, strobemerWMax,
+				        strobemerQ, strobemerMaxDist, strobemerAuxLen,
+				        strobemerWeight, strobemerRatio, strobemerSeed);
+			} else {
+				enableStrobemers = false;
+				strobemerAuto = true;
+				strobemerWMin = strobemerWMax = strobemerQ = 0;
+				strobemerMaxDist = 0;
+				strobemerAuxLen = 15;
+				strobemerWeight = 0.0;
+				strobemerRatio = 0.6;
+				strobemerSeed = 0;
+			}
 		}
 	};
 }
 
-CEREAL_CLASS_VERSION(ChimeraBuild::IMCFConfig, 1);
+CEREAL_CLASS_VERSION(ChimeraBuild::IMCFConfig, 2);
 
 #endif // BUILDCONFIG_HPP

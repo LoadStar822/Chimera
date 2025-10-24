@@ -1052,6 +1052,7 @@ inline size_t altHash(size_t bucket, uint32_t routeFingerprint) const {
 
       uint32_t victimFingerprint = laneFingerprint(victimValue, binIndex);
       uint32_t victimRoute = victimFingerprint & routeMask();
+      uint32_t nextLaneValue = victimValue;
       if (victimRoute == 0u) {
         uint64_t remixed =
             mix64((static_cast<uint64_t>(victimFingerprint) ^
@@ -1061,10 +1062,12 @@ inline size_t altHash(size_t bucket, uint32_t routeFingerprint) const {
           victimRoute = 1u;
         }
         victimFingerprint = (victimFingerprint & ~routeMask()) | victimRoute;
-        writeLaneValue(bucket, binIndex, lane, victimValue);
+        uint32_t victimSpecies = laneSpecies(victimValue, binIndex);
+        nextLaneValue =
+            buildLaneValue(binIndex, victimFingerprint, victimSpecies);
       }
 
-      laneValue = victimValue;
+      laneValue = nextLaneValue;
       fp.full = victimFingerprint;
       fp.route = victimRoute;
       bucket = altHash(bucket, fp.route);

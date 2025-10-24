@@ -61,6 +61,15 @@ namespace dbg {
 		size_t progressStep = 5000;
 		double progressInterval = 1.0;
 		size_t batchSize;
+		bool enable_strobemers{ true };
+		bool strobemer_auto{ true };
+		uint16_t strobemer_w_min{ 0 };
+		uint16_t strobemer_w_max{ 0 };
+		uint16_t strobemer_q{ 0 };
+		uint32_t strobemer_max_dist{ 0 };
+        uint16_t strobemer_aux_len{ 0 };
+		double strobemer_weight{ 0.0 };
+		uint64_t strobemer_seed{ 0 };
 		bool em = false;
 		bool vem = false;
 		double emThreshold;
@@ -101,6 +110,15 @@ namespace dbg {
 			<< std::setw(20) << "Evidence override:" << config.evidence_override << std::endl
 			<< std::setw(20) << "Filter:" << config.filter << std::endl
 			<< std::setw(20) << "Batch size:" << config.batchSize << std::endl
+			<< std::setw(20) << "Enable strobemers:" << config.enable_strobemers << std::endl
+			<< std::setw(20) << "Strobemer auto:" << config.strobemer_auto << std::endl
+			<< std::setw(20) << "Strobemer w_min:" << config.strobemer_w_min << std::endl
+			<< std::setw(20) << "Strobemer w_max:" << config.strobemer_w_max << std::endl
+			<< std::setw(20) << "Strobemer q:" << config.strobemer_q << std::endl
+			<< std::setw(20) << "Strobemer max dist:" << config.strobemer_max_dist << std::endl
+			<< std::setw(20) << "Strobemer aux len:" << config.strobemer_aux_len << std::endl
+			<< std::setw(20) << "Strobemer weight:" << config.strobemer_weight << std::endl
+			<< std::setw(20) << "Strobemer seed:" << config.strobemer_seed << std::endl
 			<< std::setw(20) << "EM:" << config.em << std::endl
 			<< std::setw(20) << "VEM:" << config.vem << std::endl
 			<< std::setw(20) << "Threads:" << config.threads << std::endl

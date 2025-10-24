@@ -36,8 +36,11 @@ endif()
 
 # 设置SeqAn3库的路径
 set(SEQAN3_DIR "${CMAKE_SOURCE_DIR}/libs/seqan3/share/cmake/seqan3")
-set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/libs/seqan3/share/cmake/seqan3")
+set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/libs/seqan3/share/cmake")
 set(SEQAN3_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/libs/seqan3/include")
+
+# 默认使用仓库内自带的 cereal 头文件，用户可在外部重新指定 cereal_DIR
+set(cereal_DIR "${CMAKE_SOURCE_DIR}/libs/seqan3/share/cmake" CACHE PATH "Directory containing cerealConfig.cmake" FORCE)
 
 # 查找 OpenSSL 包
 find_package(OpenSSL REQUIRED)

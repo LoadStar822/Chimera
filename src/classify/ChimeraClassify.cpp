@@ -42,6 +42,7 @@
 #include <span>
 
 #include <utils/Syncmer.hpp>
+#include <utils/Strobemer.hpp>
 
 namespace ChimeraClassify {
 
@@ -170,6 +171,14 @@ struct TraceRecord {
   std::vector<std::pair<std::string, size_t>> emInputTop;
   std::vector<std::pair<std::string, double>> emFinalTop;
   uint64_t totalTidHits = 0;
+  double bestRatio = 0.0;
+  double bestGap = 0.0;
+  size_t bestUniqueCount = 0;
+  double bestUniqueWeight = 0.0;
+  double bestUniqueRatio = 0.0;
+  double bestUniqueWeightRatio = 0.0;
+  size_t bestConsistencyCount = 0;
+  double bestConsistencyWeight = 0.0;
   bool candidateEmpty = false;
   bool fallbackFull = false;
   size_t thrConf = 0;
@@ -223,6 +232,10 @@ inline void dumpTrace(TraceRecord &rec, const std::string &id,
   log("Counts: evaluated=%zu weight=%.2f best=%zu second=%zu best_tid=%s",
       rec.evaluated, rec.evaluatedWeight, rec.bestCount, rec.secondCount,
       bestTaxid);
+  log("Evidence: gap=%.2f ratio=%.3f uniq_cnt=%zu uniq_w=%.2f uniq_ratio=%.3f uniq_w_ratio=%.3f cons_cnt=%zu cons_w=%.2f",
+      rec.bestGap, rec.bestRatio, rec.bestUniqueCount, rec.bestUniqueWeight,
+      rec.bestUniqueRatio, rec.bestUniqueWeightRatio, rec.bestConsistencyCount,
+      rec.bestConsistencyWeight);
   if (!rec.emInputTop.empty()) {
     size_t idx = 0;
     for (const auto &[taxid, cnt] : rec.emInputTop) {
@@ -674,6 +687,35 @@ loadFilter(const std::string &input_file,
         std::to_string(imcfConfig.fpSalt) +
         "，请重新构建数据库或升级程序。");
   }
+
+  if (!imcfConfig.enableStrobemers) {
+    expectedConfig.enable_strobemers = false;
+  }
+  if (expectedConfig.enable_strobemers && expectedConfig.strobemer_auto && !imcfConfig.strobemerAuto) {
+    expectedConfig.strobemer_auto = false;
+  }
+  if (expectedConfig.strobemer_seed == 0 && imcfConfig.strobemerSeed != 0) {
+    expectedConfig.strobemer_seed = imcfConfig.strobemerSeed;
+  }
+  if (expectedConfig.strobemer_weight == 0.0 && imcfConfig.strobemerWeight > 0.0) {
+    expectedConfig.strobemer_weight = imcfConfig.strobemerWeight;
+  }
+  if (expectedConfig.strobemer_w_min == 0 && imcfConfig.strobemerWMin > 0) {
+    expectedConfig.strobemer_w_min = imcfConfig.strobemerWMin;
+  }
+  if (expectedConfig.strobemer_w_max == 0 && imcfConfig.strobemerWMax > 0) {
+    expectedConfig.strobemer_w_max = imcfConfig.strobemerWMax;
+  }
+  if (expectedConfig.strobemer_q == 0 && imcfConfig.strobemerQ > 0) {
+    expectedConfig.strobemer_q = imcfConfig.strobemerQ;
+  }
+  if (expectedConfig.strobemer_max_dist == 0 && imcfConfig.strobemerMaxDist > 0) {
+    expectedConfig.strobemer_max_dist = imcfConfig.strobemerMaxDist;
+  }
+  if (expectedConfig.strobemer_aux_len == 0 && imcfConfig.strobemerAuxLen > 0) {
+    expectedConfig.strobemer_aux_len = imcfConfig.strobemerAuxLen;
+  }
+
   auto to_lower = [](std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
@@ -1148,6 +1190,7 @@ inline void processSequence(
     return acc;
   };
 
+
   std::shared_ptr<dbg::TraceRecord> trace;
   if (dbg::enabled()) {
     trace = std::make_shared<dbg::TraceRecord>();
@@ -1355,11 +1398,15 @@ inline void processSequence(
   }
 
   robin_hood::unordered_flat_map<uint32_t, double> tidScore;
-  robin_hood::unordered_flat_map<uint32_t, uint32_t> uniqueHits;
-  robin_hood::unordered_flat_map<uint32_t, uint32_t> consistencyHits;
+  robin_hood::unordered_flat_map<uint32_t, uint32_t> uniqueHitsRaw;
+  robin_hood::unordered_flat_map<uint32_t, double> uniqueHitWeight;
+  robin_hood::unordered_flat_map<uint32_t, uint32_t> consistencyHitsRaw;
+  robin_hood::unordered_flat_map<uint32_t, double> consistencyHitWeight;
   tidScore.reserve(128);
-  uniqueHits.reserve(128);
-  consistencyHits.reserve(128);
+  uniqueHitsRaw.reserve(128);
+  uniqueHitWeight.reserve(128);
+  consistencyHitsRaw.reserve(128);
+  consistencyHitWeight.reserve(128);
 
   uint64_t eventHits = 0;
   robin_hood::unordered_flat_map<uint32_t, uint32_t> binHitCount;
@@ -1380,6 +1427,7 @@ inline void processSequence(
 
   auto evaluate_minimizer = [&](uint64_t value,
                                 const std::vector<uint32_t> *subset) -> double {
+    const bool is_strobe = (value >> 63) != 0;
     minimizerTids.clear();
     auto emit = [&](uint32_t bin, uint16_t sp) {
       if (bin >= tax.idx2id.size()) {
@@ -1438,18 +1486,35 @@ inline void processSequence(
     size_t df = routedBinsBuf.empty() ? deg : routedBinsBuf.size();
     double idf = std::log2((totalBins + 1.0) /
                            (static_cast<double>(df) + 1.0));
-    idf = std::clamp(idf, 0.5, 5.0);
+    double idf_min = is_strobe ? 1.0 : 0.5;
+    double idf_max = is_strobe ? 7.5 : 5.0;
+    idf = std::clamp(idf, idf_min, idf_max);
 
-    double contrib = idf / std::sqrt(static_cast<double>(deg));
+    double featureWeight = 1.0;
+    if (is_strobe) {
+      if (config.strobemer_weight > 0.0) {
+        featureWeight = config.strobemer_weight;
+      } else if (imcfConfig.strobemerWeight > 0.0) {
+        featureWeight = imcfConfig.strobemerWeight;
+      } else {
+        featureWeight = 1.6;
+      }
+    }
+
+    double contrib =
+        (idf * featureWeight) / std::sqrt(static_cast<double>(deg));
     for (uint32_t tid : minimizerTids) {
       tidScore[tid] += contrib;
-      ++consistencyHits[tid];
+      ++consistencyHitsRaw[tid];
+      consistencyHitWeight[tid] += featureWeight;
     }
     if (deg == 1) {
-      ++uniqueHits[minimizerTids.front()];
+      uint32_t tid = minimizerTids.front();
+      ++uniqueHitsRaw[tid];
+      uniqueHitWeight[tid] += featureWeight;
     }
 
-    return idf;
+    return idf * featureWeight;
   };
 
   auto recompute_subset_state = [&]() {
@@ -1497,8 +1562,11 @@ inline void processSequence(
     double ratio = 0.0;
     double gap = 0.0;
     size_t uniqueCount = 0;
+    double uniqueWeight = 0.0;
     double uniqueRatio = 0.0;
-    size_t consistency = 0;
+    double uniqueWeightRatio = 0.0;
+    size_t consistencyCount = 0;
+    double consistencyWeight = 0.0;
   };
 
   auto collect_stats = [&]() -> EvidenceStats {
@@ -1507,16 +1575,27 @@ inline void processSequence(
     stats.ratio = compute_ratio(stats.best, stats.second);
     stats.gap = stats.best - stats.second;
     if (stats.bestTid != std::numeric_limits<uint32_t>::max()) {
-      if (auto it = uniqueHits.find(stats.bestTid); it != uniqueHits.end()) {
+      if (auto it = uniqueHitsRaw.find(stats.bestTid);
+          it != uniqueHitsRaw.end()) {
         stats.uniqueCount = it->second;
       }
-      if (auto it = consistencyHits.find(stats.bestTid);
-          it != consistencyHits.end()) {
-        stats.consistency = it->second;
+      if (auto it = uniqueHitWeight.find(stats.bestTid);
+          it != uniqueHitWeight.end()) {
+        stats.uniqueWeight = it->second;
+      }
+      if (auto it = consistencyHitsRaw.find(stats.bestTid);
+          it != consistencyHitsRaw.end()) {
+        stats.consistencyCount = it->second;
+      }
+      if (auto it = consistencyHitWeight.find(stats.bestTid);
+          it != consistencyHitWeight.end()) {
+        stats.consistencyWeight = it->second;
       }
     }
     double denom = eff_eval > 0.0 ? eff_eval : 1.0;
     stats.uniqueRatio = static_cast<double>(stats.uniqueCount) / denom;
+    stats.uniqueWeightRatio =
+        stats.uniqueWeight > 0.0 ? (stats.uniqueWeight / denom) : 0.0;
     return stats;
   };
 
@@ -1533,8 +1612,13 @@ inline void processSequence(
     double thr_conf_local = std::ceil(config.shotThreshold * eff_eval);
     double gap_need_local = std::max(0.5, eff_eval / 24.0);
     bool strong = (s.best >= thr_conf_local);
-    bool unique_ok = (s.uniqueCount >= 3) ||
-                     (s.uniqueCount >= 2 && s.uniqueRatio >= 0.12);
+    double uniqueScore = s.uniqueWeight > 0.0
+                             ? s.uniqueWeight
+                             : static_cast<double>(s.uniqueCount);
+    double uniqueRatioWeighted =
+        s.uniqueWeight > 0.0 ? s.uniqueWeightRatio : s.uniqueRatio;
+    bool unique_ok = (uniqueScore >= 3.0) ||
+                     (uniqueScore >= 2.0 && uniqueRatioWeighted >= 0.12);
     bool stable = (s.gap >= gap_need_local) && (s.ratio >= 1.35);
     return strong && unique_ok && stable;
   };
@@ -1576,6 +1660,10 @@ inline void processSequence(
   double gap = stats.gap;
   size_t uniqueCount = stats.uniqueCount;
   double uniqueRatio = stats.uniqueRatio;
+  double uniqueWeight = stats.uniqueWeight;
+  double uniqueWeightRatio = stats.uniqueWeightRatio;
+  double consistencyWeight = stats.consistencyWeight;
+  size_t consistencyCount = stats.consistencyCount;
 
   bool expanded = false;
   if (!fallback_full && bestTid < tax.tid2bin.size()) {
@@ -1600,8 +1688,10 @@ inline void processSequence(
       binHitCount.clear();
       eventHits = 0;
     }
-    uniqueHits.clear();
-    consistencyHits.clear();
+    uniqueHitsRaw.clear();
+    uniqueHitWeight.clear();
+    consistencyHitsRaw.clear();
+    consistencyHitWeight.clear();
     eff_eval = 0.0;
     n_eval = 0;
     for (auto value : hashs1) {
@@ -1619,6 +1709,10 @@ inline void processSequence(
     gap = stats.gap;
     uniqueCount = stats.uniqueCount;
     uniqueRatio = stats.uniqueRatio;
+    uniqueWeight = stats.uniqueWeight;
+    uniqueWeightRatio = stats.uniqueWeightRatio;
+    consistencyWeight = stats.consistencyWeight;
+    consistencyCount = stats.consistencyCount;
   }
 
   if (trace) {
@@ -1629,6 +1723,14 @@ inline void processSequence(
     trace->evaluatedWeight = eff_eval;
     trace->bestCount = static_cast<size_t>(std::llround(best));
     trace->secondCount = static_cast<size_t>(std::llround(second));
+    trace->bestRatio = best_ratio;
+    trace->bestGap = gap;
+    trace->bestUniqueCount = uniqueCount;
+    trace->bestUniqueWeight = uniqueWeight;
+    trace->bestUniqueRatio = uniqueRatio;
+    trace->bestUniqueWeightRatio = uniqueWeightRatio;
+    trace->bestConsistencyCount = consistencyCount;
+    trace->bestConsistencyWeight = consistencyWeight;
     trace->bestTid = bestTid;
     if (bestTid < tax.id2str.size()) {
       trace->bestTaxid = tax.id2str[bestTid];
@@ -1835,9 +1937,14 @@ inline void processSequence(
 
   size_t dynamicTopK = config.preEmTopK > 0 ? static_cast<size_t>(config.preEmTopK)
                                             : 16;
-  bool strong = (best_ratio >= 2.5) &&
-                (best >= thr_conf + std::max(1.0, eff_eval / 16.0));
-  bool weak = (best < thr_conf) || (best_ratio < 1.20);
+  bool unique_support =
+      (uniqueWeight >= 2.2 && uniqueWeightRatio >= 0.10) ||
+      (uniqueWeight >= 3.0);
+  bool strong = ((best_ratio >= 2.5) &&
+                 (best >= thr_conf + std::max(1.0, eff_eval / 16.0))) ||
+                (unique_support && gap >= std::max(0.5, eff_eval / 18.0));
+  bool weak = (best < thr_conf && uniqueWeight < 1.5) ||
+              (best_ratio < 1.20 && uniqueWeightRatio < 0.08);
   if (strong && dynamicTopK > 8) {
     dynamicTopK = 8;
   } else if (weak && dynamicTopK < 64) {
@@ -2039,35 +2146,102 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
                          FileInfo &fileInfo,
                          GroupHeat &heat,
                          ProgressTracker *progress = nullptr) {
-  // Process batch of reads
-  std::vector<uint64_t> hashs1;
+  const bool strobe_enabled = config.enable_strobemers && imcfConfig.enableStrobemers;
+  const bool strobe_auto = strobe_enabled && config.strobemer_auto && imcfConfig.strobemerAuto;
+  const uint64_t strobe_seed = config.strobemer_seed != 0
+                                   ? config.strobemer_seed
+                                   : (imcfConfig.strobemerSeed != 0
+                                          ? imcfConfig.strobemerSeed
+                                          : ChimeraBuild::adjust_seed(imcfConfig.kmerSize,
+                                                                      0x6F37B5E1C943A7DDULL));
+  chimera::strobemer::StrobeParams override_params{
+      static_cast<uint16_t>(imcfConfig.kmerSize),
+      static_cast<uint16_t>(imcfConfig.smerSize),
+      static_cast<uint16_t>(config.strobemer_w_min),
+      static_cast<uint16_t>(config.strobemer_w_max),
+      static_cast<uint16_t>(config.strobemer_q),
+      config.strobemer_max_dist,
+      static_cast<uint16_t>(config.strobemer_aux_len),
+      strobe_seed};
+  if (override_params.aux_len == 0) {
+    override_params.aux_len = imcfConfig.strobemerAuxLen == 0 ? 15 : imcfConfig.strobemerAuxLen;
+  }
+
+  auto derive_strobe = [&](size_t read_len) -> chimera::strobemer::StrobeParams {
+    chimera::strobemer::StrobeParams params{
+        static_cast<uint16_t>(imcfConfig.kmerSize),
+        static_cast<uint16_t>(imcfConfig.smerSize),
+        0, 0, 0, 0,
+        override_params.aux_len,
+        strobe_seed};
+    if (strobe_auto) {
+      auto profile = chimera::strobemer::auto_profile_from_read(read_len,
+                                                                imcfConfig.kmerSize,
+                                                                strobe_seed);
+      params = chimera::strobemer::override_params(profile.params, override_params);
+    } else {
+      params = chimera::strobemer::override_params(params, override_params);
+      if (params.w_min == 0) params.w_min = imcfConfig.strobemerWMin ? imcfConfig.strobemerWMin : 32;
+      if (params.w_max == 0) params.w_max = imcfConfig.strobemerWMax ? imcfConfig.strobemerWMax : (params.w_min + 32);
+      if (params.q == 0) params.q = imcfConfig.strobemerQ ? imcfConfig.strobemerQ : 9;
+      if (params.max_dist == 0) params.max_dist = imcfConfig.strobemerMaxDist ? imcfConfig.strobemerMaxDist : 180;
+    }
+    if (params.w_min == 0) params.w_min = 32;
+    if (params.w_max == 0) params.w_max = params.w_min + 32;
+    if (params.q == 0) params.q = 9;
+    if (params.max_dist == 0) params.max_dist = 180;
+    params.seed = strobe_seed;
+    chimera::strobemer::sanitize_params(params);
+    return params;
+  };
+
+  std::vector<uint64_t> hashes;
+  hashes.reserve(1024);
+
+  auto append_syncmers = [&](const std::vector<seqan3::dna4> &seq) {
+    if (seq.size() < imcfConfig.kmerSize) {
+      return;
+    }
+    chimera::syncmer::stream_hashes(seq,
+                                    imcfConfig.smerSize,
+                                    imcfConfig.kmerSize,
+                                    syncmer_positions,
+                                    syncmer_seed,
+                                    true,
+                                    [&](uint64_t hash) {
+                                      hashes.push_back(chimera::strobemer::encode_key(false, hash));
+                                    });
+  };
+
+  auto append_strobes = [&](const std::vector<seqan3::dna4> &seq) {
+    if (!strobe_enabled || seq.size() < imcfConfig.kmerSize) {
+      return;
+    }
+    auto params = derive_strobe(seq.size());
+    chimera::strobemer::StrobemerRunner strobe_runner{params};
+    strobe_runner.for_each(seq,
+                           [&](uint64_t hash) {
+                             hashes.push_back(chimera::strobemer::encode_key(true, hash));
+                           });
+  };
+
   if (!batch.seqs2.empty()) {
     for (size_t i = 0; i < batch.ids.size(); ++i) {
-      hashs1.clear();
+      hashes.clear();
       size_t len1 = (i < batch.seqs.size()) ? batch.seqs[i].size() : 0;
       size_t len2 = (i < batch.seqs2.size()) ? batch.seqs2[i].size() : 0;
       size_t readLen = len1 + len2;
-      if (i < batch.seqs.size() && batch.seqs[i].size() >= imcfConfig.kmerSize) {
-        hashs1 = chimera::syncmer::compute_hashes(batch.seqs[i],
-                                                  imcfConfig.smerSize,
-                                                  imcfConfig.kmerSize,
-                                                  syncmer_positions,
-                                                  syncmer_seed,
-                                                  true);
+      if (i < batch.seqs.size()) {
+        append_syncmers(batch.seqs[i]);
+        append_strobes(batch.seqs[i]);
       }
-      if (i < batch.seqs2.size() && batch.seqs2[i].size() >= imcfConfig.kmerSize) {
-        std::vector<uint64_t> hashs2 = chimera::syncmer::compute_hashes(
-            batch.seqs2[i],
-            imcfConfig.smerSize,
-            imcfConfig.kmerSize,
-            syncmer_positions,
-            syncmer_seed,
-            true);
-        hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
+      if (i < batch.seqs2.size()) {
+        append_syncmers(batch.seqs2[i]);
+        append_strobes(batch.seqs2[i]);
       }
-      if (hashs1.size() > 2048) {
-        std::sort(hashs1.begin(), hashs1.end());
-        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
+      if (hashes.size() > 2048) {
+        std::sort(hashes.begin(), hashes.end());
+        hashes.erase(std::unique(hashes.begin(), hashes.end()), hashes.end());
       }
       if (dbg::enabled()) {
         dbg::g.total_reads.fetch_add(1, std::memory_order_relaxed);
@@ -2076,52 +2250,40 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
         if (allShort) {
           dbg::g.too_short.fetch_add(1, std::memory_order_relaxed);
         }
-        if (!hashs1.empty()) {
+        if (!hashes.empty()) {
           dbg::g.has_minimizers.fetch_add(1, std::memory_order_relaxed);
         }
       }
-      processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
+      processSequence(hashes, readLen, imcfConfig, indexToTaxid, tax, config,
                       heat, imcf, batch.ids[i], classifyResults, fileInfo,
                       progress);
     }
   } else {
-    // Process single-end reads
     for (size_t i = 0; i < batch.seqs.size(); i++) {
-      hashs1.clear();
+      hashes.clear();
       size_t readLen = batch.seqs[i].size();
-      if (batch.seqs[i].size() >= imcfConfig.kmerSize) {
-        // Generate syncmer hash values for the sequence
-        hashs1 = chimera::syncmer::compute_hashes(batch.seqs[i],
-                                                  imcfConfig.smerSize,
-                                                  imcfConfig.kmerSize,
-                                                  syncmer_positions,
-                                                  syncmer_seed,
-                                                  true);
-      }
-      if (hashs1.size() > 2048) {
-        std::sort(hashs1.begin(), hashs1.end());
-        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
+      append_syncmers(batch.seqs[i]);
+      append_strobes(batch.seqs[i]);
+      if (hashes.size() > 2048) {
+        std::sort(hashes.begin(), hashes.end());
+        hashes.erase(std::unique(hashes.begin(), hashes.end()), hashes.end());
       }
       if (dbg::enabled()) {
         dbg::g.total_reads.fetch_add(1, std::memory_order_relaxed);
         if (readLen < imcfConfig.kmerSize) {
           dbg::g.too_short.fetch_add(1, std::memory_order_relaxed);
         }
-        if (!hashs1.empty()) {
+        if (!hashes.empty()) {
           dbg::g.has_minimizers.fetch_add(1, std::memory_order_relaxed);
         }
       }
-      // Process the hash values for classification
-      processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
+      processSequence(hashes, readLen, imcfConfig, indexToTaxid, tax, config,
                       heat, imcf, batch.ids[i], classifyResults, fileInfo,
                       progress);
     }
   }
 }
 
-/**
- * @brief Classify reads while streaming batches from producer thread.
- */
 void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
                         moodycamel::ConcurrentQueue<batchReads> &readQueue,
                         ClassifyConfig &config,

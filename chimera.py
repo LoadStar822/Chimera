@@ -89,6 +89,59 @@ def parse_arguments():
         help="Syncmer minimal s-mer offset (0-based)",
     )
     build_parser.add_argument(
+        "--disable-strobemer",
+        action="store_true",
+        help="Disable strobemer feature extraction",
+    )
+    build_parser.add_argument(
+        "--strobe-wmin",
+        type=int,
+        default=0,
+        help="Strobemer window lower bound (0 = auto)",
+    )
+    build_parser.add_argument(
+        "--strobe-wmax",
+        type=int,
+        default=0,
+        help="Strobemer window upper bound (0 = auto)",
+    )
+    build_parser.add_argument(
+        "--strobe-q",
+        type=int,
+        default=0,
+        help="Strobemer popcount mask (0 = auto)",
+    )
+    build_parser.add_argument(
+        "--strobe-maxdist",
+        type=int,
+        default=0,
+        help="Strobemer maximum distance (0 = auto)",
+    )
+    build_parser.add_argument(
+        "--strobe-aux-len",
+        type=int,
+        default=15,
+        help="Strobemer aux_len parameter (default 15)",
+    )
+    build_parser.add_argument(
+        "--strobe-weight",
+        type=float,
+        default=0.0,
+        help="Strobemer event weight (0 = auto)",
+    )
+    build_parser.add_argument(
+        "--strobe-ratio",
+        type=float,
+        default=0.6,
+        help="Sampling quota for strobemer features [0,1]",
+    )
+    build_parser.add_argument(
+        "--strobe-seed",
+        type=int,
+        default=0,
+        help="Strobemer hashing seed (0 = auto)",
+    )
+    build_parser.add_argument(
         "-l",
         "--min-length",
         type=int,
@@ -398,6 +451,53 @@ def parse_arguments():
         help="分类使用的滤器 (仅 imcf)",
     )
     classify_parser.add_argument(
+        "--disable-strobemer",
+        action="store_true",
+        help="Disable strobemer feature extraction during classify",
+    )
+    classify_parser.add_argument(
+        "--strobe-wmin",
+        type=int,
+        default=0,
+        help="Strobemer window lower bound for classify (0 = use database/auto)",
+    )
+    classify_parser.add_argument(
+        "--strobe-wmax",
+        type=int,
+        default=0,
+        help="Strobemer window upper bound for classify (0 = use database/auto)",
+    )
+    classify_parser.add_argument(
+        "--strobe-q",
+        type=int,
+        default=0,
+        help="Strobemer popcount mask for classify (0 = use database/auto)",
+    )
+    classify_parser.add_argument(
+        "--strobe-maxdist",
+        type=int,
+        default=0,
+        help="Strobemer maximum distance for classify (0 = use database/auto)",
+    )
+    classify_parser.add_argument(
+        "--strobe-aux-len",
+        type=int,
+        default=0,
+        help="Strobemer aux_len for classify (0 = use database)",
+    )
+    classify_parser.add_argument(
+        "--strobe-weight",
+        type=float,
+        default=0.0,
+        help="Strobemer event weight override (0 = use database/auto)",
+    )
+    classify_parser.add_argument(
+        "--strobe-seed",
+        type=int,
+        default=0,
+        help="Strobemer hashing seed override (0 = use database)",
+    )
+    classify_parser.add_argument(
         "-b", "--batch-size", type=int, default=400, help="Batch size for classifying"
     )
     classify_parser.add_argument(
@@ -440,6 +540,30 @@ def parse_arguments():
     if args.command == "classify":
         if not any([args.em, args.vem]):
             args.em = True
+        manual_strobe = any(
+            value > 0
+            for value in (
+                args.strobe_wmin,
+                args.strobe_wmax,
+                args.strobe_q,
+                args.strobe_maxdist,
+                args.strobe_weight,
+                args.strobe_seed,
+            )
+        )
+        if args.disable_strobemer and manual_strobe:
+            parser.error("Cannot disable strobemer while providing override parameters")
+        if manual_strobe:
+            if args.strobe_wmin <= 0 or args.strobe_wmax <= 0:
+                parser.error("手动 strobemer 模式需指定 --strobe-wmin 与 --strobe-wmax")
+            if args.strobe_wmin > args.strobe_wmax:
+                parser.error("--strobe-wmin must be <= --strobe-wmax")
+            if args.strobe_q <= 0:
+                parser.error("手动 strobemer 模式需指定 --strobe-q > 0")
+            if args.strobe_maxdist <= 0:
+                parser.error("手动 strobemer 模式需指定 --strobe-maxdist > 0")
+            if args.strobe_weight <= 0.0:
+                parser.error("手动 strobemer 模式需指定 --strobe-weight > 0")
 
     if args.command in {"build", "download_and_build"}:
         if args.syncmer_s < 1:
@@ -469,6 +593,30 @@ def parse_arguments():
                 parser.error(f"{name} 必须落在 [0, 1] 区间")
         if args.toxic_safety_min < 0:
             parser.error("--toxic-safety-min 必须为非负整数")
+        if args.strobe_ratio < 0.0 or args.strobe_ratio > 1.0:
+            parser.error("--strobe-ratio must be between 0 and 1")
+        manual_strobe = any(
+            value > 0
+            for value in (
+                args.strobe_wmin,
+                args.strobe_wmax,
+                args.strobe_q,
+                args.strobe_maxdist,
+                args.strobe_weight,
+                args.strobe_seed,
+            )
+        )
+        if not args.disable_strobemer and manual_strobe:
+            if args.strobe_wmin <= 0 or args.strobe_wmax <= 0:
+                parser.error("手动 strobemer 模式需指定 --strobe-wmin 与 --strobe-wmax")
+            if args.strobe_wmin > args.strobe_wmax:
+                parser.error("--strobe-wmin must be <= --strobe-wmax")
+            if args.strobe_q <= 0:
+                parser.error("手动 strobemer 模式需指定 --strobe-q > 0")
+            if args.strobe_maxdist <= 0:
+                parser.error("手动 strobemer 模式需指定 --strobe-maxdist > 0")
+            if args.strobe_weight <= 0.0:
+                parser.error("手动 strobemer 模式需指定 --strobe-weight > 0")
 
     return args
 
@@ -544,6 +692,24 @@ def run_chimera(args, chimera_path):
         command.extend(["--toxic-safety-min", str(args.toxic_safety_min)])
         command.extend(["-M", str(args.max_hashes)])
         command.extend(["-f", args.filter])
+        if args.disable_strobemer:
+            command.append("--disable-strobemer")
+        else:
+            if args.strobe_wmin:
+                command.extend(["--strobe-wmin", str(args.strobe_wmin)])
+            if args.strobe_wmax:
+                command.extend(["--strobe-wmax", str(args.strobe_wmax)])
+            if args.strobe_q:
+                command.extend(["--strobe-q", str(args.strobe_q)])
+            if args.strobe_maxdist:
+                command.extend(["--strobe-maxdist", str(args.strobe_maxdist)])
+            if args.strobe_aux_len:
+                command.extend(["--strobe-aux-len", str(args.strobe_aux_len)])
+            if args.strobe_weight:
+                command.extend(["--strobe-weight", str(args.strobe_weight)])
+            command.extend(["--strobe-ratio", str(args.strobe_ratio)])
+            if args.strobe_seed:
+                command.extend(["--strobe-seed", str(args.strobe_seed)])
         if args.adaptive_cutoff:
             command.append("--adaptive-cutoff")
         if args.quiet:
@@ -593,6 +759,23 @@ def run_chimera(args, chimera_path):
         command.extend(["-t", str(args.threads)])
         command.extend(["-b", str(args.batch_size)])
         command.extend(["-f", args.filter])
+        if args.disable_strobemer:
+            command.append("--disable-strobemer")
+        else:
+            if args.strobe_wmin:
+                command.extend(["--strobe-wmin", str(args.strobe_wmin)])
+            if args.strobe_wmax:
+                command.extend(["--strobe-wmax", str(args.strobe_wmax)])
+            if args.strobe_q:
+                command.extend(["--strobe-q", str(args.strobe_q)])
+            if args.strobe_maxdist:
+                command.extend(["--strobe-maxdist", str(args.strobe_maxdist)])
+            if args.strobe_aux_len:
+                command.extend(["--strobe-aux-len", str(args.strobe_aux_len)])
+            if args.strobe_weight:
+                command.extend(["--strobe-weight", str(args.strobe_weight)])
+            if args.strobe_seed:
+                command.extend(["--strobe-seed", str(args.strobe_seed)])
         if args.em:
             command.append("-e")
             command.extend(["--em-iter", str(args.em_iter)])
