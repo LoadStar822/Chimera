@@ -35,7 +35,6 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
-#include <hashutil.h>
 #include <iterator>
 #include <kvec.h>
 #include <limits>

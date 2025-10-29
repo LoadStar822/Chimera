@@ -250,7 +250,6 @@ int main(int argc, char **argv) {
       ->add_option("-b,--batch-size", classifyConfig.batchSize,
                    "Batch size for classifying")
       ->default_val(400);
-  // TODO: LCA 相关参数暂时废弃，仅保留内部实现以便后续恢复
   auto emFlag = classify->add_flag("-e,--EM", classifyConfig.em,
                                    "Enable EM mode (default)");
   auto vemFlag =

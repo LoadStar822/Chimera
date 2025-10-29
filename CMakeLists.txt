@@ -83,6 +83,7 @@ file(GLOB_RECURSE SOURCES
 list(FILTER SOURCES EXCLUDE REGEX "CMakeFiles/")
 list(FILTER SOURCES EXCLUDE REGEX "/tests/")
 list(FILTER SOURCES EXCLUDE REGEX "/libs/minions-master/")
+list(FILTER SOURCES EXCLUDE REGEX "/src/legacy/")
 
 # 递归地查找头文件
 file(GLOB_RECURSE HEADERS
@@ -93,7 +94,7 @@ file(GLOB_RECURSE HEADERS
 )
 
 # 添加可执行文件
-add_executable(Chimera ${SOURCES} "src/build/filter/interleaved-cuckoo-filter.h" "src/build/ChimeraBuild.cpp" "libs/xxhash.c" "libs/klib/kthread.c")
+add_executable(Chimera ${SOURCES} "src/build/ChimeraBuild.cpp" "libs/xxhash.c" "libs/klib/kthread.c")
 
 
 # 链接库和 OpenSSL
