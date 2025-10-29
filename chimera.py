@@ -2,6 +2,7 @@ import argparse
 import os
 import shutil
 import sys
+from pathlib import Path
 
 from src.download import download as downloader
 from src.profile import conversion2Krona, profile
@@ -120,6 +121,19 @@ def parse_arguments():
         help="构建使用的滤器 (仅 imcf)",
     )
     build_parser.add_argument(
+        "--taxonomy-kind",
+        dest="taxonomy_kind",
+        default="auto",
+        choices=["auto", "ncbi", "gtdb"],
+        help="taxonomy 数据源标识 (auto/ncbi/gtdb)",
+    )
+    build_parser.add_argument(
+        "--taxonomy-version",
+        dest="taxonomy_version",
+        default="auto",
+        help="taxonomy 数据版本标识，例如 ncbi-taxdump-2025-09-15 或 gtdb-rs226",
+    )
+    build_parser.add_argument(
         "--adaptive-cutoff",
         action="store_true",
         help="启用基于文件规模的自适应 cutoff",
@@ -187,6 +201,19 @@ def parse_arguments():
         default="imcf",
         choices=["imcf"],
         help="构建使用的滤器 (仅 imcf)",
+    )
+    download_build_parser.add_argument(
+        "--taxonomy-kind",
+        dest="taxonomy_kind",
+        default="auto",
+        choices=["auto", "ncbi", "gtdb"],
+        help="taxonomy 数据源标识 (auto/ncbi/gtdb)",
+    )
+    download_build_parser.add_argument(
+        "--taxonomy-version",
+        dest="taxonomy_version",
+        default="auto",
+        help="taxonomy 数据版本标识，例如 ncbi-taxdump-2025-09-15 或 gtdb-rs226",
     )
     download_build_parser.add_argument(
         "--adaptive-cutoff",
@@ -331,6 +358,19 @@ def parse_arguments():
         help="分类使用的滤器 (仅 imcf)",
     )
     classify_parser.add_argument(
+        "--taxonomy-kind",
+        dest="taxonomy_kind",
+        default="auto",
+        choices=["auto", "ncbi", "gtdb"],
+        help="分类期望的 taxonomy 数据源标识",
+    )
+    classify_parser.add_argument(
+        "--taxonomy-version",
+        dest="taxonomy_version",
+        default="auto",
+        help="分类期望的 taxonomy 数据版本标识",
+    )
+    classify_parser.add_argument(
         "-b", "--batch-size", type=int, default=400, help="Batch size for classifying"
     )
     classify_parser.add_argument(
@@ -362,6 +402,31 @@ def parse_arguments():
     )
     profile_parser.add_argument(
         "-k", "--krona", action="store_true", help="Generate Krona chart"
+    )
+    profile_parser.add_argument(
+        "--taxonomy-kind",
+        dest="taxonomy_kind",
+        default="auto",
+        choices=["auto", "ncbi", "gtdb"],
+        help="Profile 使用的 taxonomy 数据源标识（auto 将尝试自动推断）",
+    )
+    profile_parser.add_argument(
+        "--taxonomy-version",
+        dest="taxonomy_version",
+        default="auto",
+        help="Profile 使用的 taxonomy 数据版本标识（可选）",
+    )
+    profile_parser.add_argument(
+        "--taxonomy-info",
+        dest="taxonomy_info",
+        default=None,
+        help="指向构建阶段生成的 tax.info 文件，用于 GTDB 等自定义 taxonomy",
+    )
+    profile_parser.add_argument(
+        "--taxonomy-meta",
+        dest="taxonomy_meta",
+        default=None,
+        help="指向 taxonomy.meta 元数据文件（若未提供将尝试在输入文件同目录查找）",
     )
 
     if len(sys.argv) == 1:
@@ -411,12 +476,42 @@ def run_chimera(args, chimera_path):
         options = downloader.download(interactive=True)
         args.command = "build"
         args.input = os.path.join(options.output_dir, "target.tsv")
+        resolved_kind = getattr(options, "taxonomy_kind_resolved", None)
+        if resolved_kind is None:
+            resolved_kind = getattr(options, "taxonomy_mode", None)
+        if resolved_kind is None:
+            resolved_kind = "auto"
+        args.taxonomy_kind = resolved_kind
+        resolved_version = getattr(options, "taxonomy_version_resolved", None)
+        if resolved_version is None:
+            resolved_version = getattr(options, "version_label", None)
+        if not resolved_version:
+            resolved_version = "auto"
+        args.taxonomy_version = resolved_version
 
     if args.command == "profile":
+        if args.taxonomy_meta is None and args.input:
+            candidate_meta = Path(args.input[0]).resolve().parent / "taxonomy.meta"
+            if candidate_meta.exists():
+                args.taxonomy_meta = str(candidate_meta)
+        if args.taxonomy_info is None:
+            if args.taxonomy_meta:
+                meta_dir = Path(args.taxonomy_meta).resolve().parent
+                candidate_info = meta_dir / "tax.info"
+                if candidate_info.exists():
+                    args.taxonomy_info = str(candidate_info)
+            if args.taxonomy_info is None and args.input:
+                candidate_info = Path(args.input[0]).resolve().parent / "tax.info"
+                if candidate_info.exists():
+                    args.taxonomy_info = str(candidate_info)
         if args.krona:
             print("Converting file to Krona format...")
             conversion2Krona.convert_multiple_files_to_krona_format(
-                args.input, args.output
+                args.input,
+                args.output,
+                taxonomy_kind=args.taxonomy_kind,
+                taxonomy_info=args.taxonomy_info,
+                taxonomy_meta=args.taxonomy_meta,
             )
             print("Conversion completed.")
             print("Generating Krona chart...")
@@ -424,7 +519,18 @@ def run_chimera(args, chimera_path):
                 ["ktImportText", args.output + ".tsv", "-o", args.output + ".html"]
             )
             print("Krona chart generated.")
-        profile.process_file(args.input, args.output)
+        try:
+            profile.process_file(
+                args.input,
+                args.output,
+                taxonomy_kind=args.taxonomy_kind,
+                taxonomy_version=args.taxonomy_version,
+                taxonomy_info=args.taxonomy_info,
+                taxonomy_meta=args.taxonomy_meta,
+            )
+        except ValueError as exc:
+            print(f"Profile failed: {exc}")
+            return 1
         return 0
 
     command = [chimera_path]
@@ -451,6 +557,8 @@ def run_chimera(args, chimera_path):
         command.extend(["-t", str(args.threads)])
         command.extend(["--load-factor", str(args.load_factor)])
         command.extend(["-f", args.filter])
+        command.extend(["--taxonomy-kind", args.taxonomy_kind])
+        command.extend(["--taxonomy-version", args.taxonomy_version])
         if args.adaptive_cutoff:
             command.append("--adaptive-cutoff")
         command.extend(["-M", str(args.max_hashes)])
@@ -501,6 +609,8 @@ def run_chimera(args, chimera_path):
         command.extend(["-t", str(args.threads)])
         command.extend(["-b", str(args.batch_size)])
         command.extend(["-f", args.filter])
+        command.extend(["--taxonomy-kind", args.taxonomy_kind])
+        command.extend(["--taxonomy-version", args.taxonomy_version])
         if args.em:
             command.append("-e")
             command.extend(["--em-iter", str(args.em_iter)])

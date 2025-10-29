@@ -26,6 +26,7 @@
 #include <iomanip>
 #include <string_view>
 #include <chrono>
+#include <cctype>
 #include <cereal/archives/binary.hpp>
 #include <cereal/types/string.hpp>
 #include <cereal/types/vector.hpp>
@@ -906,6 +907,50 @@ namespace ChimeraBuild {
 			}
 			config.threads = static_cast<uint16_t>(hardwareThreads);
 		}
+		const char* kTaxonomyMetaFilename = "taxonomy.meta";
+		auto trim = [](std::string& value) {
+			while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
+				value.erase(value.begin());
+			}
+			while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) {
+				value.pop_back();
+			}
+		};
+		if ((config.taxonomy_kind == "auto" || config.taxonomy_kind.empty()) ||
+			(config.taxonomy_version == "auto" || config.taxonomy_version.empty())) {
+			std::filesystem::path metaPath = std::filesystem::path(config.input_file).parent_path() / kTaxonomyMetaFilename;
+			if (std::filesystem::exists(metaPath)) {
+				std::ifstream metaStream(metaPath);
+				std::string line;
+				while (std::getline(metaStream, line)) {
+					auto pos = line.find('=');
+					if (pos == std::string::npos) {
+						continue;
+					}
+					std::string key = line.substr(0, pos);
+					std::string value = line.substr(pos + 1);
+					trim(key);
+					trim(value);
+					if (key == "taxonomy_kind") {
+						if (config.taxonomy_kind == "auto" || config.taxonomy_kind.empty()) {
+							std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+								return static_cast<char>(std::tolower(ch));
+							});
+							if (!value.empty()) {
+								config.taxonomy_kind = value;
+							}
+						}
+					}
+					else if (key == "taxonomy_version") {
+						if (config.taxonomy_version == "auto" || config.taxonomy_version.empty()) {
+							if (!value.empty()) {
+								config.taxonomy_version = value;
+							}
+						}
+					}
+				}
+			}
+		}
 		if (config.verbose) {
 			std::cout << config << std::endl;
 		}
@@ -980,6 +1025,18 @@ namespace ChimeraBuild {
 			imcfConfig.seed64 = ChimeraBuild::adjust_seed(config.kmer_size);
 			imcfConfig.fpSalt = IMCFConfig::DefaultFingerprintSalt;
 			imcfConfig.hashVersion = IMCFConfig::CurrentHashVersion;
+			if (config.taxonomy_kind == "auto" || config.taxonomy_kind.empty()) {
+				imcfConfig.taxonomyKind = "ncbi";
+			}
+			else {
+				imcfConfig.taxonomyKind = config.taxonomy_kind;
+			}
+			if (config.taxonomy_version == "auto" || config.taxonomy_version.empty()) {
+				imcfConfig.taxonomyVersion = "ncbi-taxdump";
+			}
+			else {
+				imcfConfig.taxonomyVersion = config.taxonomy_version;
+			}
 			chimera::imcf::InterleavedMergedCuckooFilter imcf(groups, imcfConfig);
 			std::vector<std::vector<std::string>> indexToTaxid = buildIMCF(imcf, groups, hashCount);
 			auto build_end = std::chrono::high_resolution_clock::now();

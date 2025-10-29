@@ -44,6 +44,8 @@ namespace dbg {
 		std::string outputFile;
 		std::string dbFile;
 		std::string filter{ "imcf" };
+		std::string taxonomyKind{ "auto" };
+		std::string taxonomyVersion{ "auto" };
 		double shotThreshold = 0.62;
 		bool adaptive_shot = true;
 		double firstFilterBeta = 0.8;
@@ -86,6 +88,8 @@ namespace dbg {
 		}
 		os << std::setw(20) << "Output file:" << config.outputFile << std::endl
 			<< std::setw(20) << "Database file:" << config.dbFile << std::endl
+			<< std::setw(20) << "Taxonomy kind:" << config.taxonomyKind << std::endl
+			<< std::setw(20) << "Taxonomy version:" << config.taxonomyVersion << std::endl
 			<< std::setw(20) << "Shot threshold:" << config.shotThreshold << std::endl
 			<< std::setw(20) << "Adaptive shot:" << config.adaptive_shot << std::endl
 			<< std::setw(20) << "First filter beta:" << config.firstFilterBeta << std::endl

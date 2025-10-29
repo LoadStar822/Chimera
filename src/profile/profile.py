@@ -5,6 +5,13 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from ete3 import NCBITaxa
 
+from .taxonomy_utils import (
+    GtdbTaxonomy,
+    load_gtdb_taxonomy,
+    normalize_kind,
+    read_taxonomy_meta,
+)
+
 # 目标层级及其在 NCBI taxonomy 中可能出现的 rank 名称
 LEVEL_ALIASES = {
     "acellular root": ("acellular root",),
@@ -23,7 +30,9 @@ LEVEL_ALIASES = {
 UNCLASSIFIED = "unclassified"
 
 
-def _normalize_rank(rank: str) -> Optional[str]:
+def _normalize_rank(rank: Optional[str]) -> Optional[str]:
+    if rank is None:
+        return None
     rank_lower = rank.lower()
     for level, aliases in LEVEL_ALIASES.items():
         if rank_lower in aliases:
@@ -64,7 +73,7 @@ def calculate_simpson_index(taxon_dict: Dict[str, int]) -> float:
     return 1.0 - simpson_index
 
 
-def _parse_primary_taxid(line: str) -> Optional[int]:
+def _parse_primary_taxid(line: str, expect_numeric: bool) -> Optional[str]:
     line = line.strip()
     if not line:
         return None
@@ -77,22 +86,28 @@ def _parse_primary_taxid(line: str) -> Optional[int]:
         if token.lower() == UNCLASSIFIED:
             return None
         tid_token = token.split(":", 1)[0]
-        try:
-            tid = int(tid_token)
-        except ValueError:
-            continue
-        if tid > 0:
-            return tid
+        if expect_numeric:
+            try:
+                tid = int(tid_token)
+            except ValueError:
+                continue
+            if tid > 0:
+                return str(tid)
+        else:
+            if tid_token:
+                return tid_token
     return None
 
 
-def _collect_taxids(input_files: Iterable[str]) -> Tuple[Counter[int], int]:
-    taxid_counts: Counter[int] = Counter()
+def _collect_taxids(
+    input_files: Iterable[str], expect_numeric: bool
+) -> Tuple[Counter[str], int]:
+    taxid_counts: Counter[str] = Counter()
     unclassified_reads = 0
     for input_file in input_files:
         with open(input_file, "r", errors="ignore") as infile:
             for line in infile:
-                taxid = _parse_primary_taxid(line)
+                taxid = _parse_primary_taxid(line, expect_numeric=expect_numeric)
                 if taxid is None:
                     unclassified_reads += 1
                 else:
@@ -102,7 +117,7 @@ def _collect_taxids(input_files: Iterable[str]) -> Tuple[Counter[int], int]:
 
 def _aggregate_levels(
     tax: Optional[NCBITaxa],
-    taxid_counts: Counter,
+    taxid_counts: Counter[int],
     base_unclassified: int,
 ) -> Dict[str, Counter]:
     count_by_level: Dict[str, Counter[str]] = {
@@ -157,15 +172,95 @@ def _aggregate_levels(
     return count_by_level
 
 
-def process_file(input_files: Iterable[str], output_file: str) -> None:
-    taxid_counts, base_unclassified = _collect_taxids(input_files)
-    try:
-        tax = NCBITaxa()
-    except Exception as exc:  # pragma: no cover - 初始化失败极少发生
-        warnings.warn(f"无法初始化 NCBITaxa，所有条目将标记为未分类: {exc}")
-        tax = None
+def _aggregate_gtdb_levels(
+    taxonomy: GtdbTaxonomy,
+    taxid_counts: Counter[str],
+    base_unclassified: int,
+) -> Dict[str, Counter[str]]:
+    count_by_level: Dict[str, Counter[str]] = {
+        level: Counter() for level in LEVEL_ALIASES
+    }
+    if base_unclassified:
+        for level in count_by_level:
+            count_by_level[level][UNCLASSIFIED] += base_unclassified
 
-    count_by_level = _aggregate_levels(tax, taxid_counts, base_unclassified)
+    for node, count in taxid_counts.items():
+        if node not in taxonomy.rank:
+            for level in count_by_level:
+                count_by_level[level][UNCLASSIFIED] += count
+            continue
+        has_level = {level: False for level in LEVEL_ALIASES}
+        recorded_any = False
+        for current in taxonomy.iter_lineage(node):
+            node_rank = taxonomy.rank.get(current)
+            normalized = _normalize_rank(node_rank)
+            if not normalized:
+                continue
+            if normalized != "clade" and has_level[normalized]:
+                continue
+            display_name = taxonomy.display_name(current)
+            count_by_level[normalized][display_name] += count
+            has_level[normalized] = True
+            recorded_any = True
+        if not recorded_any:
+            for level in count_by_level:
+                count_by_level[level][UNCLASSIFIED] += count
+            continue
+        for level in LEVEL_ALIASES:
+            if level == "clade":
+                continue
+            if not has_level[level] and _should_mark_unclassified(level, has_level):
+                count_by_level[level][UNCLASSIFIED] += count
+    return count_by_level
+
+
+def process_file(
+    input_files: Iterable[str],
+    output_file: str,
+    taxonomy_kind: str = "auto",
+    taxonomy_version: str = "auto",
+    taxonomy_info: Optional[str] = None,
+    taxonomy_meta: Optional[str] = None,
+) -> None:
+    meta = read_taxonomy_meta(taxonomy_meta)
+    resolved_kind = normalize_kind(taxonomy_kind)
+    if resolved_kind == "auto":
+        resolved_kind = normalize_kind(meta.kind)
+    if resolved_kind == "auto":
+        resolved_kind = "ncbi"
+    resolved_version = taxonomy_version or "auto"
+    if resolved_version in {"auto", "", None}:
+        resolved_version = meta.version
+
+    expect_numeric = resolved_kind != "gtdb"
+    taxid_counts, base_unclassified = _collect_taxids(
+        input_files, expect_numeric=expect_numeric
+    )
+
+    if resolved_kind == "gtdb":
+        if not taxonomy_info:
+            raise ValueError("GTDB 模式需要提供 --taxonomy-info (tax.info 文件路径)")
+        gtdb_taxonomy = load_gtdb_taxonomy(taxonomy_info)
+        count_by_level = _aggregate_gtdb_levels(
+            gtdb_taxonomy, taxid_counts, base_unclassified
+        )
+    else:
+        try:
+            tax = NCBITaxa()
+        except Exception as exc:  # pragma: no cover - 初始化失败极少发生
+            warnings.warn(f"无法初始化 NCBITaxa，所有条目将标记为未分类: {exc}")
+            tax = None
+
+        numeric_counts: Counter[int] = Counter()
+        for taxid_str, count in taxid_counts.items():
+            try:
+                tid = int(taxid_str)
+            except ValueError:
+                continue
+            if tid > 0:
+                numeric_counts[tid] += count
+        count_by_level = _aggregate_levels(tax, numeric_counts, base_unclassified)
+
     total_counts_by_level = {
         level: sum(counter.values()) for level, counter in count_by_level.items()
     }

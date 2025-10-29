@@ -27,6 +27,8 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <algorithm>
+#include <cctype>
 #include <thread>
 #include <vector>
 
@@ -154,6 +156,14 @@ int main(int argc, char **argv) {
                    "构建使用的滤器类型 (imcf)")
       ->check(CLI::IsMember({"imcf"}))
       ->default_val("imcf");
+  build
+      ->add_option("--taxonomy-kind", buildConfig.taxonomy_kind,
+                   "taxonomy 数据源标识 (auto|ncbi|gtdb)")
+      ->default_val("auto");
+  build
+      ->add_option("--taxonomy-version", buildConfig.taxonomy_version,
+                   "taxonomy 数据版本标识，例如 ncbi-taxdump-2025-09-15 或 gtdb-rs226")
+      ->default_val("auto");
   build->add_flag("-q,--quiet", buildConfig.verbose, "Quiet output")
       ->default_val(true)
       ->disable_flag_override();
@@ -169,6 +179,21 @@ int main(int argc, char **argv) {
     if (buildConfig.syncmer_position >= window_span) {
       throw CLI::ValidationError("--syncmer-pos must be < k - s + 1");
     }
+    auto normalize_kind = [](std::string &value) {
+      std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+      });
+      if (value.empty()) {
+        value = "auto";
+      }
+    };
+    auto sanitize_version = [](std::string &value) {
+      if (value.empty()) {
+        value = "auto";
+      }
+    };
+    normalize_kind(buildConfig.taxonomy_kind);
+    sanitize_version(buildConfig.taxonomy_version);
   });
 
   // Classify
@@ -191,11 +216,26 @@ int main(int argc, char **argv) {
 
   // Custom validation function to ensure that the --paired option must have an
   // even number of files
-  classify->callback([pairedOpt]() {
+  classify->callback([pairedOpt, &classifyConfig]() {
     if (pairedOpt->count() > 0 && pairedOpt->count() % 2 != 0) {
       throw CLI::ValidationError(
           "--paired option must have an even number of input files");
     }
+    auto normalize_kind = [](std::string &value) {
+      std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+      });
+      if (value.empty()) {
+        value = "auto";
+      }
+    };
+    auto sanitize_version = [](std::string &value) {
+      if (value.empty()) {
+        value = "auto";
+      }
+    };
+    normalize_kind(classifyConfig.taxonomyKind);
+    sanitize_version(classifyConfig.taxonomyVersion);
   });
 
   classify
@@ -207,6 +247,14 @@ int main(int argc, char **argv) {
                    "Database file for classifying")
       ->required()
       ->check(CLI::ExistingFile);
+  classify
+      ->add_option("--taxonomy-kind", classifyConfig.taxonomyKind,
+                   "分类期望的 taxonomy 数据源 (auto|ncbi|gtdb)")
+      ->default_val("auto");
+  classify
+      ->add_option("--taxonomy-version", classifyConfig.taxonomyVersion,
+                   "分类期望的 taxonomy 数据版本标识")
+      ->default_val("auto");
   classify
       ->add_option("-s,--shot-threshold", classifyConfig.shotThreshold,
                    "Shot threshold for classifying")

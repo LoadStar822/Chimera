@@ -23,7 +23,9 @@
 #include <iostream>
 #include <iomanip>
 #include <cstdint>
+#include <string>
 #include <cereal/cereal.hpp>
+#include <cereal/types/string.hpp>
 
 namespace ChimeraBuild {
 	inline constexpr uint64_t adjust_seed(uint8_t const kmer_size,
@@ -35,6 +37,8 @@ namespace ChimeraBuild {
 	}
 
 	struct BuildConfig {
+		std::string taxonomy_kind{ "auto" };
+		std::string taxonomy_version{ "auto" };
 		std::string input_file;
 		std::string output_file;
 		std::string filter{ "imcf" };
@@ -58,6 +62,8 @@ namespace ChimeraBuild {
 			<< std::setw(25) << "Input file:" << config.input_file << std::endl
 			<< std::setw(25) << "Output file:" << config.output_file << std::endl
 			<< std::setw(25) << "Filter:" << config.filter << std::endl
+			<< std::setw(25) << "Taxonomy kind:" << config.taxonomy_kind << std::endl
+			<< std::setw(25) << "Taxonomy version:" << config.taxonomy_version << std::endl
 			<< std::setw(25) << "Kmer size:" << (int)config.kmer_size << std::endl
 			<< std::setw(25) << "Syncmer s-mer size:" << config.smer_size << std::endl
 			<< std::setw(25) << "Syncmer offset:" << config.syncmer_position << std::endl
@@ -104,19 +110,32 @@ namespace ChimeraBuild {
 		uint64_t seed64{ 0 };
 		uint64_t fpSalt{ DefaultFingerprintSalt };
 		uint8_t hashVersion{ 0 };
+		std::string taxonomyKind{ "ncbi" };
+		std::string taxonomyVersion{ "ncbi-taxdump" };
 
 		template <class Archive>
-		void save(Archive& archive) const {
+		void save(Archive& archive, const std::uint32_t version) const {
 			archive(binNum, binSize, MaxCuckooCount, loadFactor,
 				kmerSize, smerSize, syncmerPosition, seed64, fpSalt, hashVersion);
+			if (version >= 1) {
+				archive(taxonomyKind, taxonomyVersion);
+			}
 		}
 
 		template <class Archive>
-		void load(Archive& archive) {
+		void load(Archive& archive, const std::uint32_t version) {
 			archive(binNum, binSize, MaxCuckooCount, loadFactor,
 				kmerSize, smerSize, syncmerPosition, seed64, fpSalt, hashVersion);
+			if (version >= 1) {
+				archive(taxonomyKind, taxonomyVersion);
+			} else {
+				taxonomyKind = "ncbi";
+				taxonomyVersion = "ncbi-taxdump";
+			}
 		}
 	};
 }
+
+CEREAL_CLASS_VERSION(ChimeraBuild::IMCFConfig, 1);
 
 #endif // BUILDCONFIG_HPP

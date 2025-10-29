@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cmath>
 #include <array>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -2303,6 +2304,44 @@ void run(ClassifyConfig config) {
     ChimeraBuild::IMCFConfig imcfConfig;
     auto indexStatus =
         loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid);
+    auto normalize_kind = [](std::string &value) {
+      std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+      });
+    };
+    std::string resolvedKind = imcfConfig.taxonomyKind;
+    if (resolvedKind.empty()) {
+      resolvedKind = "ncbi";
+    } else {
+      normalize_kind(resolvedKind);
+    }
+    if (config.taxonomyKind == "auto" || config.taxonomyKind.empty()) {
+      config.taxonomyKind = resolvedKind;
+    } else {
+      std::string requestedKind = config.taxonomyKind;
+      normalize_kind(requestedKind);
+      if (requestedKind != resolvedKind) {
+        throw std::runtime_error("数据库 taxonomy_kind (" + resolvedKind +
+                                 ") 与分类请求 (" + requestedKind +
+                                 ") 不匹配，请检查参数 –-taxonomy-kind。");
+      }
+      config.taxonomyKind = requestedKind;
+    }
+    std::string resolvedVersion = imcfConfig.taxonomyVersion;
+    if (resolvedVersion.empty()) {
+      resolvedVersion = resolvedKind == "gtdb" ? "gtdb-auto" : "ncbi-taxdump";
+    }
+    if (config.taxonomyVersion == "auto" || config.taxonomyVersion.empty()) {
+      config.taxonomyVersion = resolvedVersion;
+    } else {
+      if (config.taxonomyVersion != resolvedVersion) {
+        std::ostringstream oss;
+        oss << "数据库 taxonomy_version (" << resolvedVersion
+            << ") 与分类请求 (" << config.taxonomyVersion
+            << ") 不一致，请检查参数 –-taxonomy-version。";
+        throw std::runtime_error(oss.str());
+      }
+    }
     if (indexStatus.builtActive) {
       rebuildActiveMs = indexStatus.activeMs;
       std::cout
