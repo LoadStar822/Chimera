@@ -45,7 +45,7 @@ namespace ChimeraBuild {
 		uint8_t kmer_size{ 31 };
 		uint16_t smer_size{ 16 };
 		uint16_t syncmer_position{ 7 };
-		uint64_t min_length;
+		uint64_t min_length{ 0 };
 		uint16_t threads;
 		bool verbose = true;
 		double load_factor{ 0.95 };

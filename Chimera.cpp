@@ -133,10 +133,33 @@ int main(int argc, char **argv) {
       ->add_option("-P,--syncmer-pos", buildConfig.syncmer_position,
                    "Syncmer minimal s-mer offset (0-based)")
       ->default_val(7);
-  build
+  auto *min_length_option = build
       ->add_option("-l,--min-length", buildConfig.min_length,
-                   "Minimum length sequence for building")
-      ->default_val(0);
+                   "Minimum length sequence for building (auto => k-mer size)");
+  min_length_option->default_val(0);
+  min_length_option->default_str("auto");
+  CLI::Validator min_length_validator;
+  min_length_validator.description("auto or non-negative integer");
+  min_length_validator.operation([](std::string &input) -> std::string {
+    std::string lowered = input;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char ch) {
+      return static_cast<char>(std::tolower(ch));
+    });
+    if (lowered == "auto") {
+      input = "0";
+      return {};
+    }
+    try {
+      long long value = std::stoll(input);
+      if (value < 0) {
+        return "Minimum length must be >= 0 or 'auto'";
+      }
+    } catch (const std::exception &) {
+      return "Minimum length must be an integer or 'auto'";
+    }
+    return {};
+  });
+  min_length_option->check(min_length_validator);
   build
       ->add_option("-t,--threads", buildConfig.threads,
                    "Number of threads for building")
@@ -168,7 +191,7 @@ int main(int argc, char **argv) {
       ->default_val(true)
       ->disable_flag_override();
 
-  build->callback([&buildConfig]() {
+  build->callback([&buildConfig, min_length_option]() {
     if (buildConfig.smer_size == 0) {
       throw CLI::ValidationError("--syncmer-s must be greater than 0");
     }
@@ -194,6 +217,10 @@ int main(int argc, char **argv) {
     };
     normalize_kind(buildConfig.taxonomy_kind);
     sanitize_version(buildConfig.taxonomy_version);
+    if (min_length_option->count() == 0) {
+      buildConfig.min_length = buildConfig.kmer_size;
+    }
+    buildConfig.min_length = std::max<uint64_t>(buildConfig.min_length, buildConfig.kmer_size);
   });
 
   // Classify

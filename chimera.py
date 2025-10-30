@@ -30,6 +30,19 @@ def kmer_type(x):
     return x
 
 
+def min_length_type(value: str):
+    lowered = value.lower()
+    if lowered == "auto":
+        return "auto"
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Minimum length must be an integer or 'auto'") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("Minimum length must be >= 0 or 'auto'")
+    return parsed
+
+
 def parse_arguments():
     if len(sys.argv) > 1 and sys.argv[1] == "download":
         parser = argparse.ArgumentParser(
@@ -92,9 +105,9 @@ def parse_arguments():
     build_parser.add_argument(
         "-l",
         "--min-length",
-        type=int,
-        default=0,
-        help="Minimum length sequence for building",
+        type=min_length_type,
+        default="auto",
+        help="Minimum sequence length for building (auto => k-mer size)",
     )
     build_parser.add_argument(
         "-t",
@@ -174,9 +187,9 @@ def parse_arguments():
     download_build_parser.add_argument(
         "-l",
         "--min-length",
-        type=int,
-        default=0,
-        help="Minimum length sequence for building",
+        type=min_length_type,
+        default="auto",
+        help="Minimum sequence length for building (auto => k-mer size)",
     )
     download_build_parser.add_argument(
         "-t",
@@ -553,7 +566,8 @@ def run_chimera(args, chimera_path):
         command.extend(["-k", str(args.kmer)])
         command.extend(["-s", str(args.syncmer_s)])
         command.extend(["-P", str(args.syncmer_pos)])
-        command.extend(["-l", str(args.min_length)])
+        if args.min_length != "auto":
+            command.extend(["-l", str(args.min_length)])
         command.extend(["-t", str(args.threads)])
         command.extend(["--load-factor", str(args.load_factor)])
         command.extend(["-f", args.filter])

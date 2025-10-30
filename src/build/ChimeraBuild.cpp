@@ -19,6 +19,7 @@
  */
 #include <ChimeraBuild.hpp>
 #include <limits>
+#include <atomic>
 #include <future>
 #include <algorithm>
 #include <array>
@@ -196,170 +197,193 @@ namespace ChimeraBuild {
 			taxid_to_index[taxid] = index++;
 			index_to_taxid.push_back(taxid);
 		}
+		const size_t max_hashes = config.max_hashes_per_taxid;
+		constexpr size_t hash_buffer_flush_bytes = 4 * 1024 * 1024; // 4 MiB
+
 		std::vector<std::mutex> taxidMutexes(index);
+		// Track per-taxid buffered hashes so quota checks include pending data.
+		std::vector<std::atomic<size_t>> pendingHashCounts(index);
+		for (auto &pending : pendingHashCounts) {
+			pending.store(0, std::memory_order_relaxed);
+		}
 		// Global file information statistics
 		FileInfo globalFileInfo = {};
 
 		// Mutex to protect global file information
 		std::mutex fileInfo_mutex;
 
-		// OpenMP parallel processing
-#pragma omp parallel for schedule(dynamic)
-		for (size_t idx = 0; idx < taxid_file_pairs.size(); ++idx)
+		const size_t min_required = std::max<size_t>(config.min_length, static_cast<size_t>(config.kmer_size));
+
+#pragma omp parallel
 		{
-			const auto& [taxid, filename] = taxid_file_pairs[idx];
+			robin_hood::unordered_flat_map<size_t, std::vector<uint64_t>> thread_hash_buffers;
+			thread_hash_buffers.reserve(8);
 
-			size_t taxid_index = taxid_to_index[taxid];
-
-			bool skip_processing = false;
-			{
-				std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index]);
-				if (config.max_hashes_per_taxid > 0 && hashCount[taxid] >= config.max_hashes_per_taxid)
-				{
-					skip_processing = true;
+			auto flush_buffer = [&](size_t taxid_index_local, std::vector<uint64_t> &buffer) {
+				if (buffer.empty()) {
+					return;
 				}
-			}
-			if (skip_processing)
+
+				const size_t buffer_size = buffer.size();
+				std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index_local]);
+				const std::string &taxid_ref = index_to_taxid[taxid_index_local];
+
+				size_t write_count = buffer_size;
+				if (max_hashes > 0) {
+					size_t current_count = hashCount[taxid_ref];
+					if (current_count >= max_hashes) {
+						pendingHashCounts[taxid_index_local].fetch_sub(buffer_size, std::memory_order_relaxed);
+						buffer.clear();
+						return;
+					}
+					size_t remaining = max_hashes - current_count;
+					write_count = std::min(remaining, buffer_size);
+					if (write_count == 0) {
+						pendingHashCounts[taxid_index_local].fetch_sub(buffer_size, std::memory_order_relaxed);
+						buffer.clear();
+						return;
+					}
+				}
+
+				std::string output_filename = "tmp/" + taxid_ref + ".sync";
+				std::ofstream ofile(output_filename, std::ios::binary | std::ios::app);
+				if (!ofile.is_open()) {
+					std::cerr << "Unable to open the syncmer file: " << output_filename << std::endl;
+					pendingHashCounts[taxid_index_local].fetch_sub(buffer_size, std::memory_order_relaxed);
+					buffer.clear();
+					return;
+				}
+
+				ofile.write(reinterpret_cast<const char*>(buffer.data()),
+					static_cast<std::streamsize>(write_count * sizeof(uint64_t)));
+				hashCount[taxid_ref] += write_count;
+
+				pendingHashCounts[taxid_index_local].fetch_sub(buffer_size, std::memory_order_relaxed);
+				buffer.clear();
+			};
+
+#pragma omp for schedule(dynamic)
+			for (size_t idx = 0; idx < taxid_file_pairs.size(); ++idx)
 			{
+				const auto& [taxid, filename] = taxid_file_pairs[idx];
+
+				size_t taxid_index = taxid_to_index[taxid];
+
+				bool skip_processing = false;
+				{
+					std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index]);
+					size_t observed = hashCount[taxid] + pendingHashCounts[taxid_index].load(std::memory_order_relaxed);
+					if (max_hashes > 0 && observed >= max_hashes)
+					{
+						skip_processing = true;
+					}
+				}
+				if (skip_processing)
 				{
 					std::lock_guard<std::mutex> lock(fileInfo_mutex);
 					fileInfo.skippedNum++;
+					continue;
 				}
-				continue;
-			}
 
-			// Thread-local file information
-			FileInfo localFileInfo = {};
+				// Thread-local file information
+				FileInfo localFileInfo = {};
 
-			// Thread-local hash count
-			robin_hood::unordered_flat_map<uint64_t, uint8_t> local_hash_counts;
+				// Thread-local hash count
+				robin_hood::unordered_flat_map<uint64_t, uint8_t> local_hash_counts;
 
-			// Calculate the threshold
-			uint8_t cutoff = 0;
-			if (config.adaptive_cutoff)
-			{
-				// 基于文件大小估算 cutoff，仅在显式开启时触发
-				std::filesystem::path filepath(filename);
-				size_t filesize = std::filesystem::file_size(filepath);
-				bool is_compressed = file_is_compressed(filepath);
-
-				size_t adjusted_filesize = filesize * 2 / (is_compressed ? 1 : 3);
-
-				if (adjusted_filesize <= 314'572'800ULL) // 300 MB
-					cutoff = 1;
-				else if (adjusted_filesize <= 524'288'000ULL) // 500 MB
-					cutoff = 3;
-				else if (adjusted_filesize <= 1'073'741'824ULL) // 1 GB
-					cutoff = 10;
-				else if (adjusted_filesize <= 3'221'225'472ULL) // 3 GB
-					cutoff = 20;
-				else
-					cutoff = 50;
-			}
-
-			// Set the maximum hash limit
-			size_t max_hashes = config.max_hashes_per_taxid;
-
-			{
-				// Open the sequence file
-				seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ filename };
-
-				// Iterate over the records in the sequence file
-				for (auto& record : fin)
+				// Calculate the threshold
+				uint8_t cutoff = 0;
+				if (config.adaptive_cutoff)
 				{
-					auto& seq = record.sequence();
+					// 基于文件大小估算 cutoff，仅在显式开启时触发
+					std::filesystem::path filepath(filename);
+					size_t filesize = std::filesystem::file_size(filepath);
+					bool is_compressed = file_is_compressed(filepath);
 
-					if (seq.size() < config.min_length)
-					{
-						localFileInfo.skippedSeqNum++;
-						continue;
-					}
-					localFileInfo.sequenceNum++;
-					localFileInfo.bpLength += seq.size();
+					size_t adjusted_filesize = filesize * 2 / (is_compressed ? 1 : 3);
 
-					// Compute syncmers and count hash values
-					auto hashes = chimera::syncmer::compute_hashes(
-					    seq, config.smer_size, config.kmer_size, syncmer_pos_span, syncmer_seed, true);
-					for (uint64_t hash : hashes)
-					{
-						uint8_t &count = local_hash_counts[hash];
-						if (count < 255)
-							++count;
-					}
-				}
-			}
-			// Compute syncmers and count hash values
-			std::vector<uint64_t> filtered_hashes;
-			filtered_hashes.reserve(local_hash_counts.size());
-			for (const auto& [hash, count] : local_hash_counts)
-			{
-				if (count >= cutoff)
-				{
-					filtered_hashes.emplace_back(hash);
-				}
-			}
-
-			local_hash_counts.clear();
-
-			if (max_hashes > 0 && filtered_hashes.size() > max_hashes)
-			{
-				filtered_hashes.resize(max_hashes);
-			}
-
-			// Write to the syncmer file
-			{
-
-
-				// Lock is required to prevent multiple threads from writing to the same taxid file
-				std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index]);
-
-
-				if (max_hashes > 0)
-				{
-					size_t current_count = hashCount[taxid];
-					if (current_count >= max_hashes)
-					{
-						filtered_hashes.clear();
-					}
+					if (adjusted_filesize <= 314'572'800ULL) // 300 MB
+						cutoff = 1;
+					else if (adjusted_filesize <= 524'288'000ULL) // 500 MB
+						cutoff = 3;
+					else if (adjusted_filesize <= 1'073'741'824ULL) // 1 GB
+						cutoff = 10;
+					else if (adjusted_filesize <= 3'221'225'472ULL) // 3 GB
+						cutoff = 20;
 					else
+						cutoff = 50;
+				}
+
+				{
+					// Open the sequence file
+					seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ filename };
+
+					// Iterate over the records in the sequence file
+					for (auto& record : fin)
 					{
-						size_t remaining = max_hashes - current_count;
-						if (filtered_hashes.size() > remaining)
+						auto& seq = record.sequence();
+
+						if (seq.size() < min_required)
 						{
-							filtered_hashes.resize(remaining);
+							localFileInfo.skippedSeqNum++;
+							continue;
 						}
-						hashCount[taxid] += filtered_hashes.size();
+						localFileInfo.sequenceNum++;
+						localFileInfo.bpLength += seq.size();
+
+						// Compute syncmers and count hash values
+						auto hashes = chimera::syncmer::compute_hashes(
+							seq, config.smer_size, config.kmer_size, syncmer_pos_span, syncmer_seed, true);
+						for (uint64_t hash : hashes)
+						{
+							uint8_t &count = local_hash_counts[hash];
+							if (count < 255)
+								++count;
+						}
 					}
 				}
-				else
+				// Compute syncmers and count hash values
+				std::vector<uint64_t> filtered_hashes;
+				filtered_hashes.reserve(local_hash_counts.size());
+				for (const auto& [hash, count] : local_hash_counts)
 				{
-					hashCount[taxid] += filtered_hashes.size();
+					if (count >= cutoff)
+					{
+						filtered_hashes.emplace_back(hash);
+					}
 				}
+
+				local_hash_counts.clear();
+
+				if (max_hashes > 0 && filtered_hashes.size() > max_hashes)
+				{
+					filtered_hashes.resize(max_hashes);
+				}
+
 				if (!filtered_hashes.empty())
 				{
-					std::string output_filename = "tmp/" + taxid + ".sync";
-					std::ofstream ofile(output_filename, std::ios::binary | std::ios::app);
-					if (!ofile.is_open())
+					auto &buffer = thread_hash_buffers[taxid_index];
+					buffer.insert(buffer.end(), filtered_hashes.begin(), filtered_hashes.end());
+					pendingHashCounts[taxid_index].fetch_add(filtered_hashes.size(), std::memory_order_relaxed);
+					if (buffer.size() * sizeof(uint64_t) >= hash_buffer_flush_bytes)
 					{
-						std::cerr << "Unable to open the syncmer file: " << output_filename << std::endl;
-						continue;
-					}
-					for (uint64_t hash : filtered_hashes)
-					{
-						ofile.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
+						flush_buffer(taxid_index, buffer);
 					}
 				}
 
+				// Update global hash count
+				{
+					std::lock_guard<std::mutex> lock(fileInfo_mutex);
+					fileInfo.skippedNum += localFileInfo.skippedNum;
+					fileInfo.skippedSeqNum += localFileInfo.skippedSeqNum;
+					fileInfo.sequenceNum += localFileInfo.sequenceNum;
+					fileInfo.bpLength += localFileInfo.bpLength;
+				}
 			}
 
-
-			// Update global hash count
+			for (auto &entry : thread_hash_buffers)
 			{
-				std::lock_guard<std::mutex> lock(fileInfo_mutex);
-				fileInfo.skippedNum += localFileInfo.skippedNum;
-				fileInfo.skippedSeqNum += localFileInfo.skippedSeqNum;
-				fileInfo.sequenceNum += localFileInfo.sequenceNum;
-				fileInfo.bpLength += localFileInfo.bpLength;
+				flush_buffer(entry.first, entry.second);
 			}
 		}
 	}
