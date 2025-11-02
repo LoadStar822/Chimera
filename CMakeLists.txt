@@ -84,6 +84,19 @@ list(FILTER SOURCES EXCLUDE REGEX "CMakeFiles/")
 list(FILTER SOURCES EXCLUDE REGEX "/tests/")
 list(FILTER SOURCES EXCLUDE REGEX "/libs/minions-master/")
 list(FILTER SOURCES EXCLUDE REGEX "/src/legacy/")
+list(FILTER SOURCES EXCLUDE REGEX "/libs/strobemers/")
+
+list(APPEND SOURCES "${PROJECT_SOURCE_DIR}/src/utils/FeatureHasher.cpp")
+list(REMOVE_DUPLICATES SOURCES)
+
+add_library(strobemers STATIC
+    ${PROJECT_SOURCE_DIR}/libs/strobemers/randstrobes.cpp
+)
+
+target_include_directories(strobemers
+    PUBLIC
+    ${PROJECT_SOURCE_DIR}/libs/strobemers
+)
 
 # 递归地查找头文件
 file(GLOB_RECURSE HEADERS
@@ -100,6 +113,7 @@ add_executable(Chimera ${SOURCES} "src/build/ChimeraBuild.cpp" "libs/xxhash.c" "
 # 链接库和 OpenSSL
 target_link_libraries(Chimera
     PRIVATE
+    strobemers
     OpenSSL::SSL
     OpenSSL::Crypto
     pthread
@@ -111,6 +125,7 @@ target_link_libraries(Chimera
 
 target_compile_definitions(Chimera
     PRIVATE
+    CHIMERA_HAS_STROBEMERS=1
     IMCF_MIRROR64
 )
 
@@ -135,6 +150,7 @@ target_include_directories(Chimera
 # IMCF 单元测试可执行文件
 add_executable(imcf_filter_tests
     tests/imcf/interleaved_merged_cuckoo_filter_test.cpp
+    src/utils/FeatureHasher.cpp
     libs/xxhash.c
     libs/klib/kthread.c
 )
@@ -142,6 +158,7 @@ add_executable(imcf_filter_tests
 # 复用与主程序相同的依赖与包含路径
 target_link_libraries(imcf_filter_tests
     PRIVATE
+    strobemers
     OpenSSL::SSL
     OpenSSL::Crypto
     pthread
@@ -153,6 +170,7 @@ target_link_libraries(imcf_filter_tests
 
 target_compile_definitions(imcf_filter_tests
     PRIVATE
+    CHIMERA_HAS_STROBEMERS=1
     IMCF_MIRROR64
 )
 
@@ -181,10 +199,13 @@ target_include_directories(imcf_filter_tests
 
 add_executable(syncmer_tests
     tests/utils/syncmer_test.cpp
+    src/utils/FeatureHasher.cpp
+    libs/xxhash.c
 )
 
 target_link_libraries(syncmer_tests
     PRIVATE
+    strobemers
     OpenSSL::SSL
     OpenSSL::Crypto
     pthread
@@ -196,6 +217,7 @@ target_link_libraries(syncmer_tests
 
 target_compile_definitions(syncmer_tests
     PRIVATE
+    CHIMERA_HAS_STROBEMERS=1
     IMCF_MIRROR64
 )
 

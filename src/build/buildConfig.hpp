@@ -42,6 +42,11 @@ namespace ChimeraBuild {
 		std::string input_file;
 		std::string output_file;
 		std::string filter{ "imcf" };
+		std::string feature{ "strobemer" }; // syncmer | strobemer | auto
+		uint8_t strobemer_k{ 28 };
+		uint8_t strobemer_order{ 2 };
+		uint16_t strobemer_w_min{ 12 };
+		uint16_t strobemer_w_max{ 32 };
 		uint8_t kmer_size{ 31 };
 		uint16_t smer_size{ 16 };
 		uint16_t syncmer_position{ 7 };
@@ -62,6 +67,11 @@ namespace ChimeraBuild {
 			<< std::setw(25) << "Input file:" << config.input_file << std::endl
 			<< std::setw(25) << "Output file:" << config.output_file << std::endl
 			<< std::setw(25) << "Filter:" << config.filter << std::endl
+			<< std::setw(25) << "Feature method:" << config.feature << std::endl
+			<< std::setw(25) << "Strobemer k:" << static_cast<int>(config.strobemer_k) << std::endl
+			<< std::setw(25) << "Strobemer order:" << static_cast<int>(config.strobemer_order) << std::endl
+			<< std::setw(25) << "Strobemer w_min:" << config.strobemer_w_min << std::endl
+			<< std::setw(25) << "Strobemer w_max:" << config.strobemer_w_max << std::endl
 			<< std::setw(25) << "Taxonomy kind:" << config.taxonomy_kind << std::endl
 			<< std::setw(25) << "Taxonomy version:" << config.taxonomy_version << std::endl
 			<< std::setw(25) << "Kmer size:" << (int)config.kmer_size << std::endl
@@ -112,30 +122,33 @@ namespace ChimeraBuild {
 		uint8_t hashVersion{ 0 };
 		std::string taxonomyKind{ "ncbi" };
 		std::string taxonomyVersion{ "ncbi-taxdump" };
+		uint8_t featureMethod{ 0 }; // 0=syncmer, 1=strobemer
+	uint8_t strobeOrder{ 0 };
+	uint16_t strobeWmin{ 0 };
+	uint16_t strobeWmax{ 0 };
+	uint8_t strobeK{ 0 };
 
-		template <class Archive>
-		void save(Archive& archive, const std::uint32_t version) const {
-			archive(binNum, binSize, MaxCuckooCount, loadFactor,
-				kmerSize, smerSize, syncmerPosition, seed64, fpSalt, hashVersion);
-			if (version >= 1) {
-				archive(taxonomyKind, taxonomyVersion);
-			}
-		}
-
-		template <class Archive>
-		void load(Archive& archive, const std::uint32_t version) {
-			archive(binNum, binSize, MaxCuckooCount, loadFactor,
-				kmerSize, smerSize, syncmerPosition, seed64, fpSalt, hashVersion);
-			if (version >= 1) {
-				archive(taxonomyKind, taxonomyVersion);
-			} else {
-				taxonomyKind = "ncbi";
-				taxonomyVersion = "ncbi-taxdump";
-			}
-		}
+	template <class Archive>
+	void serialize(Archive& archive) {
+		archive(binNum,
+		       binSize,
+		       MaxCuckooCount,
+		       loadFactor,
+		       kmerSize,
+		       smerSize,
+		       syncmerPosition,
+		       seed64,
+		       fpSalt,
+		       hashVersion,
+		       taxonomyKind,
+		       taxonomyVersion,
+		       featureMethod,
+		       strobeOrder,
+		       strobeWmin,
+		       strobeWmax,
+		       strobeK);
+	}
 	};
 }
-
-CEREAL_CLASS_VERSION(ChimeraBuild::IMCFConfig, 1);
 
 #endif // BUILDCONFIG_HPP

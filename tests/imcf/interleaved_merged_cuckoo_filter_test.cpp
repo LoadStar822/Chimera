@@ -24,7 +24,13 @@
 
 #include <robin_hood.h>
 
+#include <seqan3/alphabet/nucleotide/dna4.hpp>
+
+#include <buildConfig.hpp>
+#include <utils/FeatureHasher.hpp>
+
 namespace {
+using seqan3::operator""_dna4;
 template <typename T, typename U>
 void expect_equal(const T &lhs, const U &rhs, const std::string &message) {
   if (!(lhs == rhs)) {
@@ -448,6 +454,94 @@ static void test_bulk_count_repeat() {
                "bulkCount 应将标签 2 计数为 1");
 }
 
+static seqan3::dna4_vector make_repeat_sequence(std::string_view pattern,
+                                                size_t repeats) {
+  seqan3::dna4_vector result;
+  result.reserve(pattern.size() * repeats);
+  for (size_t i = 0; i < repeats; ++i) {
+    for (char c : pattern) {
+      result.push_back(seqan3::assign_char_to(c, seqan3::dna4{}));
+    }
+  }
+  return result;
+}
+
+static void test_feature_hash_compatibility() {
+  auto long_seq = make_repeat_sequence("ACGTTGCATGTCAGTCA", 12);
+
+  if (!chimera::feature::strobemer_available()) {
+    chimera::feature::Params strobe{};
+    strobe.method = chimera::feature::Method::Strobemer;
+    strobe.strobe = {.k = 28, .order = 2, .w_min = 12, .w_max = 32, .seed = 0, .canonical = true};
+    auto hashes = chimera::feature::compute_hashes(long_seq, strobe);
+    expect_true(hashes.empty(), "未启用 strobemer 时应回退");
+    return;
+  }
+
+  chimera::feature::Params strobe{};
+  strobe.method = chimera::feature::Method::Strobemer;
+  strobe.strobe = {.k = 28, .order = 2, .w_min = 12, .w_max = 32,
+                   .seed = ChimeraBuild::adjust_seed(28), .canonical = true};
+  auto strobe_hashes = chimera::feature::compute_hashes(long_seq, strobe);
+  expect_true(!strobe_hashes.empty(), "strobemer 哈希结果不应为空");
+
+  ChimeraBuild::IMCFConfig config{};
+  config.loadFactor = 0.9;
+  config.kmerSize = 31;
+  config.smerSize = 16;
+  config.syncmerPosition = 7;
+  config.seed64 = strobe.strobe.seed;
+  config.fpSalt = ChimeraBuild::IMCFConfig::DefaultFingerprintSalt;
+  config.hashVersion = ChimeraBuild::IMCFConfig::CurrentHashVersion;
+  config.featureMethod = 1;
+  config.strobeK = strobe.strobe.k;
+  config.strobeOrder = strobe.strobe.order;
+  config.strobeWmin = strobe.strobe.w_min;
+  config.strobeWmax = strobe.strobe.w_max;
+
+  auto strobe_filter = make_filter_with_hashes(config, {static_cast<uint64_t>(strobe_hashes.size())});
+  for (size_t i = 0; i < strobe_hashes.size(); ++i) {
+    size_t slot = i % 16;
+    expect_true(strobe_filter.insertTag(0, strobe_hashes[i], slot),
+                "strobemer 插入应成功");
+  }
+  expect_equal(strobe_filter.getInsertFailureTotal(), static_cast<uint64_t>(0),
+               "strobemer 插入不应失败");
+
+  std::vector<std::bitset<16>> strobe_result(config.binNum);
+  strobe_filter.bulkContain(strobe_hashes.front(), strobe_result);
+  expect_true(strobe_result[0].test(0), "strobemer bulkContain 应命中 slot 0");
+
+  chimera::feature::Params sync{};
+  sync.method = chimera::feature::Method::Syncmer;
+  sync.sync = {.k = 31, .s = 16, .pos = 7, .seed = ChimeraBuild::adjust_seed(31), .canonical = true};
+  auto sync_hashes = chimera::feature::compute_hashes(long_seq, sync);
+  expect_true(!sync_hashes.empty(), "syncmer 哈希结果不应为空");
+
+  ChimeraBuild::IMCFConfig sync_config{};
+  sync_config.loadFactor = 0.9;
+  sync_config.kmerSize = 31;
+  sync_config.smerSize = 16;
+  sync_config.syncmerPosition = 7;
+  sync_config.seed64 = sync.sync.seed;
+  sync_config.fpSalt = ChimeraBuild::IMCFConfig::DefaultFingerprintSalt;
+  sync_config.hashVersion = ChimeraBuild::IMCFConfig::CurrentHashVersion;
+  sync_config.featureMethod = 0;
+
+  auto sync_filter = make_filter_with_hashes(sync_config, {static_cast<uint64_t>(sync_hashes.size())});
+  for (size_t i = 0; i < sync_hashes.size(); ++i) {
+    size_t slot = i % 16;
+    expect_true(sync_filter.insertTag(0, sync_hashes[i], slot),
+                "syncmer 插入应成功");
+  }
+  expect_equal(sync_filter.getInsertFailureTotal(), static_cast<uint64_t>(0),
+               "syncmer 插入不应失败");
+
+  std::vector<std::bitset<16>> sync_result(sync_config.binNum);
+  sync_filter.bulkContain(sync_hashes.front(), sync_result);
+  expect_true(sync_result[0].test(0), "syncmer bulkContain 应命中 slot 0");
+}
+
 static void test_route_and_subset() {
   ChimeraBuild::IMCFConfig config{};
   auto filter = make_filter_with_hashes(config, {128, 128});
@@ -826,6 +920,7 @@ int main() {
   runner.add("分组-边界情况", test_partition_edge_cases);
   runner.add("插入与 bulkContain-基础", test_insert_and_bulk_contain_basic);
   runner.add("bulkCount-重复计数", test_bulk_count_repeat);
+  runner.add("特征哈希兼容性", test_feature_hash_compatibility);
   runner.add("候选枚举与子集计数", test_route_and_subset);
   runner.add("序列化往返", test_serialize_roundtrip);
   runner.add("插入备用桶并命中", test_insert_alt_bucket_and_find);

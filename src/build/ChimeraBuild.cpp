@@ -33,8 +33,9 @@
 #include <cereal/types/vector.hpp>
 #include <mutex>
 #include <span>
+#include <unordered_map>
 
-#include <utils/Syncmer.hpp>
+#include <utils/FeatureHasher.hpp>
 
 namespace ChimeraBuild {
 	static inline uint64_t mix64(uint64_t value) {
@@ -46,6 +47,52 @@ namespace ChimeraBuild {
 		size_t slotIndex;
 		uint64_t expectedCount;
 	};
+
+	static inline chimera::feature::Method resolve_feature_method(const BuildConfig &config)
+	{
+		if (config.feature == "syncmer")
+			return chimera::feature::Method::Syncmer;
+		if (config.feature == "strobemer")
+			return chimera::feature::Method::Strobemer;
+		// auto: 默认采用 strobemer，后续可根据配置扩展
+		return chimera::feature::Method::Strobemer;
+	}
+
+	static inline chimera::feature::Params make_feature_params(const BuildConfig &config,
+	                                                          chimera::feature::Method &selected,
+	                                                          uint64_t &seed_out)
+	{
+		selected = resolve_feature_method(config);
+#ifndef CHIMERA_HAS_STROBEMERS
+		if (selected == chimera::feature::Method::Strobemer)
+		{
+			selected = chimera::feature::Method::Syncmer;
+		}
+#endif
+		chimera::feature::Params params{};
+		if (selected == chimera::feature::Method::Strobemer)
+		{
+			params.method = chimera::feature::Method::Strobemer;
+			params.strobe.k = config.strobemer_k;
+			params.strobe.order = config.strobemer_order;
+			params.strobe.w_min = config.strobemer_w_min;
+			params.strobe.w_max = config.strobemer_w_max;
+			seed_out = ChimeraBuild::adjust_seed(params.strobe.k);
+			params.strobe.seed = seed_out;
+			params.strobe.canonical = true;
+		}
+		else
+		{
+			params.method = chimera::feature::Method::Syncmer;
+			params.sync.k = config.kmer_size;
+			params.sync.s = config.smer_size;
+			params.sync.pos = config.syncmer_position;
+			seed_out = ChimeraBuild::adjust_seed(config.kmer_size);
+			params.sync.seed = seed_out;
+			params.sync.canonical = true;
+		}
+		return params;
+	}
 
 	/**
 	* Print the build time in a human-readable format.
@@ -165,6 +212,24 @@ namespace ChimeraBuild {
 		return extension == ".gz" || extension == ".bgzf" || extension == ".bz2";
 	}
 
+	static inline std::string tmp_hash_path(const std::string &taxid, std::string_view suffix)
+	{
+		std::string path = "tmp/";
+		path.append(taxid);
+		path.append(suffix);
+		return path;
+	}
+
+	static inline std::string tmp_hash_thread_path(const std::string &taxid,
+	                                               std::string_view suffix,
+	                                               int thread_id)
+	{
+		std::string path = tmp_hash_path(taxid, suffix);
+		path.push_back('.');
+		path.append(std::to_string(thread_id));
+		return path;
+	}
+
 	/**
 	 * Count syncmers for each taxid and its associated files.
 	 *
@@ -179,9 +244,26 @@ namespace ChimeraBuild {
 		robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
 		FileInfo& fileInfo)
 	{
-		const std::array<size_t, 1> syncmer_positions{ static_cast<size_t>(config.syncmer_position) };
-		const std::span<const size_t> syncmer_pos_span(syncmer_positions);
-		const uint64_t syncmer_seed = ChimeraBuild::adjust_seed(config.kmer_size);
+	chimera::feature::Method feature_method{};
+	uint64_t feature_seed = 0;
+	chimera::feature::Params feature_params = make_feature_params(config, feature_method, feature_seed);
+	const std::string feature_suffix = (feature_method == chimera::feature::Method::Strobemer) ? ".strb" : ".sync";
+	if (config.verbose) {
+		if (feature_method == chimera::feature::Method::Strobemer) {
+			std::cout << "Feature method: strobemer (k="
+			          << static_cast<int>(feature_params.strobe.k)
+			          << ", order=" << static_cast<int>(feature_params.strobe.order)
+			          << ", w=[" << feature_params.strobe.w_min << ',' << feature_params.strobe.w_max
+			          << "], seed=" << static_cast<unsigned long long>(feature_params.strobe.seed)
+			          << ")" << std::endl;
+		} else {
+			std::cout << "Feature method: syncmer (k=" << static_cast<int>(feature_params.sync.k)
+			          << ", s=" << feature_params.sync.s
+			          << ", pos=" << feature_params.sync.pos
+			          << ", seed=" << static_cast<unsigned long long>(feature_params.sync.seed)
+			          << ")" << std::endl;
+		}
+	}
 
 		// Expand the pairs of taxid and files
 		std::vector<std::pair<std::string, std::string>> taxid_file_pairs;
@@ -212,51 +294,95 @@ namespace ChimeraBuild {
 		// Mutex to protect global file information
 		std::mutex fileInfo_mutex;
 
-		const size_t min_required = std::max<size_t>(config.min_length, static_cast<size_t>(config.kmer_size));
+		const size_t feature_min_length = chimera::feature::min_required_length(feature_params);
+	const size_t min_required = std::max<size_t>(config.min_length, feature_min_length);
+	if (config.verbose) {
+		std::cout << "Feature hash minimum read length: " << min_required << std::endl;
+	}
 
-#pragma omp parallel
+		int used_threads = 1;
+
+	#pragma omp parallel
 		{
 			robin_hood::unordered_flat_map<size_t, std::vector<uint64_t>> thread_hash_buffers;
 			thread_hash_buffers.reserve(8);
+			const int tid = omp_get_thread_num();
+#ifdef _OPENMP
+#pragma omp single
+			{
+				used_threads = omp_get_num_threads();
+			}
+#endif
 
-			auto flush_buffer = [&](size_t taxid_index_local, std::vector<uint64_t> &buffer) {
+			auto flush_buffer = [&](size_t taxid_index_local, std::vector<uint64_t> &buffer, int thread_id) {
 				if (buffer.empty()) {
 					return;
 				}
 
 				const size_t buffer_size = buffer.size();
-				std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index_local]);
 				const std::string &taxid_ref = index_to_taxid[taxid_index_local];
-
 				size_t write_count = buffer_size;
-				if (max_hashes > 0) {
-					size_t current_count = hashCount[taxid_ref];
-					if (current_count >= max_hashes) {
-						pendingHashCounts[taxid_index_local].fetch_sub(buffer_size, std::memory_order_relaxed);
-						buffer.clear();
-						return;
+				bool should_write = true;
+
+			size_t reserved = 0;
+			{
+				std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index_local]);
+				size_t &current_count_ref = hashCount[taxid_ref];
+				if (max_hashes > 0)
+				{
+					if (current_count_ref >= max_hashes)
+					{
+						should_write = false;
 					}
-					size_t remaining = max_hashes - current_count;
-					write_count = std::min(remaining, buffer_size);
-					if (write_count == 0) {
-						pendingHashCounts[taxid_index_local].fetch_sub(buffer_size, std::memory_order_relaxed);
-						buffer.clear();
-						return;
+					else
+					{
+						size_t remaining = max_hashes - current_count_ref;
+						if (write_count > remaining)
+							write_count = remaining;
+						should_write = (write_count > 0);
 					}
 				}
+				else
+				{
+					should_write = true;
+				}
+				if (should_write)
+				{
+					current_count_ref += write_count;
+					reserved = write_count;
+				}
+			}
 
-				std::string output_filename = "tmp/" + taxid_ref + ".sync";
-				std::ofstream ofile(output_filename, std::ios::binary | std::ios::app);
-				if (!ofile.is_open()) {
-					std::cerr << "Unable to open the syncmer file: " << output_filename << std::endl;
+			if (!should_write)
+			{
+				pendingHashCounts[taxid_index_local].fetch_sub(buffer_size, std::memory_order_relaxed);
+				buffer.clear();
+					return;
+				}
+
+				const std::string part_path = tmp_hash_thread_path(taxid_ref, feature_suffix, thread_id);
+				std::ofstream stream(part_path, std::ios::binary | std::ios::app);
+				stream.tie(nullptr);
+				if (!stream.is_open())
+				{
+					std::cerr << "Unable to open the feature hash file: "
+					          << part_path << std::endl;
 					pendingHashCounts[taxid_index_local].fetch_sub(buffer_size, std::memory_order_relaxed);
 					buffer.clear();
 					return;
 				}
 
-				ofile.write(reinterpret_cast<const char*>(buffer.data()),
-					static_cast<std::streamsize>(write_count * sizeof(uint64_t)));
-				hashCount[taxid_ref] += write_count;
+				const auto bytes_to_write = static_cast<std::streamsize>(write_count * sizeof(uint64_t));
+				stream.write(reinterpret_cast<const char*>(buffer.data()), bytes_to_write);
+				if (!stream.good())
+				{
+					std::cerr << "Failed to write feature hashes for taxid " << taxid_ref << std::endl;
+					if (reserved > 0)
+					{
+						std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index_local]);
+						hashCount[taxid_ref] -= reserved;
+					}
+				}
 
 				pendingHashCounts[taxid_index_local].fetch_sub(buffer_size, std::memory_order_relaxed);
 				buffer.clear();
@@ -288,64 +414,93 @@ namespace ChimeraBuild {
 				// Thread-local file information
 				FileInfo localFileInfo = {};
 
-				// Thread-local hash count
-				robin_hood::unordered_flat_map<uint64_t, uint8_t> local_hash_counts;
+			// Calculate the threshold
+			uint8_t cutoff = 0;
+			if (config.adaptive_cutoff)
+			{
+				// 基于文件大小估算 cutoff，仅在显式开启时触发
+				std::filesystem::path filepath(filename);
+				size_t filesize = std::filesystem::file_size(filepath);
+				bool is_compressed = file_is_compressed(filepath);
 
-				// Calculate the threshold
-				uint8_t cutoff = 0;
-				if (config.adaptive_cutoff)
+				size_t adjusted_filesize = filesize * 2 / (is_compressed ? 1 : 3);
+
+				if (adjusted_filesize <= 314'572'800ULL) // 300 MB
+					cutoff = 1;
+				else if (adjusted_filesize <= 524'288'000ULL) // 500 MB
+					cutoff = 3;
+				else if (adjusted_filesize <= 1'073'741'824ULL) // 1 GB
+					cutoff = 10;
+				else if (adjusted_filesize <= 3'221'225'472ULL) // 3 GB
+					cutoff = 20;
+				else
+					cutoff = 50;
+			}
+
+			const bool streaming = (!config.adaptive_cutoff && max_hashes == 0);
+
+			// Open the sequence file
+			seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ filename };
+			std::vector<uint64_t> hashes;
+			hashes.reserve(4096);
+
+			if (streaming)
+			{
+				for (auto &record : fin)
 				{
-					// 基于文件大小估算 cutoff，仅在显式开启时触发
-					std::filesystem::path filepath(filename);
-					size_t filesize = std::filesystem::file_size(filepath);
-					bool is_compressed = file_is_compressed(filepath);
+					auto &seq = record.sequence();
 
-					size_t adjusted_filesize = filesize * 2 / (is_compressed ? 1 : 3);
-
-					if (adjusted_filesize <= 314'572'800ULL) // 300 MB
-						cutoff = 1;
-					else if (adjusted_filesize <= 524'288'000ULL) // 500 MB
-						cutoff = 3;
-					else if (adjusted_filesize <= 1'073'741'824ULL) // 1 GB
-						cutoff = 10;
-					else if (adjusted_filesize <= 3'221'225'472ULL) // 3 GB
-						cutoff = 20;
-					else
-						cutoff = 50;
-				}
-
-				{
-					// Open the sequence file
-					seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ filename };
-
-					// Iterate over the records in the sequence file
-					for (auto& record : fin)
+					if (seq.size() < min_required)
 					{
-						auto& seq = record.sequence();
+						localFileInfo.skippedSeqNum++;
+						continue;
+					}
+					localFileInfo.sequenceNum++;
+					localFileInfo.bpLength += seq.size();
 
-						if (seq.size() < min_required)
-						{
-							localFileInfo.skippedSeqNum++;
-							continue;
-						}
-						localFileInfo.sequenceNum++;
-						localFileInfo.bpLength += seq.size();
+					hashes.clear();
+					chimera::feature::compute_hashes_append(seq, feature_params, hashes);
+					if (hashes.empty())
+						continue;
 
-						// Compute syncmers and count hash values
-						auto hashes = chimera::syncmer::compute_hashes(
-							seq, config.smer_size, config.kmer_size, syncmer_pos_span, syncmer_seed, true);
-						for (uint64_t hash : hashes)
-						{
-							uint8_t &count = local_hash_counts[hash];
-							if (count < 255)
-								++count;
-						}
+					auto &buffer = thread_hash_buffers[taxid_index];
+					size_t appended = hashes.size();
+					buffer.insert(buffer.end(), hashes.begin(), hashes.end());
+					pendingHashCounts[taxid_index].fetch_add(appended, std::memory_order_relaxed);
+					if (buffer.size() * sizeof(uint64_t) >= hash_buffer_flush_bytes)
+					{
+						flush_buffer(taxid_index, buffer, tid);
 					}
 				}
-				// Compute syncmers and count hash values
+			}
+			else
+			{
+				robin_hood::unordered_flat_map<uint64_t, uint8_t> local_hash_counts;
+				for (auto &record : fin)
+				{
+					auto &seq = record.sequence();
+
+					if (seq.size() < min_required)
+					{
+						localFileInfo.skippedSeqNum++;
+						continue;
+					}
+					localFileInfo.sequenceNum++;
+					localFileInfo.bpLength += seq.size();
+
+					hashes.clear();
+					chimera::feature::compute_hashes_append(seq, feature_params, hashes);
+					for (uint64_t hash : hashes)
+					{
+						uint8_t &count = local_hash_counts[hash];
+						if (count < 255)
+							++count;
+					}
+				}
+
 				std::vector<uint64_t> filtered_hashes;
 				filtered_hashes.reserve(local_hash_counts.size());
-				for (const auto& [hash, count] : local_hash_counts)
+				for (const auto &[hash, count] : local_hash_counts)
 				{
 					if (count >= cutoff)
 					{
@@ -367,9 +522,10 @@ namespace ChimeraBuild {
 					pendingHashCounts[taxid_index].fetch_add(filtered_hashes.size(), std::memory_order_relaxed);
 					if (buffer.size() * sizeof(uint64_t) >= hash_buffer_flush_bytes)
 					{
-						flush_buffer(taxid_index, buffer);
+						flush_buffer(taxid_index, buffer, tid);
 					}
 				}
+			}
 
 				// Update global hash count
 				{
@@ -383,9 +539,47 @@ namespace ChimeraBuild {
 
 			for (auto &entry : thread_hash_buffers)
 			{
-				flush_buffer(entry.first, entry.second);
+				flush_buffer(entry.first, entry.second, tid);
 			}
 		}
+
+			for (size_t idx = 0; idx < index_to_taxid.size(); ++idx)
+			{
+				const std::string &taxid = index_to_taxid[idx];
+				std::string base_path = tmp_hash_path(taxid, feature_suffix);
+				{
+				std::ofstream base(base_path, std::ios::binary | std::ios::trunc);
+				base.tie(nullptr);
+				if (!base.is_open())
+				{
+					std::cerr << "Failed to open merge target: " << base_path << std::endl;
+					continue;
+				}
+				std::array<char, 1 << 20> io_buffer; // 1 MiB chunk for efficient copy
+					for (int tid = 0; tid < used_threads; ++tid)
+					{
+						std::string part_path = tmp_hash_thread_path(taxid, feature_suffix, tid);
+						std::ifstream part(part_path, std::ios::binary);
+						part.tie(nullptr);
+						if (!part.is_open()) {
+							continue;
+						}
+
+						while (part)
+						{
+							part.read(io_buffer.data(), static_cast<std::streamsize>(io_buffer.size()));
+							std::streamsize got = part.gcount();
+							if (got > 0)
+							{
+								base.write(io_buffer.data(), got);
+							}
+						}
+						part.close();
+						std::error_code ec;
+						std::filesystem::remove(part_path, ec);
+					}
+				}
+			}
 	}
 
 	/**
@@ -421,8 +615,8 @@ namespace ChimeraBuild {
 	/**
 	 * @brief Constructs the Interleaved Merged Cuckoo Filter (IMCF) using provided groups and returns a mapping of indices to taxids.
 	 *
-	 * This function builds the IMCF by iterating over groups of taxids, reading syncmer files, and inserting syncmer hashes
-	 * into the IMCF. Each group represents a set of taxids that are processed together, with each syncmer hash being inserted
+	 * This function builds the IMCF by iterating over groups of taxids, reading feature-hash files, and inserting the hashes
+	 * into the IMCF. Each group represents a set of taxids that are processed together, with each hash being inserted
 	 * into the corresponding index in the filter.
 	 *
 	 * @param imcf A reference to the Interleaved Merged Cuckoo Filter object to be built.
@@ -432,23 +626,25 @@ namespace ChimeraBuild {
 	 *
 	 * @details
 	 * The function first resizes `indexToTaxid` to match the number of groups and resizes each sub-vector to the number of taxids
-	 * in the group. It then iterates over each group, reads the syncmer hashes from a file named in the format "tmp/{taxid}.sync",
+	 * in the group. It then iterates over each group, reads the feature hashes from a file named in the format "tmp/{taxid}<suffix>",
 	 * and inserts each hash into the IMCF using the `insertTag` method.
 	 *
 	 * The function is parallelized using OpenMP to process each group concurrently, speeding up the construction process.
 	 *
-	 * If the syncmer file for a taxid cannot be opened, an error message is printed to `std::cerr`.
+	 * If the feature file for a taxid cannot be opened, an error message is printed to `std::cerr`.
 	 *
 	 * @note
-	 * Ensure that the temporary files containing syncmer hashes ("tmp/{taxid}.sync") are pre-generated and accessible.
-	 * The function assumes that `imcf.insertTag` is implemented and capable of inserting 64-bit syncmer hashes into the filter.
+	 * Ensure that the temporary files containing feature hashes ("tmp/{taxid}<suffix>") are pre-generated and accessible.
+	 * The function assumes that `imcf.insertTag` is implemented and capable of inserting 64-bit feature hashes into the filter.
 	 */
 	std::vector<std::vector<std::string>> buildIMCF(
 		chimera::imcf::InterleavedMergedCuckooFilter& imcf,
 		const std::vector<chimera::imcf::Group>& groups,
-		const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount)
+		const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
+		std::string_view featureSuffix)
 	{
 		std::vector<std::vector<std::string>> indexToTaxid(groups.size());
+		const std::string suffix(featureSuffix);
 		robin_hood::unordered_flat_map<std::string, std::vector<TaxidShardPlan>> shardPlan;
 		shardPlan.reserve(hashCount.size());
 
@@ -488,7 +684,7 @@ namespace ChimeraBuild {
 			double ratio = expected == 0 ? (delta == 0 ? 0.0 : std::numeric_limits<double>::infinity())
 				: static_cast<double>(absDelta) / static_cast<double>(expected);
 				if (ratio > kShardToleranceRatio) {
-					std::cerr << "Warning: syncmer count mismatch for taxid " << taxid
+					std::cerr << "Warning: feature count mismatch for taxid " << taxid
 						<< ": expected=" << expected << ", planned=" << shardTotal
 						<< ", delta=" << delta << " (" << std::fixed << std::setprecision(4)
 						<< ratio * 100.0 << "%)" << std::endl;
@@ -527,10 +723,10 @@ namespace ChimeraBuild {
 			const auto& entry = shardEntriesView[entryIdx];
 			const std::string& taxid = entry.taxid;
 			const auto& plans = *entry.plans;
-			std::ifstream ifile("tmp/" + taxid + ".sync", std::ios::binary);
+			std::ifstream ifile(tmp_hash_path(taxid, suffix), std::ios::binary);
 			if (!ifile) {
 #pragma omp critical(imcf_log)
-				std::cerr << "Failed to open syncmer file: " << taxid << ".sync" << std::endl;
+				std::cerr << "Failed to open feature hash file: " << taxid << suffix << std::endl;
 				continue;
 			}
 
@@ -1012,7 +1208,7 @@ namespace ChimeraBuild {
 		if (config.filter == "imcf")
 		{
 			auto calculate_start = std::chrono::high_resolution_clock::now();
-			std::cout << "Calculating syncmers..." << std::endl;
+			std::cout << "Calculating feature hashes..." << std::endl;
 			syncmer_count(config, inputFiles, hashCount, fileInfo);
 			auto calculate_end = std::chrono::high_resolution_clock::now();
 			auto calculate_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_end - calculate_start).count();
@@ -1040,15 +1236,32 @@ namespace ChimeraBuild {
 			}
 
 			auto build_start = std::chrono::high_resolution_clock::now();
-			std::cout << "Building IMCF..." << std::endl;
-			IMCFConfig imcfConfig;
-			imcfConfig.loadFactor = config.load_factor;
-			imcfConfig.kmerSize = config.kmer_size;
-			imcfConfig.smerSize = config.smer_size;
+		std::cout << "Building IMCF..." << std::endl;
+		uint64_t imcf_feature_seed = 0;
+		chimera::feature::Method imcf_feature_method{};
+		make_feature_params(config, imcf_feature_method, imcf_feature_seed);
+		const std::string feature_suffix = (imcf_feature_method == chimera::feature::Method::Strobemer) ? ".strb" : ".sync";
+		IMCFConfig imcfConfig;
+		imcfConfig.loadFactor = config.load_factor;
+		imcfConfig.kmerSize = config.kmer_size;
+		imcfConfig.smerSize = config.smer_size;
 			imcfConfig.syncmerPosition = config.syncmer_position;
-			imcfConfig.seed64 = ChimeraBuild::adjust_seed(config.kmer_size);
+			imcfConfig.seed64 = imcf_feature_seed;
 			imcfConfig.fpSalt = IMCFConfig::DefaultFingerprintSalt;
 			imcfConfig.hashVersion = IMCFConfig::CurrentHashVersion;
+		if (imcf_feature_method == chimera::feature::Method::Strobemer) {
+			imcfConfig.featureMethod = 1;
+			imcfConfig.strobeOrder = config.strobemer_order;
+			imcfConfig.strobeWmin = config.strobemer_w_min;
+			imcfConfig.strobeWmax = config.strobemer_w_max;
+			imcfConfig.strobeK = config.strobemer_k;
+			} else {
+				imcfConfig.featureMethod = 0;
+				imcfConfig.strobeOrder = 0;
+				imcfConfig.strobeWmin = 0;
+				imcfConfig.strobeWmax = 0;
+				imcfConfig.strobeK = 0;
+			}
 			if (config.taxonomy_kind == "auto" || config.taxonomy_kind.empty()) {
 				imcfConfig.taxonomyKind = "ncbi";
 			}
@@ -1062,7 +1275,7 @@ namespace ChimeraBuild {
 				imcfConfig.taxonomyVersion = config.taxonomy_version;
 			}
 			chimera::imcf::InterleavedMergedCuckooFilter imcf(groups, imcfConfig);
-			std::vector<std::vector<std::string>> indexToTaxid = buildIMCF(imcf, groups, hashCount);
+			std::vector<std::vector<std::string>> indexToTaxid = buildIMCF(imcf, groups, hashCount, feature_suffix);
 			auto build_end = std::chrono::high_resolution_clock::now();
 			auto build_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(build_end - build_start).count();
 			if (config.verbose) {

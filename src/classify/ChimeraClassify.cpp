@@ -40,7 +40,7 @@
 #include <memory>
 #include <span>
 
-#include <utils/Syncmer.hpp>
+#include <utils/FeatureHasher.hpp>
 
 namespace ChimeraClassify {
 
@@ -243,6 +243,164 @@ inline void dumpTrace(TraceRecord &rec, const std::string &id,
 } // namespace dbg
 
 namespace {
+
+using FeatureMethod = chimera::feature::Method;
+
+constexpr size_t kInvalidLength = std::numeric_limits<size_t>::max();
+
+FeatureMethod parse_feature_method_string(std::string feature)
+{
+  std::transform(feature.begin(), feature.end(), feature.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  if (feature == "syncmer")
+    return FeatureMethod::Syncmer;
+  if (feature == "strobemer")
+    return FeatureMethod::Strobemer;
+  return FeatureMethod::Auto;
+}
+
+std::string feature_method_to_string(FeatureMethod method)
+{
+  switch (method) {
+  case FeatureMethod::Syncmer:
+    return "syncmer";
+  case FeatureMethod::Strobemer:
+    return "strobemer";
+  case FeatureMethod::Auto:
+  default:
+    return "auto";
+  }
+}
+
+struct ReadStats {
+  size_t count{0};
+  size_t total_len{0};
+  size_t min_len{kInvalidLength};
+  size_t max_len{0};
+
+  void update(size_t len) {
+    if (len == 0)
+      return;
+    ++count;
+    total_len += len;
+    if (len < min_len)
+      min_len = len;
+    if (len > max_len)
+      max_len = len;
+  }
+};
+
+ReadStats sample_read_stats(const ClassifyConfig &config, size_t max_reads = 20000)
+{
+  ReadStats stats;
+  if (!config.singleFiles.empty()) {
+    for (const auto &file : config.singleFiles) {
+      try {
+        seqan3::sequence_file_input<
+            raptor::dna4_traits,
+            seqan3::fields<seqan3::field::id, seqan3::field::seq>>
+            fin{file};
+        for (auto &record : fin) {
+          stats.update(record.sequence().size());
+          if (stats.count >= max_reads)
+            break;
+        }
+      } catch (const std::exception &e) {
+        std::cerr << "Warning: 采样读取文件 " << file << " 失败: " << e.what() << std::endl;
+      }
+      if (stats.count >= max_reads)
+        break;
+    }
+  } else if (!config.pairedFiles.empty()) {
+    for (size_t i = 0; i + 1 < config.pairedFiles.size(); i += 2) {
+      try {
+        seqan3::sequence_file_input<
+            raptor::dna4_traits,
+            seqan3::fields<seqan3::field::id, seqan3::field::seq>>
+            fin1{config.pairedFiles[i]};
+        seqan3::sequence_file_input<
+            raptor::dna4_traits,
+            seqan3::fields<seqan3::field::id, seqan3::field::seq>>
+            fin2{config.pairedFiles[i + 1]};
+        auto it1 = fin1.begin();
+        auto it2 = fin2.begin();
+        for (; it1 != fin1.end() && it2 != fin2.end(); ++it1, ++it2) {
+          stats.update((*it1).sequence().size());
+          stats.update((*it2).sequence().size());
+          if (stats.count >= max_reads)
+            break;
+        }
+      } catch (const std::exception &e) {
+        std::cerr << "Warning: 采样读取文件 " << config.pairedFiles[i]
+                  << " 或 " << config.pairedFiles[i + 1]
+                  << " 失败: " << e.what() << std::endl;
+      }
+      if (stats.count >= max_reads)
+        break;
+    }
+  }
+  if (stats.count == 0) {
+    stats.min_len = 0;
+    stats.max_len = 0;
+  }
+  return stats;
+}
+
+chimera::feature::Params prepare_feature_params_for_classify(
+    const ChimeraBuild::IMCFConfig &imcfConfig,
+    ClassifyConfig &config,
+    FeatureMethod method,
+    size_t &feature_min_len)
+{
+  chimera::feature::Params params{};
+  if (method == FeatureMethod::Strobemer)
+  {
+    if (imcfConfig.strobeK == 0)
+    {
+      throw std::runtime_error("IMCF 数据库缺少 strobemer 参数，无法以 strobemer 模式分类。");
+    }
+    auto ensure_match = [](auto &cfg_value, auto reference, const char *name) {
+      if (cfg_value == 0) {
+        cfg_value = reference;
+      } else if (cfg_value != reference) {
+        std::ostringstream oss;
+        oss << "分类参数 " << name << "=" << static_cast<uint32_t>(cfg_value)
+            << " 与数据库设置 " << static_cast<uint32_t>(reference)
+            << " 不一致，请调整后重试。";
+        throw std::runtime_error(oss.str());
+      }
+    };
+    ensure_match(config.strobemer_k, imcfConfig.strobeK, "--strobe-k");
+    ensure_match(config.strobemer_order, imcfConfig.strobeOrder, "--strobe-order");
+    ensure_match(config.strobemer_w_min, imcfConfig.strobeWmin, "--strobe-w-min");
+    ensure_match(config.strobemer_w_max, imcfConfig.strobeWmax, "--strobe-w-max");
+
+    params.method = FeatureMethod::Strobemer;
+    params.strobe.k = config.strobemer_k;
+    params.strobe.order = config.strobemer_order;
+    params.strobe.w_min = config.strobemer_w_min;
+    params.strobe.w_max = config.strobemer_w_max;
+    params.strobe.seed = imcfConfig.seed64;
+    params.strobe.canonical = true;
+  }
+  else
+  {
+    if (config.strobemer_k != 0 || config.strobemer_order != 0 ||
+        config.strobemer_w_min != 0 || config.strobemer_w_max != 0)
+    {
+      throw std::runtime_error("分类参数 --strobe-* 仅在 feature=strobemer 时可用。");
+    }
+    params.method = FeatureMethod::Syncmer;
+    params.sync.k = imcfConfig.kmerSize;
+    params.sync.s = imcfConfig.smerSize;
+    params.sync.pos = imcfConfig.syncmerPosition;
+    params.sync.seed = imcfConfig.seed64;
+    params.sync.canonical = true;
+  }
+  feature_min_len = chimera::feature::min_required_length(params);
+  return params;
+}
+
 class ProgressTracker {
 public:
   ProgressTracker(bool enabled, std::string stage, size_t min_step,
@@ -1917,8 +2075,8 @@ void thirdFilteringStep(std::vector<classifyResult> &classifyResults,
  * @param imcf The Interleaved Merged Cuckoo Filter used for classification.
  * @param classifyResults A vector to store the classification results for each
  * read.
- * @param syncmer_positions Positions used to determine syncmer offsets.
- * @param syncmer_seed Seed used when hashing syncmers.
+ * @param feature_params Parameters controlling feature hashing (syncmer/strobemer).
+ * @param feature_min_len Minimum read length required to emit hashes.
  * @param fileInfo A structure to store information about the processed reads,
  * such as the number of classified and unclassified reads.
  *
@@ -1932,8 +2090,8 @@ void thirdFilteringStep(std::vector<classifyResult> &classifyResults,
  * classification, which updates the classification results and the file
  * information.
  *
- * - If the read length is smaller than the k-mer size specified in
- * `imcfConfig`, the read is skipped.
+ * - If the read length is smaller than the required feature length, the read
+ *   is skipped.
  * - The function ensures that hash values are generated only for reads that
  * meet the minimum length requirement.
  */
@@ -1942,36 +2100,32 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
                          const TaxDict &tax, ClassifyConfig &config,
                          chimera::imcf::InterleavedMergedCuckooFilter &imcf,
                          std::vector<classifyResult> &classifyResults,
-                         std::span<const size_t> syncmer_positions,
-                         uint64_t syncmer_seed,
+                         const chimera::feature::Params & feature_params,
+                         size_t feature_min_len,
                          FileInfo &fileInfo,
                          GroupHeat &heat,
                          ProgressTracker *progress = nullptr) {
   // Process batch of reads
   std::vector<uint64_t> hashs1;
+  hashs1.reserve(2048);
   if (!batch.seqs2.empty()) {
     for (size_t i = 0; i < batch.ids.size(); ++i) {
       hashs1.clear();
       size_t len1 = (i < batch.seqs.size()) ? batch.seqs[i].size() : 0;
       size_t len2 = (i < batch.seqs2.size()) ? batch.seqs2[i].size() : 0;
       size_t readLen = len1 + len2;
-      if (i < batch.seqs.size() && batch.seqs[i].size() >= imcfConfig.kmerSize) {
-        hashs1 = chimera::syncmer::compute_hashes(batch.seqs[i],
-                                                  imcfConfig.smerSize,
-                                                  imcfConfig.kmerSize,
-                                                  syncmer_positions,
-                                                  syncmer_seed,
-                                                  true);
+      if (readLen > 0) {
+        if (fileInfo.minLen == 0 || fileInfo.minLen == kInvalidLength || readLen < fileInfo.minLen)
+          fileInfo.minLen = readLen;
+        if (readLen > fileInfo.maxLen)
+          fileInfo.maxLen = readLen;
+        fileInfo.bpLength += readLen;
       }
-      if (i < batch.seqs2.size() && batch.seqs2[i].size() >= imcfConfig.kmerSize) {
-        std::vector<uint64_t> hashs2 = chimera::syncmer::compute_hashes(
-            batch.seqs2[i],
-            imcfConfig.smerSize,
-            imcfConfig.kmerSize,
-            syncmer_positions,
-            syncmer_seed,
-            true);
-        hashs1.insert(hashs1.end(), hashs2.begin(), hashs2.end());
+      if (i < batch.seqs.size() && batch.seqs[i].size() >= feature_min_len) {
+        chimera::feature::compute_hashes_append(batch.seqs[i], feature_params, hashs1);
+      }
+      if (i < batch.seqs2.size() && batch.seqs2[i].size() >= feature_min_len) {
+        chimera::feature::compute_hashes_append(batch.seqs2[i], feature_params, hashs1);
       }
       if (hashs1.size() > 2048) {
         std::sort(hashs1.begin(), hashs1.end());
@@ -1979,8 +2133,8 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
       }
       if (dbg::enabled()) {
         dbg::g.total_reads.fetch_add(1, std::memory_order_relaxed);
-        bool allShort = (len1 < imcfConfig.kmerSize) &&
-                        (len2 < imcfConfig.kmerSize);
+        bool allShort = (len1 < feature_min_len) &&
+                        (len2 < feature_min_len);
         if (allShort) {
           dbg::g.too_short.fetch_add(1, std::memory_order_relaxed);
         }
@@ -1997,14 +2151,15 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
     for (size_t i = 0; i < batch.seqs.size(); i++) {
       hashs1.clear();
       size_t readLen = batch.seqs[i].size();
-      if (batch.seqs[i].size() >= imcfConfig.kmerSize) {
-        // Generate syncmer hash values for the sequence
-        hashs1 = chimera::syncmer::compute_hashes(batch.seqs[i],
-                                                  imcfConfig.smerSize,
-                                                  imcfConfig.kmerSize,
-                                                  syncmer_positions,
-                                                  syncmer_seed,
-                                                  true);
+      if (readLen > 0) {
+        if (fileInfo.minLen == 0 || fileInfo.minLen == kInvalidLength || readLen < fileInfo.minLen)
+          fileInfo.minLen = readLen;
+        if (readLen > fileInfo.maxLen)
+          fileInfo.maxLen = readLen;
+        fileInfo.bpLength += readLen;
+      }
+      if (batch.seqs[i].size() >= feature_min_len) {
+        chimera::feature::compute_hashes_append(batch.seqs[i], feature_params, hashs1);
       }
       if (hashs1.size() > 2048) {
         std::sort(hashs1.begin(), hashs1.end());
@@ -2012,7 +2167,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
       }
       if (dbg::enabled()) {
         dbg::g.total_reads.fetch_add(1, std::memory_order_relaxed);
-        if (readLen < imcfConfig.kmerSize) {
+        if (readLen < feature_min_len) {
           dbg::g.too_short.fetch_add(1, std::memory_order_relaxed);
         }
         if (!hashs1.empty()) {
@@ -2038,36 +2193,57 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
                         const TaxDict &tax,
                         std::vector<classifyResult> &classifyResults,
                         FileInfo &fileInfo, std::atomic<bool> &producer_done,
-                        ProgressTracker *progress) {
+                        ProgressTracker *progress,
+                        const chimera::feature::Params &feature_params,
+                        size_t feature_min_len) {
   if (dbg::enabled()) {
     dbg::reset();
   }
   dbg::initSink();
   if (dbg::enabled()) {
-    dbg::log("Trace start: seed64=%llu, k=%u, s=%u, pos=%u, hashVersion=%u, fpSalt=%llu",
-             static_cast<unsigned long long>(imcfConfig.seed64),
-             static_cast<unsigned>(imcfConfig.kmerSize),
-             static_cast<unsigned>(imcfConfig.smerSize),
-             static_cast<unsigned>(imcfConfig.syncmerPosition),
-             static_cast<unsigned>(imcfConfig.hashVersion),
-             static_cast<unsigned long long>(imcfConfig.fpSalt));
+    const char *feature_mode =
+        feature_params.method == chimera::feature::Method::Strobemer
+            ? "strobemer"
+            : (feature_params.method == chimera::feature::Method::Syncmer
+                   ? "syncmer"
+                   : "auto");
+    if (feature_params.method == chimera::feature::Method::Strobemer) {
+      dbg::log("Trace start: feature=%s, seed64=%llu, strobe_k=%u, order=%u, w_min=%u, w_max=%u, hashVersion=%u, fpSalt=%llu",
+               feature_mode,
+               static_cast<unsigned long long>(feature_params.strobe.seed),
+               static_cast<unsigned>(feature_params.strobe.k),
+               static_cast<unsigned>(feature_params.strobe.order),
+               static_cast<unsigned>(feature_params.strobe.w_min),
+               static_cast<unsigned>(feature_params.strobe.w_max),
+               static_cast<unsigned>(imcfConfig.hashVersion),
+               static_cast<unsigned long long>(imcfConfig.fpSalt));
+    } else {
+      dbg::log("Trace start: feature=%s, seed64=%llu, k=%u, s=%u, pos=%u, hashVersion=%u, fpSalt=%llu",
+               feature_mode,
+               static_cast<unsigned long long>(feature_params.sync.seed),
+               static_cast<unsigned>(feature_params.sync.k),
+               static_cast<unsigned>(feature_params.sync.s),
+               static_cast<unsigned>(feature_params.sync.pos),
+               static_cast<unsigned>(imcfConfig.hashVersion),
+               static_cast<unsigned long long>(imcfConfig.fpSalt));
+    }
   }
-
-  const std::array<size_t, 1> syncmer_positions{ static_cast<size_t>(imcfConfig.syncmerPosition) };
-  const std::span<const size_t> syncmer_pos_span(syncmer_positions);
 
 #pragma omp parallel
   {
     batchReads batch;
     std::vector<classifyResult> localClassifyResults;
     FileInfo localFileInfo;
+    localFileInfo.minLen = kInvalidLength;
+    localFileInfo.maxLen = 0;
+    localFileInfo.bpLength = 0;
     GroupHeat heat;
     heat.ensure(indexToTaxid.size());
 
     for (;;) {
       if (readQueue.try_dequeue(batch)) {
         processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
-                     localClassifyResults, syncmer_pos_span, imcfConfig.seed64,
+                     localClassifyResults, feature_params, feature_min_len,
                      localFileInfo, heat, progress);
         continue;
       }
@@ -2096,6 +2272,15 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
       for (const auto &[taxid, count] : localFileInfo.taxidUniqueMatches) {
         fileInfo.taxidUniqueMatches[taxid] += count;
       }
+      size_t localMin = (localFileInfo.minLen == kInvalidLength) ? 0 : localFileInfo.minLen;
+      if (localMin > 0 &&
+          (fileInfo.minLen == 0 || fileInfo.minLen == kInvalidLength || localMin < fileInfo.minLen)) {
+        fileInfo.minLen = localMin;
+      }
+      if (localFileInfo.maxLen > fileInfo.maxLen) {
+        fileInfo.maxLen = localFileInfo.maxLen;
+      }
+      fileInfo.bpLength += localFileInfo.bpLength;
     }
   }
 
@@ -2162,23 +2347,41 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               chimera::imcf::InterleavedMergedCuckooFilter &imcf,
               std::vector<std::vector<std::string>> &indexToTaxid,
               const TaxDict &tax, std::vector<classifyResult> &classifyResults,
-              FileInfo &fileInfo, ProgressTracker *progress) {
+              FileInfo &fileInfo, ProgressTracker *progress,
+              const chimera::feature::Params &feature_params,
+              size_t feature_min_len) {
   if (dbg::enabled()) {
     dbg::reset();
   }
   dbg::initSink();
   if (dbg::enabled()) {
-    dbg::log("Trace start: seed64=%llu, k=%u, s=%u, pos=%u, hashVersion=%u, fpSalt=%llu",
-             static_cast<unsigned long long>(imcfConfig.seed64),
-             static_cast<unsigned>(imcfConfig.kmerSize),
-             static_cast<unsigned>(imcfConfig.smerSize),
-             static_cast<unsigned>(imcfConfig.syncmerPosition),
-             static_cast<unsigned>(imcfConfig.hashVersion),
-             static_cast<unsigned long long>(imcfConfig.fpSalt));
+    const char *feature_mode =
+        feature_params.method == chimera::feature::Method::Strobemer
+            ? "strobemer"
+            : (feature_params.method == chimera::feature::Method::Syncmer
+                   ? "syncmer"
+                   : "auto");
+    if (feature_params.method == chimera::feature::Method::Strobemer) {
+      dbg::log("Trace start: feature=%s, seed64=%llu, strobe_k=%u, order=%u, w_min=%u, w_max=%u, hashVersion=%u, fpSalt=%llu",
+               feature_mode,
+               static_cast<unsigned long long>(feature_params.strobe.seed),
+               static_cast<unsigned>(feature_params.strobe.k),
+               static_cast<unsigned>(feature_params.strobe.order),
+               static_cast<unsigned>(feature_params.strobe.w_min),
+               static_cast<unsigned>(feature_params.strobe.w_max),
+               static_cast<unsigned>(imcfConfig.hashVersion),
+               static_cast<unsigned long long>(imcfConfig.fpSalt));
+    } else {
+      dbg::log("Trace start: feature=%s, seed64=%llu, k=%u, s=%u, pos=%u, hashVersion=%u, fpSalt=%llu",
+               feature_mode,
+               static_cast<unsigned long long>(feature_params.sync.seed),
+               static_cast<unsigned>(feature_params.sync.k),
+               static_cast<unsigned>(feature_params.sync.s),
+               static_cast<unsigned>(feature_params.sync.pos),
+               static_cast<unsigned>(imcfConfig.hashVersion),
+               static_cast<unsigned long long>(imcfConfig.fpSalt));
+    }
   }
-
-  const std::array<size_t, 1> syncmer_positions{ static_cast<size_t>(imcfConfig.syncmerPosition) };
-  const std::span<const size_t> syncmer_pos_span(syncmer_positions);
 
   // Parallel processing of batches using OpenMP
 #pragma omp parallel
@@ -2186,12 +2389,15 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
     batchReads batch;
     std::vector<classifyResult> localClassifyResults;
     FileInfo localFileInfo;
+    localFileInfo.minLen = kInvalidLength;
+    localFileInfo.maxLen = 0;
+    localFileInfo.bpLength = 0;
     GroupHeat heat;
     heat.ensure(indexToTaxid.size());
     // Dequeue and process batches until the queue is empty
     while (readQueue.try_dequeue(batch)) {
       processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
-                   localClassifyResults, syncmer_pos_span, imcfConfig.seed64,
+                   localClassifyResults, feature_params, feature_min_len,
                    localFileInfo, heat, progress);
     }
     // Critical section to merge local results into shared resources
@@ -2216,6 +2422,15 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
       for (const auto &[taxid, count] : localFileInfo.taxidUniqueMatches) {
         fileInfo.taxidUniqueMatches[taxid] += count;
       }
+      size_t localMin = (localFileInfo.minLen == kInvalidLength) ? 0 : localFileInfo.minLen;
+      if (localMin > 0 &&
+          (fileInfo.minLen == 0 || fileInfo.minLen == kInvalidLength || localMin < fileInfo.minLen)) {
+        fileInfo.minLen = localMin;
+      }
+      if (localFileInfo.maxLen > fileInfo.maxLen) {
+        fileInfo.maxLen = localFileInfo.maxLen;
+      }
+      fileInfo.bpLength += localFileInfo.bpLength;
     }
   }
 
@@ -2348,12 +2563,186 @@ void run(ClassifyConfig config) {
           << "IMCF index: active-group list missing, rebuilding in memory ("
           << rebuildActiveMs << " ms)" << std::endl;
     }
+    FeatureMethod db_method = (imcfConfig.featureMethod == 1)
+                                  ? FeatureMethod::Strobemer
+                                  : FeatureMethod::Syncmer;
+    FeatureMethod user_method = parse_feature_method_string(config.feature);
+    FeatureMethod desired_method = user_method;
+    std::string db_method_str = feature_method_to_string(db_method);
+    std::string user_method_str = feature_method_to_string(user_method);
+    uint8_t desired_k = config.strobemer_k;
+    uint8_t desired_order = config.strobemer_order;
+    uint16_t desired_w_min = config.strobemer_w_min;
+    uint16_t desired_w_max = config.strobemer_w_max;
+
+    if (user_method == FeatureMethod::Auto) {
+      ReadStats stats = sample_read_stats(config);
+      double avg_len = (stats.count == 0)
+                           ? 0.0
+                           : static_cast<double>(stats.total_len) /
+                                 static_cast<double>(stats.count);
+      if (dbg::enabled()) {
+        dbg::log("Auto feature sampling: count=%zu min=%zu max=%zu avg=%.1f user=%s db=%s",
+                 stats.count,
+                 stats.min_len == kInvalidLength ? 0 : stats.min_len,
+                 stats.max_len,
+                 avg_len,
+                 user_method_str.c_str(),
+                 db_method_str.c_str());
+      }
+      if (stats.count == 0) {
+        desired_method = db_method;
+      } else {
+        size_t representative_len = static_cast<size_t>(std::llround(avg_len));
+        if (representative_len == 0)
+          representative_len = stats.max_len;
+        chimera::feature::Params suggested =
+            chimera::feature::auto_params_from_readlen(representative_len);
+        if (suggested.method == chimera::feature::Method::Strobemer) {
+          size_t required = chimera::feature::min_required_length(suggested);
+          if (stats.max_len < required) {
+            suggested.method = chimera::feature::Method::Syncmer;
+          }
+        }
+        desired_method = static_cast<FeatureMethod>(suggested.method);
+        if (suggested.method == chimera::feature::Method::Strobemer) {
+          desired_k = suggested.strobe.k;
+          desired_order = suggested.strobe.order;
+          desired_w_min = suggested.strobe.w_min;
+          desired_w_max = suggested.strobe.w_max;
+        } else {
+          desired_k = 0;
+          desired_order = 0;
+          desired_w_min = 0;
+          desired_w_max = 0;
+        }
+      }
+    }
+
+    FeatureMethod final_method = desired_method;
+    if (final_method == FeatureMethod::Strobemer) {
+      if (db_method != FeatureMethod::Strobemer) {
+        std::cout << "[info] 输入 reads 建议使用 strobemer，但数据库为 syncmer，自动改用 syncmer。" << std::endl;
+        if (dbg::enabled()) {
+          dbg::log("Auto feature fallback: desired strobemer but database %s", db_method_str.c_str());
+        }
+        final_method = db_method;
+      } else {
+        if (imcfConfig.strobeK == 0) {
+          throw std::runtime_error("IMCF 数据库缺少 strobemer 参数，无法分类。");
+        }
+        if (user_method == FeatureMethod::Auto) {
+          if (desired_k != 0 && (desired_k != imcfConfig.strobeK ||
+                                 desired_order != imcfConfig.strobeOrder ||
+                                 desired_w_min != imcfConfig.strobeWmin ||
+                                 desired_w_max != imcfConfig.strobeWmax)) {
+            std::cout << "[warn] 自动参数建议 strobemer(k=" << static_cast<int>(desired_k)
+                      << ", order=" << static_cast<int>(desired_order)
+                      << ", w=[" << desired_w_min << ',' << desired_w_max
+                      << "])，但数据库为 strobemer(k=" << static_cast<int>(imcfConfig.strobeK)
+                      << ", order=" << static_cast<int>(imcfConfig.strobeOrder)
+                      << ", w=[" << imcfConfig.strobeWmin << ',' << imcfConfig.strobeWmax
+                      << "])，将沿用数据库参数。如需匹配自动建议，请重新构建数据库。" << std::endl;
+            if (dbg::enabled()) {
+              dbg::log("Auto feature suggestion mismatch: desired k=%u order=%u w=[%u,%u] but database k=%u order=%u w=[%u,%u]",
+                       static_cast<unsigned>(desired_k),
+                       static_cast<unsigned>(desired_order),
+                       static_cast<unsigned>(desired_w_min),
+                       static_cast<unsigned>(desired_w_max),
+                       static_cast<unsigned>(imcfConfig.strobeK),
+                       static_cast<unsigned>(imcfConfig.strobeOrder),
+                       static_cast<unsigned>(imcfConfig.strobeWmin),
+                       static_cast<unsigned>(imcfConfig.strobeWmax));
+            }
+          }
+        }
+        config.strobemer_k = imcfConfig.strobeK;
+        config.strobemer_order = imcfConfig.strobeOrder;
+        config.strobemer_w_min = imcfConfig.strobeWmin;
+        config.strobemer_w_max = imcfConfig.strobeWmax;
+      }
+    } else { // final_method syncmer
+      if (db_method == FeatureMethod::Strobemer) {
+        std::cout << "[warn] 自动模式建议使用 syncmer，但数据库是 strobemer，将沿用数据库参数。" << std::endl;
+        if (dbg::enabled()) {
+          dbg::log("%s", "Auto feature fallback: desired syncmer but database strobemer");
+        }
+        final_method = db_method;
+        config.strobemer_k = imcfConfig.strobeK;
+        config.strobemer_order = imcfConfig.strobeOrder;
+        config.strobemer_w_min = imcfConfig.strobeWmin;
+        config.strobemer_w_max = imcfConfig.strobeWmax;
+      } else {
+        config.strobemer_k = 0;
+        config.strobemer_order = 0;
+        config.strobemer_w_min = 0;
+        config.strobemer_w_max = 0;
+      }
+    }
+
+    if (final_method != db_method) {
+      std::ostringstream oss;
+      oss << "数据库构建特征方法为 " << feature_method_to_string(db_method)
+          << "，但分类配置要求 " << feature_method_to_string(final_method)
+          << "，请调整 --feature 参数或重新构建数据库。";
+      throw std::runtime_error(oss.str());
+    }
+
+    std::string final_method_str = feature_method_to_string(final_method);
+    config.feature = final_method_str;
+
+    if (final_method == FeatureMethod::Strobemer && !chimera::feature::strobemer_available()) {
+      throw std::runtime_error("当前 Chimera 构建未启用 strobemer 支持，无法加载使用 strobemer 的数据库，请重新编译或改用 syncmer 数据库。");
+    }
+
+    size_t feature_min_len = 0;
+    chimera::feature::Params feature_params =
+        prepare_feature_params_for_classify(imcfConfig, config, final_method, feature_min_len);
+
+    if (dbg::enabled()) {
+      if (final_method == FeatureMethod::Strobemer) {
+        dbg::log("Feature selected: %s (k=%u, order=%u, w=[%u,%u], seed=%llu, min_len=%zu)",
+                 final_method_str.c_str(),
+                 static_cast<unsigned>(config.strobemer_k),
+                 static_cast<unsigned>(config.strobemer_order),
+                 static_cast<unsigned>(config.strobemer_w_min),
+                 static_cast<unsigned>(config.strobemer_w_max),
+                 static_cast<unsigned long long>(imcfConfig.seed64),
+                 feature_min_len);
+      } else {
+        dbg::log("Feature selected: %s (k=%u, s=%u, pos=%u, seed=%llu, min_len=%zu)",
+                 final_method_str.c_str(),
+                 static_cast<unsigned>(imcfConfig.kmerSize),
+                 static_cast<unsigned>(imcfConfig.smerSize),
+                 static_cast<unsigned>(imcfConfig.syncmerPosition),
+                 static_cast<unsigned long long>(imcfConfig.seed64),
+                 feature_min_len);
+      }
+    }
+
+    if (config.verbose) {
+      if (final_method == FeatureMethod::Strobemer) {
+        std::cout << "Feature method: strobemer (k="
+                  << static_cast<int>(config.strobemer_k)
+                  << ", order=" << static_cast<int>(config.strobemer_order)
+                  << ", w=[" << config.strobemer_w_min << ',' << config.strobemer_w_max
+                  << "], seed=" << static_cast<unsigned long long>(imcfConfig.seed64)
+                  << ")" << std::endl;
+      } else {
+        std::cout << "Feature method: syncmer (k=" << static_cast<int>(imcfConfig.kmerSize)
+                  << ", s=" << imcfConfig.smerSize
+                  << ", pos=" << imcfConfig.syncmerPosition
+                  << ", seed=" << static_cast<unsigned long long>(imcfConfig.seed64)
+                  << ")" << std::endl;
+      }
+    }
     const TaxDict tax = build_tax_dict(indexToTaxid);
 
     auto classifyStart = std::chrono::high_resolution_clock::now();
-    std::cout << "Classifying sequences by imcf..." << std::endl;
+    std::cout << "Classifying sequences by imcf (feature=" << config.feature << ")..." << std::endl;
     classify_streaming(imcfConfig, readQueue, config, imcf, indexToTaxid, tax,
-                       classifyResults, fileInfo, producer_done, progressPtr);
+                       classifyResults, fileInfo, producer_done, progressPtr,
+                       feature_params, feature_min_len);
     auto classifyEnd = std::chrono::high_resolution_clock::now();
     auto classifyDuration =
         std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd -
@@ -2380,6 +2769,15 @@ void run(ClassifyConfig config) {
                   << readsPerSec << " reads/s" << std::defaultfloat
                   << std::endl;
       }
+    }
+    if (fileInfo.sequenceNum > 0) {
+      fileInfo.avgLen = fileInfo.bpLength / fileInfo.sequenceNum;
+    }
+    if (config.verbose && fileInfo.sequenceNum > 0) {
+      size_t min_print = (fileInfo.minLen == 0 || fileInfo.minLen == kInvalidLength) ? 0 : fileInfo.minLen;
+      std::cout << "Read length stats: min=" << min_print
+                << ", max=" << fileInfo.maxLen
+                << ", avg=" << fileInfo.avgLen << std::endl;
     }
   } else {
     throw std::runtime_error("Invalid filter type: " + config.filter +

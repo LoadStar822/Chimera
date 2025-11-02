@@ -180,6 +180,26 @@ int main(int argc, char **argv) {
       ->check(CLI::IsMember({"imcf"}))
       ->default_val("imcf");
   build
+      ->add_option("--feature", buildConfig.feature,
+                   "Feature 提取方式 (syncmer|strobemer|auto)")
+      ->default_val("strobemer");
+  build
+      ->add_option("--strobe-k", buildConfig.strobemer_k,
+                   "Strobemer k-mer 长度")
+      ->default_val(28);
+  build
+      ->add_option("--strobe-order", buildConfig.strobemer_order,
+                   "Strobemer 阶数 (目前仅支持 2)")
+      ->default_val(2);
+  build
+      ->add_option("--strobe-w-min", buildConfig.strobemer_w_min,
+                   "Strobemer 最小窗口")
+      ->default_val(12);
+  build
+      ->add_option("--strobe-w-max", buildConfig.strobemer_w_max,
+                   "Strobemer 最大窗口")
+      ->default_val(32);
+  build
       ->add_option("--taxonomy-kind", buildConfig.taxonomy_kind,
                    "taxonomy 数据源标识 (auto|ncbi|gtdb)")
       ->default_val("auto");
@@ -210,17 +230,42 @@ int main(int argc, char **argv) {
         value = "auto";
       }
     };
+    auto normalize_feature = [](std::string &value) {
+      std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+      });
+      if (value.empty()) {
+        value = "auto";
+      }
+    };
     auto sanitize_version = [](std::string &value) {
       if (value.empty()) {
         value = "auto";
       }
     };
     normalize_kind(buildConfig.taxonomy_kind);
+    normalize_feature(buildConfig.feature);
     sanitize_version(buildConfig.taxonomy_version);
     if (min_length_option->count() == 0) {
       buildConfig.min_length = buildConfig.kmer_size;
     }
     buildConfig.min_length = std::max<uint64_t>(buildConfig.min_length, buildConfig.kmer_size);
+    if (!(buildConfig.feature == "auto" || buildConfig.feature == "syncmer" ||
+          buildConfig.feature == "strobemer")) {
+      throw CLI::ValidationError("--feature must be one of auto|syncmer|strobemer");
+    }
+    if (buildConfig.strobemer_w_min == 0 || buildConfig.strobemer_w_max == 0) {
+      throw CLI::ValidationError("--strobe-w-min/w-max must be greater than 0");
+    }
+    if (buildConfig.strobemer_w_min > buildConfig.strobemer_w_max) {
+      throw CLI::ValidationError("--strobe-w-min must be <= --strobe-w-max");
+    }
+    if (buildConfig.strobemer_k < 8) {
+      throw CLI::ValidationError("--strobe-k must be >= 8");
+    }
+    if (buildConfig.strobemer_order != 2) {
+      throw CLI::ValidationError("--strobe-order 当前仅支持取 2");
+    }
   });
 
   // Classify
@@ -256,6 +301,14 @@ int main(int argc, char **argv) {
         value = "auto";
       }
     };
+    auto normalize_feature = [](std::string &value) {
+      std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+      });
+      if (value.empty()) {
+        value = "auto";
+      }
+    };
     auto sanitize_version = [](std::string &value) {
       if (value.empty()) {
         value = "auto";
@@ -263,6 +316,22 @@ int main(int argc, char **argv) {
     };
     normalize_kind(classifyConfig.taxonomyKind);
     sanitize_version(classifyConfig.taxonomyVersion);
+    normalize_feature(classifyConfig.feature);
+    if (!(classifyConfig.feature == "auto" || classifyConfig.feature == "syncmer" ||
+          classifyConfig.feature == "strobemer")) {
+      throw CLI::ValidationError("--feature must be one of auto|syncmer|strobemer");
+    }
+    if (classifyConfig.strobemer_w_min != 0 && classifyConfig.strobemer_w_max != 0 &&
+        classifyConfig.strobemer_w_min > classifyConfig.strobemer_w_max) {
+      throw CLI::ValidationError("--strobe-w-min must be <= --strobe-w-max");
+    }
+    if (classifyConfig.strobemer_order != 0 &&
+        classifyConfig.strobemer_order != 2) {
+      throw CLI::ValidationError("--strobe-order 当前仅支持取 2");
+    }
+    if (classifyConfig.strobemer_k != 0 && classifyConfig.strobemer_k < 8) {
+      throw CLI::ValidationError("--strobe-k must be >= 8 when specified");
+    }
   });
 
   classify
@@ -274,6 +343,34 @@ int main(int argc, char **argv) {
                    "Database file for classifying")
       ->required()
       ->check(CLI::ExistingFile);
+  classify
+      ->add_option("--feature", classifyConfig.feature,
+                   "Feature 提取方式 (syncmer|strobemer|auto；auto 表示跟随数据库)")
+      ->default_val("auto");
+  auto *strobeKOpt =
+      classify
+          ->add_option("--strobe-k", classifyConfig.strobemer_k,
+                       "Strobemer k-mer 长度 (默认跟随数据库)")
+          ->default_val(0);
+  strobeKOpt->default_str("inherit");
+  auto *strobeOrderOpt =
+      classify
+      ->add_option("--strobe-order", classifyConfig.strobemer_order,
+                       "Strobemer 阶数 (默认跟随数据库，当前仅支持 2)")
+          ->default_val(0);
+  strobeOrderOpt->default_str("inherit");
+  auto *strobeWminOpt =
+      classify
+          ->add_option("--strobe-w-min", classifyConfig.strobemer_w_min,
+                       "Strobemer 最小窗口 (默认跟随数据库)")
+          ->default_val(0);
+  strobeWminOpt->default_str("inherit");
+  auto *strobeWmaxOpt =
+      classify
+          ->add_option("--strobe-w-max", classifyConfig.strobemer_w_max,
+                       "Strobemer 最大窗口 (默认跟随数据库)")
+          ->default_val(0);
+  strobeWmaxOpt->default_str("inherit");
   classify
       ->add_option("--taxonomy-kind", classifyConfig.taxonomyKind,
                    "分类期望的 taxonomy 数据源 (auto|ncbi|gtdb)")

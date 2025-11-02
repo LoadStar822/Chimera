@@ -161,8 +161,7 @@ Randstrobe RandstrobeIterator::get(unsigned int strobe1_index) const {
     unsigned int w_start = strobe1_index + parameters.w_min;
     uint64_t min_val = std::numeric_limits<uint64_t>::max();
     Syncmer strobe2 = strobe1;
-    const uint64_t mask = parameters.q >= 64 ? std::numeric_limits<uint64_t>::max()
-                                             : ((1ULL << parameters.q) - 1ULL);
+    const uint64_t mask = parameters.q; // q 已经是形如 2^c-1 的掩码
 
     for (auto i = w_start; i <= w_end && syncmers[i].position <= max_position; i++) {
         assert(i < syncmers.size());
@@ -195,8 +194,7 @@ Randstrobe RandstrobeGenerator::next() {
     auto max_position = strobe1.position + parameters.max_dist;
     uint64_t min_val = std::numeric_limits<uint64_t>::max();
     Syncmer strobe2 = strobe1; // Default if no nearby syncmer
-    const uint64_t mask = parameters.q >= 64 ? std::numeric_limits<uint64_t>::max()
-                                             : ((1ULL << parameters.q) - 1ULL);
+    const uint64_t mask = parameters.q; // q 已经是形如 2^c-1 的掩码
 
     for (auto i = parameters.w_min; i < syncmers.size() && syncmers[i].position <= max_position; i++) {
         assert(i <= parameters.w_max);
@@ -264,4 +262,3 @@ std::array<std::vector<QueryRandstrobe>, 2> randstrobes_query(const std::string_
     }
     return randstrobes;
 }
-
