@@ -304,8 +304,9 @@ namespace ChimeraBuild {
 
 	#pragma omp parallel
 		{
-			robin_hood::unordered_flat_map<size_t, std::vector<uint64_t>> thread_hash_buffers;
-			thread_hash_buffers.reserve(8);
+			std::vector<uint64_t> thread_buffer;
+			thread_buffer.reserve(8192);
+			size_t last_taxid_index = std::numeric_limits<size_t>::max();
 			const int tid = omp_get_thread_num();
 #ifdef _OPENMP
 #pragma omp single
@@ -394,6 +395,11 @@ namespace ChimeraBuild {
 				const auto& [taxid, filename] = taxid_file_pairs[idx];
 
 				size_t taxid_index = taxid_to_index[taxid];
+				if (last_taxid_index != taxid_index && !thread_buffer.empty())
+				{
+					flush_buffer(last_taxid_index, thread_buffer, tid);
+				}
+				last_taxid_index = taxid_index;
 
 				bool skip_processing = false;
 				{
@@ -437,7 +443,8 @@ namespace ChimeraBuild {
 					cutoff = 50;
 			}
 
-			const bool streaming = (!config.adaptive_cutoff && max_hashes == 0);
+			// 未启用 adaptive_cutoff 时强制采用流式路径，max_hashes 仍由 flush_buffer 控制
+			const bool streaming = (!config.adaptive_cutoff);
 
 			// Open the sequence file
 			seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ filename };
@@ -463,13 +470,12 @@ namespace ChimeraBuild {
 					if (hashes.empty())
 						continue;
 
-					auto &buffer = thread_hash_buffers[taxid_index];
 					size_t appended = hashes.size();
-					buffer.insert(buffer.end(), hashes.begin(), hashes.end());
+					thread_buffer.insert(thread_buffer.end(), hashes.begin(), hashes.end());
 					pendingHashCounts[taxid_index].fetch_add(appended, std::memory_order_relaxed);
-					if (buffer.size() * sizeof(uint64_t) >= hash_buffer_flush_bytes)
+					if (thread_buffer.size() * sizeof(uint64_t) >= hash_buffer_flush_bytes)
 					{
-						flush_buffer(taxid_index, buffer, tid);
+						flush_buffer(taxid_index, thread_buffer, tid);
 					}
 				}
 			}
@@ -517,12 +523,11 @@ namespace ChimeraBuild {
 
 				if (!filtered_hashes.empty())
 				{
-					auto &buffer = thread_hash_buffers[taxid_index];
-					buffer.insert(buffer.end(), filtered_hashes.begin(), filtered_hashes.end());
+					thread_buffer.insert(thread_buffer.end(), filtered_hashes.begin(), filtered_hashes.end());
 					pendingHashCounts[taxid_index].fetch_add(filtered_hashes.size(), std::memory_order_relaxed);
-					if (buffer.size() * sizeof(uint64_t) >= hash_buffer_flush_bytes)
+					if (thread_buffer.size() * sizeof(uint64_t) >= hash_buffer_flush_bytes)
 					{
-						flush_buffer(taxid_index, buffer, tid);
+						flush_buffer(taxid_index, thread_buffer, tid);
 					}
 				}
 			}
@@ -537,9 +542,9 @@ namespace ChimeraBuild {
 				}
 			}
 
-			for (auto &entry : thread_hash_buffers)
+			if (!thread_buffer.empty() && last_taxid_index != std::numeric_limits<size_t>::max())
 			{
-				flush_buffer(entry.first, entry.second, tid);
+				flush_buffer(last_taxid_index, thread_buffer, tid);
 			}
 		}
 
