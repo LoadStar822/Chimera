@@ -451,7 +451,7 @@ int main(int argc, char **argv) {
       ->add_flag("--evidence-override,!--no-evidence-override",
                  classifyConfig.evidence_override,
                  "Allow strong pre-EM evidence to bypass posterior filter")
-      ->default_val(true);
+      ->default_val(false);
   classify
       ->add_flag("--output-posterior,!--no-output-posterior",
                  classifyConfig.output_posterior,

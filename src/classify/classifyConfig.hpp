@@ -58,7 +58,7 @@ namespace dbg {
 		bool adaptive_fdr = true;
 		double fdr_z = 3.0;
 		size_t min_eval_count = 0;
-		bool evidence_override = true;
+		bool evidence_override = false;
 		uint16_t threads;
 		bool verbose = true;
 		bool progress = true;
@@ -74,7 +74,7 @@ namespace dbg {
 		double post_ratio = 1.30;
 		double post_pi_min = 1e-4;
 		bool output_posterior = true;
-		bool skip_post_filter = true;
+		bool skip_post_filter = false;
 	};
 
 	inline std::ostream& operator<<(std::ostream& os, const ClassifyConfig& config) {
