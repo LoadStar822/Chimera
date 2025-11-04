@@ -78,6 +78,8 @@ struct Counters {
   std::atomic<uint64_t> candidate_zero{0};
   std::atomic<uint64_t> entered_em{0};
   std::atomic<uint64_t> passed_post{0};
+  std::atomic<uint64_t> pre_margin_accept{0};
+  std::atomic<uint64_t> pre_margin_reject{0};
 } g;
 
 static TraceCfg gCfg = TraceCfg::fromEnv();
@@ -98,6 +100,8 @@ inline void reset() {
   g.candidate_zero.store(0, std::memory_order_relaxed);
   g.entered_em.store(0, std::memory_order_relaxed);
   g.passed_post.store(0, std::memory_order_relaxed);
+  g.pre_margin_accept.store(0, std::memory_order_relaxed);
+  g.pre_margin_reject.store(0, std::memory_order_relaxed);
   gDeepUsed.clear(std::memory_order_release);
 }
 
@@ -181,6 +185,9 @@ struct TraceRecord {
   size_t evaluated = 0;
   size_t bestCount = 0;
   size_t secondCount = 0;
+  size_t margin = 0;
+  size_t marginNeed = 0;
+  double marginRatio = 0.0;
   uint32_t bestTid = std::numeric_limits<uint32_t>::max();
   std::string bestTaxid;
   bool useEm = false;
@@ -222,6 +229,8 @@ inline void dumpTrace(TraceRecord &rec, const std::string &id,
   log("Counts: evaluated=%zu weight=%.2f best=%zu second=%zu best_tid=%s",
       rec.evaluated, rec.evaluatedWeight, rec.bestCount, rec.secondCount,
       bestTaxid);
+  log("Margin: diff=%zu need=%zu ratio=%.3f",
+      rec.margin, rec.marginNeed, rec.marginRatio);
   if (!rec.emInputTop.empty()) {
     size_t idx = 0;
     for (const auto &[taxid, cnt] : rec.emInputTop) {
@@ -270,6 +279,28 @@ std::string feature_method_to_string(FeatureMethod method)
   default:
     return "auto";
   }
+}
+
+struct MarginDecision {
+  bool accept{false};
+  size_t need{0};
+  double margin{0.0};
+  double ratio{0.0};
+};
+
+static inline MarginDecision decide_high_conf(size_t best, size_t second,
+                                              double eff_eval)
+{
+  MarginDecision dc;
+  dc.margin = static_cast<double>(best) - static_cast<double>(second);
+  dc.ratio = second ? static_cast<double>(best) / static_cast<double>(second)
+                    : static_cast<double>(best);
+  double base = std::max(1.0, std::sqrt(std::max(0.0, eff_eval)));
+  dc.need = static_cast<size_t>(std::floor(0.35 * base + 1.0));
+  if (best >= 3 && best >= second + dc.need && dc.ratio >= 1.25) {
+    dc.accept = true;
+  }
+  return dc;
 }
 
 struct ReadStats {
@@ -1506,16 +1537,18 @@ inline void processSequence(
                            (static_cast<double>(df) + 1.0));
     idf = std::clamp(idf, 0.5, 5.0);
 
-    double contrib = idf / std::sqrt(static_cast<double>(deg));
+    double denom = std::log2(2.0 + static_cast<double>(deg));
+    double weight = denom > 0.0 ? 1.0 / denom : 1.0;
+    double contrib = idf * weight;
     for (uint32_t tid : minimizerTids) {
       tidScore[tid] += contrib;
       ++consistencyHits[tid];
     }
-    if (deg == 1) {
+    if (deg == 1 && !minimizerTids.empty()) {
       ++uniqueHits[minimizerTids.front()];
     }
 
-    return idf;
+    return contrib;
   };
 
   auto recompute_subset_state = [&]() {
@@ -1602,7 +1635,14 @@ inline void processSequence(
     bool unique_ok = (s.uniqueCount >= 3) ||
                      (s.uniqueCount >= 2 && s.uniqueRatio >= 0.12);
     bool stable = (s.gap >= gap_need_local) && (s.ratio >= 1.35);
-    return strong && unique_ok && stable;
+    size_t bestRoundedLocal = static_cast<size_t>(
+        std::max<double>(0.0, std::llround(s.best)));
+    size_t secondRoundedLocal = static_cast<size_t>(
+        std::max<double>(0.0, std::llround(s.second)));
+    size_t needLocal = static_cast<size_t>(std::ceil(thr_conf_local));
+    auto dc = decide_high_conf(bestRoundedLocal, secondRoundedLocal, eff_eval);
+    bool margin_ok = (bestRoundedLocal >= needLocal) && dc.accept;
+    return strong && unique_ok && stable && margin_ok;
   };
 
   EvidenceStats stats = collect_stats();
@@ -1687,27 +1727,49 @@ inline void processSequence(
     uniqueRatio = stats.uniqueRatio;
   }
 
+  size_t bestRounded = static_cast<size_t>(
+      std::max<double>(0.0, std::llround(best)));
+  size_t secondRounded = static_cast<size_t>(
+      std::max<double>(0.0, std::llround(second)));
+  size_t thrConfNeed = static_cast<size_t>(std::ceil(thr_conf));
+  auto dc = decide_high_conf(bestRounded, secondRounded, eff_eval);
+  bool marginAccept = (bestRounded >= thrConfNeed) && dc.accept;
+  if (marginAccept) {
+    dbg::g.pre_margin_accept.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    dbg::g.pre_margin_reject.fetch_add(1, std::memory_order_relaxed);
+  }
+  highConfPre = highConfPre && marginAccept;
+
   if (trace) {
-    trace->thrConf = static_cast<size_t>(std::ceil(thr_conf));
+    auto append_reason = [&](const std::string &tag) {
+      if (trace->decisionReason.empty()) {
+        trace->decisionReason = tag;
+      } else if (trace->decisionReason.find(tag) == std::string::npos) {
+        trace->decisionReason += "|" + tag;
+      }
+    };
+
+    trace->thrConf = thrConfNeed;
     trace->imcfEvents = eventHits;
     trace->binsWithHits = binHitCount.size();
     trace->evaluated = n_eval;
     trace->evaluatedWeight = eff_eval;
-    trace->bestCount = static_cast<size_t>(std::llround(best));
-    trace->secondCount = static_cast<size_t>(std::llround(second));
+    trace->bestCount = bestRounded;
+    trace->secondCount = secondRounded;
     trace->bestTid = bestTid;
     if (bestTid < tax.id2str.size()) {
       trace->bestTaxid = tax.id2str[bestTid];
     }
     if (highConfPre) {
-      if (trace->decisionReason.empty()) {
-        trace->decisionReason = "pre_high_conf";
-      } else if (trace->decisionReason.find("pre_high_conf") ==
-                 std::string::npos) {
-        trace->decisionReason += "|pre_high_conf";
-      }
+      append_reason("pre_high_conf");
       trace->suspiciousPre = false;
     }
+    append_reason(marginAccept ? "pre_margin_ok" : "pre_margin_ng");
+    trace->margin = static_cast<size_t>(
+        std::llround(std::max(0.0, dc.margin)));
+    trace->marginNeed = dc.need;
+    trace->marginRatio = dc.ratio;
     if (!binHitCount.empty()) {
       std::vector<std::pair<uint32_t, uint32_t>> ranked;
       ranked.reserve(binHitCount.size());
@@ -1739,7 +1801,6 @@ inline void processSequence(
   std::pair<std::string, std::size_t> maxCount;
   bool maxCountValid = false;
 
-  size_t bestRounded = static_cast<size_t>(std::max<double>(0.0, std::llround(best)));
   size_t effRounded = static_cast<size_t>(
       std::max<double>(1.0, std::llround(eff_eval)));
   if (!maxCountValid && bestRounded > 0 && bestTid < tax.id2str.size()) {
@@ -2298,6 +2359,9 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
              static_cast<unsigned long long>(dbg::g.candidate_zero.load()),
              static_cast<unsigned long long>(dbg::g.entered_em.load()),
              static_cast<unsigned long long>(dbg::g.passed_post.load()));
+    dbg::log("Margin summary: accept=%llu block=%llu",
+             static_cast<unsigned long long>(dbg::g.pre_margin_accept.load()),
+             static_cast<unsigned long long>(dbg::g.pre_margin_reject.load()));
   }
 }
 
@@ -2511,6 +2575,12 @@ void run(ClassifyConfig config) {
     std::thread producer([&]() {
       parseReads(readQueue, config, fileInfo, progressPtr);
       readEnd = std::chrono::high_resolution_clock::now();
+      if (config.verbose) {
+        auto readDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            readEnd - readStart);
+        std::cout << "\nRead time: ";
+        print_classify_time(readDuration.count());
+      }
       producer_done.store(true, std::memory_order_release);
     });
 
@@ -2751,13 +2821,6 @@ void run(ClassifyConfig config) {
     if (progressPtr) {
       progress.finish();
     }
-    auto readDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
-        readEnd - readStart);
-    if (config.verbose) {
-      std::cout << "Read time: ";
-      print_classify_time(readDuration.count());
-      std::cout << std::endl;
-    }
     if (config.verbose) {
       std::cout << "Classify time: ";
       print_classify_time(classifyDuration.count());
@@ -2778,6 +2841,20 @@ void run(ClassifyConfig config) {
       std::cout << "Read length stats: min=" << min_print
                 << ", max=" << fileInfo.maxLen
                 << ", avg=" << fileInfo.avgLen << std::endl;
+    }
+    if (config.verbose) {
+      uint64_t marginPass = dbg::g.pre_margin_accept.load(std::memory_order_relaxed);
+      uint64_t marginBlock = dbg::g.pre_margin_reject.load(std::memory_order_relaxed);
+      uint64_t marginTotal = marginPass + marginBlock;
+      std::cout << "Pre-margin summary: accept=" << marginPass
+                << ", blocked=" << marginBlock;
+      if (marginTotal > 0) {
+        double passRatio = static_cast<double>(marginPass) /
+                           static_cast<double>(marginTotal);
+        std::cout << " (accept ratio=" << std::fixed << std::setprecision(3)
+                  << passRatio << std::defaultfloat << ')';
+      }
+      std::cout << std::endl;
     }
   } else {
     throw std::runtime_error("Invalid filter type: " + config.filter +
