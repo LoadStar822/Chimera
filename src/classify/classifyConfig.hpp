@@ -59,6 +59,13 @@ namespace dbg {
 		double fdr_z = 3.0;
 		size_t min_eval_count = 0;
 		bool evidence_override = false;
+		std::string presence_caller{ "tdfdr" };
+		double presence_q = 0.01;
+		std::string decoy_mode{ "imcf-edge-shuffle" };
+		uint32_t decoy_reps = 1;
+		double exclusive_gamma = 1.0;
+		uint32_t min_unique_evidence = 3;
+		bool auto_q_tune = true;
 		uint16_t threads;
 		bool verbose = true;
 		bool progress = true;
@@ -104,6 +111,13 @@ namespace dbg {
 			<< std::setw(20) << "Adaptive shot:" << config.adaptive_shot << std::endl
 			<< std::setw(20) << "First filter beta:" << config.firstFilterBeta << std::endl
 			<< std::setw(20) << "Pre-EM topK:" << config.preEmTopK << std::endl
+			<< std::setw(20) << "Presence caller:" << config.presence_caller << std::endl
+			<< std::setw(20) << "Presence q:" << config.presence_q << std::endl
+			<< std::setw(20) << "Auto q tune:" << config.auto_q_tune << std::endl
+			<< std::setw(20) << "Decoy mode:" << config.decoy_mode << std::endl
+			<< std::setw(20) << "Decoy reps:" << config.decoy_reps << std::endl
+			<< std::setw(20) << "Exclusive gamma:" << config.exclusive_gamma << std::endl
+			<< std::setw(20) << "Min unique evidence:" << config.min_unique_evidence << std::endl
 			<< std::setw(20) << "Adaptive FDR:" << config.adaptive_fdr << std::endl
 			<< std::setw(20) << "FDR Z:" << config.fdr_z << std::endl
 			<< std::setw(20) << "Min eval count:" << config.min_eval_count << std::endl

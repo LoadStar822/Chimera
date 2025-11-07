@@ -309,6 +309,14 @@ int main(int argc, char **argv) {
         value = "auto";
       }
     };
+    auto normalize_presence = [](std::string &value, const char *fallback) {
+      std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+      });
+      if (value.empty()) {
+        value = fallback;
+      }
+    };
     auto sanitize_version = [](std::string &value) {
       if (value.empty()) {
         value = "auto";
@@ -317,6 +325,8 @@ int main(int argc, char **argv) {
     normalize_kind(classifyConfig.taxonomyKind);
     sanitize_version(classifyConfig.taxonomyVersion);
     normalize_feature(classifyConfig.feature);
+    normalize_presence(classifyConfig.presence_caller, "tdfdr");
+    normalize_presence(classifyConfig.decoy_mode, "imcf-edge-shuffle");
     if (!(classifyConfig.feature == "auto" || classifyConfig.feature == "syncmer" ||
           classifyConfig.feature == "strobemer")) {
       throw CLI::ValidationError("--feature must be one of auto|syncmer|strobemer");
@@ -331,6 +341,13 @@ int main(int argc, char **argv) {
     }
     if (classifyConfig.strobemer_k != 0 && classifyConfig.strobemer_k < 8) {
       throw CLI::ValidationError("--strobe-k must be >= 8 when specified");
+    }
+    if (!(classifyConfig.presence_caller == "tdfdr" ||
+          classifyConfig.presence_caller == "hard_cutoff")) {
+      throw CLI::ValidationError("--presence-caller must be tdfdr or hard_cutoff");
+    }
+    if (classifyConfig.decoy_mode != "imcf-edge-shuffle") {
+      throw CLI::ValidationError("--decoy-mode 当前仅支持 imcf-edge-shuffle");
     }
   });
 
@@ -396,6 +413,40 @@ int main(int argc, char **argv) {
       ->add_option("--pre-em-topk", classifyConfig.preEmTopK,
                    "Keep top-K candidates per read before EM/VEM")
       ->default_val(32);
+  classify
+      ->add_option("--presence-caller", classifyConfig.presence_caller,
+                   "Presence caller strategy (tdfdr|hard_cutoff)")
+      ->check(CLI::IsMember({"tdfdr", "hard_cutoff"}))
+      ->default_val("tdfdr");
+  classify
+      ->add_option("--presence-q", classifyConfig.presence_q,
+                   "Target q-value cutoff for presence calling")
+      ->check(CLI::Range(0.001, 0.05))
+      ->default_val(0.01);
+  classify
+      ->add_flag("--auto-q-tune,!--no-auto-q-tune",
+                 classifyConfig.auto_q_tune,
+                 "Auto-tune presence q from {0.02,0.01,0.005} to cap decoy positives")
+      ->default_val(true);
+  classify
+      ->add_option("--decoy-mode", classifyConfig.decoy_mode,
+                   "Decoy generation mode (imcf-edge-shuffle)")
+      ->default_val("imcf-edge-shuffle");
+  classify
+      ->add_option("--decoy-reps", classifyConfig.decoy_reps,
+                   "Number of IMCF edge-shuffle decoy replicates (0-5)")
+      ->check(CLI::Range(0, 5))
+      ->default_val(1);
+  classify
+      ->add_option("--exclusive-gamma", classifyConfig.exclusive_gamma,
+                   "Exclusive edge weighting gamma (0.5-2.0)")
+      ->check(CLI::Range(0.5, 2.0))
+      ->default_val(1.0);
+  classify
+      ->add_option("--min-unique-evidence", classifyConfig.min_unique_evidence,
+                   "Minimum IMCF unique-edge hits required before testing (1-10)")
+      ->check(CLI::Range(1, 10))
+      ->default_val(3);
   classify
       ->add_flag("--adaptive-fdr,!--no-adaptive-fdr",
                  classifyConfig.adaptive_fdr,

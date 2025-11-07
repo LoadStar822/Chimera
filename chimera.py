@@ -287,6 +287,54 @@ def parse_arguments():
         help="Limit candidates before EM/VEM to top K (default 32)",
     )
     classify_parser.add_argument(
+        "--presence-caller",
+        choices=["tdfdr", "hard_cutoff"],
+        default=None,
+        help="Presence caller strategy (tdfdr|hard_cutoff)",
+    )
+    classify_parser.add_argument(
+        "--presence-q",
+        type=float,
+        default=None,
+        help="Target q-value cutoff for presence calling",
+    )
+    classify_parser.add_argument(
+        "--auto-q-tune",
+        dest="auto_q_tune",
+        action="store_true",
+        default=None,
+        help="Enable auto q tuning (default on)",
+    )
+    classify_parser.add_argument(
+        "--no-auto-q-tune",
+        dest="auto_q_tune",
+        action="store_false",
+        help="Disable auto q tuning",
+    )
+    classify_parser.add_argument(
+        "--decoy-mode",
+        default=None,
+        help="Decoy generation mode (imcf-edge-shuffle)",
+    )
+    classify_parser.add_argument(
+        "--decoy-reps",
+        type=int,
+        default=None,
+        help="Number of IMCF edge-shuffle decoy replicates",
+    )
+    classify_parser.add_argument(
+        "--exclusive-gamma",
+        type=float,
+        default=None,
+        help="Exclusive edge weighting gamma",
+    )
+    classify_parser.add_argument(
+        "--min-unique-evidence",
+        type=int,
+        default=None,
+        help="Minimum IMCF unique-edge hits required to test presence",
+    )
+    classify_parser.add_argument(
         "--adaptive-fdr",
         dest="adaptive_fdr",
         action="store_true",
@@ -596,6 +644,22 @@ def run_chimera(args, chimera_path):
             command.extend(["--first-filter-beta", str(args.first_filter_beta)])
         if args.pre_em_topk is not None:
             command.extend(["--pre-em-topk", str(args.pre_em_topk)])
+        if args.presence_caller is not None:
+            command.extend(["--presence-caller", args.presence_caller])
+        if args.presence_q is not None:
+            command.extend(["--presence-q", str(args.presence_q)])
+        if args.auto_q_tune is True:
+            command.append("--auto-q-tune")
+        elif args.auto_q_tune is False:
+            command.append("--no-auto-q-tune")
+        if args.decoy_mode is not None:
+            command.extend(["--decoy-mode", args.decoy_mode])
+        if args.decoy_reps is not None:
+            command.extend(["--decoy-reps", str(args.decoy_reps)])
+        if args.exclusive_gamma is not None:
+            command.extend(["--exclusive-gamma", str(args.exclusive_gamma)])
+        if args.min_unique_evidence is not None:
+            command.extend(["--min-unique-evidence", str(args.min_unique_evidence)])
         if args.adaptive_fdr is True:
             command.append("--adaptive-fdr")
         elif args.adaptive_fdr is False:

@@ -598,6 +598,7 @@ struct TaxDict {
   std::vector<std::vector<uint32_t>> idx2id;  // [bin][species] -> tid_id
   std::vector<std::string> id2str;            // tid_id -> taxid string
   std::vector<std::vector<uint32_t>> tid2bin; // tid_id -> 所在 bin 列表（去重）
+  robin_hood::unordered_flat_map<std::string, uint32_t> str2id; // taxid -> tid_id
 };
 
 static TaxDict
@@ -629,6 +630,7 @@ build_tax_dict(const std::vector<std::vector<std::string>> &idx2tax) {
     std::sort(bins.begin(), bins.end());
     bins.erase(std::unique(bins.begin(), bins.end()), bins.end());
   }
+  td.str2id = std::move(dict);
   return td;
 }
 /**
@@ -1226,6 +1228,92 @@ struct GroupHeat {
   }
 };
 
+static inline uint64_t splitmix64(uint64_t x) {
+  x += 0x9e3779b97f4a7c15ULL;
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+  x ^= (x >> 31);
+  return x;
+}
+
+struct PresenceStats {
+  double score{0.0};
+  double hits{0.0};
+  uint64_t uniqueHits{0};
+  std::vector<double> decoys;
+};
+
+struct PresenceAccumulator {
+  size_t decoyReps{0};
+  robin_hood::unordered_flat_map<uint32_t, PresenceStats> stats;
+
+  explicit PresenceAccumulator(size_t reps = 0) : decoyReps(reps) {}
+
+  PresenceStats &touch(uint32_t tid) {
+    auto [it, inserted] = stats.try_emplace(tid);
+    if (decoyReps > 0 && it->second.decoys.size() != decoyReps) {
+      it->second.decoys.resize(decoyReps, 0.0);
+    }
+    (void)inserted;
+    return it->second;
+  }
+
+  void add_target(uint32_t tid, double weight, bool uniqueEdge) {
+    PresenceStats &entry = touch(tid);
+    entry.score += weight;
+    entry.hits += 1.0;
+    if (uniqueEdge) {
+      entry.uniqueHits += 1;
+    }
+  }
+
+  void add_decoy(size_t rep, uint32_t tid, double weight) {
+    if (decoyReps == 0 || rep >= decoyReps) {
+      return;
+    }
+    PresenceStats &entry = touch(tid);
+    entry.decoys[rep] += weight;
+  }
+};
+
+struct PresenceSummary {
+  size_t decoyReps{0};
+  robin_hood::unordered_flat_map<uint32_t, PresenceStats> stats;
+
+  explicit PresenceSummary(size_t reps = 0) : decoyReps(reps) {}
+
+  void merge(const PresenceAccumulator &acc) {
+    for (const auto &[tid, entry] : acc.stats) {
+      auto &dst = stats[tid];
+      dst.score += entry.score;
+      dst.hits += entry.hits;
+      dst.uniqueHits += entry.uniqueHits;
+      if (decoyReps > 0) {
+        if (dst.decoys.size() != decoyReps) {
+          dst.decoys.resize(decoyReps, 0.0);
+        }
+        size_t copy = std::min(decoyReps, entry.decoys.size());
+        for (size_t i = 0; i < copy; ++i) {
+          dst.decoys[i] += entry.decoys[i];
+        }
+      }
+    }
+  }
+};
+
+struct PresenceDecision {
+  std::unordered_set<uint32_t> accepted;
+  robin_hood::unordered_flat_map<uint32_t, double> qValues;
+  double threshold{1.0};
+  size_t tested{0};
+  size_t acceptedCount{0};
+  size_t decoyPositives{0};
+};
+
+static PresenceDecision evaluate_presence_tdFDR(const PresenceSummary &summary,
+                                                const TaxDict &tax,
+                                                const ClassifyConfig &config);
+
 inline void processSequence(
     const std::vector<uint64_t> &hashs1, size_t readLen,
     ChimeraBuild::IMCFConfig &imcfConfig,
@@ -1233,6 +1321,7 @@ inline void processSequence(
     ClassifyConfig &config, GroupHeat &heat,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
+    PresenceAccumulator *presenceAcc, uint64_t decoySeed,
     ProgressTracker *progress) {
   // Calculate the number of hash values and determine the threshold for
   // classification
@@ -1266,6 +1355,9 @@ inline void processSequence(
 
   const size_t binNumAll = indexToTaxid.size();
   heat.ensure(binNumAll);
+  const bool presenceEnabled = (presenceAcc != nullptr);
+  const size_t presenceDecoyReps = presenceEnabled ? presenceAcc->decoyReps : 0;
+  const double exclusiveGamma = std::max(0.0, config.exclusive_gamma);
 
   size_t targetSample = hashNum / 4;
   targetSample = std::clamp<size_t>(targetSample, 16, 96);
@@ -1517,6 +1609,11 @@ inline void processSequence(
       return 0.0;
     }
 
+    double exclusivityWeight = 1.0;
+    if (exclusiveGamma > 0.0 && deg > 0) {
+      exclusivityWeight = std::pow(static_cast<double>(deg), -exclusiveGamma);
+    }
+
     double totalBins = subset ? static_cast<double>(subset->size())
                               : static_cast<double>(binNumAll);
     if (totalBins <= 0.0) {
@@ -1539,10 +1636,24 @@ inline void processSequence(
 
     double denom = std::log2(2.0 + static_cast<double>(deg));
     double weight = denom > 0.0 ? 1.0 / denom : 1.0;
-    double contrib = idf * weight;
+    double contrib = idf * weight * exclusivityWeight;
     for (uint32_t tid : minimizerTids) {
       tidScore[tid] += contrib;
       ++consistencyHits[tid];
+    }
+    if (presenceEnabled && !minimizerTids.empty()) {
+      bool uniqueEdge = (deg == 1);
+      for (uint32_t tid : minimizerTids) {
+        presenceAcc->add_target(tid, exclusivityWeight, uniqueEdge);
+      }
+      if (presenceDecoyReps > 0 && deg > 0) {
+        for (size_t rep = 0; rep < presenceDecoyReps; ++rep) {
+          uint64_t mix = splitmix64(value ^ (static_cast<uint64_t>(rep + 1) << 17) ^ decoySeed);
+          size_t pick = static_cast<size_t>(mix % deg);
+          uint32_t decoyTid = minimizerTids[pick];
+          presenceAcc->add_decoy(rep, decoyTid, exclusivityWeight);
+        }
+      }
     }
     if (deg == 1 && !minimizerTids.empty()) {
       ++uniqueHits[minimizerTids.front()];
@@ -2165,6 +2276,8 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
                          size_t feature_min_len,
                          FileInfo &fileInfo,
                          GroupHeat &heat,
+                         PresenceAccumulator *presenceAcc,
+                         uint64_t decoySeed,
                          ProgressTracker *progress = nullptr) {
   // Process batch of reads
   std::vector<uint64_t> hashs1;
@@ -2205,7 +2318,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
       }
       processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
                       heat, imcf, batch.ids[i], classifyResults, fileInfo,
-                      progress);
+                      presenceAcc, decoySeed, progress);
     }
   } else {
     // Process single-end reads
@@ -2238,7 +2351,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
       // Process the hash values for classification
       processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
                       heat, imcf, batch.ids[i], classifyResults, fileInfo,
-                      progress);
+                      presenceAcc, decoySeed, progress);
     }
   }
 }
@@ -2256,7 +2369,9 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
                         FileInfo &fileInfo, std::atomic<bool> &producer_done,
                         ProgressTracker *progress,
                         const chimera::feature::Params &feature_params,
-                        size_t feature_min_len) {
+                        size_t feature_min_len,
+                        PresenceSummary *presenceSummary,
+                        uint64_t decoySeed) {
   if (dbg::enabled()) {
     dbg::reset();
   }
@@ -2300,12 +2415,14 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
     localFileInfo.bpLength = 0;
     GroupHeat heat;
     heat.ensure(indexToTaxid.size());
+    PresenceAccumulator presenceLocal(presenceSummary ? presenceSummary->decoyReps : 0);
+    PresenceAccumulator *presencePtr = presenceSummary ? &presenceLocal : nullptr;
 
     for (;;) {
       if (readQueue.try_dequeue(batch)) {
         processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
                      localClassifyResults, feature_params, feature_min_len,
-                     localFileInfo, heat, progress);
+                     localFileInfo, heat, presencePtr, decoySeed, progress);
         continue;
       }
       if (producer_done.load(std::memory_order_acquire)) {
@@ -2342,6 +2459,9 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
         fileInfo.maxLen = localFileInfo.maxLen;
       }
       fileInfo.bpLength += localFileInfo.bpLength;
+      if (presenceSummary) {
+        presenceSummary->merge(presenceLocal);
+      }
     }
   }
 
@@ -2462,7 +2582,7 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
     while (readQueue.try_dequeue(batch)) {
       processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
                    localClassifyResults, feature_params, feature_min_len,
-                   localFileInfo, heat, progress);
+                   localFileInfo, heat, nullptr, 0, progress);
     }
     // Critical section to merge local results into shared resources
 #pragma omp critical
@@ -2513,6 +2633,180 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
              static_cast<unsigned long long>(dbg::g.entered_em.load()),
              static_cast<unsigned long long>(dbg::g.passed_post.load()));
   }
+}
+
+struct PresenceFilterStats {
+  size_t trimmedAssignments{0};
+  size_t forcedUnclassified{0};
+};
+
+static PresenceFilterStats apply_presence_filter(
+    const PresenceDecision &decision, const TaxDict &tax,
+    std::vector<classifyResult> &classifyResults, FileInfo &fileInfo) {
+  PresenceFilterStats stats;
+  if (decision.accepted.empty()) {
+    return stats;
+  }
+  auto keepTaxid = [&](const std::string &taxid) {
+    if (taxid == "unclassified") {
+      return true;
+    }
+    auto it = tax.str2id.find(taxid);
+    if (it == tax.str2id.end()) {
+      return true;
+    }
+    return decision.accepted.find(it->second) != decision.accepted.end();
+  };
+  for (auto &result : classifyResults) {
+    if (result.taxidCount.empty()) {
+      continue;
+    }
+    auto before = result.taxidCount.size();
+    result.taxidCount.erase(
+        std::remove_if(result.taxidCount.begin(), result.taxidCount.end(),
+                       [&](const auto &kv) { return !keepTaxid(kv.first); }),
+        result.taxidCount.end());
+    stats.trimmedAssignments += before - result.taxidCount.size();
+    if (result.taxidCount.empty()) {
+      result.taxidCount.emplace_back("unclassified", 1);
+      ++stats.forcedUnclassified;
+    }
+    if (!result.posteriors.empty()) {
+      result.posteriors.erase(
+          std::remove_if(result.posteriors.begin(), result.posteriors.end(),
+                         [&](const auto &kv) { return !keepTaxid(kv.first); }),
+          result.posteriors.end());
+    }
+  }
+  for (auto it = fileInfo.uniqueTaxids.begin(); it != fileInfo.uniqueTaxids.end();) {
+    auto mapIt = tax.str2id.find(*it);
+    if (mapIt != tax.str2id.end() &&
+        decision.accepted.find(mapIt->second) == decision.accepted.end()) {
+      it = fileInfo.uniqueTaxids.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  return stats;
+}
+
+static PresenceDecision evaluate_presence_tdFDR(const PresenceSummary &summary,
+                                                const TaxDict &tax,
+                                                const ClassifyConfig &config) {
+  PresenceDecision decision;
+  if (summary.stats.empty() || summary.decoyReps == 0) {
+    return decision;
+  }
+  struct Record {
+    uint32_t tid{0};
+    double score{0.0};
+    double hits{0.0};
+    uint64_t uniqueHits{0};
+    double decoyScore{0.0};
+    double pValue{1.0};
+    double qValue{1.0};
+  };
+  std::vector<Record> records;
+  records.reserve(summary.stats.size());
+  std::vector<double> decoyScores;
+  decoyScores.reserve(summary.stats.size());
+  for (const auto &[tid, entry] : summary.stats) {
+    Record rec;
+    rec.tid = tid;
+    rec.score = entry.score;
+    rec.hits = entry.hits;
+    rec.uniqueHits = entry.uniqueHits;
+    if (!entry.decoys.empty()) {
+      rec.decoyScore = *std::max_element(entry.decoys.begin(), entry.decoys.end());
+    }
+    records.push_back(rec);
+    decoyScores.push_back(rec.decoyScore);
+  }
+  if (records.empty()) {
+    return decision;
+  }
+  std::vector<double> sortedDecoys = decoyScores;
+  std::sort(sortedDecoys.begin(), sortedDecoys.end());
+  auto count_ge = [&](double value) {
+    auto it = std::lower_bound(sortedDecoys.begin(), sortedDecoys.end(), value);
+    return static_cast<size_t>(sortedDecoys.end() - it);
+  };
+  std::vector<double> decoyPVals(decoyScores.size(), 1.0);
+  double denom = static_cast<double>(sortedDecoys.size()) + 1.0;
+  for (size_t i = 0; i < decoyScores.size(); ++i) {
+    size_t ge = count_ge(decoyScores[i]);
+    decoyPVals[i] = (static_cast<double>(ge) + 1.0) / denom;
+  }
+  std::vector<size_t> eligible;
+  eligible.reserve(records.size());
+  for (size_t i = 0; i < records.size(); ++i) {
+    auto &rec = records[i];
+    if (rec.score > 0.0) {
+      size_t ge = count_ge(rec.score);
+      rec.pValue = (static_cast<double>(ge) + 1.0) / denom;
+      if (rec.uniqueHits >= config.min_unique_evidence) {
+        eligible.push_back(i);
+      }
+    } else {
+      rec.pValue = 1.0;
+    }
+  }
+  size_t m = eligible.size();
+  decision.tested = m;
+  if (m > 0) {
+    std::sort(eligible.begin(), eligible.end(), [&](size_t a, size_t b) {
+      return records[a].pValue < records[b].pValue;
+    });
+    double prev = 1.0;
+    for (size_t rank = m; rank > 0; --rank) {
+      size_t idx = eligible[rank - 1];
+      double q = std::min(prev, records[idx].pValue * static_cast<double>(m) /
+                                   static_cast<double>(rank));
+      records[idx].qValue = q;
+      prev = q;
+    }
+  }
+
+  double qThreshold = config.presence_q;
+  if (config.auto_q_tune && !decoyPVals.empty()) {
+    std::array<double, 3> candidates{0.02, 0.01, 0.005};
+    bool tuned = false;
+    for (double candidate : candidates) {
+      size_t decoyPass = 0;
+      for (double p : decoyPVals) {
+        if (p <= candidate) {
+          ++decoyPass;
+        }
+      }
+      if (decoyPass <= 1) {
+        qThreshold = candidate;
+        tuned = true;
+      }
+    }
+    if (!tuned) {
+      qThreshold = config.presence_q;
+    }
+  }
+  decision.threshold = qThreshold;
+  for (auto &rec : records) {
+    rec.qValue = std::clamp(rec.qValue, 0.0, 1.0);
+    decision.qValues[rec.tid] = rec.qValue;
+    if (rec.score <= 0.0 || rec.uniqueHits < config.min_unique_evidence) {
+      continue;
+    }
+    if (rec.qValue <= qThreshold) {
+      decision.accepted.insert(rec.tid);
+    }
+  }
+  size_t decoyPos = 0;
+  for (double p : decoyPVals) {
+    if (p <= qThreshold) {
+      ++decoyPos;
+    }
+  }
+  decision.decoyPositives = decoyPos;
+  decision.acceptedCount = decision.accepted.size();
+  return decision;
 }
 
 /**
@@ -2808,11 +3102,29 @@ void run(ClassifyConfig config) {
     }
     const TaxDict tax = build_tax_dict(indexToTaxid);
 
+    bool presenceEnabled = (config.presence_caller == "tdfdr");
+    if (presenceEnabled && config.decoy_reps == 0) {
+      std::cerr << "Warning: presence caller tdFDR 需要 decoy_reps>0，检测到 decoy_reps=0，已回退至 hard_cutoff" << std::endl;
+      presenceEnabled = false;
+    }
+    PresenceSummary presenceSummary(presenceEnabled
+                                        ? static_cast<size_t>(config.decoy_reps)
+                                        : 0);
+    PresenceSummary *presencePtr = presenceEnabled ? &presenceSummary : nullptr;
+    uint64_t presenceSeed = 0;
+    if (presencePtr) {
+      std::hash<std::string> hasher;
+      presenceSeed = hasher(config.outputFile);
+      presenceSeed ^= (hasher(config.dbFile) << 1);
+      presenceSeed ^= static_cast<uint64_t>(imcfConfig.fpSalt);
+    }
+
     auto classifyStart = std::chrono::high_resolution_clock::now();
     std::cout << "Classifying sequences by imcf (feature=" << config.feature << ")..." << std::endl;
     classify_streaming(imcfConfig, readQueue, config, imcf, indexToTaxid, tax,
                        classifyResults, fileInfo, producer_done, progressPtr,
-                       feature_params, feature_min_len);
+                       feature_params, feature_min_len, presencePtr,
+                       presenceSeed);
     auto classifyEnd = std::chrono::high_resolution_clock::now();
     auto classifyDuration =
         std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd -
@@ -2855,6 +3167,30 @@ void run(ClassifyConfig config) {
                   << passRatio << std::defaultfloat << ')';
       }
       std::cout << std::endl;
+    }
+
+    PresenceDecision presenceDecision;
+    if (presencePtr) {
+      presenceDecision = evaluate_presence_tdFDR(presenceSummary, tax, config);
+      if (config.verbose) {
+        auto oldFlags = std::cout.flags();
+        auto oldPrecision = std::cout.precision();
+        std::cout << "Presence caller (tdFDR): tests=" << presenceDecision.tested
+                  << ", accepted=" << presenceDecision.acceptedCount
+                  << ", q_threshold=" << std::fixed << std::setprecision(3)
+                  << presenceDecision.threshold << std::defaultfloat
+                  << ", decoy_pass=" << presenceDecision.decoyPositives
+                  << std::endl;
+        std::cout.flags(oldFlags);
+        std::cout.precision(oldPrecision);
+      }
+      auto filterStats = apply_presence_filter(presenceDecision, tax, classifyResults, fileInfo);
+      if (config.verbose && (filterStats.trimmedAssignments > 0 ||
+                             filterStats.forcedUnclassified > 0)) {
+        std::cout << "Presence filter: trimmed " << filterStats.trimmedAssignments
+                  << " assignments, forced " << filterStats.forcedUnclassified
+                  << " reads to unclassified" << std::endl;
+      }
     }
   } else {
     throw std::runtime_error("Invalid filter type: " + config.filter +
