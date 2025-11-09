@@ -416,14 +416,14 @@ int main(int argc, char **argv) {
   classify
       ->add_flag("--presence-report-only,!--presence-hard-filter",
                  classifyConfig.presence_report_only,
-                 "Treat presence caller as report-only evidence")
-      ->default_val(true);
+                 "Presence caller gating mode (default hard filter; use --presence-report-only to skip trimming)")
+      ->default_val(false);
   classify
       ->add_option("--presence-abundance-prior",
                    classifyConfig.presence_abundance_prior,
                    "Down-weight p-values based on abundance (0-1)")
       ->check(CLI::Range(0.0, 1.0))
-      ->default_val(0.2);
+      ->default_val(0.30);
   classify
       ->add_flag("--auto-q-tune,!--no-auto-q-tune",
                  classifyConfig.auto_q_tune,
@@ -437,17 +437,17 @@ int main(int argc, char **argv) {
       ->add_option("--decoy-reps", classifyConfig.decoy_reps,
                    "Number of IMCF edge-shuffle decoy replicates (0-5)")
       ->check(CLI::Range(0, 5))
-      ->default_val(1);
+      ->default_val(3);
   classify
       ->add_option("--exclusive-gamma", classifyConfig.exclusive_gamma,
                    "Exclusive edge weighting gamma (0.5-2.0)")
       ->check(CLI::Range(0.5, 2.0))
-      ->default_val(1.0);
+      ->default_val(1.2);
   classify
       ->add_option("--min-unique-evidence", classifyConfig.min_unique_evidence,
                    "Minimum IMCF unique-edge hits required before testing (1-10)")
       ->check(CLI::Range(1, 10))
-      ->default_val(7);
+      ->default_val(5);
   classify
       ->add_flag("--adaptive-fdr,!--no-adaptive-fdr",
                  classifyConfig.adaptive_fdr,

@@ -61,11 +61,11 @@ namespace dbg {
 		std::string presence_caller{ "tdfdr" };
 		double presence_q = 0.05;
 		std::string decoy_mode{ "imcf-edge-shuffle" };
-		uint32_t decoy_reps = 1;
-		double exclusive_gamma = 1.0;
-		uint32_t min_unique_evidence = 7;
-		bool presence_report_only = true;
-		double presence_abundance_prior = 0.2;
+		uint32_t decoy_reps = 3;
+		double exclusive_gamma = 1.2;
+		uint32_t min_unique_evidence = 5;
+		bool presence_report_only = false;
+		double presence_abundance_prior = 0.30;
 		bool auto_q_tune = true;
 		uint16_t threads;
 		bool verbose = true;

@@ -283,13 +283,13 @@ def parse_arguments():
         dest="presence_report_only",
         action="store_true",
         default=None,
-        help="Treat presence caller as report-only evidence (default)",
+        help="将 presence 先验仅用于报告，不裁剪候选 (默认关闭)",
     )
     classify_parser.add_argument(
         "--presence-hard-filter",
         dest="presence_report_only",
         action="store_false",
-        help="Use presence caller as a hard gating filter",
+        help="启用 presence 硬裁剪 (默认)",
     )
     classify_parser.add_argument(
         "--presence-abundance-prior",
