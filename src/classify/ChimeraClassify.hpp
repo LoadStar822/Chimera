@@ -43,8 +43,6 @@
 #include <seqan3/alphabet/nucleotide/dna4.hpp>
 #include <seqan3/contrib/stream/bgzf.hpp>
 #include <seqan3/core/debug_stream.hpp>
-#include <seqan3/search/views/kmer_hash.hpp>
-#include <seqan3/search/views/minimiser_hash.hpp>
 #include <seqan3/utility/views/chunk.hpp>
 #include <sstream>
 #include <thread>

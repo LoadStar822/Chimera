@@ -111,6 +111,9 @@ int main(int argc, char **argv) {
   }
   const auto default_threads = static_cast<uint16_t>(hardware_threads);
 
+  bool buildQuietRequested = false;
+  bool classifyQuietRequested = false;
+
   // Build
   build
       ->add_option("-i,--input", buildConfig.input_file,
@@ -175,11 +178,6 @@ int main(int argc, char **argv) {
   build->add_flag("--adaptive-cutoff", buildConfig.adaptive_cutoff,
                   "启用基于文件规模的自适应 cutoff");
   build
-      ->add_option("-f,--filter", buildConfig.filter,
-                   "构建使用的滤器类型 (imcf)")
-      ->check(CLI::IsMember({"imcf"}))
-      ->default_val("imcf");
-  build
       ->add_option("--feature", buildConfig.feature,
                    "Feature 提取方式 (syncmer|strobemer|auto)")
       ->default_val("strobemer");
@@ -207,11 +205,9 @@ int main(int argc, char **argv) {
       ->add_option("--taxonomy-version", buildConfig.taxonomy_version,
                    "taxonomy 数据版本标识，例如 ncbi-taxdump-2025-09-15 或 gtdb-rs226")
       ->default_val("auto");
-  build->add_flag("-q,--quiet", buildConfig.verbose, "Quiet output")
-      ->default_val(true)
-      ->disable_flag_override();
+  build->add_flag("-q,--quiet", buildQuietRequested, "Quiet output");
 
-  build->callback([&buildConfig, min_length_option]() {
+  build->callback([&buildConfig, min_length_option, &buildQuietRequested]() {
     if (buildConfig.smer_size == 0) {
       throw CLI::ValidationError("--syncmer-s must be greater than 0");
     }
@@ -266,6 +262,7 @@ int main(int argc, char **argv) {
     if (buildConfig.strobemer_order != 2) {
       throw CLI::ValidationError("--strobe-order 当前仅支持取 2");
     }
+    buildConfig.verbose = !buildQuietRequested;
   });
 
   // Classify
@@ -288,7 +285,7 @@ int main(int argc, char **argv) {
 
   // Custom validation function to ensure that the --paired option must have an
   // even number of files
-  classify->callback([pairedOpt, &classifyConfig]() {
+  classify->callback([pairedOpt, &classifyConfig, &classifyQuietRequested]() {
     if (pairedOpt->count() > 0 && pairedOpt->count() % 2 != 0) {
       throw CLI::ValidationError(
           "--paired option must have an even number of input files");
@@ -349,6 +346,7 @@ int main(int argc, char **argv) {
     if (classifyConfig.decoy_mode != "imcf-edge-shuffle") {
       throw CLI::ValidationError("--decoy-mode 当前仅支持 imcf-edge-shuffle");
     }
+    classifyConfig.verbose = !classifyQuietRequested;
   });
 
   classify
@@ -389,14 +387,6 @@ int main(int argc, char **argv) {
           ->default_val(0);
   strobeWmaxOpt->default_str("inherit");
   classify
-      ->add_option("--taxonomy-kind", classifyConfig.taxonomyKind,
-                   "分类期望的 taxonomy 数据源 (auto|ncbi|gtdb)")
-      ->default_val("auto");
-  classify
-      ->add_option("--taxonomy-version", classifyConfig.taxonomyVersion,
-                   "分类期望的 taxonomy 数据版本标识")
-      ->default_val("auto");
-  classify
       ->add_option("-s,--shot-threshold", classifyConfig.shotThreshold,
                    "Shot threshold for classifying")
       ->default_val(0.62);
@@ -421,12 +411,23 @@ int main(int argc, char **argv) {
   classify
       ->add_option("--presence-q", classifyConfig.presence_q,
                    "Target q-value cutoff for presence calling")
-      ->check(CLI::Range(0.001, 0.05))
-      ->default_val(0.01);
+      ->check(CLI::Range(0.001, 0.2))
+      ->default_val(0.05);
+  classify
+      ->add_flag("--presence-report-only,!--presence-hard-filter",
+                 classifyConfig.presence_report_only,
+                 "Treat presence caller as report-only evidence")
+      ->default_val(true);
+  classify
+      ->add_option("--presence-abundance-prior",
+                   classifyConfig.presence_abundance_prior,
+                   "Down-weight p-values based on abundance (0-1)")
+      ->check(CLI::Range(0.0, 1.0))
+      ->default_val(0.2);
   classify
       ->add_flag("--auto-q-tune,!--no-auto-q-tune",
                  classifyConfig.auto_q_tune,
-                 "Auto-tune presence q from {0.02,0.01,0.005} to cap decoy positives")
+                 "Auto-tune presence q from {0.05,0.02,0.01,0.005} to cap decoy positives")
       ->default_val(true);
   classify
       ->add_option("--decoy-mode", classifyConfig.decoy_mode,
@@ -446,7 +447,7 @@ int main(int argc, char **argv) {
       ->add_option("--min-unique-evidence", classifyConfig.min_unique_evidence,
                    "Minimum IMCF unique-edge hits required before testing (1-10)")
       ->check(CLI::Range(1, 10))
-      ->default_val(3);
+      ->default_val(7);
   classify
       ->add_flag("--adaptive-fdr,!--no-adaptive-fdr",
                  classifyConfig.adaptive_fdr,
@@ -464,11 +465,6 @@ int main(int argc, char **argv) {
       ->add_option("-t,--threads", classifyConfig.threads,
                    "Number of threads for classifying")
       ->default_val(default_threads);
-  classify
-      ->add_option("-f,--filter", classifyConfig.filter,
-                   "分类使用的滤器类型 (imcf)")
-      ->default_val("imcf")
-      ->check(CLI::IsMember({"imcf"}));
   classify
       ->add_option("-b,--batch-size", classifyConfig.batchSize,
                    "Batch size for classifying")
@@ -495,6 +491,23 @@ int main(int argc, char **argv) {
                        "Minimum ratio between top1 and top2 posteriors")
       ->default_val(1.30);
   classify
+      ->add_option("--post-relax-abs", classifyConfig.post_relax_abs,
+                   "Absolute posterior floor for relaxed gate")
+      ->default_val(0.50);
+  classify
+      ->add_option("--post-relax-ratio", classifyConfig.post_relax_ratio,
+                   "Ratio required when using relaxed gate")
+      ->default_val(1.50);
+  classify
+      ->add_option("--post-relax-delta", classifyConfig.post_relax_delta,
+                   "Gap required when using relaxed gate")
+      ->default_val(0.08);
+  classify
+      ->add_option("--post-relax-delta-abs",
+                   classifyConfig.post_relax_delta_abs,
+                   "Absolute posterior floor for gap-based relaxed gate")
+      ->default_val(0.52);
+  classify
       ->add_option("--post-pi-min", classifyConfig.post_pi_min,
                    "Minimum global class weight")
       ->default_val(1e-4);
@@ -504,14 +517,25 @@ int main(int argc, char **argv) {
                  "Allow strong pre-EM evidence to bypass posterior filter")
       ->default_val(false);
   classify
+      ->add_option("--em-temp", classifyConfig.em_temp,
+                   "Softmax temperature inside EM/VEM")
+      ->default_val(1.10);
+  classify
+      ->add_option("--em-prior-strength", classifyConfig.em_prior_strength,
+                   "Dirichlet pseudo-count mass for abundance prior")
+      ->default_val(0.25);
+  classify
+      ->add_option("--em-coexist-penalty",
+                   classifyConfig.em_coexist_penalty,
+                   "Penalty term when candidates are near-tied")
+      ->default_val(0.20);
+  classify
       ->add_flag("--output-posterior,!--no-output-posterior",
                  classifyConfig.output_posterior,
                  "Write posterior probabilities to the TSV output")
       ->default_val("true");
   // TODO: 后处理相关参数暂时废弃，内部逻辑维持默认行为
-  classify->add_flag("-q,--quiet", classifyConfig.verbose, "Quiet output")
-      ->default_val(true)
-      ->disable_flag_override();
+  classify->add_flag("-q,--quiet", classifyQuietRequested, "Quiet output");
 
   if (argc == 1) {
     std::cout << app.help() << std::endl;

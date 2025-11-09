@@ -25,6 +25,8 @@ struct VEMOptions {
 	double eps = 1e-9;
 	double alpha = 1e-6;
 	double temp = 1.0;
+	double prior_strength = 0.0;
+	double coexist_penalty = 0.0;
 };
 
 namespace vem_detail {
@@ -72,6 +74,42 @@ VEMAlgorithm(const std::vector<classifyResult>& input,
 		taxid_list.emplace_back(taxid);
 	}
 
+	std::unordered_map<std::string, double> abundance_prior;
+	abundance_prior.reserve(taxid_list.size());
+	for (const auto& taxid : taxid_list) {
+		abundance_prior[taxid] = 0.0;
+	}
+	double abundance_sum = 0.0;
+	for (const auto& record : results) {
+		for (const auto& [taxid, count] : record.taxidCount) {
+			if (vem_detail::is_unclassified(taxid)) {
+				continue;
+			}
+			double contrib = static_cast<double>(count);
+			abundance_prior[taxid] += contrib;
+			abundance_sum += contrib;
+		}
+	}
+	if (abundance_sum <= 0.0) {
+		double uniform = 1.0 / static_cast<double>(std::max<size_t>(1, taxid_list.size()));
+		for (auto& entry : abundance_prior) {
+			entry.second = uniform;
+		}
+	} else {
+		constexpr double prior_exponent = 0.75;
+		double norm = 0.0;
+		for (auto& entry : abundance_prior) {
+			double value = std::max(entry.second, options.eps);
+			double smooth = std::pow(value, prior_exponent);
+			entry.second = smooth;
+			norm += smooth;
+		}
+		norm = std::max(norm, options.eps * static_cast<double>(taxid_list.size()));
+		for (auto& entry : abundance_prior) {
+			entry.second /= norm;
+		}
+	}
+
 	std::unordered_map<std::string, double> pi;
 	if (taxid_list.empty()) {
 		return { results, pi };
@@ -79,27 +117,24 @@ VEMAlgorithm(const std::vector<classifyResult>& input,
 
 	double uniform = 1.0 / static_cast<double>(taxid_list.size());
 	for (const auto& taxid : taxid_list) {
-		pi[taxid] = uniform;
-	}
-
-	std::unordered_map<std::string, double> prior_counts;
-	for (const auto& taxid : taxid_list) {
-		prior_counts[taxid] = 0.0;
+		double prior = abundance_prior[taxid];
+		if (!(prior > 0.0)) {
+			prior = uniform;
+		}
+		pi[taxid] = prior;
 	}
 
 	size_t iteration = 0;
 	while (iteration < max_iter) {
 		std::unordered_map<std::string, double> expected_log_pi;
-		double denominator_strength = options.alpha * static_cast<double>(taxid_list.size());
 		for (const auto& taxid : taxid_list) {
-			auto it = prior_counts.find(taxid);
-			double concentration = options.alpha + (it != prior_counts.end() ? it->second : 0.0);
-			expected_log_pi[taxid] = std::log(std::max(concentration, options.eps));
-			denominator_strength += (it != prior_counts.end() ? it->second : 0.0);
-		}
-		double log_denominator = std::log(std::max(denominator_strength, options.eps));
-		for (auto& [taxid, log_val] : expected_log_pi) {
-			log_val -= log_denominator;
+			double prior_mix = std::max(pi[taxid], options.eps);
+			if (options.prior_strength > 0.0) {
+				double blended = (pi[taxid] + options.prior_strength * abundance_prior[taxid]) /
+				                (1.0 + options.prior_strength);
+				prior_mix = std::max(blended, options.eps);
+			}
+			expected_log_pi[taxid] = std::log(prior_mix);
 		}
 
 #ifdef _OPENMP
@@ -131,37 +166,56 @@ VEMAlgorithm(const std::vector<classifyResult>& input,
 				auto& destination = results[i];
 				destination.posteriors.clear();
 
-				std::vector<std::pair<std::string, double>> candidates;
-				double max_count = 0.0;
-				for (const auto& [taxid, count] : source.taxidCount) {
-					if (vem_detail::is_unclassified(taxid)) {
-						continue;
-					}
-					double c = static_cast<double>(count) / source.evaluated;
-					candidates.emplace_back(taxid, c);
-					max_count = std::max(max_count, c);
+			std::vector<std::pair<std::string, double>> candidates;
+			double max_count = 0.0;
+			double second_count = 0.0;
+			std::string best_taxid;
+			for (const auto& [taxid, count] : source.taxidCount) {
+				if (vem_detail::is_unclassified(taxid)) {
+					continue;
 				}
+				double c = static_cast<double>(count) / source.evaluated;
+				candidates.emplace_back(taxid, c);
+				if (c > max_count) {
+					second_count = max_count;
+					max_count = c;
+					best_taxid = taxid;
+				} else if (c > second_count) {
+					second_count = c;
+				}
+			}
 
 				if (candidates.empty()) {
 					continue;
 				}
 
-				double denom = max_count + options.eps * static_cast<double>(candidates.size());
-				if (denom <= 0.0) {
-					denom = options.eps * static_cast<double>(candidates.size());
-				}
+			double denom = max_count + options.eps * static_cast<double>(candidates.size());
+			if (denom <= 0.0) {
+				denom = options.eps * static_cast<double>(candidates.size());
+			}
+			double penalty_scale = 0.0;
+			if (options.coexist_penalty > 0.0 && second_count > 0.0) {
+				double ratio_est = max_count /
+				                 std::max(second_count, options.eps);
+				double tightness = std::clamp((1.5 - ratio_est) / 0.5, 0.0, 1.0);
+				penalty_scale = options.coexist_penalty * tightness;
+			}
 
 				std::vector<std::pair<std::string, double>> log_components;
 				log_components.reserve(candidates.size());
-				for (const auto& [taxid, c] : candidates) {
-					auto it_pi = expected_log_pi.find(taxid);
-					if (it_pi == expected_log_pi.end()) {
-						continue;
-					}
-					double likelihood = (c + options.eps) / denom;
-					double log_likelihood = options.temp * std::log(std::max(likelihood, options.eps));
-					log_components.emplace_back(taxid, it_pi->second + log_likelihood);
+			for (const auto& [taxid, c] : candidates) {
+				auto it_pi = expected_log_pi.find(taxid);
+				if (it_pi == expected_log_pi.end()) {
+					continue;
 				}
+				double likelihood = (c + options.eps) / denom;
+				double log_likelihood = options.temp * std::log(std::max(likelihood, options.eps));
+				double coexist = 0.0;
+				if (!best_taxid.empty() && taxid != best_taxid) {
+					coexist = penalty_scale;
+				}
+				log_components.emplace_back(taxid, it_pi->second + log_likelihood - coexist);
+			}
 
 				if (log_components.empty()) {
 					continue;
@@ -197,7 +251,10 @@ VEMAlgorithm(const std::vector<classifyResult>& input,
 			}
 		}
 
-		double denominator = options.alpha * static_cast<double>(taxid_list.size()) + sum_expected;
+		double prior_mass = std::max(0.0, options.prior_strength);
+		double uniform_mass = options.alpha * static_cast<double>(taxid_list.size());
+		double pseudo_mass = (prior_mass > 0.0) ? prior_mass : uniform_mass;
+		double denominator = pseudo_mass + sum_expected;
 		if (denominator <= 0.0) {
 			denominator = 1.0;
 		}
@@ -209,10 +266,12 @@ VEMAlgorithm(const std::vector<classifyResult>& input,
 			if (it != expected_counts.end()) {
 				expected = it->second;
 			}
-			double updated = (expected + options.alpha) / denominator;
+			double prior_component = (prior_mass > 0.0)
+			                             ? prior_mass * abundance_prior[taxid]
+			                             : options.alpha;
+			double updated = (expected + prior_component) / denominator;
 			diff += std::abs(pi[taxid] - updated);
 			pi[taxid] = updated;
-			prior_counts[taxid] = expected;
 		}
 
 		if (diff < tol) {

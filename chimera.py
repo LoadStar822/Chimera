@@ -127,13 +127,6 @@ def parse_arguments():
         help="Maximum number of hashes per taxid",
     )
     build_parser.add_argument(
-        "-f",
-        "--filter",
-        default="imcf",
-        choices=["imcf"],
-        help="构建使用的滤器 (仅 imcf)",
-    )
-    build_parser.add_argument(
         "--taxonomy-kind",
         dest="taxonomy_kind",
         default="auto",
@@ -150,9 +143,6 @@ def parse_arguments():
         "--adaptive-cutoff",
         action="store_true",
         help="启用基于文件规模的自适应 cutoff",
-    )
-    build_parser.add_argument(
-        "-q", "--quiet", action="store_true", default=False, help="Quiet output"
     )
 
     # Download and Build combined subcommand
@@ -209,13 +199,6 @@ def parse_arguments():
         help="Maximum number of hashes per taxid",
     )
     download_build_parser.add_argument(
-        "-f",
-        "--filter",
-        default="imcf",
-        choices=["imcf"],
-        help="构建使用的滤器 (仅 imcf)",
-    )
-    download_build_parser.add_argument(
         "--taxonomy-kind",
         dest="taxonomy_kind",
         default="auto",
@@ -232,9 +215,6 @@ def parse_arguments():
         "--adaptive-cutoff",
         action="store_true",
         help="启用基于文件规模的自适应 cutoff",
-    )
-    download_build_parser.add_argument(
-        "-q", "--quiet", action="store_true", default=False, help="Quiet output"
     )
 
     # Classify subcommand
@@ -297,6 +277,25 @@ def parse_arguments():
         type=float,
         default=None,
         help="Target q-value cutoff for presence calling",
+    )
+    classify_parser.add_argument(
+        "--presence-report-only",
+        dest="presence_report_only",
+        action="store_true",
+        default=None,
+        help="Treat presence caller as report-only evidence (default)",
+    )
+    classify_parser.add_argument(
+        "--presence-hard-filter",
+        dest="presence_report_only",
+        action="store_false",
+        help="Use presence caller as a hard gating filter",
+    )
+    classify_parser.add_argument(
+        "--presence-abundance-prior",
+        type=float,
+        default=None,
+        help="Abundance-driven prior weight applied to tdFDR p-values",
     )
     classify_parser.add_argument(
         "--auto-q-tune",
@@ -378,6 +377,30 @@ def parse_arguments():
         help="Minimum ratio between top1 and top2 posteriors (default 1.30)",
     )
     classify_parser.add_argument(
+        "--post-relax-abs",
+        type=float,
+        default=None,
+        help="Absolute posterior floor for relaxed gate",
+    )
+    classify_parser.add_argument(
+        "--post-relax-ratio",
+        type=float,
+        default=None,
+        help="Ratio threshold for relaxed gate",
+    )
+    classify_parser.add_argument(
+        "--post-relax-delta",
+        type=float,
+        default=None,
+        help="Gap threshold for relaxed gate",
+    )
+    classify_parser.add_argument(
+        "--post-relax-delta-abs",
+        type=float,
+        default=None,
+        help="Absolute posterior floor for gap-based relaxed gate",
+    )
+    classify_parser.add_argument(
         "--post-pi-min",
         type=float,
         default=None,
@@ -412,26 +435,6 @@ def parse_arguments():
         help="Number of threads for classifying",
     )
     classify_parser.add_argument(
-        "-f",
-        "--filter",
-        default="imcf",
-        choices=["imcf"],
-        help="分类使用的滤器 (仅 imcf)",
-    )
-    classify_parser.add_argument(
-        "--taxonomy-kind",
-        dest="taxonomy_kind",
-        default="auto",
-        choices=["auto", "ncbi", "gtdb"],
-        help="分类期望的 taxonomy 数据源标识",
-    )
-    classify_parser.add_argument(
-        "--taxonomy-version",
-        dest="taxonomy_version",
-        default="auto",
-        help="分类期望的 taxonomy 数据版本标识",
-    )
-    classify_parser.add_argument(
         "-b", "--batch-size", type=int, default=400, help="Batch size for classifying"
     )
     classify_parser.add_argument(
@@ -450,7 +453,22 @@ def parse_arguments():
         "--em-threshold", type=float, default=0.001, help="EM threshold"
     )
     classify_parser.add_argument(
-        "-q", "--quiet", action="store_true", default=False, help="Quiet output"
+        "--em-temp",
+        type=float,
+        default=None,
+        help="Softmax temperature inside EM/VEM",
+    )
+    classify_parser.add_argument(
+        "--em-prior-strength",
+        type=float,
+        default=None,
+        help="Dirichlet mass for abundance prior",
+    )
+    classify_parser.add_argument(
+        "--em-coexist-penalty",
+        type=float,
+        default=None,
+        help="Penalty applied when reads have near-tied taxa",
     )
 
     # Profile subcommand
@@ -618,14 +636,9 @@ def run_chimera(args, chimera_path):
             command.extend(["-l", str(args.min_length)])
         command.extend(["-t", str(args.threads)])
         command.extend(["--load-factor", str(args.load_factor)])
-        command.extend(["-f", args.filter])
-        command.extend(["--taxonomy-kind", args.taxonomy_kind])
-        command.extend(["--taxonomy-version", args.taxonomy_version])
         if args.adaptive_cutoff:
             command.append("--adaptive-cutoff")
         command.extend(["-M", str(args.max_hashes)])
-        if args.quiet:
-            command.append("-q")
 
     elif args.command == "classify":
         if args.single:
@@ -648,6 +661,14 @@ def run_chimera(args, chimera_path):
             command.extend(["--presence-caller", args.presence_caller])
         if args.presence_q is not None:
             command.extend(["--presence-q", str(args.presence_q)])
+        if args.presence_report_only is True:
+            command.append("--presence-report-only")
+        elif args.presence_report_only is False:
+            command.append("--presence-hard-filter")
+        if args.presence_abundance_prior is not None:
+            command.extend(
+                ["--presence-abundance-prior", str(args.presence_abundance_prior)]
+            )
         if args.auto_q_tune is True:
             command.append("--auto-q-tune")
         elif args.auto_q_tune is False:
@@ -674,6 +695,16 @@ def run_chimera(args, chimera_path):
             command.extend(["--post-margin", str(args.post_margin)])
         if args.post_ratio is not None:
             command.extend(["--post-ratio", str(args.post_ratio)])
+        if args.post_relax_abs is not None:
+            command.extend(["--post-relax-abs", str(args.post_relax_abs)])
+        if args.post_relax_ratio is not None:
+            command.extend(["--post-relax-ratio", str(args.post_relax_ratio)])
+        if args.post_relax_delta is not None:
+            command.extend(["--post-relax-delta", str(args.post_relax_delta)])
+        if args.post_relax_delta_abs is not None:
+            command.extend(
+                ["--post-relax-delta-abs", str(args.post_relax_delta_abs)]
+            )
         if args.post_pi_min is not None:
             command.extend(["--post-pi-min", str(args.post_pi_min)])
         if args.evidence_override is True:
@@ -686,9 +717,6 @@ def run_chimera(args, chimera_path):
             command.append("--no-output-posterior")
         command.extend(["-t", str(args.threads)])
         command.extend(["-b", str(args.batch_size)])
-        command.extend(["-f", args.filter])
-        command.extend(["--taxonomy-kind", args.taxonomy_kind])
-        command.extend(["--taxonomy-version", args.taxonomy_version])
         if args.em:
             command.append("-e")
             command.extend(["--em-iter", str(args.em_iter)])
@@ -697,8 +725,16 @@ def run_chimera(args, chimera_path):
             command.append("-V")
             command.extend(["--em-iter", str(args.em_iter)])
             command.extend(["--em-threshold", str(args.em_threshold)])
-        if args.quiet:
-            command.append("-q")
+        if args.em_temp is not None:
+            command.extend(["--em-temp", str(args.em_temp)])
+        if args.em_prior_strength is not None:
+            command.extend(
+                ["--em-prior-strength", str(args.em_prior_strength)]
+            )
+        if args.em_coexist_penalty is not None:
+            command.extend(
+                ["--em-coexist-penalty", str(args.em_coexist_penalty)]
+            )
 
     # Execute the command using the provided run function
     downloader.run_command(command)

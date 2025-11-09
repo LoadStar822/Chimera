@@ -1210,37 +1210,35 @@ namespace ChimeraBuild {
 
 		std::filesystem::path dir = "tmp";
 		createOrResetDirectory(dir, config);
-		if (config.filter == "imcf")
-		{
-			auto calculate_start = std::chrono::high_resolution_clock::now();
-			std::cout << "Calculating feature hashes..." << std::endl;
-			syncmer_count(config, inputFiles, hashCount, fileInfo);
-			auto calculate_end = std::chrono::high_resolution_clock::now();
-			auto calculate_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_end - calculate_start).count();
-			if (config.verbose) {
-				std::cout << "Calculate time: ";
-				print_build_time(calculate_total_time);
-				std::cout << "File information:" << std::endl;
-				std::cout << "Number of files: " << fileInfo.fileNum << std::endl;
-				std::cout << "Number of invalid files: " << fileInfo.invalidNum << std::endl;
-				std::cout << "Number of skipped files: " << fileInfo.skippedNum << std::endl;
-				std::cout << "Number of sequences: " << fileInfo.sequenceNum << std::endl;
-				std::cout << "Number of skipped sequences: " << fileInfo.skippedSeqNum << std::endl;
-				std::cout << "Total base pairs: " << fileInfo.bpLength << std::endl << std::endl;
-			}
+		auto calculate_start = std::chrono::high_resolution_clock::now();
+		std::cout << "Calculating feature hashes..." << std::endl;
+		syncmer_count(config, inputFiles, hashCount, fileInfo);
+		auto calculate_end = std::chrono::high_resolution_clock::now();
+		auto calculate_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_end - calculate_start).count();
+		if (config.verbose) {
+			std::cout << "Calculate time: ";
+			print_build_time(calculate_total_time);
+			std::cout << "File information:" << std::endl;
+			std::cout << "Number of files: " << fileInfo.fileNum << std::endl;
+			std::cout << "Number of invalid files: " << fileInfo.invalidNum << std::endl;
+			std::cout << "Number of skipped files: " << fileInfo.skippedNum << std::endl;
+			std::cout << "Number of sequences: " << fileInfo.sequenceNum << std::endl;
+			std::cout << "Number of skipped sequences: " << fileInfo.skippedSeqNum << std::endl;
+			std::cout << "Total base pairs: " << fileInfo.bpLength << std::endl << std::endl;
+		}
 
-			auto partition_start = std::chrono::high_resolution_clock::now();
-			std::cout << "Partitioning hashcout..." << std::endl;
-			std::vector<chimera::imcf::Group> groups = chimera::imcf::partitionHashCount(hashCount, 16);
-			auto partition_end = std::chrono::high_resolution_clock::now();
-			auto partition_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(partition_end - partition_start).count();
-			if (config.verbose) {
-				std::cout << "Partition time: ";
-				print_build_time(partition_total_time);
-				std::cout << std::endl;
-			}
+		auto partition_start = std::chrono::high_resolution_clock::now();
+		std::cout << "Partitioning hashcout..." << std::endl;
+		std::vector<chimera::imcf::Group> groups = chimera::imcf::partitionHashCount(hashCount, 16);
+		auto partition_end = std::chrono::high_resolution_clock::now();
+		auto partition_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(partition_end - partition_start).count();
+		if (config.verbose) {
+			std::cout << "Partition time: ";
+			print_build_time(partition_total_time);
+			std::cout << std::endl;
+		}
 
-			auto build_start = std::chrono::high_resolution_clock::now();
+		auto imcf_build_start = std::chrono::high_resolution_clock::now();
 		std::cout << "Building IMCF..." << std::endl;
 		uint64_t imcf_feature_seed = 0;
 		chimera::feature::Method imcf_feature_method{};
@@ -1250,61 +1248,53 @@ namespace ChimeraBuild {
 		imcfConfig.loadFactor = config.load_factor;
 		imcfConfig.kmerSize = config.kmer_size;
 		imcfConfig.smerSize = config.smer_size;
-			imcfConfig.syncmerPosition = config.syncmer_position;
-			imcfConfig.seed64 = imcf_feature_seed;
-			imcfConfig.fpSalt = IMCFConfig::DefaultFingerprintSalt;
-			imcfConfig.hashVersion = IMCFConfig::CurrentHashVersion;
+		imcfConfig.syncmerPosition = config.syncmer_position;
+		imcfConfig.seed64 = imcf_feature_seed;
+		imcfConfig.fpSalt = IMCFConfig::DefaultFingerprintSalt;
+		imcfConfig.hashVersion = IMCFConfig::CurrentHashVersion;
 		if (imcf_feature_method == chimera::feature::Method::Strobemer) {
 			imcfConfig.featureMethod = 1;
 			imcfConfig.strobeOrder = config.strobemer_order;
 			imcfConfig.strobeWmin = config.strobemer_w_min;
 			imcfConfig.strobeWmax = config.strobemer_w_max;
 			imcfConfig.strobeK = config.strobemer_k;
-			} else {
-				imcfConfig.featureMethod = 0;
-				imcfConfig.strobeOrder = 0;
-				imcfConfig.strobeWmin = 0;
-				imcfConfig.strobeWmax = 0;
-				imcfConfig.strobeK = 0;
-			}
-			if (config.taxonomy_kind == "auto" || config.taxonomy_kind.empty()) {
-				imcfConfig.taxonomyKind = "ncbi";
-			}
-			else {
-				imcfConfig.taxonomyKind = config.taxonomy_kind;
-			}
-			if (config.taxonomy_version == "auto" || config.taxonomy_version.empty()) {
-				imcfConfig.taxonomyVersion = "ncbi-taxdump";
-			}
-			else {
-				imcfConfig.taxonomyVersion = config.taxonomy_version;
-			}
-			chimera::imcf::InterleavedMergedCuckooFilter imcf(groups, imcfConfig);
-			std::vector<std::vector<std::string>> indexToTaxid = buildIMCF(imcf, groups, hashCount, feature_suffix);
-			auto build_end = std::chrono::high_resolution_clock::now();
-			auto build_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(build_end - build_start).count();
-			if (config.verbose) {
-				std::cout << "Build time: ";
-				print_build_time(build_total_time);
-				std::cout << std::endl;
-				std::cout << imcf << std::endl;
-			}
-
-			auto save_start = std::chrono::high_resolution_clock::now();
-			std::cout << "Saving IMCF..." << std::endl;
-		saveIMCF(imcf, config.output_file, indexToTaxid, imcfConfig,
-		        config.filter == "imcf");
-			auto save_end = std::chrono::high_resolution_clock::now();
-			auto save_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(save_end - save_start).count();
-			if (config.verbose) {
-				std::cout << "Save time: ";
-				print_build_time(save_total_time);
-				std::cout << std::endl;
-			}
+		} else {
+			imcfConfig.featureMethod = 0;
+			imcfConfig.strobeOrder = 0;
+			imcfConfig.strobeWmin = 0;
+			imcfConfig.strobeWmax = 0;
+			imcfConfig.strobeK = 0;
 		}
-		else {
-			throw std::runtime_error("Unsupported filter type: " + config.filter +
-			                             ". 当前仅支持 imcf");
+		if (config.taxonomy_kind == "auto" || config.taxonomy_kind.empty()) {
+			imcfConfig.taxonomyKind = "ncbi";
+		} else {
+			imcfConfig.taxonomyKind = config.taxonomy_kind;
+		}
+		if (config.taxonomy_version == "auto" || config.taxonomy_version.empty()) {
+			imcfConfig.taxonomyVersion = "ncbi-taxdump";
+		} else {
+			imcfConfig.taxonomyVersion = config.taxonomy_version;
+		}
+		chimera::imcf::InterleavedMergedCuckooFilter imcf(groups, imcfConfig);
+		std::vector<std::vector<std::string>> indexToTaxid = buildIMCF(imcf, groups, hashCount, feature_suffix);
+		auto imcf_build_end = std::chrono::high_resolution_clock::now();
+		auto imcf_build_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(imcf_build_end - imcf_build_start).count();
+		if (config.verbose) {
+			std::cout << "Build time: ";
+			print_build_time(imcf_build_total_time);
+			std::cout << std::endl;
+			std::cout << imcf << std::endl;
+		}
+
+		auto save_start = std::chrono::high_resolution_clock::now();
+		std::cout << "Saving IMCF..." << std::endl;
+		saveIMCF(imcf, config.output_file, indexToTaxid, imcfConfig, true);
+		auto save_end = std::chrono::high_resolution_clock::now();
+		auto save_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(save_end - save_start).count();
+		if (config.verbose) {
+			std::cout << "Save time: ";
+			print_build_time(save_total_time);
+			std::cout << std::endl;
 		}
 
 

@@ -41,7 +41,6 @@ namespace ChimeraBuild {
 		std::string taxonomy_version{ "auto" };
 		std::string input_file;
 		std::string output_file;
-		std::string filter{ "imcf" };
 		std::string feature{ "strobemer" }; // syncmer | strobemer | auto
 		uint8_t strobemer_k{ 28 };
 		uint8_t strobemer_order{ 2 };
@@ -66,8 +65,7 @@ namespace ChimeraBuild {
 		os << std::left
 			<< std::setw(25) << "Input file:" << config.input_file << std::endl
 			<< std::setw(25) << "Output file:" << config.output_file << std::endl
-			<< std::setw(25) << "Filter:" << config.filter << std::endl
-			<< std::setw(25) << "Feature method:" << config.feature << std::endl
+		<< std::setw(25) << "Feature method:" << config.feature << std::endl
 			<< std::setw(25) << "Strobemer k:" << static_cast<int>(config.strobemer_k) << std::endl
 			<< std::setw(25) << "Strobemer order:" << static_cast<int>(config.strobemer_order) << std::endl
 			<< std::setw(25) << "Strobemer w_min:" << config.strobemer_w_min << std::endl

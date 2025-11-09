@@ -33,10 +33,9 @@
 #include <numeric>
 #include <queue>
 #include <sstream>
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
-#include <cstdio>
-#include <cstdlib>
 #include <memory>
 #include <span>
 
@@ -44,125 +43,16 @@
 
 namespace ChimeraClassify {
 
+struct PresenceSummary;
+struct PresenceDecision;
+
 namespace dbg {
-struct TraceCfg {
-  bool enabled = true;
-  bool once = true;
-  std::string id_substr;
-  std::string file = "chimera_trace.log";
-  size_t topk_print = 10;
-
-  static TraceCfg fromEnv() {
-    TraceCfg cfg;
-    if (const char *v = std::getenv("CHIMERA_TRACE")) {
-      cfg.enabled = std::string(v) != "0";
-    }
-    if (const char *v = std::getenv("CHIMERA_TRACE_ONCE")) {
-      cfg.once = std::string(v) != "0";
-    }
-    if (const char *v = std::getenv("CHIMERA_TRACE_ID")) {
-      cfg.id_substr = v;
-    }
-    if (const char *v = std::getenv("CHIMERA_TRACE_FILE")) {
-      cfg.file = v;
-    }
-    return cfg;
-  }
-};
-
-struct Counters {
-  std::atomic<uint64_t> total_reads{0};
-  std::atomic<uint64_t> too_short{0};
-  std::atomic<uint64_t> has_minimizers{0};
-  std::atomic<uint64_t> imcf_event_zero{0};
-  std::atomic<uint64_t> candidate_zero{0};
-  std::atomic<uint64_t> entered_em{0};
-  std::atomic<uint64_t> passed_post{0};
-  std::atomic<uint64_t> pre_margin_accept{0};
-  std::atomic<uint64_t> pre_margin_reject{0};
-} g;
-
-static TraceCfg gCfg = TraceCfg::fromEnv();
-static std::atomic_flag gDeepUsed = ATOMIC_FLAG_INIT;
-static std::mutex gMtx;
-static std::unique_ptr<std::ofstream> gOut;
-
-inline bool enabled() { return gCfg.enabled; }
-
-inline void reset() {
-  if (!enabled()) {
-    return;
-  }
-  g.total_reads.store(0, std::memory_order_relaxed);
-  g.too_short.store(0, std::memory_order_relaxed);
-  g.has_minimizers.store(0, std::memory_order_relaxed);
-  g.imcf_event_zero.store(0, std::memory_order_relaxed);
-  g.candidate_zero.store(0, std::memory_order_relaxed);
-  g.entered_em.store(0, std::memory_order_relaxed);
-  g.passed_post.store(0, std::memory_order_relaxed);
-  g.pre_margin_accept.store(0, std::memory_order_relaxed);
-  g.pre_margin_reject.store(0, std::memory_order_relaxed);
-  gDeepUsed.clear(std::memory_order_release);
-}
-
-inline void initSink() {
-  if (!enabled()) {
-    return;
-  }
-  std::scoped_lock lk(gMtx);
-  if (gOut) {
-    return;
-  }
-  auto sink = std::make_unique<std::ofstream>(gCfg.file,
-                                              std::ios::out | std::ios::app);
-  if (sink->is_open()) {
-    gOut = std::move(sink);
-  }
-}
-
-inline bool wantDeep(const std::string &id, bool isSuspicious) {
-  if (!enabled()) {
-    return false;
-  }
-  if (!gCfg.id_substr.empty() && id.find(gCfg.id_substr) == std::string::npos) {
-    return false;
-  }
-  if (!isSuspicious) {
-    return false;
-  }
-  if (!gCfg.once) {
-    return true;
-  }
-  if (!gDeepUsed.test_and_set()) {
-    return true;
-  }
-  return false;
-}
-
-template <class... Args>
-inline void log(const char *fmt, Args &&...args) {
-  if (!enabled()) {
-    return;
-  }
-  if (!gOut) {
-    return;
-  }
-  std::scoped_lock lk(gMtx);
-  int size = std::snprintf(nullptr, 0, fmt, std::forward<Args>(args)...);
-  if (size <= 0) {
-    return;
-  }
-  std::vector<char> buf(static_cast<size_t>(size) + 1, '\0');
-  std::snprintf(buf.data(), buf.size(), fmt, std::forward<Args>(args)...);
-  (*gOut) << buf.data() << '\n';
-  gOut->flush();
-}
-
 struct TraceRecord {
   size_t readLen = 0;
   size_t minimizerTotal = 0;
   size_t uniqCount = 0;
   size_t sampleCount = 0;
+  double sampleCoverage = 0.0;
   uint64_t xorAll = 0;
   uint64_t xorSample = 0;
   uint64_t imcfEvents = 0;
@@ -171,7 +61,6 @@ struct TraceRecord {
   size_t candidateSize = 0;
   std::vector<std::pair<uint32_t, uint32_t>> topBinHits;
   std::vector<std::pair<std::string, size_t>> emInputTop;
-  std::vector<std::pair<std::string, double>> emFinalTop;
   uint64_t totalTidHits = 0;
   bool candidateEmpty = false;
   bool fallbackFull = false;
@@ -191,64 +80,20 @@ struct TraceRecord {
   uint32_t bestTid = std::numeric_limits<uint32_t>::max();
   std::string bestTaxid;
   bool useEm = false;
-  bool enteredEm = false;
-  bool passedPost = false;
-  std::string decisionReason;
-  bool deepLogged = false;
-  bool suspiciousPre = false;
-  bool suspiciousPost = false;
-  bool emFinalLogged = false;
   double evaluatedWeight = 0.0;
+  bool candidateExpanded = false;
+  std::array<uint32_t, 6> degHist{};
+  double preContainmentTop1 = 0.0;
+  double preContainmentTop2 = 0.0;
+  double aniEstimateTop1 = 0.0;
+  double aniEstimateTop2 = 0.0;
+  double dynPost = 0.0;
+  double dynRatio = 0.0;
+  double dynDelta = 0.0;
+  double uniqueRatio = 0.0;
+  size_t uniqueSupport = 0;
 };
 
-inline void dumpTrace(TraceRecord &rec, const std::string &id,
-                      const char *stage) {
-  if (!enabled()) {
-    return;
-  }
-  const char *stageLabel = stage ? stage : "pre";
-  const char *bestTaxid = rec.bestTaxid.empty() ? "N/A" : rec.bestTaxid.c_str();
-  log("READ[%s][%s] len=%zu mm_total=%zu mm_uniq=%zu mm_sample=%zu xor_all=%016llx xor_sample=%016llx",
-      id.c_str(), stageLabel, rec.readLen, rec.minimizerTotal, rec.uniqCount,
-      rec.sampleCount, static_cast<unsigned long long>(rec.xorAll),
-      static_cast<unsigned long long>(rec.xorSample));
-  log("IMCF: events=%llu bins=%zu touched=%zu candidate=%zu fallback=%d total_tid=%llu",
-      static_cast<unsigned long long>(rec.imcfEvents), rec.binsWithHits,
-      rec.touchedBins, rec.candidateSize, rec.fallbackFull ? 1 : 0,
-      static_cast<unsigned long long>(rec.totalTidHits));
-  if (!rec.topBinHits.empty()) {
-    size_t idx = 0;
-    for (const auto &[bin, count] : rec.topBinHits) {
-      log("  bin[%zu]=%u count=%u", idx, bin, count);
-      ++idx;
-    }
-  }
-  log("Thresholds: shot=%.3f thr_conf=%zu thr_eval=%zu thr_beta=%zu thr_min_eval=%zu preEmTopK=%zu",
-      rec.shotThreshold, rec.thrConf, rec.thrEval, rec.thrBeta, rec.thrMinEval,
-      rec.preEmTopK);
-  log("Counts: evaluated=%zu weight=%.2f best=%zu second=%zu best_tid=%s",
-      rec.evaluated, rec.evaluatedWeight, rec.bestCount, rec.secondCount,
-      bestTaxid);
-  log("Margin: diff=%zu need=%zu ratio=%.3f",
-      rec.margin, rec.marginNeed, rec.marginRatio);
-  if (!rec.emInputTop.empty()) {
-    size_t idx = 0;
-    for (const auto &[taxid, cnt] : rec.emInputTop) {
-      log("  EM-in[%zu]=%s:%zu", idx, taxid.c_str(), cnt);
-      ++idx;
-    }
-  }
-  if (!rec.emFinalTop.empty()) {
-    size_t idx = 0;
-    for (const auto &[taxid, val] : rec.emFinalTop) {
-      log("  EM-final[%zu]=%s:%.6f", idx, taxid.c_str(), val);
-      ++idx;
-    }
-  }
-  log("Decision: passed=%d reason=%s", rec.passedPost ? 1 : 0,
-      rec.decisionReason.empty() ? "" : rec.decisionReason.c_str());
-  rec.emFinalLogged = !rec.emFinalTop.empty();
-}
 } // namespace dbg
 
 namespace {
@@ -996,33 +841,8 @@ void postEmDecision(std::vector<classifyResult> &results,
       prune_by_global_pi(result, decisionConfig.min_class_weight);
     }
     auto trace = result.trace;
-    auto appendReason = [&](const std::string &tag) {
-      if (!trace || tag.empty()) {
-        return;
-      }
-      if (trace->decisionReason.empty()) {
-        trace->decisionReason = tag;
-        return;
-      }
-      if (trace->decisionReason.find(tag) == std::string::npos) {
-        trace->decisionReason += "|" + tag;
-      }
-    };
 
     if (result.posteriors.empty()) {
-      if (trace) {
-        trace->passedPost = false;
-        trace->suspiciousPost = trace->enteredEm;
-        appendReason("posterior_empty");
-        if (trace->suspiciousPost && !trace->deepLogged &&
-            dbg::wantDeep(result.id, trace->suspiciousPost)) {
-          trace->deepLogged = true;
-          dbg::dumpTrace(*trace, result.id, "post");
-        } else if (trace->deepLogged) {
-          dbg::log("Decision[%s][post]: passed=0 reason=%s", result.id.c_str(),
-                   trace->decisionReason.c_str());
-        }
-      }
       result.taxidCount.clear();
       result.taxidCount.emplace_back(kUnclassified, 1);
       continue;
@@ -1058,11 +878,33 @@ void postEmDecision(std::vector<classifyResult> &results,
                            ? 1.30
                            : std::max(decisionConfig.margin_ratio, 1.30);
     double dyn_delta = std::max(decisionConfig.margin_delta, 0.03);
+    if (trace) {
+      trace->dynPost = dyn_post;
+      trace->dynRatio = dyn_ratio;
+      trace->dynDelta = dyn_delta;
+    }
 
     bool threshold_ok = top_score >= dyn_post;
     bool ratio_ok = ratio >= dyn_ratio;
     bool delta_ok = delta >= dyn_delta;
-    bool pass_margins = ratio_ok && delta_ok;
+
+    double relax_abs = std::clamp(decisionConfig.relax_abs, 0.0, 1.0);
+    double relax_ratio_need = (decisionConfig.relax_ratio > 0.0)
+                                  ? decisionConfig.relax_ratio
+                                  : std::numeric_limits<double>::quiet_NaN();
+    double relax_delta_need = std::max(decisionConfig.relax_delta, 0.0);
+    double relax_delta_abs = std::clamp(decisionConfig.relax_delta_abs, 0.0, 1.0);
+
+    bool ratio_guard_enabled = std::isfinite(relax_ratio_need);
+    bool delta_guard_enabled = relax_delta_need > 0.0;
+
+    bool strict_ratio_ok = threshold_ok && ratio_ok;
+    bool strict_delta_ok = threshold_ok && delta_ok;
+    bool ratio_guard = ratio_guard_enabled && top_score >= relax_abs &&
+                       ratio >= relax_ratio_need;
+    bool delta_guard = delta_guard_enabled &&
+                       top_score >= relax_delta_abs &&
+                       delta >= relax_delta_need;
 
     double class_weight = 0.0;
     bool weight_ok = true;
@@ -1078,57 +920,16 @@ void postEmDecision(std::vector<classifyResult> &results,
       weight_ok = true;
     }
 
-    if (trace) {
-      trace->emFinalTop.clear();
-      size_t limit = std::min(posterior.size(), dbg::gCfg.topk_print);
-      for (size_t i = 0; i < limit; ++i) {
-        trace->emFinalTop.emplace_back(posterior[i].first, posterior[i].second);
-      }
-      if (trace->deepLogged && !trace->emFinalLogged &&
-          !trace->emFinalTop.empty()) {
-        size_t idx = 0;
-        for (const auto &[taxid, val] : trace->emFinalTop) {
-          dbg::log("  EM-final[%zu]=%s:%.6f", idx, taxid.c_str(), val);
-          ++idx;
-        }
-        trace->emFinalLogged = true;
-      }
-    }
-
-    std::string reason;
-    if (!threshold_ok) {
-      reason = "below_posterior(" + format_val(top_score) + "<" +
-               format_val(dyn_post) + ")";
-    } else if (!pass_margins) {
-      if (!std::isnan(dyn_ratio) && !ratio_ok) {
-        reason = "below_ratio(" + format_val(ratio) + "<" +
-                 format_val(dyn_ratio) + ")";
-      } else {
-        reason = "below_margin(" + format_val(delta) + "<" +
-                 format_val(dyn_delta) + ")";
-      }
-    } else if (!weight_ok) {
-      reason = "below_weight(" + format_val(class_weight) + "<" +
-               format_val(decisionConfig.min_class_weight) + ")";
-    }
-
-    bool pass = threshold_ok && pass_margins && weight_ok;
+    
+    bool pass = weight_ok &&
+                (strict_ratio_ok || strict_delta_ok || ratio_guard ||
+                 delta_guard);
 
     result.posteriors = std::move(posterior);
 
     if (pass) {
       result.taxidCount.clear();
       result.taxidCount.emplace_back(top.first, 0);
-      if (trace) {
-        trace->passedPost = true;
-        trace->suspiciousPost = false;
-        appendReason("post_pass");
-        if (trace->deepLogged) {
-          dbg::log("Decision[%s][post]: passed=1 reason=%s", result.id.c_str(),
-                   trace->decisionReason.c_str());
-        }
-      }
-      dbg::g.passed_post.fetch_add(1, std::memory_order_relaxed);
       continue;
     }
 
@@ -1156,35 +957,7 @@ void postEmDecision(std::vector<classifyResult> &results,
       const std::string &fallback = trace->bestTaxid;
       result.taxidCount.clear();
       result.taxidCount.emplace_back(fallback, 0);
-      if (trace) {
-        trace->passedPost = true;
-        trace->suspiciousPost = false;
-        appendReason("pre_evidence_override");
-        if (trace->deepLogged) {
-          dbg::log("Decision[%s][post]: passed=1 reason=%s", result.id.c_str(),
-                   trace->decisionReason.c_str());
-        }
-      }
-      dbg::g.passed_post.fetch_add(1, std::memory_order_relaxed);
       continue;
-    }
-
-    if (reason.empty()) {
-      reason = "post_reject";
-    }
-    appendReason(reason);
-
-    if (trace) {
-      trace->passedPost = false;
-      trace->suspiciousPost = trace->enteredEm;
-      if (trace->suspiciousPost && !trace->deepLogged &&
-          dbg::wantDeep(result.id, trace->suspiciousPost)) {
-        trace->deepLogged = true;
-        dbg::dumpTrace(*trace, result.id, "post");
-      } else if (trace->deepLogged) {
-        dbg::log("Decision[%s][post]: passed=0 reason=%s", result.id.c_str(),
-                 trace->decisionReason.c_str());
-      }
     }
 
     result.taxidCount.clear();
@@ -1308,6 +1081,7 @@ struct PresenceDecision {
   size_t tested{0};
   size_t acceptedCount{0};
   size_t decoyPositives{0};
+  size_t minUniqueThreshold{0};
 };
 
 static PresenceDecision evaluate_presence_tdFDR(const PresenceSummary &summary,
@@ -1334,23 +1108,20 @@ inline void processSequence(
     return acc;
   };
 
-  std::shared_ptr<dbg::TraceRecord> trace;
-  if (dbg::enabled()) {
-    trace = std::make_shared<dbg::TraceRecord>();
-    trace->readLen = readLen;
-    trace->minimizerTotal = hashNum;
-    trace->shotThreshold = config.shotThreshold;
-    trace->firstFilterBeta = config.firstFilterBeta;
-    trace->preEmTopK = config.preEmTopK;
-    trace->thrMinEval = config.min_eval_count;
-    if (!hashs1.empty()) {
-      trace->xorAll = xor_reduce(hashs1);
-      std::vector<uint64_t> uniqVals = hashs1;
-      std::sort(uniqVals.begin(), uniqVals.end());
-      uniqVals.erase(std::unique(uniqVals.begin(), uniqVals.end()),
-                     uniqVals.end());
-      trace->uniqCount = uniqVals.size();
-    }
+  auto trace = std::make_shared<dbg::TraceRecord>();
+  trace->readLen = readLen;
+  trace->minimizerTotal = hashNum;
+  trace->shotThreshold = config.shotThreshold;
+  trace->firstFilterBeta = config.firstFilterBeta;
+  trace->preEmTopK = config.preEmTopK;
+  trace->thrMinEval = config.min_eval_count;
+  if (!hashs1.empty()) {
+    trace->xorAll = xor_reduce(hashs1);
+    std::vector<uint64_t> uniqVals = hashs1;
+    std::sort(uniqVals.begin(), uniqVals.end());
+    uniqVals.erase(std::unique(uniqVals.begin(), uniqVals.end()),
+                   uniqVals.end());
+    trace->uniqCount = uniqVals.size();
   }
 
   const size_t binNumAll = indexToTaxid.size();
@@ -1380,6 +1151,7 @@ inline void processSequence(
   touchedS.reserve(64);
   robin_hood::unordered_flat_map<uint32_t, uint32_t> sampleBinScore;
   uint64_t coarseTotal = 0;
+  uint64_t sampleCovered = 0;
   std::vector<uint64_t> deferredEval;
   if (hashs1.size() > 64) {
     deferredEval.reserve(hashs1.size() - 64);
@@ -1468,6 +1240,7 @@ inline void processSequence(
         break;
       }
     }
+    sampleCovered = covered;
     fallback_full = false;
   }
 
@@ -1522,11 +1295,13 @@ inline void processSequence(
     trace->candidateSize = topBins.size();
     trace->fallbackFull = fallback_full;
     trace->candidateEmpty = candidateEmpty;
+    if (coarseTotal > 0) {
+      double coverage =
+          static_cast<double>(std::min<uint64_t>(coarseTotal, sampleCovered)) /
+          static_cast<double>(coarseTotal);
+      trace->sampleCoverage = std::clamp(coverage, 0.0, 1.0);
+    }
   }
-  if (trace && candidateEmpty) {
-    dbg::g.candidate_zero.fetch_add(1, std::memory_order_relaxed);
-  }
-
   if (!fallback_full) {
     for (auto bin : topBins) {
       uint32_t delta = 1;
@@ -1566,6 +1341,25 @@ inline void processSequence(
 
   const std::vector<uint32_t> *activeSubset =
       (fallback_full || topBins.size() == binNumAll) ? nullptr : &topBins;
+
+  auto bucket_degree = [](size_t d) -> size_t {
+    if (d <= 1) {
+      return 0;
+    }
+    if (d <= 3) {
+      return 1;
+    }
+    if (d <= 7) {
+      return 2;
+    }
+    if (d <= 15) {
+      return 3;
+    }
+    if (d <= 31) {
+      return 4;
+    }
+    return 5;
+  };
 
   auto evaluate_minimizer = [&](uint64_t value,
                                 const std::vector<uint32_t> *subset) -> double {
@@ -1607,6 +1401,9 @@ inline void processSequence(
     size_t deg = minimizerTids.size();
     if (deg == 0) {
       return 0.0;
+    }
+    if (trace) {
+      trace->degHist[bucket_degree(deg)]++;
     }
 
     double exclusivityWeight = 1.0;
@@ -1676,18 +1473,22 @@ inline void processSequence(
     }
   }
 
-  auto compute_top = [&](uint32_t &bestTid, double &best, double &second) {
+  auto compute_top = [&](uint32_t &bestTid, uint32_t &secondTid, double &best,
+                         double &second) {
     best = 0.0;
     second = 0.0;
     bestTid = std::numeric_limits<uint32_t>::max();
+    secondTid = std::numeric_limits<uint32_t>::max();
     for (const auto &kv : tidScore) {
       double c = kv.second;
       if (c > best) {
         second = best;
+        secondTid = bestTid;
         best = c;
         bestTid = kv.first;
       } else if (c > second) {
         second = c;
+        secondTid = kv.first;
       }
     }
   };
@@ -1702,6 +1503,7 @@ inline void processSequence(
 
   struct EvidenceStats {
     uint32_t bestTid = std::numeric_limits<uint32_t>::max();
+    uint32_t secondTid = std::numeric_limits<uint32_t>::max();
     double best = 0.0;
     double second = 0.0;
     double ratio = 0.0;
@@ -1713,7 +1515,7 @@ inline void processSequence(
 
   auto collect_stats = [&]() -> EvidenceStats {
     EvidenceStats stats;
-    compute_top(stats.bestTid, stats.best, stats.second);
+    compute_top(stats.bestTid, stats.secondTid, stats.best, stats.second);
     stats.ratio = compute_ratio(stats.best, stats.second);
     stats.gap = stats.best - stats.second;
     if (stats.bestTid != std::numeric_limits<uint32_t>::max()) {
@@ -1728,6 +1530,18 @@ inline void processSequence(
     double denom = eff_eval > 0.0 ? eff_eval : 1.0;
     stats.uniqueRatio = static_cast<double>(stats.uniqueCount) / denom;
     return stats;
+  };
+
+  auto consistency_ratio = [&](uint32_t tid) -> double {
+    if (tid == std::numeric_limits<uint32_t>::max() || n_eval == 0) {
+      return 0.0;
+    }
+    auto it = consistencyHits.find(tid);
+    if (it == consistencyHits.end()) {
+      return 0.0;
+    }
+    return static_cast<double>(it->second) /
+           static_cast<double>(std::max<size_t>(1, n_eval));
   };
 
   size_t n0 = std::min<size_t>(64, hashs1.size());
@@ -1845,38 +1659,41 @@ inline void processSequence(
   size_t thrConfNeed = static_cast<size_t>(std::ceil(thr_conf));
   auto dc = decide_high_conf(bestRounded, secondRounded, eff_eval);
   bool marginAccept = (bestRounded >= thrConfNeed) && dc.accept;
-  if (marginAccept) {
-    dbg::g.pre_margin_accept.fetch_add(1, std::memory_order_relaxed);
-  } else {
-    dbg::g.pre_margin_reject.fetch_add(1, std::memory_order_relaxed);
-  }
   highConfPre = highConfPre && marginAccept;
 
   if (trace) {
-    auto append_reason = [&](const std::string &tag) {
-      if (trace->decisionReason.empty()) {
-        trace->decisionReason = tag;
-      } else if (trace->decisionReason.find(tag) == std::string::npos) {
-        trace->decisionReason += "|" + tag;
-      }
-    };
-
+    trace->candidateExpanded = expanded;
     trace->thrConf = thrConfNeed;
     trace->imcfEvents = eventHits;
     trace->binsWithHits = binHitCount.size();
     trace->evaluated = n_eval;
     trace->evaluatedWeight = eff_eval;
+    trace->uniqueSupport = uniqueCount;
+    trace->uniqueRatio = uniqueRatio;
     trace->bestCount = bestRounded;
     trace->secondCount = secondRounded;
     trace->bestTid = bestTid;
+    trace->preContainmentTop1 = consistency_ratio(bestTid);
+    trace->preContainmentTop2 = consistency_ratio(stats.secondTid);
+    size_t effectiveK = 0;
+    if (imcfConfig.featureMethod == 1 && imcfConfig.strobeK > 0) {
+      effectiveK = std::max<size_t>(
+          1, static_cast<size_t>(std::llround(
+                 static_cast<double>(imcfConfig.strobeK) * 1.5)));
+    } else {
+      effectiveK = std::max<size_t>(1, static_cast<size_t>(imcfConfig.kmerSize));
+    }
+    auto ani_from = [&](double p) -> double {
+      if (p <= 0.0 || effectiveK == 0) {
+        return 0.0;
+      }
+      return std::pow(p, 1.0 / static_cast<double>(effectiveK));
+    };
+    trace->aniEstimateTop1 = ani_from(trace->preContainmentTop1);
+    trace->aniEstimateTop2 = ani_from(trace->preContainmentTop2);
     if (bestTid < tax.id2str.size()) {
       trace->bestTaxid = tax.id2str[bestTid];
     }
-    if (highConfPre) {
-      append_reason("pre_high_conf");
-      trace->suspiciousPre = false;
-    }
-    append_reason(marginAccept ? "pre_margin_ok" : "pre_margin_ng");
     trace->margin = static_cast<size_t>(
         std::llround(std::max(0.0, dc.margin)));
     trace->marginNeed = dc.need;
@@ -1889,18 +1706,7 @@ inline void processSequence(
       }
       std::sort(ranked.begin(), ranked.end(),
                 [](const auto &a, const auto &b) { return a.second > b.second; });
-      if (ranked.size() > dbg::gCfg.topk_print) {
-        ranked.resize(dbg::gCfg.topk_print);
-      }
       trace->topBinHits = std::move(ranked);
-    }
-    bool eventZero = (eventHits == 0);
-    if (!hashs1.empty() && eventZero) {
-      dbg::g.imcf_event_zero.fetch_add(1, std::memory_order_relaxed);
-      trace->suspiciousPre = true;
-    }
-    if (eventHits > 0 && trace->candidateEmpty) {
-      trace->suspiciousPre = true;
     }
   }
 
@@ -1989,9 +1795,6 @@ inline void processSequence(
     }
     std::sort(ranked.begin(), ranked.end(),
               [](const auto &a, const auto &b) { return a.second > b.second; });
-    if (ranked.size() > dbg::gCfg.topk_print) {
-      ranked.resize(dbg::gCfg.topk_print);
-    }
     trace->emInputTop = ranked;
   }
 
@@ -2037,10 +1840,7 @@ inline void processSequence(
     result.taxidCount.emplace_back(taxid, bestRoundedDirect);
     maxCount = std::make_pair(taxid, bestRoundedDirect);
     maxCountValid = true;
-    if (trace) {
-      trace->passedPost = true;
-      trace->suspiciousPost = false;
-    }
+    
   } else {
     for (const auto &[tid_id, rawScore] : tidScore) {
       size_t rounded = static_cast<size_t>(
@@ -2061,25 +1861,20 @@ inline void processSequence(
     result.taxidCount.emplace_back(maxCount);
   }
 
-  if (trace) {
-    bool enters = use_em && !result.taxidCount.empty() &&
-                  !(result.taxidCount.size() == 1 &&
-                    result.taxidCount.front().first == "unclassified");
-    trace->enteredEm = enters;
-    if (enters) {
-      dbg::g.entered_em.fetch_add(1, std::memory_order_relaxed);
-    }
-  }
 
-  size_t dynamicTopK = config.preEmTopK > 0 ? static_cast<size_t>(config.preEmTopK)
-                                            : 16;
-  bool strong = (best_ratio >= 2.5) &&
-                (best >= thr_conf + std::max(1.0, eff_eval / 16.0));
-  bool weak = (best < thr_conf) || (best_ratio < 1.20);
-  if (strong && dynamicTopK > 8) {
+  size_t baseTopK = config.preEmTopK > 0 ? static_cast<size_t>(config.preEmTopK)
+                                         : 32;
+  size_t dynamicTopK = baseTopK;
+  double tieGapNeed = std::max(2.0, eff_eval / 24.0);
+  bool nearTie = (gap < tieGapNeed) || (best_ratio < 1.30);
+  bool binOverflow = (!fallback_full && topBins.size() > 40) ||
+                     (result.taxidCount.size() > baseTopK);
+  if (nearTie || binOverflow) {
+    dynamicTopK = std::max<size_t>(64, dynamicTopK);
+  } else if (best_ratio >= 2.5 &&
+             best >= thr_conf + std::max(1.0, eff_eval / 16.0) &&
+             dynamicTopK > 8) {
     dynamicTopK = 8;
-  } else if (weak && dynamicTopK < 64) {
-    dynamicTopK = 64;
   }
   if (trace) {
     trace->preEmTopK = dynamicTopK;
@@ -2120,20 +1915,6 @@ inline void processSequence(
     result.taxidCount.emplace_back("unclassified", 1);
   }
 
-  if (trace) {
-    if (trace->decisionReason.empty()) {
-      if (!hashs1.empty() && trace->imcfEvents == 0) {
-        trace->decisionReason = "imcf_no_hit";
-      } else if (trace->candidateEmpty) {
-        trace->decisionReason = "candidate_empty";
-      }
-    }
-    if (trace->suspiciousPre && !trace->deepLogged &&
-        dbg::wantDeep(id, trace->suspiciousPre)) {
-      trace->deepLogged = true;
-      dbg::dumpTrace(*trace, id, "pre");
-    }
-  }
 
   // Add the classifyResult to the shared classifyResults vector
   if (progress) {
@@ -2305,17 +2086,6 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
         std::sort(hashs1.begin(), hashs1.end());
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
-      if (dbg::enabled()) {
-        dbg::g.total_reads.fetch_add(1, std::memory_order_relaxed);
-        bool allShort = (len1 < feature_min_len) &&
-                        (len2 < feature_min_len);
-        if (allShort) {
-          dbg::g.too_short.fetch_add(1, std::memory_order_relaxed);
-        }
-        if (!hashs1.empty()) {
-          dbg::g.has_minimizers.fetch_add(1, std::memory_order_relaxed);
-        }
-      }
       processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
                       heat, imcf, batch.ids[i], classifyResults, fileInfo,
                       presenceAcc, decoySeed, progress);
@@ -2338,15 +2108,6 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
       if (hashs1.size() > 2048) {
         std::sort(hashs1.begin(), hashs1.end());
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
-      }
-      if (dbg::enabled()) {
-        dbg::g.total_reads.fetch_add(1, std::memory_order_relaxed);
-        if (readLen < feature_min_len) {
-          dbg::g.too_short.fetch_add(1, std::memory_order_relaxed);
-        }
-        if (!hashs1.empty()) {
-          dbg::g.has_minimizers.fetch_add(1, std::memory_order_relaxed);
-        }
       }
       // Process the hash values for classification
       processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
@@ -2372,38 +2133,6 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
                         size_t feature_min_len,
                         PresenceSummary *presenceSummary,
                         uint64_t decoySeed) {
-  if (dbg::enabled()) {
-    dbg::reset();
-  }
-  dbg::initSink();
-  if (dbg::enabled()) {
-    const char *feature_mode =
-        feature_params.method == chimera::feature::Method::Strobemer
-            ? "strobemer"
-            : (feature_params.method == chimera::feature::Method::Syncmer
-                   ? "syncmer"
-                   : "auto");
-    if (feature_params.method == chimera::feature::Method::Strobemer) {
-      dbg::log("Trace start: feature=%s, seed64=%llu, strobe_k=%u, order=%u, w_min=%u, w_max=%u, hashVersion=%u, fpSalt=%llu",
-               feature_mode,
-               static_cast<unsigned long long>(feature_params.strobe.seed),
-               static_cast<unsigned>(feature_params.strobe.k),
-               static_cast<unsigned>(feature_params.strobe.order),
-               static_cast<unsigned>(feature_params.strobe.w_min),
-               static_cast<unsigned>(feature_params.strobe.w_max),
-               static_cast<unsigned>(imcfConfig.hashVersion),
-               static_cast<unsigned long long>(imcfConfig.fpSalt));
-    } else {
-      dbg::log("Trace start: feature=%s, seed64=%llu, k=%u, s=%u, pos=%u, hashVersion=%u, fpSalt=%llu",
-               feature_mode,
-               static_cast<unsigned long long>(feature_params.sync.seed),
-               static_cast<unsigned>(feature_params.sync.k),
-               static_cast<unsigned>(feature_params.sync.s),
-               static_cast<unsigned>(feature_params.sync.pos),
-               static_cast<unsigned>(imcfConfig.hashVersion),
-               static_cast<unsigned long long>(imcfConfig.fpSalt));
-    }
-  }
 
 #pragma omp parallel
   {
@@ -2465,24 +2194,9 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
     }
   }
 
-  if (!(config.em || config.vem) || !config.skip_post_filter) {
-    secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
-    thirdFilteringStep(classifyResults, fileInfo);
-  }
+  secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
+  thirdFilteringStep(classifyResults, fileInfo);
 
-  if (dbg::enabled()) {
-    dbg::log("Summary: reads=%llu, too_short=%llu, has_min=%llu, imcf_event_zero=%llu, candidate_zero=%llu, entered_em=%llu, passed_post=%llu",
-             static_cast<unsigned long long>(dbg::g.total_reads.load()),
-             static_cast<unsigned long long>(dbg::g.too_short.load()),
-             static_cast<unsigned long long>(dbg::g.has_minimizers.load()),
-             static_cast<unsigned long long>(dbg::g.imcf_event_zero.load()),
-             static_cast<unsigned long long>(dbg::g.candidate_zero.load()),
-             static_cast<unsigned long long>(dbg::g.entered_em.load()),
-             static_cast<unsigned long long>(dbg::g.passed_post.load()));
-    dbg::log("Margin summary: accept=%llu block=%llu",
-             static_cast<unsigned long long>(dbg::g.pre_margin_accept.load()),
-             static_cast<unsigned long long>(dbg::g.pre_margin_reject.load()));
-  }
 }
 
 /**
@@ -2534,38 +2248,6 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               FileInfo &fileInfo, ProgressTracker *progress,
               const chimera::feature::Params &feature_params,
               size_t feature_min_len) {
-  if (dbg::enabled()) {
-    dbg::reset();
-  }
-  dbg::initSink();
-  if (dbg::enabled()) {
-    const char *feature_mode =
-        feature_params.method == chimera::feature::Method::Strobemer
-            ? "strobemer"
-            : (feature_params.method == chimera::feature::Method::Syncmer
-                   ? "syncmer"
-                   : "auto");
-    if (feature_params.method == chimera::feature::Method::Strobemer) {
-      dbg::log("Trace start: feature=%s, seed64=%llu, strobe_k=%u, order=%u, w_min=%u, w_max=%u, hashVersion=%u, fpSalt=%llu",
-               feature_mode,
-               static_cast<unsigned long long>(feature_params.strobe.seed),
-               static_cast<unsigned>(feature_params.strobe.k),
-               static_cast<unsigned>(feature_params.strobe.order),
-               static_cast<unsigned>(feature_params.strobe.w_min),
-               static_cast<unsigned>(feature_params.strobe.w_max),
-               static_cast<unsigned>(imcfConfig.hashVersion),
-               static_cast<unsigned long long>(imcfConfig.fpSalt));
-    } else {
-      dbg::log("Trace start: feature=%s, seed64=%llu, k=%u, s=%u, pos=%u, hashVersion=%u, fpSalt=%llu",
-               feature_mode,
-               static_cast<unsigned long long>(feature_params.sync.seed),
-               static_cast<unsigned>(feature_params.sync.k),
-               static_cast<unsigned>(feature_params.sync.s),
-               static_cast<unsigned>(feature_params.sync.pos),
-               static_cast<unsigned>(imcfConfig.hashVersion),
-               static_cast<unsigned long long>(imcfConfig.fpSalt));
-    }
-  }
 
   // Parallel processing of batches using OpenMP
 #pragma omp parallel
@@ -2618,21 +2300,9 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
     }
   }
 
-  if (!(config.em || config.vem) || !config.skip_post_filter) {
-    secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
-    thirdFilteringStep(classifyResults, fileInfo);
-  }
+  secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
+  thirdFilteringStep(classifyResults, fileInfo);
 
-  if (dbg::enabled()) {
-    dbg::log("Summary: reads=%llu, too_short=%llu, has_min=%llu, imcf_event_zero=%llu, candidate_zero=%llu, entered_em=%llu, passed_post=%llu",
-             static_cast<unsigned long long>(dbg::g.total_reads.load()),
-             static_cast<unsigned long long>(dbg::g.too_short.load()),
-             static_cast<unsigned long long>(dbg::g.has_minimizers.load()),
-             static_cast<unsigned long long>(dbg::g.imcf_event_zero.load()),
-             static_cast<unsigned long long>(dbg::g.candidate_zero.load()),
-             static_cast<unsigned long long>(dbg::g.entered_em.load()),
-             static_cast<unsigned long long>(dbg::g.passed_post.load()));
-  }
 }
 
 struct PresenceFilterStats {
@@ -2697,6 +2367,7 @@ static PresenceDecision evaluate_presence_tdFDR(const PresenceSummary &summary,
   if (summary.stats.empty() || summary.decoyReps == 0) {
     return decision;
   }
+  decision.minUniqueThreshold = config.min_unique_evidence;
   struct Record {
     uint32_t tid{0};
     double score{0.0};
@@ -2744,6 +2415,15 @@ static PresenceDecision evaluate_presence_tdFDR(const PresenceSummary &summary,
     if (rec.score > 0.0) {
       size_t ge = count_ge(rec.score);
       rec.pValue = (static_cast<double>(ge) + 1.0) / denom;
+      if (config.presence_abundance_prior > 0.0 && rec.uniqueHits > 0) {
+        double relUnique = static_cast<double>(rec.uniqueHits) /
+                           std::max<double>(1.0, config.min_unique_evidence);
+        double boost = 1.0 /
+                       (1.0 + config.presence_abundance_prior *
+                                  std::max(0.0, relUnique - 1.0));
+        rec.pValue *= boost;
+      }
+      rec.pValue = std::clamp(rec.pValue, 0.0, 1.0);
       if (rec.uniqueHits >= config.min_unique_evidence) {
         eligible.push_back(i);
       }
@@ -2769,7 +2449,7 @@ static PresenceDecision evaluate_presence_tdFDR(const PresenceSummary &summary,
 
   double qThreshold = config.presence_q;
   if (config.auto_q_tune && !decoyPVals.empty()) {
-    std::array<double, 3> candidates{0.02, 0.01, 0.005};
+    std::array<double, 4> candidates{0.05, 0.02, 0.01, 0.005};
     bool tuned = false;
     for (double candidate : candidates) {
       size_t decoyPass = 0;
@@ -2857,13 +2537,11 @@ void run(ClassifyConfig config) {
   bool posteriorModelUsed = false;
   long long rebuildActiveMs = 0;
 
-  std::string progressLabel =
-      config.filter.empty() ? "classify" : config.filter;
+	std::string progressLabel = "classify";
   ProgressTracker progress(config.verbose && config.progress, progressLabel,
                            config.progressStep, config.progressInterval);
   ProgressTracker *progressPtr = progress.enabled() ? &progress : nullptr;
 
-  if (config.filter == "imcf") {
     std::atomic<bool> producer_done{false};
     auto readEnd = readStart;
     std::thread producer([&]() {
@@ -2945,15 +2623,6 @@ void run(ClassifyConfig config) {
                            ? 0.0
                            : static_cast<double>(stats.total_len) /
                                  static_cast<double>(stats.count);
-      if (dbg::enabled()) {
-        dbg::log("Auto feature sampling: count=%zu min=%zu max=%zu avg=%.1f user=%s db=%s",
-                 stats.count,
-                 stats.min_len == kInvalidLength ? 0 : stats.min_len,
-                 stats.max_len,
-                 avg_len,
-                 user_method_str.c_str(),
-                 db_method_str.c_str());
-      }
       if (stats.count == 0) {
         desired_method = db_method;
       } else {
@@ -2987,9 +2656,6 @@ void run(ClassifyConfig config) {
     if (final_method == FeatureMethod::Strobemer) {
       if (db_method != FeatureMethod::Strobemer) {
         std::cout << "[info] 输入 reads 建议使用 strobemer，但数据库为 syncmer，自动改用 syncmer。" << std::endl;
-        if (dbg::enabled()) {
-          dbg::log("Auto feature fallback: desired strobemer but database %s", db_method_str.c_str());
-        }
         final_method = db_method;
       } else {
         if (imcfConfig.strobeK == 0) {
@@ -3007,17 +2673,6 @@ void run(ClassifyConfig config) {
                       << ", order=" << static_cast<int>(imcfConfig.strobeOrder)
                       << ", w=[" << imcfConfig.strobeWmin << ',' << imcfConfig.strobeWmax
                       << "])，将沿用数据库参数。如需匹配自动建议，请重新构建数据库。" << std::endl;
-            if (dbg::enabled()) {
-              dbg::log("Auto feature suggestion mismatch: desired k=%u order=%u w=[%u,%u] but database k=%u order=%u w=[%u,%u]",
-                       static_cast<unsigned>(desired_k),
-                       static_cast<unsigned>(desired_order),
-                       static_cast<unsigned>(desired_w_min),
-                       static_cast<unsigned>(desired_w_max),
-                       static_cast<unsigned>(imcfConfig.strobeK),
-                       static_cast<unsigned>(imcfConfig.strobeOrder),
-                       static_cast<unsigned>(imcfConfig.strobeWmin),
-                       static_cast<unsigned>(imcfConfig.strobeWmax));
-            }
           }
         }
         config.strobemer_k = imcfConfig.strobeK;
@@ -3028,9 +2683,6 @@ void run(ClassifyConfig config) {
     } else { // final_method syncmer
       if (db_method == FeatureMethod::Strobemer) {
         std::cout << "[warn] 自动模式建议使用 syncmer，但数据库是 strobemer，将沿用数据库参数。" << std::endl;
-        if (dbg::enabled()) {
-          dbg::log("%s", "Auto feature fallback: desired syncmer but database strobemer");
-        }
         final_method = db_method;
         config.strobemer_k = imcfConfig.strobeK;
         config.strobemer_order = imcfConfig.strobeOrder;
@@ -3063,26 +2715,7 @@ void run(ClassifyConfig config) {
     chimera::feature::Params feature_params =
         prepare_feature_params_for_classify(imcfConfig, config, final_method, feature_min_len);
 
-    if (dbg::enabled()) {
-      if (final_method == FeatureMethod::Strobemer) {
-        dbg::log("Feature selected: %s (k=%u, order=%u, w=[%u,%u], seed=%llu, min_len=%zu)",
-                 final_method_str.c_str(),
-                 static_cast<unsigned>(config.strobemer_k),
-                 static_cast<unsigned>(config.strobemer_order),
-                 static_cast<unsigned>(config.strobemer_w_min),
-                 static_cast<unsigned>(config.strobemer_w_max),
-                 static_cast<unsigned long long>(imcfConfig.seed64),
-                 feature_min_len);
-      } else {
-        dbg::log("Feature selected: %s (k=%u, s=%u, pos=%u, seed=%llu, min_len=%zu)",
-                 final_method_str.c_str(),
-                 static_cast<unsigned>(imcfConfig.kmerSize),
-                 static_cast<unsigned>(imcfConfig.smerSize),
-                 static_cast<unsigned>(imcfConfig.syncmerPosition),
-                 static_cast<unsigned long long>(imcfConfig.seed64),
-                 feature_min_len);
-      }
-    }
+    
 
     if (config.verbose) {
       if (final_method == FeatureMethod::Strobemer) {
@@ -3154,20 +2787,7 @@ void run(ClassifyConfig config) {
                 << ", max=" << fileInfo.maxLen
                 << ", avg=" << fileInfo.avgLen << std::endl;
     }
-    if (config.verbose) {
-      uint64_t marginPass = dbg::g.pre_margin_accept.load(std::memory_order_relaxed);
-      uint64_t marginBlock = dbg::g.pre_margin_reject.load(std::memory_order_relaxed);
-      uint64_t marginTotal = marginPass + marginBlock;
-      std::cout << "Pre-margin summary: accept=" << marginPass
-                << ", blocked=" << marginBlock;
-      if (marginTotal > 0) {
-        double passRatio = static_cast<double>(marginPass) /
-                           static_cast<double>(marginTotal);
-        std::cout << " (accept ratio=" << std::fixed << std::setprecision(3)
-                  << passRatio << std::defaultfloat << ')';
-      }
-      std::cout << std::endl;
-    }
+    
 
     PresenceDecision presenceDecision;
     if (presencePtr) {
@@ -3184,23 +2804,30 @@ void run(ClassifyConfig config) {
         std::cout.flags(oldFlags);
         std::cout.precision(oldPrecision);
       }
-      auto filterStats = apply_presence_filter(presenceDecision, tax, classifyResults, fileInfo);
-      if (config.verbose && (filterStats.trimmedAssignments > 0 ||
-                             filterStats.forcedUnclassified > 0)) {
-        std::cout << "Presence filter: trimmed " << filterStats.trimmedAssignments
-                  << " assignments, forced " << filterStats.forcedUnclassified
-                  << " reads to unclassified" << std::endl;
+      if (!config.presence_report_only) {
+        auto filterStats =
+            apply_presence_filter(presenceDecision, tax, classifyResults,
+                                  fileInfo);
+        if (config.verbose && (filterStats.trimmedAssignments > 0 ||
+                               filterStats.forcedUnclassified > 0)) {
+          std::cout << "Presence filter: trimmed "
+                    << filterStats.trimmedAssignments << " assignments, forced "
+                    << filterStats.forcedUnclassified
+                    << " reads to unclassified" << std::endl;
+        }
+      } else if (config.verbose) {
+        std::cout << "Presence caller: report-only mode, no assignments trimmed"
+                  << std::endl;
       }
     }
-  } else {
-    throw std::runtime_error("Invalid filter type: " + config.filter +
-                             ". 当前仅支持 imcf");
-  }
 
   if (config.em) {
     auto EMstart = std::chrono::high_resolution_clock::now();
     std::cout << "Running EM algorithm..." << std::endl;
     EMOptions options;
+    options.temp = config.em_temp;
+    options.prior_strength = config.em_prior_strength;
+    options.coexist_penalty = config.em_coexist_penalty;
     auto [posterior, weights] = EMAlgorithm(classifyResults, config.emIter,
                                             config.emThreshold, options);
     classifyResults = std::move(posterior);
@@ -3218,6 +2845,9 @@ void run(ClassifyConfig config) {
     auto VEMstart = std::chrono::high_resolution_clock::now();
     std::cout << "Running VEM algorithm..." << std::endl;
     VEMOptions options;
+    options.temp = config.em_temp;
+    options.prior_strength = config.em_prior_strength;
+    options.coexist_penalty = config.em_coexist_penalty;
     auto [posterior, weights] = VEMAlgorithm(classifyResults, config.emIter,
                                              config.emThreshold, options);
     classifyResults = std::move(posterior);
@@ -3237,6 +2867,10 @@ void run(ClassifyConfig config) {
     decisionConfig.posterior_threshold = config.post_thres;
     decisionConfig.margin_delta = config.post_margin;
     decisionConfig.margin_ratio = config.post_ratio;
+    decisionConfig.relax_abs = config.post_relax_abs;
+    decisionConfig.relax_ratio = config.post_relax_ratio;
+    decisionConfig.relax_delta = config.post_relax_delta;
+    decisionConfig.relax_delta_abs = config.post_relax_delta_abs;
     decisionConfig.min_class_weight = config.post_pi_min;
     decisionConfig.evidence_override = config.evidence_override;
 
