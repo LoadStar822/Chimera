@@ -688,7 +688,11 @@ We would like to acknowledge the following repositories and libraries that contr
 
 - **[klib](https://github.com/attractivechaos/klib)**: This lightweight library was used for its highly efficient implementations of `khash` (a fast hash table) and `kvector` (a dynamic array). These data structures were integral in handling sequence data and managing the large volumes of information necessary for metagenomic classification.
 
-- **[seqan3](https://github.com/seqan/seqan3)**: SeqAn3 is a modern C++ library for sequence analysis, and Chimera leverages it for flexible **syncmer** computation. Syncmers are used to reduce redundancy and optimize memory usage during the processing of genomic data, making classification faster and more efficient.
+- **[seqan3](https://github.com/seqan/seqan3)**: SeqAn3 supplies the modern C++ sequence-analysis infrastructure (alphabets, range adaptors, I/O, etc.) that lets Chimera stand up a stable k-mer/syncmer feature pipeline quickly.
+
+- **[seqan/minions](https://github.com/seqan/minions)**: Chimera follows the seqan3 syncmer implementation showcased here so that our syncmer filtering stays aligned with the upstream reference behavior and remains easy to maintain.
+
+- **[strobealign](https://github.com/ksahlin/strobealign)**: Chimera’s strobemer/randstrobe module borrows the sampling strategy from strobealign, yielding high-quality k-mer subsampling and hash features in `Method::Strobemer` mode.
 
 - **[CLI11](https://github.com/CLIUtils/CLI11)**: This header-only library was used to provide Chimera's flexible and intuitive command-line interface. CLI11 allows users to easily specify options, input files, and configurations, enabling the tool to handle complex workflows with minimal user friction.
 
