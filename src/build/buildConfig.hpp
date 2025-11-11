@@ -24,6 +24,7 @@
 #include <iomanip>
 #include <cstdint>
 #include <string>
+#include <type_traits>
 #include <cereal/cereal.hpp>
 #include <cereal/types/string.hpp>
 
@@ -139,12 +140,29 @@ namespace ChimeraBuild {
 		       fpSalt,
 		       hashVersion,
 		       taxonomyKind,
-		       taxonomyVersion,
-		       featureMethod,
-		       strobeOrder,
-		       strobeWmin,
-		       strobeWmax,
-		       strobeK);
+		       taxonomyVersion);
+
+		if constexpr (Archive::is_loading::value) {
+			try {
+				archive(featureMethod,
+				       strobeOrder,
+				       strobeWmin,
+				       strobeWmax,
+				       strobeK);
+			} catch (const cereal::Exception&) {
+				featureMethod = 0;
+				strobeOrder = 0;
+				strobeWmin = 0;
+				strobeWmax = 0;
+				strobeK = 0;
+			}
+		} else {
+			archive(featureMethod,
+			       strobeOrder,
+			       strobeWmin,
+			       strobeWmax,
+			       strobeK);
+		}
 	}
 	};
 }

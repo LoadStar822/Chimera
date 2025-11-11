@@ -678,9 +678,21 @@ loadFilter(const std::string &input_file,
   }
 
   cereal::BinaryInputArchive archive(is);
-  archive(imcf);
-  archive(indexToTaxid);
-  archive(imcfConfig);
+  try {
+    archive(imcf);
+  } catch (const cereal::Exception &exc) {
+    throw std::runtime_error(std::string("加载 IMCF 主档案失败: ") + exc.what());
+  }
+  try {
+    archive(indexToTaxid);
+  } catch (const cereal::Exception &exc) {
+    throw std::runtime_error(std::string("加载 IMCF taxid 索引失败: ") + exc.what());
+  }
+  try {
+    archive(imcfConfig);
+  } catch (const cereal::Exception &exc) {
+    throw std::runtime_error(std::string("加载 IMCF 配置失败: ") + exc.what());
+  }
   is.close();
 
   if (imcfConfig.hashVersion != ChimeraBuild::IMCFConfig::CurrentHashVersion) {

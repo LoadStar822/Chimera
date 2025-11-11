@@ -50,10 +50,10 @@ namespace dbg {
 		uint16_t strobemer_w_max{ 0 };
 		std::string taxonomyKind{ "auto" };
 		std::string taxonomyVersion{ "auto" };
-		double shotThreshold = 0.62;
+		double shotThreshold = 0.70;
 		bool adaptive_shot = true;
 		double firstFilterBeta = 0.8;
-		size_t preEmTopK = 32;
+		size_t preEmTopK = 16;
 		bool adaptive_fdr = true;
 		double fdr_z = 3.0;
 		size_t min_eval_count = 0;
@@ -84,7 +84,7 @@ namespace dbg {
 		double post_relax_ratio = 1.50;
 		double post_relax_delta = 0.08;
 		double post_relax_delta_abs = 0.52;
-		double post_pi_min = 1e-4;
+		double post_pi_min = 5e-4;
 		bool output_posterior = true;
 		double em_temp = 1.10;
 		double em_prior_strength = 0.25;

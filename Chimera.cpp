@@ -389,7 +389,7 @@ int main(int argc, char **argv) {
   classify
       ->add_option("-s,--shot-threshold", classifyConfig.shotThreshold,
                    "Shot threshold for classifying")
-      ->default_val(0.62);
+      ->default_val(0.70);
   classify
       ->add_flag("--adaptive-shot,!--no-adaptive-shot",
                  classifyConfig.adaptive_shot,
@@ -402,7 +402,7 @@ int main(int argc, char **argv) {
   classify
       ->add_option("--pre-em-topk", classifyConfig.preEmTopK,
                    "Keep top-K candidates per read before EM/VEM")
-      ->default_val(32);
+      ->default_val(16);
   classify
       ->add_option("--presence-caller", classifyConfig.presence_caller,
                    "Presence caller strategy (tdfdr|hard_cutoff)")
@@ -510,7 +510,7 @@ int main(int argc, char **argv) {
   classify
       ->add_option("--post-pi-min", classifyConfig.post_pi_min,
                    "Minimum global class weight")
-      ->default_val(1e-4);
+      ->default_val(5e-4);
   classify
       ->add_flag("--evidence-override,!--no-evidence-override",
                  classifyConfig.evidence_override,

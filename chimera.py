@@ -239,7 +239,7 @@ def parse_arguments():
         "--shot-threshold",
         type=float,
         default=None,
-        help="Shot threshold for classifying (defaults to 0.62 if unset)",
+        help="Shot threshold for classifying (defaults to 0.70 if unset)",
     )
     classify_parser.add_argument(
         "--adaptive-shot",
@@ -264,7 +264,7 @@ def parse_arguments():
         "--pre-em-topk",
         type=int,
         default=None,
-        help="Limit candidates before EM/VEM to top K (default 32)",
+        help="Limit candidates before EM/VEM to top K (default 16)",
     )
     classify_parser.add_argument(
         "--presence-caller",
@@ -404,7 +404,7 @@ def parse_arguments():
         "--post-pi-min",
         type=float,
         default=None,
-        help="Minimum global class weight (default 0.0001)",
+        help="Minimum global class weight (default 0.0005)",
     )
     classify_parser.add_argument(
         "--evidence-override",
