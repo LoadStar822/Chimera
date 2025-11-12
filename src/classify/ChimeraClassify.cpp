@@ -40,6 +40,7 @@
 #include <span>
 
 #include <utils/FeatureHasher.hpp>
+#include <ani/AniSketch.hpp>
 
 namespace ChimeraClassify {
 
@@ -87,6 +88,11 @@ struct TraceRecord {
   double preContainmentTop2 = 0.0;
   double aniEstimateTop1 = 0.0;
   double aniEstimateTop2 = 0.0;
+  bool aniApplied = false;
+  double aniContainmentTop1 = 0.0;
+  double aniAniTop1 = 0.0;
+  uint32_t aniIntersectTop1 = 0;
+  size_t aniCandidates = 0;
   double dynPost = 0.0;
   double dynRatio = 0.0;
   double dynDelta = 0.0;
@@ -146,6 +152,102 @@ static inline MarginDecision decide_high_conf(size_t best, size_t second,
     dc.accept = true;
   }
   return dc;
+}
+
+struct AniRuntimeContext {
+  std::shared_ptr<chimera::ani::AniSketchReader> reader;
+  uint32_t minIntersection{25};
+  double minContainment{0.05};
+  double minAni{0.85};
+  size_t topK{32};
+  uint32_t minQuerySize{20};
+  bool verbose{false};
+
+  bool enabled() const { return reader && reader->ok(); }
+};
+
+struct AniRankHit {
+  std::string taxid;
+  size_t count{0};
+  chimera::ani::AniStats stats;
+};
+
+static void apply_ani_filter(const AniRuntimeContext *ctx,
+                             const std::vector<uint64_t> &querySketch,
+                             classifyResult &result,
+                             dbg::TraceRecord *trace) {
+  if (ctx == nullptr || !ctx->enabled() || result.taxidCount.empty()) {
+    return;
+  }
+  if (ctx->minQuerySize > 0 && querySketch.size() < ctx->minQuerySize) {
+    return;
+  }
+  const auto &reader = *ctx->reader;
+  std::vector<AniRankHit> hits;
+  hits.reserve(result.taxidCount.size());
+  for (const auto &kv : result.taxidCount) {
+    const auto *ref = reader.find(kv.first);
+    if (ref == nullptr || ref->count == 0) {
+      continue;
+    }
+    auto stats = chimera::ani::score(querySketch, *ref,
+                                     reader.header().k == 0 ? 1 : reader.header().k);
+    if (ctx->minIntersection > 0 && stats.intersect < ctx->minIntersection) {
+      continue;
+    }
+    if (stats.containment + 1e-12 < ctx->minContainment) {
+      continue;
+    }
+    if (stats.ani + 1e-12 < ctx->minAni) {
+      continue;
+    }
+    hits.push_back({kv.first, kv.second, stats});
+  }
+
+  if (hits.empty()) {
+    result.taxidCount.clear();
+    if (trace) {
+      trace->aniApplied = true;
+      trace->aniCandidates = 0;
+      trace->aniContainmentTop1 = 0.0;
+      trace->aniAniTop1 = 0.0;
+      trace->aniIntersectTop1 = 0;
+    }
+    return;
+  }
+
+  auto cmp = [](const AniRankHit &a, const AniRankHit &b) {
+    if (a.stats.containment != b.stats.containment) {
+      return a.stats.containment > b.stats.containment;
+    }
+    if (a.stats.ani != b.stats.ani) {
+      return a.stats.ani > b.stats.ani;
+    }
+    if (a.stats.intersect != b.stats.intersect) {
+      return a.stats.intersect > b.stats.intersect;
+    }
+    return a.count > b.count;
+  };
+
+  if (ctx->topK > 0 && hits.size() > ctx->topK) {
+    std::partial_sort(hits.begin(), hits.begin() + ctx->topK, hits.end(), cmp);
+    hits.resize(ctx->topK);
+  } else {
+    std::sort(hits.begin(), hits.end(), cmp);
+  }
+
+  result.taxidCount.clear();
+  for (const auto &hit : hits) {
+    result.taxidCount.emplace_back(hit.taxid, hit.count);
+  }
+
+  if (trace) {
+    trace->aniApplied = true;
+    trace->aniCandidates = hits.size();
+    trace->aniContainmentTop1 = hits.front().stats.containment;
+    trace->aniAniTop1 = hits.front().stats.ani;
+    trace->aniIntersectTop1 = hits.front().stats.intersect;
+  }
 }
 
 struct ReadStats {
@@ -1108,6 +1210,7 @@ inline void processSequence(
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
     PresenceAccumulator *presenceAcc, uint64_t decoySeed,
+    const AniRuntimeContext *aniCtx,
     ProgressTracker *progress) {
   // Calculate the number of hash values and determine the threshold for
   // classification
@@ -1135,6 +1238,23 @@ inline void processSequence(
                    uniqVals.end());
     trace->uniqCount = uniqVals.size();
   }
+
+  std::vector<uint64_t> aniQuerySketch;
+  bool aniQueryReady = false;
+  auto ensureAniSketch = [&]() -> bool {
+    if (aniCtx == nullptr || !aniCtx->enabled()) {
+      return false;
+    }
+    if (aniQueryReady) {
+      return !aniQuerySketch.empty();
+    }
+    aniQueryReady = true;
+    uint32_t headerScale = aniCtx->reader->header().scale == 0
+                               ? 1u
+                               : aniCtx->reader->header().scale;
+    aniQuerySketch = chimera::ani::build_query_sketch(hashs1, headerScale);
+    return !aniQuerySketch.empty();
+  };
 
   const size_t binNumAll = indexToTaxid.size();
   heat.ensure(binNumAll);
@@ -1873,6 +1993,10 @@ inline void processSequence(
     result.taxidCount.emplace_back(maxCount);
   }
 
+  if (!result.taxidCount.empty() && ensureAniSketch()) {
+    apply_ani_filter(aniCtx, aniQuerySketch, result, trace.get());
+  }
+
 
   size_t baseTopK = config.preEmTopK > 0 ? static_cast<size_t>(config.preEmTopK)
                                          : 32;
@@ -2071,6 +2195,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
                          GroupHeat &heat,
                          PresenceAccumulator *presenceAcc,
                          uint64_t decoySeed,
+                         const AniRuntimeContext *aniCtx,
                          ProgressTracker *progress = nullptr) {
   // Process batch of reads
   std::vector<uint64_t> hashs1;
@@ -2100,7 +2225,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
       }
       processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
                       heat, imcf, batch.ids[i], classifyResults, fileInfo,
-                      presenceAcc, decoySeed, progress);
+                      presenceAcc, decoySeed, aniCtx, progress);
     }
   } else {
     // Process single-end reads
@@ -2124,7 +2249,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
       // Process the hash values for classification
       processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
                       heat, imcf, batch.ids[i], classifyResults, fileInfo,
-                      presenceAcc, decoySeed, progress);
+                      presenceAcc, decoySeed, aniCtx, progress);
     }
   }
 }
@@ -2144,7 +2269,8 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
                         const chimera::feature::Params &feature_params,
                         size_t feature_min_len,
                         PresenceSummary *presenceSummary,
-                        uint64_t decoySeed) {
+                        uint64_t decoySeed,
+                        const AniRuntimeContext *aniCtx) {
 
 #pragma omp parallel
   {
@@ -2163,7 +2289,8 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
       if (readQueue.try_dequeue(batch)) {
         processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
                      localClassifyResults, feature_params, feature_min_len,
-                     localFileInfo, heat, presencePtr, decoySeed, progress);
+                     localFileInfo, heat, presencePtr, decoySeed, aniCtx,
+                     progress);
         continue;
       }
       if (producer_done.load(std::memory_order_acquire)) {
@@ -2259,7 +2386,8 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               const TaxDict &tax, std::vector<classifyResult> &classifyResults,
               FileInfo &fileInfo, ProgressTracker *progress,
               const chimera::feature::Params &feature_params,
-              size_t feature_min_len) {
+              size_t feature_min_len,
+              const AniRuntimeContext *aniCtx) {
 
   // Parallel processing of batches using OpenMP
 #pragma omp parallel
@@ -2276,7 +2404,7 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
     while (readQueue.try_dequeue(batch)) {
       processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
                    localClassifyResults, feature_params, feature_min_len,
-                   localFileInfo, heat, nullptr, 0, progress);
+                   localFileInfo, heat, nullptr, 0, aniCtx, progress);
     }
     // Critical section to merge local results into shared resources
 #pragma omp critical
@@ -2764,12 +2892,77 @@ void run(ClassifyConfig config) {
       presenceSeed ^= static_cast<uint64_t>(imcfConfig.fpSalt);
     }
 
+    AniRuntimeContext aniCtx;
+    aniCtx.minIntersection = config.ani_min_intersection;
+    aniCtx.minContainment = config.ani_min_containment;
+    aniCtx.minAni = config.ani_min_ani;
+    aniCtx.topK = config.ani_topk;
+    aniCtx.minQuerySize = (config.ani_min_query == 0)
+                              ? std::max<uint32_t>(config.ani_min_intersection, 1u)
+                              : config.ani_min_query;
+    aniCtx.verbose = config.verbose;
+    const AniRuntimeContext *aniCtxPtr = nullptr;
+    if (config.ani_use) {
+      namespace fs = std::filesystem;
+      fs::path sketchPath;
+      if (!config.ani_sketch_path.empty()) {
+        sketchPath = fs::path(config.ani_sketch_path);
+      } else {
+        fs::path base = config.dbFile;
+        if (base.extension() == ".imcf") {
+          base.replace_extension("");
+        }
+        sketchPath = fs::path(base.string() + ".ani.sketch.bin");
+      }
+      bool skipAni = false;
+      if (!fs::exists(sketchPath)) {
+        if (config.verbose) {
+          std::cerr << "[chani] ANI 草图文件未找到: " << sketchPath << "，跳过 ANI 重排" << std::endl;
+        }
+        skipAni = true;
+      }
+      if (!skipAni) {
+        auto reader = std::make_shared<chimera::ani::AniSketchReader>(sketchPath);
+        if (!reader->ok()) {
+          if (config.verbose) {
+            std::cerr << "[chani] 读取 ANI 草图失败: " << sketchPath << std::endl;
+          }
+        } else {
+          bool compatible = (reader->header().method == imcfConfig.featureMethod);
+          if (compatible) {
+            if (reader->header().method == 0) {
+              compatible = (reader->header().k == imcfConfig.kmerSize);
+            } else {
+              compatible = (reader->header().k == imcfConfig.strobeK);
+            }
+          }
+          if (compatible) {
+            compatible = (reader->header().seed64 == imcfConfig.seed64);
+          }
+          if (!compatible) {
+            if (config.verbose) {
+              std::cerr << "[chani] ANI 草图与 IMCF 参数不匹配 (seed/k/method)，已禁用 ANI" << std::endl;
+            }
+          } else {
+            aniCtx.reader = std::move(reader);
+            aniCtxPtr = &aniCtx;
+            if (config.verbose) {
+              std::cout << "[chani] ANI 草图加载完成: " << sketchPath
+                        << " (taxa=" << aniCtx.reader->header().num_taxa
+                        << ", scale=" << aniCtx.reader->header().scale << ")"
+                        << std::endl;
+            }
+          }
+        }
+      }
+    }
+
     auto classifyStart = std::chrono::high_resolution_clock::now();
     std::cout << "Classifying sequences by imcf (feature=" << config.feature << ")..." << std::endl;
     classify_streaming(imcfConfig, readQueue, config, imcf, indexToTaxid, tax,
                        classifyResults, fileInfo, producer_done, progressPtr,
                        feature_params, feature_min_len, presencePtr,
-                       presenceSeed);
+                       presenceSeed, aniCtxPtr);
     auto classifyEnd = std::chrono::high_resolution_clock::now();
     auto classifyDuration =
         std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd -

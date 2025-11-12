@@ -66,6 +66,13 @@ namespace dbg {
 		uint32_t min_unique_evidence = 5;
 		bool presence_report_only = false;
 		double presence_abundance_prior = 0.30;
+		bool ani_use = true;
+		std::string ani_sketch_path;
+		uint32_t ani_min_intersection = 5;
+		double ani_min_containment = 0.01;
+		double ani_min_ani = 0.80;
+		size_t ani_topk = 64;
+		uint32_t ani_min_query = 1;
 		bool auto_q_tune = true;
 		uint16_t threads;
 		bool verbose = true;
@@ -121,7 +128,14 @@ namespace dbg {
 			<< std::setw(20) << "Presence caller:" << config.presence_caller << std::endl
 			<< std::setw(20) << "Presence q:" << config.presence_q << std::endl
 			<< std::setw(20) << "Presence report only:" << config.presence_report_only << std::endl
-			<< std::setw(20) << "Presence abundance prior:" << config.presence_abundance_prior << std::endl
+		<< std::setw(20) << "Presence abundance prior:" << config.presence_abundance_prior << std::endl
+		<< std::setw(20) << "ANI enabled:" << config.ani_use << std::endl
+		<< std::setw(20) << "ANI sketch path:" << (config.ani_sketch_path.empty() ? std::string("auto") : config.ani_sketch_path) << std::endl
+		<< std::setw(20) << "ANI min intersect:" << config.ani_min_intersection << std::endl
+		<< std::setw(20) << "ANI min containment:" << config.ani_min_containment << std::endl
+		<< std::setw(20) << "ANI min ANI:" << config.ani_min_ani << std::endl
+		<< std::setw(20) << "ANI topK:" << config.ani_topk << std::endl
+		<< std::setw(20) << "ANI min query:" << config.ani_min_query << std::endl
 			<< std::setw(20) << "Auto q tune:" << config.auto_q_tune << std::endl
 			<< std::setw(20) << "Decoy mode:" << config.decoy_mode << std::endl
 			<< std::setw(20) << "Decoy reps:" << config.decoy_reps << std::endl

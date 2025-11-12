@@ -34,6 +34,7 @@
 #include <mutex>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <utils/FeatureHasher.hpp>
 
@@ -47,6 +48,29 @@ namespace ChimeraBuild {
 		size_t slotIndex;
 		uint64_t expectedCount;
 	};
+
+namespace {
+// 写二进制基础类型，避免结构填充
+template <typename T>
+inline void write_prim(std::ofstream &os, const T &value) {
+	os.write(reinterpret_cast<const char*>(&value), sizeof(T));
+}
+
+// 收集唯一 taxid 列表
+std::vector<std::string> collect_unique_taxa(const std::vector<std::vector<std::string>> &indexToTaxid) {
+	std::unordered_set<std::string> seen;
+	seen.reserve(indexToTaxid.size() * 2);
+	std::vector<std::string> taxa;
+	for (const auto &group : indexToTaxid) {
+		for (const auto &taxid : group) {
+			if (seen.insert(taxid).second) {
+				taxa.emplace_back(taxid);
+			}
+		}
+	}
+	return taxa;
+}
+} // namespace
 
 	static inline chimera::feature::Method resolve_feature_method(const BuildConfig &config)
 	{
@@ -615,6 +639,110 @@ namespace ChimeraBuild {
 			totalSize += kv.second;
 		}
 		return totalSize;
+	}
+
+	bool writeAniSketch(const std::string &db_prefix,
+	                   const IMCFConfig &imcfConfig,
+	                   const std::vector<std::vector<std::string>> &indexToTaxid,
+	                   uint32_t scale,
+	                   std::string_view featureSuffix,
+	                   bool verbose)
+	{
+		const std::string out_path = db_prefix + ".ani.sketch.bin";
+		std::ofstream os(out_path, std::ios::binary | std::ios::trunc);
+		if (!os.is_open()) {
+			std::cerr << "[chani] failed to open " << out_path << " for write" << std::endl;
+			return false;
+		}
+
+		static constexpr char kMagic[6] = {'C','H','A','N','I','\0'};
+		static constexpr uint32_t kVersion = 1;
+		const uint16_t k = (imcfConfig.featureMethod == 0)
+			? static_cast<uint16_t>(imcfConfig.kmerSize)
+			: static_cast<uint16_t>(imcfConfig.strobeK);
+		const uint8_t method = (imcfConfig.featureMethod == 0) ? 0u : 1u;
+		const uint32_t effectiveScale = (scale == 0) ? 1u : scale;
+
+		os.write(kMagic, sizeof(kMagic));
+		write_prim(os, kVersion);
+		write_prim(os, k);
+		write_prim(os, method);
+		write_prim(os, effectiveScale);
+		write_prim(os, imcfConfig.seed64);
+
+		std::vector<std::string> taxa = collect_unique_taxa(indexToTaxid);
+		const uint32_t num_taxa = static_cast<uint32_t>(taxa.size());
+		write_prim(os, num_taxa);
+		const uint64_t index_offset = 0;
+		write_prim(os, index_offset);
+
+		const uint64_t threshold = std::numeric_limits<uint64_t>::max() / static_cast<uint64_t>(effectiveScale);
+		size_t done = 0;
+		const std::string suffix(featureSuffix);
+		uint64_t total_hashes = 0;
+		uint32_t missing_files = 0;
+		uint32_t empty_records = 0;
+
+		for (const auto &taxid : taxa) {
+			std::vector<uint64_t> kept;
+			kept.reserve(32768);
+			const std::string in_path = std::string("tmp/") + taxid + suffix;
+			std::ifstream is(in_path, std::ios::binary);
+			if (is.is_open()) {
+				std::array<uint64_t, 1 << 18> buffer{};
+				while (is) {
+					is.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(buffer.size() * sizeof(uint64_t)));
+					const std::streamsize bytes = is.gcount();
+					if (bytes <= 0) {
+						break;
+					}
+					const size_t count = static_cast<size_t>(bytes) / sizeof(uint64_t);
+					for (size_t i = 0; i < count; ++i) {
+						const uint64_t h = buffer[i];
+						if (h <= threshold) {
+							kept.push_back(h);
+						}
+					}
+				}
+			} else {
+				++missing_files;
+				if (verbose) {
+					std::cerr << "[chani] warn: missing feature file " << in_path << " (taxid=" << taxid << ")" << std::endl;
+				}
+			}
+
+			if (!kept.empty()) {
+				std::sort(kept.begin(), kept.end());
+				kept.erase(std::unique(kept.begin(), kept.end()), kept.end());
+			} else {
+				++empty_records;
+			}
+
+			const uint16_t taxid_len = static_cast<uint16_t>(std::min<size_t>(taxid.size(), std::numeric_limits<uint16_t>::max()));
+			const uint32_t num_hashes = static_cast<uint32_t>(kept.size());
+			total_hashes += num_hashes;
+			write_prim(os, taxid_len);
+			os.write(taxid.data(), taxid_len);
+			write_prim(os, num_hashes);
+			if (num_hashes) {
+				os.write(reinterpret_cast<const char*>(kept.data()), static_cast<std::streamsize>(num_hashes * sizeof(uint64_t)));
+			}
+
+			++done;
+			if (verbose && (done % 2000 == 0 || done == taxa.size())) {
+				std::cout << "[chani] sketched " << done << "/" << taxa.size() << "\r" << std::flush;
+			}
+		}
+
+		if (verbose) {
+			std::cout << "\n[chani] ANI sketch written: " << out_path
+			          << " (taxa=" << num_taxa
+			          << ", scale=" << effectiveScale
+			          << ", hashes=" << total_hashes
+			          << ", empty=" << empty_records
+			          << ", missing=" << missing_files << ")" << std::endl;
+		}
+		return true;
 	}
 
 	/**
@@ -1295,6 +1423,15 @@ namespace ChimeraBuild {
 			std::cout << "Save time: ";
 			print_build_time(save_total_time);
 			std::cout << std::endl;
+		}
+
+		if (config.enable_ani_sketch) {
+			uint32_t ani_scale = config.ani_scale == 0 ? 1u : config.ani_scale;
+			if (!writeAniSketch(config.output_file, imcfConfig, indexToTaxid, ani_scale, feature_suffix, config.verbose) && config.verbose) {
+				std::cerr << "[chani] failed to write ANI sketch" << std::endl;
+			}
+		} else if (config.verbose) {
+			std::cout << "[chani] ANI 草图写入已禁用" << std::endl;
 		}
 
 

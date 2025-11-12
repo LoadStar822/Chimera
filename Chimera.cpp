@@ -175,6 +175,16 @@ int main(int argc, char **argv) {
       ->add_option("-M,--max-hashes", buildConfig.max_hashes_per_taxid,
                    "Maximum number of hashes per taxid")
       ->default_val(2000000);
+  build
+      ->add_option("--ani-scale", buildConfig.ani_scale,
+                   "FracMinHash scale for ANI 草图 (>=1 => 1/scale sampling)")
+      ->default_val(200)
+      ->check(CLI::Range(1u, 1000000u));
+  build
+      ->add_flag("--ani-sketch,!--no-ani-sketch",
+                 buildConfig.enable_ani_sketch,
+                 "写入 ANI 草图边车文件 (默认开启)")
+      ->default_val("true");
   build->add_flag("--adaptive-cutoff", buildConfig.adaptive_cutoff,
                   "启用基于文件规模的自适应 cutoff");
   build
@@ -529,6 +539,40 @@ int main(int argc, char **argv) {
                    classifyConfig.em_coexist_penalty,
                    "Penalty term when candidates are near-tied")
       ->default_val(0.20);
+  classify
+      ->add_option("--ani-sketch", classifyConfig.ani_sketch_path,
+                   "ANI 草图文件路径 (默认 <db>.ani.sketch.bin)");
+  classify
+      ->add_flag("--ani-use,!--no-ani-use", classifyConfig.ani_use,
+                 "启用 ANI 草图重排/过滤")
+      ->default_val("true");
+  classify
+      ->add_option("--ani-min-intersection",
+                   classifyConfig.ani_min_intersection,
+                   "最小 ANI 交集数量 (0 表示不限)")
+      ->default_val(5)
+      ->check(CLI::Range(0u, 1000000u));
+  classify
+      ->add_option("--ani-min-containment",
+                   classifyConfig.ani_min_containment,
+                   "最小 ANI containment 阈值 [0,1]")
+      ->default_val(0.01)
+      ->check(CLI::Range(0.0, 1.0));
+  classify
+      ->add_option("--ani-min-ani", classifyConfig.ani_min_ani,
+                   "最小 ANI 阈值 (Mash 近似，0-1)")
+      ->default_val(0.80)
+      ->check(CLI::Range(0.0, 1.0));
+  classify
+      ->add_option("--ani-topk", classifyConfig.ani_topk,
+                   "ANI 重排后保留的最大候选数")
+      ->default_val(64)
+      ->check(CLI::Range(1u, 512u));
+  classify
+      ->add_option("--ani-min-query", classifyConfig.ani_min_query,
+                   "触发 ANI 的最小查询草图 size (0 表示不限)")
+      ->default_val(1)
+      ->check(CLI::Range(0u, 100000u));
   classify
       ->add_flag("--output-posterior,!--no-output-posterior",
                  classifyConfig.output_posterior,
