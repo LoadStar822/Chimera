@@ -59,3 +59,9 @@ genome_output/
 .cache/
 .clangd
 CMakePresets.json
+/logs/
+/results/
+/runs/
+/search/
+/scripts/
+/reports/
