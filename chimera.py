@@ -123,7 +123,7 @@ def parse_arguments():
         "-M",
         "--max-hashes",
         type=int,
-        default=2000000,
+        default=0,
         help="Maximum number of hashes per taxid",
     )
     build_parser.add_argument(
@@ -143,6 +143,12 @@ def parse_arguments():
         "--adaptive-cutoff",
         action="store_true",
         help="启用基于文件规模的自适应 cutoff",
+    )
+    build_parser.add_argument(
+        "--hash-freq-mode",
+        choices=["off", "basic"],
+        default="basic",
+        help="Hash frequency filter mode (off|basic)",
     )
 
     # Download and Build combined subcommand
@@ -195,7 +201,7 @@ def parse_arguments():
         "-M",
         "--max-hashes",
         type=int,
-        default=2000000,
+        default=0,
         help="Maximum number of hashes per taxid",
     )
     download_build_parser.add_argument(
@@ -215,6 +221,12 @@ def parse_arguments():
         "--adaptive-cutoff",
         action="store_true",
         help="启用基于文件规模的自适应 cutoff",
+    )
+    download_build_parser.add_argument(
+        "--hash-freq-mode",
+        choices=["off", "basic"],
+        default="basic",
+        help="Hash frequency filter mode (off|basic)",
     )
 
     # Classify subcommand
@@ -638,6 +650,7 @@ def run_chimera(args, chimera_path):
         command.extend(["--load-factor", str(args.load_factor)])
         if args.adaptive_cutoff:
             command.append("--adaptive-cutoff")
+        command.extend(["--hash-freq-mode", args.hash_freq_mode])
         command.extend(["-M", str(args.max_hashes)])
 
     elif args.command == "classify":

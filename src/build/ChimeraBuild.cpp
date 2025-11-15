@@ -21,6 +21,8 @@
 #include <limits>
 #include <atomic>
 #include <future>
+#include <memory>
+#include <cmath>
 #include <algorithm>
 #include <array>
 #include <sstream>
@@ -28,6 +30,7 @@
 #include <string_view>
 #include <chrono>
 #include <cctype>
+#include <stdexcept>
 #include <cereal/archives/binary.hpp>
 #include <cereal/types/string.hpp>
 #include <cereal/types/vector.hpp>
@@ -36,6 +39,7 @@
 #include <unordered_map>
 
 #include <utils/FeatureHasher.hpp>
+#include <utils/CountMinSketch.hpp>
 
 namespace ChimeraBuild {
 	static inline uint64_t mix64(uint64_t value) {
@@ -47,6 +51,28 @@ namespace ChimeraBuild {
 		size_t slotIndex;
 		uint64_t expectedCount;
 	};
+
+	struct HashFreqStats {
+		uint32_t df_high_threshold{ std::numeric_limits<uint32_t>::max() };
+		uint32_t df_max_observed{ 0 };
+		uint64_t nonzero_counters{ 0 };
+	};
+
+	struct HashFrequencyContext {
+		HashFreqMode mode{ HashFreqMode::Off };
+		double quantile{ 0.999 };
+		std::unique_ptr<CountMinSketch> sketch;
+		HashFreqStats stats{};
+		std::atomic<uint64_t> passA_total_hashes{ 0 };
+		std::atomic<uint64_t> passB_total_hashes{ 0 };
+		std::atomic<uint64_t> passB_filtered_hashes{ 0 };
+
+		bool enabled() const {
+			return mode != HashFreqMode::Off && static_cast<bool>(sketch);
+		}
+	};
+
+	void print_build_time(long long milliseconds);
 
 	static inline chimera::feature::Method resolve_feature_method(const BuildConfig &config)
 	{
@@ -94,20 +120,13 @@ namespace ChimeraBuild {
 		return params;
 	}
 
-	/**
-	* Print the build time in a human-readable format.
-	*
-	* @param milliseconds The build time in milliseconds.
-	*/
 	void print_build_time(long long milliseconds) {
-		// Calculate seconds, minutes, and hours
 		long long total_seconds = milliseconds / 1000;
 		long long seconds = total_seconds % 60;
 		long long total_minutes = total_seconds / 60;
 		long long minutes = total_minutes % 60;
 		long long hours = total_minutes / 60;
 
-		// Output different formats based on the length of time
 		if (hours > 0) {
 			std::cout << hours << "h " << minutes << "min " << seconds << "s " << milliseconds % 1000 << "ms" << std::endl;
 		}
@@ -116,6 +135,143 @@ namespace ChimeraBuild {
 		}
 		else {
 			std::cout << seconds << "s " << milliseconds % 1000 << "ms" << std::endl;
+		}
+	}
+
+	static HashFreqStats compute_hash_freq_stats(const CountMinSketch &cms, double quantile)
+	{
+		HashFreqStats stats{};
+		std::array<uint64_t, 32> histogram{};
+		cms.forEachCounter([&](uint32_t value) {
+			if (value == 0) {
+				return;
+			}
+			++stats.nonzero_counters;
+			if (value > stats.df_max_observed) {
+				stats.df_max_observed = value;
+			}
+			int bucket = 0;
+			if (value > 1) {
+				double dv = static_cast<double>(value);
+				bucket = static_cast<int>(std::log2(dv));
+				if (bucket > 31) {
+					bucket = 31;
+				}
+			}
+			histogram[static_cast<size_t>(bucket)]++;
+		});
+		if (stats.nonzero_counters == 0) {
+			stats.df_high_threshold = std::numeric_limits<uint32_t>::max();
+			return stats;
+		}
+		const double clamped = std::clamp(quantile, 0.0, 0.999999);
+		const double tail_fraction = 1.0 - clamped;
+		uint64_t target = static_cast<uint64_t>(std::ceil(tail_fraction * static_cast<double>(stats.nonzero_counters)));
+		if (target == 0) {
+			target = 1;
+		}
+		uint64_t accumulated = 0;
+		for (int bucket = static_cast<int>(histogram.size()) - 1; bucket >= 0; --bucket) {
+			accumulated += histogram[static_cast<size_t>(bucket)];
+			if (accumulated >= target) {
+				uint32_t bucket_threshold = bucket == 0 ? 1u : (1u << bucket);
+				stats.df_high_threshold = std::max<uint32_t>(1u, bucket_threshold);
+				return stats;
+			}
+		}
+		stats.df_high_threshold = std::max<uint32_t>(1u, stats.df_max_observed);
+		return stats;
+	}
+
+	static void build_hash_frequency_sketch(const BuildConfig &config,
+	                                       const robin_hood::unordered_flat_map<std::string, std::vector<std::string>> &inputFiles,
+	                                       HashFrequencyContext &context)
+	{
+		context.passA_total_hashes.store(0, std::memory_order_relaxed);
+		context.passB_total_hashes.store(0, std::memory_order_relaxed);
+		context.passB_filtered_hashes.store(0, std::memory_order_relaxed);
+		context.stats = {};
+		if (context.mode == HashFreqMode::Off) {
+			context.sketch.reset();
+			return;
+		}
+		if (config.hash_sketch_depth == 0 || config.hash_sketch_width == 0) {
+			throw std::invalid_argument("Hash sketch depth and width must be positive");
+		}
+		std::cout << "Building hash frequency sketch (mode="
+		          << (context.mode == HashFreqMode::BasicFilter ? "basic" : "off")
+		          << ", depth=" << config.hash_sketch_depth
+		          << ", width=" << config.hash_sketch_width << ")..." << std::endl;
+		context.sketch = std::make_unique<CountMinSketch>(config.hash_sketch_depth, config.hash_sketch_width);
+		std::vector<std::string> all_files;
+		for (const auto &entry : inputFiles) {
+			for (const auto &filename : entry.second) {
+				all_files.push_back(filename);
+			}
+		}
+		if (all_files.empty()) {
+			context.stats = {};
+			return;
+		}
+		chimera::feature::Method feature_method{};
+		uint64_t feature_seed = 0;
+		auto feature_params = make_feature_params(config, feature_method, feature_seed);
+		const size_t feature_min_length = chimera::feature::min_required_length(feature_params);
+		const size_t min_required = std::max<size_t>(config.min_length, feature_min_length);
+		auto sketch_start = std::chrono::high_resolution_clock::now();
+
+	#pragma omp parallel
+		{
+			std::vector<uint64_t> hashes;
+			hashes.reserve(4096);
+			uint64_t local_hash_total = 0;
+
+		#pragma omp for schedule(dynamic)
+			for (size_t idx = 0; idx < all_files.size(); ++idx) {
+				const std::string &filename = all_files[idx];
+				try {
+					seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ filename };
+					for (auto &record : fin) {
+						auto &seq = record.sequence();
+						if (seq.size() < min_required) {
+							continue;
+						}
+						hashes.clear();
+						chimera::feature::compute_hashes_append(seq, feature_params, hashes);
+						local_hash_total += hashes.size();
+						for (uint64_t hash : hashes) {
+							context.sketch->add(hash);
+						}
+					}
+				}
+				catch (const std::exception &ex) {
+				#pragma omp critical(sketch_log)
+					{
+						std::cerr << "Failed to read sequence file for sketch: " << filename
+						          << " (" << ex.what() << ")" << std::endl;
+					}
+				}
+			}
+
+			if (local_hash_total > 0) {
+				context.passA_total_hashes.fetch_add(local_hash_total, std::memory_order_relaxed);
+			}
+		}
+		auto sketch_end = std::chrono::high_resolution_clock::now();
+		auto sketch_time = std::chrono::duration_cast<std::chrono::milliseconds>(sketch_end - sketch_start).count();
+		context.stats = compute_hash_freq_stats(*context.sketch, context.quantile);
+		std::cout << "Hash frequency sketch time: "
+		          << sketch_time / 1000 << "s " << sketch_time % 1000 << "ms" << std::endl;
+		const auto hashed = context.passA_total_hashes.load(std::memory_order_relaxed);
+		std::cout << "Sketch summary:" << std::endl;
+		std::cout << "  Streamed hashes: " << hashed << std::endl;
+		std::cout << "  Active counters: " << context.stats.nonzero_counters << std::endl;
+		std::cout << "  Max df estimate: " << context.stats.df_max_observed << std::endl;
+		if (context.stats.df_high_threshold == std::numeric_limits<uint32_t>::max()) {
+			std::cout << "  BasicFilter threshold: disabled (insufficient data)" << std::endl;
+		} else {
+			std::cout << "  BasicFilter threshold: df >= " << context.stats.df_high_threshold
+			          << " (quantile=" << context.quantile << ")" << std::endl;
 		}
 	}
 
@@ -242,7 +398,8 @@ namespace ChimeraBuild {
 		BuildConfig& config,
 		robin_hood::unordered_flat_map<std::string, std::vector<std::string>>& inputFiles,
 		robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
-		FileInfo& fileInfo)
+		FileInfo& fileInfo,
+		HashFrequencyContext* hashFreqContext)
 	{
 	chimera::feature::Method feature_method{};
 	uint64_t feature_seed = 0;
@@ -294,11 +451,29 @@ namespace ChimeraBuild {
 		// Mutex to protect global file information
 		std::mutex fileInfo_mutex;
 
-		const size_t feature_min_length = chimera::feature::min_required_length(feature_params);
+	const size_t feature_min_length = chimera::feature::min_required_length(feature_params);
 	const size_t min_required = std::max<size_t>(config.min_length, feature_min_length);
 	if (config.verbose) {
 		std::cout << "Feature hash minimum read length: " << min_required << std::endl;
 	}
+	const bool freq_filter_enabled = (hashFreqContext != nullptr) && hashFreqContext->enabled();
+	const uint32_t freq_threshold = freq_filter_enabled ? hashFreqContext->stats.df_high_threshold
+		: std::numeric_limits<uint32_t>::max();
+	auto keep_hash = [&](uint64_t hash) {
+		if (!freq_filter_enabled) {
+			return true;
+		}
+		hashFreqContext->passB_total_hashes.fetch_add(1, std::memory_order_relaxed);
+		if (freq_threshold == std::numeric_limits<uint32_t>::max()) {
+			return true;
+		}
+		const uint32_t df_est = hashFreqContext->sketch->estimate(hash);
+		if (df_est >= freq_threshold) {
+			hashFreqContext->passB_filtered_hashes.fetch_add(1, std::memory_order_relaxed);
+			return false;
+		}
+		return true;
+	};
 
 		int used_threads = 1;
 
@@ -470,8 +645,27 @@ namespace ChimeraBuild {
 					if (hashes.empty())
 						continue;
 
-					size_t appended = hashes.size();
-					thread_buffer.insert(thread_buffer.end(), hashes.begin(), hashes.end());
+					size_t appended = 0;
+					if (freq_filter_enabled)
+					{
+						for (uint64_t hash : hashes)
+						{
+							if (keep_hash(hash))
+							{
+								thread_buffer.push_back(hash);
+								++appended;
+							}
+						}
+					}
+					else
+					{
+						thread_buffer.insert(thread_buffer.end(), hashes.begin(), hashes.end());
+						appended = hashes.size();
+					}
+					if (appended == 0)
+					{
+						continue;
+					}
 					pendingHashCounts[taxid_index].fetch_add(appended, std::memory_order_relaxed);
 					if (thread_buffer.size() * sizeof(uint64_t) >= hash_buffer_flush_bytes)
 					{
@@ -515,6 +709,19 @@ namespace ChimeraBuild {
 				}
 
 				local_hash_counts.clear();
+
+				if (freq_filter_enabled && !filtered_hashes.empty())
+				{
+					size_t write_idx = 0;
+					for (uint64_t hash : filtered_hashes)
+					{
+						if (keep_hash(hash))
+						{
+							filtered_hashes[write_idx++] = hash;
+						}
+					}
+					filtered_hashes.resize(write_idx);
+				}
 
 				if (max_hashes > 0 && filtered_hashes.size() > max_hashes)
 				{
@@ -1208,11 +1415,18 @@ namespace ChimeraBuild {
 			std::cout << std::endl;
 		}
 
+		HashFrequencyContext hashFreqContext;
+		hashFreqContext.mode = config.hash_freq_mode;
+		hashFreqContext.quantile = config.hash_filter_quantile;
+		if (hashFreqContext.mode != HashFreqMode::Off) {
+			build_hash_frequency_sketch(config, inputFiles, hashFreqContext);
+		}
+
 		std::filesystem::path dir = "tmp";
 		createOrResetDirectory(dir, config);
 		auto calculate_start = std::chrono::high_resolution_clock::now();
 		std::cout << "Calculating feature hashes..." << std::endl;
-		syncmer_count(config, inputFiles, hashCount, fileInfo);
+		syncmer_count(config, inputFiles, hashCount, fileInfo, hashFreqContext.enabled() ? &hashFreqContext : nullptr);
 		auto calculate_end = std::chrono::high_resolution_clock::now();
 		auto calculate_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_end - calculate_start).count();
 		if (config.verbose) {
@@ -1225,6 +1439,18 @@ namespace ChimeraBuild {
 			std::cout << "Number of sequences: " << fileInfo.sequenceNum << std::endl;
 			std::cout << "Number of skipped sequences: " << fileInfo.skippedSeqNum << std::endl;
 			std::cout << "Total base pairs: " << fileInfo.bpLength << std::endl << std::endl;
+		}
+		if (hashFreqContext.enabled()) {
+			const uint64_t total_checked = hashFreqContext.passB_total_hashes.load(std::memory_order_relaxed);
+			const uint64_t filtered = hashFreqContext.passB_filtered_hashes.load(std::memory_order_relaxed);
+			std::cout << "Hash frequency filter dropped " << filtered << " / " << total_checked << " hashes";
+			if (total_checked > 0) {
+				std::ostringstream ratio_stream;
+				double ratio = static_cast<double>(filtered) * 100.0 / static_cast<double>(total_checked);
+				ratio_stream << std::fixed << std::setprecision(2) << ratio;
+				std::cout << " (" << ratio_stream.str() << "%)";
+			}
+			std::cout << " with df >= " << hashFreqContext.stats.df_high_threshold << std::endl;
 		}
 
 		auto partition_start = std::chrono::high_resolution_clock::now();

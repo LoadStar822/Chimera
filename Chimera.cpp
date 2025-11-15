@@ -113,6 +113,7 @@ int main(int argc, char **argv) {
 
   bool buildQuietRequested = false;
   bool classifyQuietRequested = false;
+  std::string hashFreqModeStr = "basic";
 
   // Build
   build
@@ -174,9 +175,14 @@ int main(int argc, char **argv) {
   build
       ->add_option("-M,--max-hashes", buildConfig.max_hashes_per_taxid,
                    "Maximum number of hashes per taxid")
-      ->default_val(2000000);
+      ->default_val(0);
   build->add_flag("--adaptive-cutoff", buildConfig.adaptive_cutoff,
                   "启用基于文件规模的自适应 cutoff");
+  build
+      ->add_option("--hash-freq-mode", hashFreqModeStr,
+                   "Hash frequency filter mode: off/basic")
+      ->default_val("basic")
+      ->check(CLI::IsMember({"off", "basic"}));
   build
       ->add_option("--feature", buildConfig.feature,
                    "Feature 提取方式 (syncmer|strobemer|auto)")
@@ -207,7 +213,7 @@ int main(int argc, char **argv) {
       ->default_val("auto");
   build->add_flag("-q,--quiet", buildQuietRequested, "Quiet output");
 
-  build->callback([&buildConfig, min_length_option, &buildQuietRequested]() {
+  build->callback([&buildConfig, min_length_option, &buildQuietRequested, &hashFreqModeStr]() {
     if (buildConfig.smer_size == 0) {
       throw CLI::ValidationError("--syncmer-s must be greater than 0");
     }
@@ -261,6 +267,14 @@ int main(int argc, char **argv) {
     }
     if (buildConfig.strobemer_order != 2) {
       throw CLI::ValidationError("--strobe-order 当前仅支持取 2");
+    }
+    std::transform(hashFreqModeStr.begin(), hashFreqModeStr.end(), hashFreqModeStr.begin(), [](unsigned char ch) {
+      return static_cast<char>(std::tolower(ch));
+    });
+    if (hashFreqModeStr == "off") {
+      buildConfig.hash_freq_mode = ChimeraBuild::HashFreqMode::Off;
+    } else {
+      buildConfig.hash_freq_mode = ChimeraBuild::HashFreqMode::BasicFilter;
     }
     buildConfig.verbose = !buildQuietRequested;
   });
