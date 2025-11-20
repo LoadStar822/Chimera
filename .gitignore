@@ -60,3 +60,9 @@ genome_output/
 .clangd
 CMakePresets.json
 bench/
+!bench/
+bench/*
+!bench/db_freq_sweep/
+bench/db_freq_sweep/*
+!bench/db_freq_sweep/run_db_freq_sweep.py
+tmp/
