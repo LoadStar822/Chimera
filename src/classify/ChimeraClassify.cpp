@@ -40,61 +40,12 @@
 #include <span>
 
 #include <utils/FeatureHasher.hpp>
+#include <utils/PresenceModel.hpp>
 
 namespace ChimeraClassify {
 
 struct PresenceSummary;
 struct PresenceDecision;
-
-namespace dbg {
-struct TraceRecord {
-  size_t readLen = 0;
-  size_t minimizerTotal = 0;
-  size_t uniqCount = 0;
-  size_t sampleCount = 0;
-  double sampleCoverage = 0.0;
-  uint64_t xorAll = 0;
-  uint64_t xorSample = 0;
-  uint64_t imcfEvents = 0;
-  size_t binsWithHits = 0;
-  size_t touchedBins = 0;
-  size_t candidateSize = 0;
-  std::vector<std::pair<uint32_t, uint32_t>> topBinHits;
-  std::vector<std::pair<std::string, size_t>> emInputTop;
-  uint64_t totalTidHits = 0;
-  bool candidateEmpty = false;
-  bool fallbackFull = false;
-  size_t thrConf = 0;
-  size_t thrEval = 0;
-  size_t thrBeta = 0;
-  size_t thrMinEval = 0;
-  double shotThreshold = 0.0;
-  double firstFilterBeta = 0.0;
-  size_t preEmTopK = 0;
-  size_t evaluated = 0;
-  size_t bestCount = 0;
-  size_t secondCount = 0;
-  size_t margin = 0;
-  size_t marginNeed = 0;
-  double marginRatio = 0.0;
-  uint32_t bestTid = std::numeric_limits<uint32_t>::max();
-  std::string bestTaxid;
-  bool useEm = false;
-  double evaluatedWeight = 0.0;
-  bool candidateExpanded = false;
-  std::array<uint32_t, 6> degHist{};
-  double preContainmentTop1 = 0.0;
-  double preContainmentTop2 = 0.0;
-  double aniEstimateTop1 = 0.0;
-  double aniEstimateTop2 = 0.0;
-  double dynPost = 0.0;
-  double dynRatio = 0.0;
-  double dynDelta = 0.0;
-  double uniqueRatio = 0.0;
-  size_t uniqueSupport = 0;
-};
-
-} // namespace dbg
 
 namespace {
 
@@ -277,166 +228,6 @@ chimera::feature::Params prepare_feature_params_for_classify(
   return params;
 }
 
-class ProgressTracker {
-public:
-  ProgressTracker(bool enabled, std::string stage, size_t min_step,
-                  double min_interval_seconds)
-      : enabled_(enabled && min_step != 0), stage_(std::move(stage)),
-        min_step_(std::max<size_t>(min_step, 1)),
-        interval_(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::duration<double>(
-                std::max(0.0, min_interval_seconds)))),
-        start_time_(std::chrono::steady_clock::now()),
-        last_report_time_(start_time_) {}
-
-  bool enabled() const { return enabled_; }
-
-  void add_total(size_t value) {
-    if (!enabled_) {
-      return;
-    }
-    total_.fetch_add(value, std::memory_order_relaxed);
-  }
-
-  void mark_processed(size_t value) {
-    if (!enabled_) {
-      return;
-    }
-    size_t processed =
-        processed_.fetch_add(value, std::memory_order_relaxed) + value;
-    maybe_report(processed, false);
-  }
-
-  void finish() {
-    if (!enabled_) {
-      return;
-    }
-    size_t processed = processed_.load(std::memory_order_relaxed);
-    size_t total = total_.load(std::memory_order_relaxed);
-    if (processed == 0 && total == 0) {
-      return;
-    }
-    maybe_report(processed, true);
-  }
-
-private:
-  std::string format_rate(double reads_per_second) const {
-    std::ostringstream oss;
-    oss.setf(std::ios::fixed);
-    if (reads_per_second >= 1'000'000.0) {
-      double rate = reads_per_second / 1'000'000.0;
-      oss << std::setprecision(rate >= 10.0 ? 0 : 1) << rate << "M reads/s";
-    } else if (reads_per_second >= 1'000.0) {
-      double rate = reads_per_second / 1'000.0;
-      oss << std::setprecision(rate >= 10.0 ? 0 : 1) << rate << "k reads/s";
-    } else {
-      oss << std::setprecision(reads_per_second >= 10.0 ? 0 : 1)
-          << reads_per_second << " reads/s";
-    }
-    return oss.str();
-  }
-
-  std::string format_duration(double seconds) const {
-    if (seconds < 0.0) {
-      seconds = 0.0;
-    }
-    long long total_seconds = static_cast<long long>(std::round(seconds));
-    long long hours = total_seconds / 3600;
-    long long minutes = (total_seconds % 3600) / 60;
-    long long secs = total_seconds % 60;
-
-    std::ostringstream oss;
-    if (hours > 0) {
-      oss << hours << "h";
-    }
-    if (minutes > 0 || hours > 0) {
-      if (hours > 0) {
-        oss << ' ';
-      }
-      oss << minutes << "min";
-    }
-    if (hours == 0) {
-      if (minutes > 0) {
-        oss << ' ';
-      }
-      oss << secs << 's';
-    }
-    if (oss.str().empty()) {
-      return "0s";
-    }
-    return oss.str();
-  }
-
-  void maybe_report(size_t processed, bool force) {
-    if (!enabled_) {
-      return;
-    }
-    size_t total = total_.load(std::memory_order_relaxed);
-    auto now = std::chrono::steady_clock::now();
-
-    std::unique_lock<std::mutex> lock(mutex_);
-    if (!force) {
-      bool reached_total = total > 0 && processed >= total;
-      bool step_ready = processed >= last_reported_ + min_step_;
-      bool interval_ready =
-          interval_.count() == 0 || now - last_report_time_ >= interval_;
-      if (!reached_total && !step_ready && !interval_ready) {
-        return;
-      }
-    }
-
-    last_report_time_ = now;
-    last_reported_ = processed;
-
-    double elapsed_ms = static_cast<double>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time_)
-            .count());
-    double rps = elapsed_ms > 0.0 ? processed * 1000.0 / elapsed_ms : 0.0;
-
-    std::ostringstream oss;
-    oss << '[' << stage_ << "] 已处理 " << processed;
-    if (total > 0) {
-      double pct = static_cast<double>(processed) /
-                   static_cast<double>(std::max<size_t>(total, 1));
-      pct = std::min(pct * 100.0, 100.0);
-      oss << '/' << total << " (" << std::fixed << std::setprecision(1) << pct
-          << "%)" << std::defaultfloat;
-    } else {
-      oss << " 条reads";
-    }
-    if (rps > 0.0) {
-      oss << "，速度 " << format_rate(rps);
-    }
-    if (total > 0 && processed < total && rps > 0.0) {
-      double remaining_seconds = static_cast<double>(total - processed) / rps;
-      oss << "，剩余约 " << format_duration(remaining_seconds);
-    }
-
-    std::string message = oss.str();
-    size_t padding = last_line_width_ > message.size()
-                         ? last_line_width_ - message.size()
-                         : 0;
-    last_line_width_ = std::max(last_line_width_, message.size());
-
-    std::cout << '\r' << message << std::string(padding, ' ') << std::flush;
-    if (force || (total > 0 && processed >= total)) {
-      std::cout << std::endl;
-      last_line_width_ = 0;
-    }
-  }
-
-  bool enabled_;
-  std::string stage_;
-  size_t min_step_;
-  std::chrono::milliseconds interval_;
-  std::atomic<size_t> total_{0};
-  std::atomic<size_t> processed_{0};
-  size_t last_reported_{0};
-  std::chrono::steady_clock::time_point start_time_;
-  std::chrono::steady_clock::time_point last_report_time_;
-  size_t last_line_width_{0};
-  std::mutex mutex_;
-};
 } // namespace
 // --- fast taxid dictionary ---
 struct TaxDict {
@@ -522,8 +313,7 @@ void print_classify_time(long long milliseconds) {
  * @param fileInfo The information about the files and sequences.
  */
 void parseReads(moodycamel::ConcurrentQueue<batchReads> &readQueue,
-                ClassifyConfig config, FileInfo &fileInfo,
-                ProgressTracker *progress = nullptr) {
+                ClassifyConfig config, FileInfo &fileInfo) {
   size_t totalSequences = 0;
   size_t totalFiles = 0;
 
@@ -549,9 +339,6 @@ void parseReads(moodycamel::ConcurrentQueue<batchReads> &readQueue,
           for (auto &&r : rec) {
             batch.ids.emplace_back(std::move(r.id()));
             batch.seqs.emplace_back(std::move(r.sequence()));
-          }
-          if (progress) {
-            progress->add_total(batch.ids.size());
           }
           localSeq += batch.ids.size();
           localBatches.emplace_back(std::move(batch));
@@ -609,9 +396,6 @@ void parseReads(moodycamel::ConcurrentQueue<batchReads> &readQueue,
             batch.seqs2.emplace_back(std::move(r.sequence()));
           }
 
-          if (progress) {
-            progress->add_total(batch.ids.size());
-          }
           localSeq += batch.ids.size();
           localBatches.emplace_back(std::move(batch));
         }
@@ -655,7 +439,8 @@ IMCFIndexStatus
 loadFilter(const std::string &input_file,
            chimera::imcf::InterleavedMergedCuckooFilter &imcf,
            ChimeraBuild::IMCFConfig &imcfConfig,
-           std::vector<std::vector<std::string>> &indexToTaxid) {
+           std::vector<std::vector<std::string>> &indexToTaxid,
+           chimera::presence::CoverageMeta *coverageMeta = nullptr) {
   namespace fs = std::filesystem;
   using Clock = std::chrono::steady_clock;
 
@@ -692,6 +477,23 @@ loadFilter(const std::string &input_file,
     archive(imcfConfig);
   } catch (const cereal::Exception &exc) {
     throw std::runtime_error(std::string("加载 IMCF 配置失败: ") + exc.what());
+  }
+  if (coverageMeta) {
+    try {
+      archive(*coverageMeta);
+    } catch (const cereal::Exception &) {
+      coverageMeta->entries.clear();
+      coverageMeta->version = 0;
+      coverageMeta->unique_deg_threshold = 1;
+    }
+  } else {
+    // consume optional coverage meta if present, ignore failures for backward
+    // compatibility
+    try {
+      chimera::presence::CoverageMeta tmp;
+      archive(tmp);
+    } catch (const cereal::Exception &) {
+    }
   }
   is.close();
 
@@ -778,19 +580,6 @@ void saveResult(std::vector<classifyResult> classifyResults,
         result.taxidCount.front().first == "unclassified") {
       os << "unclassified";
       handled = true;
-    } else if (config.output_posterior && !result.posteriors.empty()) {
-      auto oldFlags = os.flags();
-      auto oldPrecision = os.precision();
-      os.setf(std::ios::fixed, std::ios::floatfield);
-      os << std::setprecision(4) << result.posteriors.front().first << ':'
-         << result.posteriors.front().second;
-      if (result.posteriors.size() > 1) {
-        os << '\t' << "POST_TOP2=" << result.posteriors[1].first << ':'
-           << result.posteriors[1].second;
-      }
-      os.flags(oldFlags);
-      os.precision(oldPrecision);
-      handled = true;
     }
     if (!handled) {
       for (const auto &[taxid, count] : result.taxidCount) {
@@ -852,8 +641,6 @@ void postEmDecision(std::vector<classifyResult> &results,
     if (decisionConfig.min_class_weight > 0.0) {
       prune_by_global_pi(result, decisionConfig.min_class_weight);
     }
-    auto trace = result.trace;
-
     if (result.posteriors.empty()) {
       result.taxidCount.clear();
       result.taxidCount.emplace_back(kUnclassified, 1);
@@ -866,19 +653,10 @@ void postEmDecision(std::vector<classifyResult> &results,
 
     const auto &top = posterior.front();
     double top_score = top.second;
-    double runner_up = posterior.size() > 1 ? posterior[1].second : 0.0;
-    double ratio = runner_up <= 0.0 ? std::numeric_limits<double>::infinity()
-                                    : (top_score / runner_up);
-    double delta = top_score - runner_up;
 
     // 动态阈值：短读段必须更“自信”才放行
     double dyn_post = decisionConfig.posterior_threshold;
-    double evalWeight = 0.0;
-    if (trace) {
-      evalWeight = (trace->evaluatedWeight > 0.0)
-                       ? trace->evaluatedWeight
-                       : static_cast<double>(trace->evaluated);
-    }
+    double evalWeight = result.evaluated;
     if (evalWeight < 24.0) {
       dyn_post = std::max(dyn_post, 0.60);
     } else if (evalWeight < 48.0) {
@@ -886,38 +664,6 @@ void postEmDecision(std::vector<classifyResult> &results,
     } else {
       dyn_post = std::max(dyn_post, 0.52);
     }
-    double dyn_ratio = std::isnan(decisionConfig.margin_ratio)
-                           ? 1.30
-                           : std::max(decisionConfig.margin_ratio, 1.30);
-    double dyn_delta = std::max(decisionConfig.margin_delta, 0.03);
-    if (trace) {
-      trace->dynPost = dyn_post;
-      trace->dynRatio = dyn_ratio;
-      trace->dynDelta = dyn_delta;
-    }
-
-    bool threshold_ok = top_score >= dyn_post;
-    bool ratio_ok = ratio >= dyn_ratio;
-    bool delta_ok = delta >= dyn_delta;
-
-    double relax_abs = std::clamp(decisionConfig.relax_abs, 0.0, 1.0);
-    double relax_ratio_need = (decisionConfig.relax_ratio > 0.0)
-                                  ? decisionConfig.relax_ratio
-                                  : std::numeric_limits<double>::quiet_NaN();
-    double relax_delta_need = std::max(decisionConfig.relax_delta, 0.0);
-    double relax_delta_abs = std::clamp(decisionConfig.relax_delta_abs, 0.0, 1.0);
-
-    bool ratio_guard_enabled = std::isfinite(relax_ratio_need);
-    bool delta_guard_enabled = relax_delta_need > 0.0;
-
-    bool strict_ratio_ok = threshold_ok && ratio_ok;
-    bool strict_delta_ok = threshold_ok && delta_ok;
-    bool ratio_guard = ratio_guard_enabled && top_score >= relax_abs &&
-                       ratio >= relax_ratio_need;
-    bool delta_guard = delta_guard_enabled &&
-                       top_score >= relax_delta_abs &&
-                       delta >= relax_delta_need;
-
     double class_weight = 0.0;
     bool weight_ok = true;
     if (!classWeights.empty()) {
@@ -927,48 +673,13 @@ void postEmDecision(std::vector<classifyResult> &results,
         weight_ok = (class_weight >= decisionConfig.min_class_weight);
       }
     }
-    double weight_guard = std::max(0.7, dyn_post);
-    if (top_score >= weight_guard) {
-      weight_ok = true;
-    }
-
-    
-    bool pass = weight_ok &&
-                (strict_ratio_ok || strict_delta_ok || ratio_guard ||
-                 delta_guard);
+    bool pass = weight_ok && (top_score >= dyn_post);
 
     result.posteriors = std::move(posterior);
 
     if (pass) {
       result.taxidCount.clear();
       result.taxidCount.emplace_back(top.first, 0);
-      continue;
-    }
-
-    bool evidence_ok = false;
-    if (decisionConfig.evidence_override && trace) {
-      double eval_ref = (trace->evaluatedWeight > 0.0)
-                            ? trace->evaluatedWeight
-                            : static_cast<double>(trace->evaluated);
-      double gap_need = std::max(1.0, eval_ref / 32.0);
-      double gap = static_cast<double>(trace->bestCount) -
-                   static_cast<double>(trace->secondCount);
-      double ratio_pre = (trace->secondCount > 0)
-                             ? static_cast<double>(trace->bestCount) /
-                                   static_cast<double>(trace->secondCount)
-                             : std::numeric_limits<double>::infinity();
-      double min_ratio = (eval_ref < 40.0) ? 2.0 : (eval_ref < 80.0 ? 1.6 : 1.4);
-      if (trace->bestCount >= trace->thrConf &&
-          (ratio_pre >= min_ratio || gap >= gap_need) &&
-          !trace->bestTaxid.empty()) {
-        evidence_ok = true;
-      }
-    }
-
-    if (decisionConfig.evidence_override && evidence_ok && trace) {
-      const std::string &fallback = trace->bestTaxid;
-      result.taxidCount.clear();
-      result.taxidCount.emplace_back(fallback, 0);
       continue;
     }
 
@@ -1023,6 +734,7 @@ static inline uint64_t splitmix64(uint64_t x) {
 
 struct PresenceStats {
   double score{0.0};
+  double uniqueScore{0.0};
   double hits{0.0};
   uint64_t uniqueHits{0};
   std::vector<double> decoys;
@@ -1049,6 +761,7 @@ struct PresenceAccumulator {
     entry.hits += 1.0;
     if (uniqueEdge) {
       entry.uniqueHits += 1;
+      entry.uniqueScore += weight;
     }
   }
 
@@ -1071,6 +784,7 @@ struct PresenceSummary {
     for (const auto &[tid, entry] : acc.stats) {
       auto &dst = stats[tid];
       dst.score += entry.score;
+      dst.uniqueScore += entry.uniqueScore;
       dst.hits += entry.hits;
       dst.uniqueHits += entry.uniqueHits;
       if (decoyReps > 0) {
@@ -1089,11 +803,15 @@ struct PresenceSummary {
 struct PresenceDecision {
   std::unordered_set<uint32_t> accepted;
   robin_hood::unordered_flat_map<uint32_t, double> qValues;
+  robin_hood::unordered_flat_map<uint32_t, double> posteriors;
+  robin_hood::unordered_flat_map<uint32_t, double> logPosteriors;
+  robin_hood::unordered_flat_map<uint32_t, double> lambdaHats;
   double threshold{1.0};
+  double noiseMu{0.0};
+  double priorPi{0.0};
   size_t tested{0};
   size_t acceptedCount{0};
   size_t decoyPositives{0};
-  size_t minUniqueThreshold{0};
 };
 
 static PresenceDecision evaluate_presence_tdFDR(const PresenceSummary &summary,
@@ -1107,8 +825,7 @@ inline void processSequence(
     ClassifyConfig &config, GroupHeat &heat,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
-    PresenceAccumulator *presenceAcc, uint64_t decoySeed,
-    ProgressTracker *progress) {
+    PresenceAccumulator *presenceAcc, uint64_t decoySeed) {
   // Calculate the number of hash values and determine the threshold for
   // classification
   size_t hashNum = hashs1.size();
@@ -1119,22 +836,6 @@ inline void processSequence(
     }
     return acc;
   };
-
-  auto trace = std::make_shared<dbg::TraceRecord>();
-  trace->readLen = readLen;
-  trace->minimizerTotal = hashNum;
-  trace->shotThreshold = config.shotThreshold;
-  trace->firstFilterBeta = config.firstFilterBeta;
-  trace->preEmTopK = config.preEmTopK;
-  trace->thrMinEval = config.min_eval_count;
-  if (!hashs1.empty()) {
-    trace->xorAll = xor_reduce(hashs1);
-    std::vector<uint64_t> uniqVals = hashs1;
-    std::sort(uniqVals.begin(), uniqVals.end());
-    uniqVals.erase(std::unique(uniqVals.begin(), uniqVals.end()),
-                   uniqVals.end());
-    trace->uniqCount = uniqVals.size();
-  }
 
   const size_t binNumAll = indexToTaxid.size();
   heat.ensure(binNumAll);
@@ -1179,19 +880,6 @@ inline void processSequence(
       }
       coarseTotal += contrib;
       sampleBinScore[bi] += contrib;
-    }
-  }
-
-  if (trace) {
-    trace->sampleCount = sampleVals.size();
-    trace->xorSample = xor_reduce(sampleVals);
-    if (!touchedS.empty()) {
-      std::unordered_set<uint32_t> touched;
-      touched.reserve(touchedS.size());
-      for (const auto &[bi, _] : touchedS) {
-        touched.insert(bi);
-      }
-      trace->touchedBins = touched.size();
     }
   }
 
@@ -1303,17 +991,6 @@ inline void processSequence(
   }
 
   bool candidateEmpty = fallback_full || topBins.empty();
-  if (trace) {
-    trace->candidateSize = topBins.size();
-    trace->fallbackFull = fallback_full;
-    trace->candidateEmpty = candidateEmpty;
-    if (coarseTotal > 0) {
-      double coverage =
-          static_cast<double>(std::min<uint64_t>(coarseTotal, sampleCovered)) /
-          static_cast<double>(coarseTotal);
-      trace->sampleCoverage = std::clamp(coverage, 0.0, 1.0);
-    }
-  }
   if (!fallback_full) {
     for (auto bin : topBins) {
       uint32_t delta = 1;
@@ -1337,11 +1014,8 @@ inline void processSequence(
   uniqueHits.reserve(128);
   consistencyHits.reserve(128);
 
-  uint64_t eventHits = 0;
   robin_hood::unordered_flat_map<uint32_t, uint32_t> binHitCount;
-  if (trace) {
-    binHitCount.reserve(128);
-  }
+  binHitCount.reserve(128);
 
   std::vector<uint32_t> minimizerTids;
   minimizerTids.reserve(16);
@@ -1389,10 +1063,7 @@ inline void processSequence(
         return;
       }
       minimizerTids.push_back(tid);
-      if (trace) {
-        ++eventHits;
-        ++binHitCount[bin];
-      }
+      ++binHitCount[bin];
     };
 
     if (!subset) {
@@ -1414,10 +1085,6 @@ inline void processSequence(
     if (deg == 0) {
       return 0.0;
     }
-    if (trace) {
-      trace->degHist[bucket_degree(deg)]++;
-    }
-
     double exclusivityWeight = 1.0;
     if (exclusiveGamma > 0.0 && deg > 0) {
       exclusivityWeight = std::pow(static_cast<double>(deg), -exclusiveGamma);
@@ -1639,10 +1306,7 @@ inline void processSequence(
     recompute_subset_state();
 
     tidScore.clear();
-    if (trace) {
-      binHitCount.clear();
-      eventHits = 0;
-    }
+    binHitCount.clear();
     uniqueHits.clear();
     consistencyHits.clear();
     eff_eval = 0.0;
@@ -1673,60 +1337,10 @@ inline void processSequence(
   bool marginAccept = (bestRounded >= thrConfNeed) && dc.accept;
   highConfPre = highConfPre && marginAccept;
 
-  if (trace) {
-    trace->candidateExpanded = expanded;
-    trace->thrConf = thrConfNeed;
-    trace->imcfEvents = eventHits;
-    trace->binsWithHits = binHitCount.size();
-    trace->evaluated = n_eval;
-    trace->evaluatedWeight = eff_eval;
-    trace->uniqueSupport = uniqueCount;
-    trace->uniqueRatio = uniqueRatio;
-    trace->bestCount = bestRounded;
-    trace->secondCount = secondRounded;
-    trace->bestTid = bestTid;
-    trace->preContainmentTop1 = consistency_ratio(bestTid);
-    trace->preContainmentTop2 = consistency_ratio(stats.secondTid);
-    size_t effectiveK = 0;
-    if (imcfConfig.featureMethod == 1 && imcfConfig.strobeK > 0) {
-      effectiveK = std::max<size_t>(
-          1, static_cast<size_t>(std::llround(
-                 static_cast<double>(imcfConfig.strobeK) * 1.5)));
-    } else {
-      effectiveK = std::max<size_t>(1, static_cast<size_t>(imcfConfig.kmerSize));
-    }
-    auto ani_from = [&](double p) -> double {
-      if (p <= 0.0 || effectiveK == 0) {
-        return 0.0;
-      }
-      return std::pow(p, 1.0 / static_cast<double>(effectiveK));
-    };
-    trace->aniEstimateTop1 = ani_from(trace->preContainmentTop1);
-    trace->aniEstimateTop2 = ani_from(trace->preContainmentTop2);
-    if (bestTid < tax.id2str.size()) {
-      trace->bestTaxid = tax.id2str[bestTid];
-    }
-    trace->margin = static_cast<size_t>(
-        std::llround(std::max(0.0, dc.margin)));
-    trace->marginNeed = dc.need;
-    trace->marginRatio = dc.ratio;
-    if (!binHitCount.empty()) {
-      std::vector<std::pair<uint32_t, uint32_t>> ranked;
-      ranked.reserve(binHitCount.size());
-      for (const auto &kv : binHitCount) {
-        ranked.emplace_back(kv.first, kv.second);
-      }
-      std::sort(ranked.begin(), ranked.end(),
-                [](const auto &a, const auto &b) { return a.second > b.second; });
-      trace->topBinHits = std::move(ranked);
-    }
-  }
-
   classifyResult result;
   // 告诉 EM/VEM：这条 read 的有效证据权重（考虑到 deg 与 IDF）
   result.evaluated = eff_eval;
   result.id = id;
-  result.trace = trace;
   std::pair<std::string, std::size_t> maxCount;
   bool maxCountValid = false;
 
@@ -1738,7 +1352,7 @@ inline void processSequence(
     maxCountValid = true;
   }
 
-  bool use_em = (config.em || config.vem) && !highConfPre;
+  bool use_em = config.em && !highConfPre;
 
   double maxEvidence = std::min(best, eff_eval);
   double beta = config.firstFilterBeta;
@@ -1776,38 +1390,11 @@ inline void processSequence(
         std::ceil(0.3 * static_cast<double>(n_eval)));
   }
   thr_min_eval = std::max<size_t>(thr_min_eval, 12);
-  if (config.min_eval_count > 0) {
-    thr_min_eval = std::max(thr_min_eval, config.min_eval_count);
-  }
-
-  if (trace) {
-    trace->thrBeta = thr_beta;
-    trace->thrEval = thr_eval;
-    trace->thrMinEval = thr_min_eval;
-    trace->useEm = use_em;
-  }
+  thr_min_eval = std::max<size_t>(thr_min_eval, 12);
 
   double TOT = 0.0;
   for (const auto &kv : tidScore) {
     TOT += kv.second;
-  }
-  if (trace) {
-    trace->totalTidHits = static_cast<uint64_t>(std::llround(TOT));
-  }
-
-  if (trace && !tidScore.empty()) {
-    std::vector<std::pair<std::string, size_t>> ranked;
-    ranked.reserve(tidScore.size());
-    for (const auto &[tid_id, raw] : tidScore) {
-      if (tid_id < tax.id2str.size()) {
-        ranked.emplace_back(
-            tax.id2str[tid_id],
-            static_cast<size_t>(std::max<double>(0.0, std::llround(raw))));
-      }
-    }
-    std::sort(ranked.begin(), ranked.end(),
-              [](const auto &a, const auto &b) { return a.second > b.second; });
-    trace->emInputTop = ranked;
   }
 
   size_t M = 0;
@@ -1824,25 +1411,13 @@ inline void processSequence(
   }
   M = std::max<size_t>(M, 1);
 
-  auto compute_thr_fdr = [&](double Z_value) -> size_t {
-    if (!config.adaptive_fdr || Z_value <= 0.0) {
-      return 1;
-    }
-    double mu = TOT / static_cast<double>(M);
-    return static_cast<size_t>(
-        std::ceil(mu + Z_value * std::sqrt(std::max(mu, 1e-9))));
-  };
-
   size_t thr_final = 0;
   if (use_em) {
-    size_t thr_fdr = compute_thr_fdr(std::max(0.0, config.fdr_z));
     size_t thr_beta_eval = std::min(thr_beta, thr_eval);
     size_t min_hits = 1;
-    // EM 路径也强制最少评估量
-    thr_final = std::max({thr_fdr, thr_beta_eval, min_hits, thr_min_eval});
+    thr_final = std::max({thr_beta_eval, min_hits, thr_min_eval});
   } else {
-    size_t thr_fdr = compute_thr_fdr(std::max(0.0, config.fdr_z));
-    thr_final = std::max({thr_eval, thr_fdr, thr_beta, thr_min_eval});
+    thr_final = std::max({thr_eval, thr_beta, thr_min_eval});
   }
 
   if (highConfPre && bestTid < tax.id2str.size()) {
@@ -1888,9 +1463,6 @@ inline void processSequence(
              dynamicTopK > 8) {
     dynamicTopK = 8;
   }
-  if (trace) {
-    trace->preEmTopK = dynamicTopK;
-  }
 
   if (!result.taxidCount.empty() && use_em) {
     size_t K = dynamicTopK;
@@ -1929,138 +1501,10 @@ inline void processSequence(
 
 
   // Add the classifyResult to the shared classifyResults vector
-  if (progress) {
-    progress->mark_processed(1);
-  }
   classifyResults.emplace_back(std::move(result));
 }
 
-// 第二阶段筛选：丢弃未出现在 uniqueTaxids 中的税号，防止噪声 taxid 残留。
-void secondFilteringStep(std::vector<classifyResult> &classifyResults,
-                         const std::unordered_set<std::string> &uniqueTaxids) {
-  for (auto &result : classifyResults) {
-    result.taxidCount.erase(
-        std::remove_if(result.taxidCount.begin(), result.taxidCount.end(),
-                       [&uniqueTaxids](const auto &pair) {
-                         return uniqueTaxids.find(pair.first) ==
-                                uniqueTaxids.end();
-                       }),
-        result.taxidCount.end());
-
-    if (result.taxidCount.empty()) {
-      result.taxidCount.emplace_back("unclassified", 1);
-    }
-  }
-}
-
-/*
- * 第三阶段筛选：识别唯一匹配度过低的 taxid，若大部分 reads 与其他 taxid 重合
- * 则将其替换为重合度更高的 taxid，避免劣质税号污染结果。
- */
-void thirdFilteringStep(std::vector<classifyResult> &classifyResults,
-                        FileInfo &fileInfo) {
-  std::unordered_set<std::string> lowUniqueTaxids;
-  for (const auto &[taxid, totalMatches] : fileInfo.taxidTotalMatches) {
-    size_t uniqueMatches = fileInfo.taxidUniqueMatches[taxid];
-    if (totalMatches == 0) {
-      continue;
-    }
-    if (static_cast<double>(uniqueMatches) < 0.05 * totalMatches) {
-      lowUniqueTaxids.insert(taxid);
-    }
-  }
-
-  robin_hood::unordered_flat_map<std::string, std::unordered_set<std::string>>
-      taxidToReads;
-  for (const auto &result : classifyResults) {
-    for (const auto &[taxid, _] : result.taxidCount) {
-      taxidToReads[taxid].insert(result.id);
-    }
-  }
-
-  for (const auto &taxid : lowUniqueTaxids) {
-    const auto &reads = taxidToReads[taxid];
-    if (reads.empty()) {
-      continue;
-    }
-
-    for (const auto &[otherTaxid, otherReads] : taxidToReads) {
-      if (taxid == otherTaxid) {
-        continue;
-      }
-
-      size_t sharedReads = 0;
-      for (const auto &readId : reads) {
-        if (otherReads.find(readId) != otherReads.end()) {
-          ++sharedReads;
-        }
-      }
-
-      double sharedPercentage =
-          static_cast<double>(sharedReads) / static_cast<double>(reads.size());
-      if (sharedPercentage < 0.95) {
-        continue;
-      }
-
-      for (auto &result : classifyResults) {
-        if (reads.find(result.id) == reads.end()) {
-          continue;
-        }
-        result.taxidCount.erase(std::remove_if(result.taxidCount.begin(),
-                                               result.taxidCount.end(),
-                                               [&taxid](const auto &pair) {
-                                                 return pair.first == taxid;
-                                               }),
-                                result.taxidCount.end());
-        result.taxidCount.emplace_back(otherTaxid, 0);
-      }
-      break;
-    }
-  }
-}
-
-/**
- * @brief Processes a batch of reads for classification using the Interleaved
- * Merged Cuckoo Filter (IMCF).
- *
- * This function handles both paired-end and single-end read processing. It
- * generates minimizer hash values from the reads, combines them as needed, and
- * passes the hash values to the `processSequence` function for classification.
- * The results are stored in the `classifyResults` vector and file statistics
- * are updated in `fileInfo`.
- *
- * @param batch A structure containing the batch of reads to be processed,
- * including read sequences and their IDs.
- * @param imcfConfig Configuration settings for the IMCF, including k-mer size
- * and window size.
- * @param indexToTaxid A mapping of indices in the IMCF to the corresponding
- * taxids for classification.
- * @param config Configuration settings for classification, including filtering
- * options.
- * @param imcf The Interleaved Merged Cuckoo Filter used for classification.
- * @param classifyResults A vector to store the classification results for each
- * read.
- * @param feature_params Parameters controlling feature hashing (syncmer/strobemer).
- * @param feature_min_len Minimum read length required to emit hashes.
- * @param fileInfo A structure to store information about the processed reads,
- * such as the number of classified and unclassified reads.
- *
- * @details
- * The function first checks if paired-end reads (`batch.seqs2`) are present. If
- * so, it processes the reads in pairs, generating syncmer hash values for
- * both sequences in each pair and combining the results. For single-end reads,
- * it processes each sequence individually.
- *
- * The generated hash values are passed to the `processSequence` function for
- * classification, which updates the classification results and the file
- * information.
- *
- * - If the read length is smaller than the required feature length, the read
- *   is skipped.
- * - The function ensures that hash values are generated only for reads that
- * meet the minimum length requirement.
- */
-inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
+void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
                          std::vector<std::vector<std::string>> &indexToTaxid,
                          const TaxDict &tax, ClassifyConfig &config,
                          chimera::imcf::InterleavedMergedCuckooFilter &imcf,
@@ -2070,8 +1514,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
                          FileInfo &fileInfo,
                          GroupHeat &heat,
                          PresenceAccumulator *presenceAcc,
-                         uint64_t decoySeed,
-                         ProgressTracker *progress = nullptr) {
+                         uint64_t decoySeed) {
   // Process batch of reads
   std::vector<uint64_t> hashs1;
   hashs1.reserve(2048);
@@ -2100,7 +1543,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
       }
       processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
                       heat, imcf, batch.ids[i], classifyResults, fileInfo,
-                      presenceAcc, decoySeed, progress);
+                      presenceAcc, decoySeed);
     }
   } else {
     // Process single-end reads
@@ -2124,7 +1567,7 @@ inline void processBatch(batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
       // Process the hash values for classification
       processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
                       heat, imcf, batch.ids[i], classifyResults, fileInfo,
-                      presenceAcc, decoySeed, progress);
+                      presenceAcc, decoySeed);
     }
   }
 }
@@ -2140,7 +1583,6 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
                         const TaxDict &tax,
                         std::vector<classifyResult> &classifyResults,
                         FileInfo &fileInfo, std::atomic<bool> &producer_done,
-                        ProgressTracker *progress,
                         const chimera::feature::Params &feature_params,
                         size_t feature_min_len,
                         PresenceSummary *presenceSummary,
@@ -2163,7 +1605,7 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
       if (readQueue.try_dequeue(batch)) {
         processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
                      localClassifyResults, feature_params, feature_min_len,
-                     localFileInfo, heat, presencePtr, decoySeed, progress);
+                     localFileInfo, heat, presencePtr, decoySeed);
         continue;
       }
       if (producer_done.load(std::memory_order_acquire)) {
@@ -2206,9 +1648,6 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
     }
   }
 
-  secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
-  thirdFilteringStep(classifyResults, fileInfo);
-
 }
 
 /**
@@ -2241,15 +1680,8 @@ void classify_streaming(ChimeraBuild::IMCFConfig &imcfConfig,
  * results are merged into the shared `classifyResults` vector and `fileInfo`
  * structure in a critical section to ensure thread safety.
  *
- * The `processBatch` function performs the actual classification and the first
- * filtering step. After all batches are processed, the function applies the
- * `secondFilteringStep` and `thirdFilteringStep` functions to refine the
- * classification results.
- * @note
- * - The function assumes that the `processBatch`, `secondFilteringStep`, and
- * `thirdFilteringStep` functions are defined and correctly implemented.
- * - OpenMP is used for parallel processing. Ensure proper thread
- * synchronization and safety when using shared resources.
+ * The `processBatch` function performs the actual classification; results are
+ * merged without additional post filters.
  */
 void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               moodycamel::ConcurrentQueue<batchReads> &readQueue,
@@ -2257,7 +1689,7 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               chimera::imcf::InterleavedMergedCuckooFilter &imcf,
               std::vector<std::vector<std::string>> &indexToTaxid,
               const TaxDict &tax, std::vector<classifyResult> &classifyResults,
-              FileInfo &fileInfo, ProgressTracker *progress,
+              FileInfo &fileInfo,
               const chimera::feature::Params &feature_params,
               size_t feature_min_len) {
 
@@ -2276,7 +1708,7 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
     while (readQueue.try_dequeue(batch)) {
       processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
                    localClassifyResults, feature_params, feature_min_len,
-                   localFileInfo, heat, nullptr, 0, progress);
+                   localFileInfo, heat, nullptr, 0);
     }
     // Critical section to merge local results into shared resources
 #pragma omp critical
@@ -2311,9 +1743,6 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
       fileInfo.bpLength += localFileInfo.bpLength;
     }
   }
-
-  secondFilteringStep(classifyResults, fileInfo.uniqueTaxids);
-  thirdFilteringStep(classifyResults, fileInfo);
 
 }
 
@@ -2372,131 +1801,108 @@ static PresenceFilterStats apply_presence_filter(
   return stats;
 }
 
-static PresenceDecision evaluate_presence_tdFDR(const PresenceSummary &summary,
-                                                const TaxDict &tax,
-                                                const ClassifyConfig &config) {
+static PresenceDecision evaluate_presence_coverage(
+    const PresenceSummary &summary, const TaxDict &tax,
+    const ClassifyConfig &config,
+    const chimera::presence::CoverageMeta &meta) {
   PresenceDecision decision;
-  if (summary.stats.empty() || summary.decoyReps == 0) {
+  decision.threshold = config.presence_tau;
+  decision.priorPi = config.presence_pi;
+  if (summary.stats.empty()) {
     return decision;
   }
-  decision.minUniqueThreshold = config.min_unique_evidence;
-  struct Record {
-    uint32_t tid{0};
-    double score{0.0};
-    double hits{0.0};
-    uint64_t uniqueHits{0};
-    double decoyScore{0.0};
-    double pValue{1.0};
-    double qValue{1.0};
-  };
-  std::vector<Record> records;
-  records.reserve(summary.stats.size());
-  std::vector<double> decoyScores;
-  decoyScores.reserve(summary.stats.size());
-  for (const auto &[tid, entry] : summary.stats) {
-    Record rec;
-    rec.tid = tid;
-    rec.score = entry.score;
-    rec.hits = entry.hits;
-    rec.uniqueHits = entry.uniqueHits;
-    if (!entry.decoys.empty()) {
-      rec.decoyScore = *std::max_element(entry.decoys.begin(), entry.decoys.end());
-    }
-    records.push_back(rec);
-    decoyScores.push_back(rec.decoyScore);
+
+  robin_hood::unordered_flat_map<std::string, uint64_t> uniqueMap;
+  uniqueMap.reserve(meta.entries.size());
+  for (const auto &entry : meta.entries) {
+    uniqueMap.emplace(entry.taxid, entry.unique_signatures);
   }
-  if (records.empty()) {
-    return decision;
-  }
-  std::vector<double> sortedDecoys = decoyScores;
-  std::sort(sortedDecoys.begin(), sortedDecoys.end());
-  auto count_ge = [&](double value) {
-    auto it = std::lower_bound(sortedDecoys.begin(), sortedDecoys.end(), value);
-    return static_cast<size_t>(sortedDecoys.end() - it);
-  };
-  std::vector<double> decoyPVals(decoyScores.size(), 1.0);
-  double denom = static_cast<double>(sortedDecoys.size()) + 1.0;
-  for (size_t i = 0; i < decoyScores.size(); ++i) {
-    size_t ge = count_ge(decoyScores[i]);
-    decoyPVals[i] = (static_cast<double>(ge) + 1.0) / denom;
-  }
-  std::vector<size_t> eligible;
-  eligible.reserve(records.size());
-  for (size_t i = 0; i < records.size(); ++i) {
-    auto &rec = records[i];
-    if (rec.score > 0.0) {
-      size_t ge = count_ge(rec.score);
-      rec.pValue = (static_cast<double>(ge) + 1.0) / denom;
-      if (config.presence_abundance_prior > 0.0 && rec.uniqueHits > 0) {
-        double relUnique = static_cast<double>(rec.uniqueHits) /
-                           std::max<double>(1.0, config.min_unique_evidence);
-        double boost = 1.0 /
-                       (1.0 + config.presence_abundance_prior *
-                                  std::max(0.0, relUnique - 1.0));
-        rec.pValue *= boost;
-      }
-      rec.pValue = std::clamp(rec.pValue, 0.0, 1.0);
-      if (rec.uniqueHits >= config.min_unique_evidence) {
-        eligible.push_back(i);
-      }
-    } else {
-      rec.pValue = 1.0;
-    }
-  }
-  size_t m = eligible.size();
-  decision.tested = m;
-  if (m > 0) {
-    std::sort(eligible.begin(), eligible.end(), [&](size_t a, size_t b) {
-      return records[a].pValue < records[b].pValue;
-    });
-    double prev = 1.0;
-    for (size_t rank = m; rank > 0; --rank) {
-      size_t idx = eligible[rank - 1];
-      double q = std::min(prev, records[idx].pValue * static_cast<double>(m) /
-                                   static_cast<double>(rank));
-      records[idx].qValue = q;
-      prev = q;
+
+  std::vector<uint64_t> uniqueCounts(tax.id2str.size(), 0);
+  for (size_t i = 0; i < tax.id2str.size(); ++i) {
+    auto it = uniqueMap.find(tax.id2str[i]);
+    if (it != uniqueMap.end()) {
+      uniqueCounts[i] = it->second;
     }
   }
 
-  double qThreshold = config.presence_q;
-  if (config.auto_q_tune && !decoyPVals.empty()) {
-    std::array<double, 4> candidates{0.05, 0.02, 0.01, 0.005};
-    bool tuned = false;
-    for (double candidate : candidates) {
-      size_t decoyPass = 0;
-      for (double p : decoyPVals) {
-        if (p <= candidate) {
-          ++decoyPass;
-        }
+  auto resolve_unique = [&](uint32_t tid) -> double {
+    if (tid < uniqueCounts.size() && uniqueCounts[tid] > 0) {
+      return static_cast<double>(uniqueCounts[tid]);
+    }
+    return 0.0;
+  };
+
+  double mu = config.presence_noise;
+  if (!(mu > 0.0)) {
+    double muAccum = 0.0;
+    double weightSum = 0.0;
+    for (const auto &[tid, stats] : summary.stats) {
+      double u = resolve_unique(tid);
+      if (u <= 0.0) {
+        continue;
       }
-      if (decoyPass <= 1) {
-        qThreshold = candidate;
-        tuned = true;
+      if (!stats.decoys.empty()) {
+        double decoyMean =
+            std::accumulate(stats.decoys.begin(), stats.decoys.end(), 0.0) /
+            static_cast<double>(stats.decoys.size());
+        double mu_j = decoyMean / u;
+        muAccum += mu_j * u;
+        weightSum += u;
       }
     }
-    if (!tuned) {
-      qThreshold = config.presence_q;
+    if (weightSum > 0.0) {
+      mu = muAccum / weightSum;
     }
   }
-  decision.threshold = qThreshold;
-  for (auto &rec : records) {
-    rec.qValue = std::clamp(rec.qValue, 0.0, 1.0);
-    decision.qValues[rec.tid] = rec.qValue;
-    if (rec.score <= 0.0 || rec.uniqueHits < config.min_unique_evidence) {
-      continue;
+  if (!(mu > 0.0)) {
+    mu = 1e-4;
+  }
+  mu = std::max(mu, 1e-8);
+  decision.noiseMu = mu;
+
+  double pi = std::clamp(config.presence_pi, 1e-9, 1.0 - 1e-6);
+  double logPriorOdds = std::log(pi) - std::log1p(-pi);
+
+  decision.tested = summary.stats.size();
+  for (const auto &[tid, stats] : summary.stats) {
+    double u = resolve_unique(tid);
+    if (u <= 0.0) {
+      if (stats.uniqueHits > 0) {
+        u = static_cast<double>(stats.uniqueHits);
+      } else {
+        u = std::max(1.0, stats.hits);
+      }
     }
-    if (rec.qValue <= qThreshold) {
-      decision.accepted.insert(rec.tid);
+    double u_eff =
+        std::max<double>(u, static_cast<double>(config.presence_u_min));
+    double C = (stats.uniqueScore > 0.0) ? stats.uniqueScore : stats.score;
+    double lambda_hat = std::max(0.0, (C / u_eff) - mu);
+    double logBF = 0.0;
+    if (mu > 0.0) {
+      double ratio = (lambda_hat + mu) / mu;
+      if (ratio > 0.0 && C > 0.0) {
+        logBF = C * std::log(ratio) - lambda_hat * u_eff;
+      } else {
+        logBF = -lambda_hat * u_eff;
+      }
+    }
+    double logPosterior = logBF + logPriorOdds;
+    decision.logPosteriors[tid] = logPosterior;
+    decision.lambdaHats[tid] = lambda_hat;
+    double posteriorProb = 0.5;
+    if (logPosterior >= 0.0) {
+      posteriorProb = 1.0 / (1.0 + std::exp(-logPosterior));
+    } else {
+      double e = std::exp(logPosterior);
+      posteriorProb = e / (1.0 + e);
+    }
+    decision.qValues[tid] = posteriorProb; // reused为兼容
+    decision.posteriors[tid] = posteriorProb;
+    if (logPosterior >= config.presence_tau) {
+      decision.accepted.insert(tid);
     }
   }
-  size_t decoyPos = 0;
-  for (double p : decoyPVals) {
-    if (p <= qThreshold) {
-      ++decoyPos;
-    }
-  }
-  decision.decoyPositives = decoyPos;
   decision.acceptedCount = decision.accepted.size();
   return decision;
 }
@@ -2527,11 +1933,8 @@ void run(ClassifyConfig config) {
     config.threads = static_cast<uint16_t>(hardwareThreads);
   }
 
-  if (!config.em && !config.vem) {
+  if (!config.em) {
     config.em = true;
-  }
-  if (!(config.post_ratio > 0.0)) {
-    config.post_ratio = std::numeric_limits<double>::quiet_NaN();
   }
   if (config.verbose) {
     std::cout << config << std::endl;
@@ -2549,15 +1952,10 @@ void run(ClassifyConfig config) {
   bool posteriorModelUsed = false;
   long long rebuildActiveMs = 0;
 
-	std::string progressLabel = "classify";
-  ProgressTracker progress(config.verbose && config.progress, progressLabel,
-                           config.progressStep, config.progressInterval);
-  ProgressTracker *progressPtr = progress.enabled() ? &progress : nullptr;
-
     std::atomic<bool> producer_done{false};
     auto readEnd = readStart;
     std::thread producer([&]() {
-      parseReads(readQueue, config, fileInfo, progressPtr);
+      parseReads(readQueue, config, fileInfo);
       readEnd = std::chrono::high_resolution_clock::now();
       if (config.verbose) {
         auto readDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2571,8 +1969,10 @@ void run(ClassifyConfig config) {
     std::vector<std::vector<std::string>> indexToTaxid;
     chimera::imcf::InterleavedMergedCuckooFilter imcf;
     ChimeraBuild::IMCFConfig imcfConfig;
+    chimera::presence::CoverageMeta coverageMeta;
     auto indexStatus =
-        loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid);
+        loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid,
+                   &coverageMeta);
     auto normalize_kind = [](std::string &value) {
       std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
         return static_cast<char>(std::tolower(ch));
@@ -2745,29 +2145,25 @@ void run(ClassifyConfig config) {
                   << ")" << std::endl;
       }
     }
-    const TaxDict tax = build_tax_dict(indexToTaxid);
 
-    bool presenceEnabled = (config.presence_caller == "tdfdr");
-    if (presenceEnabled && config.decoy_reps == 0) {
-      std::cerr << "Warning: presence caller tdFDR 需要 decoy_reps>0，检测到 decoy_reps=0，已回退至 hard_cutoff" << std::endl;
-      presenceEnabled = false;
+    const TaxDict tax = build_tax_dict(indexToTaxid);
+    if (config.decoy_reps == 0 && !(config.presence_noise > 0.0) &&
+        config.verbose) {
+      std::cerr << "Warning: decoy_reps=0，覆盖模型的噪声将退回默认 μ=1e-4；建议 decoy_reps>=1"
+                << std::endl;
     }
-    PresenceSummary presenceSummary(presenceEnabled
-                                        ? static_cast<size_t>(config.decoy_reps)
-                                        : 0);
-    PresenceSummary *presencePtr = presenceEnabled ? &presenceSummary : nullptr;
+    PresenceSummary presenceSummary(static_cast<size_t>(config.decoy_reps));
+    PresenceSummary *presencePtr = &presenceSummary;
     uint64_t presenceSeed = 0;
-    if (presencePtr) {
-      std::hash<std::string> hasher;
-      presenceSeed = hasher(config.outputFile);
-      presenceSeed ^= (hasher(config.dbFile) << 1);
-      presenceSeed ^= static_cast<uint64_t>(imcfConfig.fpSalt);
-    }
+    std::hash<std::string> hasher;
+    presenceSeed = hasher(config.outputFile);
+    presenceSeed ^= (hasher(config.dbFile) << 1);
+    presenceSeed ^= static_cast<uint64_t>(imcfConfig.fpSalt);
 
     auto classifyStart = std::chrono::high_resolution_clock::now();
     std::cout << "Classifying sequences by imcf (feature=" << config.feature << ")..." << std::endl;
     classify_streaming(imcfConfig, readQueue, config, imcf, indexToTaxid, tax,
-                       classifyResults, fileInfo, producer_done, progressPtr,
+                       classifyResults, fileInfo, producer_done,
                        feature_params, feature_min_len, presencePtr,
                        presenceSeed);
     auto classifyEnd = std::chrono::high_resolution_clock::now();
@@ -2775,9 +2171,6 @@ void run(ClassifyConfig config) {
         std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd -
                                                               classifyStart);
     producer.join();
-    if (progressPtr) {
-      progress.finish();
-    }
     if (config.verbose) {
       std::cout << "Classify time: ";
       print_classify_time(classifyDuration.count());
@@ -2801,45 +2194,36 @@ void run(ClassifyConfig config) {
     }
     
 
-    PresenceDecision presenceDecision;
-    if (presencePtr) {
-      presenceDecision = evaluate_presence_tdFDR(presenceSummary, tax, config);
-      if (config.verbose) {
-        auto oldFlags = std::cout.flags();
-        auto oldPrecision = std::cout.precision();
-        std::cout << "Presence caller (tdFDR): tests=" << presenceDecision.tested
-                  << ", accepted=" << presenceDecision.acceptedCount
-                  << ", q_threshold=" << std::fixed << std::setprecision(3)
-                  << presenceDecision.threshold << std::defaultfloat
-                  << ", decoy_pass=" << presenceDecision.decoyPositives
-                  << std::endl;
-        std::cout.flags(oldFlags);
-        std::cout.precision(oldPrecision);
-      }
-      if (!config.presence_report_only) {
-        auto filterStats =
-            apply_presence_filter(presenceDecision, tax, classifyResults,
-                                  fileInfo);
-        if (config.verbose && (filterStats.trimmedAssignments > 0 ||
-                               filterStats.forcedUnclassified > 0)) {
-          std::cout << "Presence filter: trimmed "
-                    << filterStats.trimmedAssignments << " assignments, forced "
-                    << filterStats.forcedUnclassified
-                    << " reads to unclassified" << std::endl;
-        }
-      } else if (config.verbose) {
-        std::cout << "Presence caller: report-only mode, no assignments trimmed"
-                  << std::endl;
-      }
+    PresenceDecision presenceDecision =
+        evaluate_presence_coverage(presenceSummary, tax, config, coverageMeta);
+    if (config.verbose) {
+      auto oldFlags = std::cout.flags();
+      auto oldPrecision = std::cout.precision();
+      std::cout << "Presence caller (coverage): tests=" << presenceDecision.tested
+                << ", accepted=" << presenceDecision.acceptedCount
+                << ", mu=" << std::scientific << std::setprecision(3)
+                << presenceDecision.noiseMu << ", pi=" << config.presence_pi
+                << ", tau=" << config.presence_tau << std::defaultfloat
+                << std::endl;
+      std::cout.flags(oldFlags);
+      std::cout.precision(oldPrecision);
+    }
+    auto filterStats = apply_presence_filter(presenceDecision, tax,
+                                             classifyResults, fileInfo);
+    if (config.verbose && (filterStats.trimmedAssignments > 0 ||
+                           filterStats.forcedUnclassified > 0)) {
+      std::cout << "Presence filter: trimmed " << filterStats.trimmedAssignments
+                << " assignments, forced " << filterStats.forcedUnclassified
+                << " reads to unclassified" << std::endl;
     }
 
   if (config.em) {
     auto EMstart = std::chrono::high_resolution_clock::now();
     std::cout << "Running EM algorithm..." << std::endl;
     EMOptions options;
-    options.temp = config.em_temp;
-    options.prior_strength = config.em_prior_strength;
-    options.coexist_penalty = config.em_coexist_penalty;
+    options.temp = 1.10;
+    options.prior_strength = 0.25;
+    options.coexist_penalty = 0.20;
     auto [posterior, weights] = EMAlgorithm(classifyResults, config.emIter,
                                             config.emThreshold, options);
     classifyResults = std::move(posterior);
@@ -2853,38 +2237,10 @@ void run(ClassifyConfig config) {
       print_classify_time(EMduration.count());
     }
   }
-  if (config.vem) {
-    auto VEMstart = std::chrono::high_resolution_clock::now();
-    std::cout << "Running VEM algorithm..." << std::endl;
-    VEMOptions options;
-    options.temp = config.em_temp;
-    options.prior_strength = config.em_prior_strength;
-    options.coexist_penalty = config.em_coexist_penalty;
-    auto [posterior, weights] = VEMAlgorithm(classifyResults, config.emIter,
-                                             config.emThreshold, options);
-    classifyResults = std::move(posterior);
-    classWeights = std::move(weights);
-    posteriorModelUsed = true;
-    auto VEMend = std::chrono::high_resolution_clock::now();
-    auto VEMduration = std::chrono::duration_cast<std::chrono::milliseconds>(
-        VEMend - VEMstart);
-    if (config.verbose) {
-      std::cout << "VEM time: ";
-      print_classify_time(VEMduration.count());
-    }
-  }
-
   if (posteriorModelUsed) {
     DecisionConfig decisionConfig;
     decisionConfig.posterior_threshold = config.post_thres;
-    decisionConfig.margin_delta = config.post_margin;
-    decisionConfig.margin_ratio = config.post_ratio;
-    decisionConfig.relax_abs = config.post_relax_abs;
-    decisionConfig.relax_ratio = config.post_relax_ratio;
-    decisionConfig.relax_delta = config.post_relax_delta;
-    decisionConfig.relax_delta_abs = config.post_relax_delta_abs;
     decisionConfig.min_class_weight = config.post_pi_min;
-    decisionConfig.evidence_override = config.evidence_override;
 
     postEmDecision(classifyResults, decisionConfig, classWeights);
     fileInfo.classifiedNum = 0;

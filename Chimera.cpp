@@ -113,7 +113,6 @@ int main(int argc, char **argv) {
 
   bool buildQuietRequested = false;
   bool classifyQuietRequested = false;
-  std::string hashFreqModeStr = "basic";
 
   // Build
   build
@@ -176,13 +175,11 @@ int main(int argc, char **argv) {
       ->add_option("-M,--max-hashes", buildConfig.max_hashes_per_taxid,
                    "Maximum number of hashes per taxid")
       ->default_val(0);
-  build->add_flag("--adaptive-cutoff", buildConfig.adaptive_cutoff,
-                  "启用基于文件规模的自适应 cutoff");
   build
-      ->add_option("--hash-freq-mode", hashFreqModeStr,
-                   "Hash frequency filter mode: off/basic")
-      ->default_val("basic")
-      ->check(CLI::IsMember({"off", "basic"}));
+      ->add_option("--presence-unique-deg", buildConfig.presence_unique_deg,
+                   "Degree cutoff (<=) treated as unique signature for coverage meta")
+      ->default_val(1)
+      ->check(CLI::Range(1, 8));
   build
       ->add_option("--feature", buildConfig.feature,
                    "Feature 提取方式 (syncmer|strobemer|auto)")
@@ -213,7 +210,7 @@ int main(int argc, char **argv) {
       ->default_val("auto");
   build->add_flag("-q,--quiet", buildQuietRequested, "Quiet output");
 
-  build->callback([&buildConfig, min_length_option, &buildQuietRequested, &hashFreqModeStr]() {
+  build->callback([&buildConfig, min_length_option, &buildQuietRequested]() {
     if (buildConfig.smer_size == 0) {
       throw CLI::ValidationError("--syncmer-s must be greater than 0");
     }
@@ -268,14 +265,6 @@ int main(int argc, char **argv) {
     if (buildConfig.strobemer_order != 2) {
       throw CLI::ValidationError("--strobe-order 当前仅支持取 2");
     }
-    std::transform(hashFreqModeStr.begin(), hashFreqModeStr.end(), hashFreqModeStr.begin(), [](unsigned char ch) {
-      return static_cast<char>(std::tolower(ch));
-    });
-    if (hashFreqModeStr == "off") {
-      buildConfig.hash_freq_mode = ChimeraBuild::HashFreqMode::Off;
-    } else {
-      buildConfig.hash_freq_mode = ChimeraBuild::HashFreqMode::BasicFilter;
-    }
     buildConfig.verbose = !buildQuietRequested;
   });
 
@@ -321,12 +310,7 @@ int main(int argc, char **argv) {
       }
     };
     auto normalize_presence = [](std::string &value, const char *fallback) {
-      std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-      });
-      if (value.empty()) {
-        value = fallback;
-      }
+      value = fallback; // presence 模式固定为 coverage，参数已移除
     };
     auto sanitize_version = [](std::string &value) {
       if (value.empty()) {
@@ -336,7 +320,6 @@ int main(int argc, char **argv) {
     normalize_kind(classifyConfig.taxonomyKind);
     sanitize_version(classifyConfig.taxonomyVersion);
     normalize_feature(classifyConfig.feature);
-    normalize_presence(classifyConfig.presence_caller, "tdfdr");
     normalize_presence(classifyConfig.decoy_mode, "imcf-edge-shuffle");
     if (!(classifyConfig.feature == "auto" || classifyConfig.feature == "syncmer" ||
           classifyConfig.feature == "strobemer")) {
@@ -352,10 +335,6 @@ int main(int argc, char **argv) {
     }
     if (classifyConfig.strobemer_k != 0 && classifyConfig.strobemer_k < 8) {
       throw CLI::ValidationError("--strobe-k must be >= 8 when specified");
-    }
-    if (!(classifyConfig.presence_caller == "tdfdr" ||
-          classifyConfig.presence_caller == "hard_cutoff")) {
-      throw CLI::ValidationError("--presence-caller must be tdfdr or hard_cutoff");
     }
     if (classifyConfig.decoy_mode != "imcf-edge-shuffle") {
       throw CLI::ValidationError("--decoy-mode 当前仅支持 imcf-edge-shuffle");
@@ -418,31 +397,23 @@ int main(int argc, char **argv) {
                    "Keep top-K candidates per read before EM/VEM")
       ->default_val(16);
   classify
-      ->add_option("--presence-caller", classifyConfig.presence_caller,
-                   "Presence caller strategy (tdfdr|hard_cutoff)")
-      ->check(CLI::IsMember({"tdfdr", "hard_cutoff"}))
-      ->default_val("tdfdr");
+      ->add_option("--presence-pi", classifyConfig.presence_pi,
+                   "Presence prior P(z=1) for coverage模型 (0-1)")
+      ->check(CLI::Range(1e-6, 0.5))
+      ->default_val(1e-3);
   classify
-      ->add_option("--presence-q", classifyConfig.presence_q,
-                   "Target q-value cutoff for presence calling")
-      ->check(CLI::Range(0.001, 0.2))
-      ->default_val(0.05);
+      ->add_option("--presence-tau", classifyConfig.presence_tau,
+                   "Log posterior odds threshold for presence (coverage)")
+      ->default_val(4.6);
   classify
-      ->add_flag("--presence-report-only,!--presence-hard-filter",
-                 classifyConfig.presence_report_only,
-                 "Presence caller gating mode (default hard filter; use --presence-report-only to skip trimming)")
-      ->default_val(false);
+      ->add_option("--presence-noise", classifyConfig.presence_noise,
+                   "Override noise μ (per-signature) for coverage; <=0 auto")
+      ->default_val(0.0);
   classify
-      ->add_option("--presence-abundance-prior",
-                   classifyConfig.presence_abundance_prior,
-                   "Down-weight p-values based on abundance (0-1)")
-      ->check(CLI::Range(0.0, 1.0))
-      ->default_val(0.30);
-  classify
-      ->add_flag("--auto-q-tune,!--no-auto-q-tune",
-                 classifyConfig.auto_q_tune,
-                 "Auto-tune presence q from {0.05,0.02,0.01,0.005} to cap decoy positives")
-      ->default_val(true);
+      ->add_option("--presence-u-min", classifyConfig.presence_u_min,
+                   "Minimum U_j used in coverage model to防止极小基因组过拟合 (1-16)")
+      ->default_val(1)
+      ->check(CLI::Range(1u, 16u));
   classify
       ->add_option("--decoy-mode", classifyConfig.decoy_mode,
                    "Decoy generation mode (imcf-edge-shuffle)")
@@ -458,24 +429,6 @@ int main(int argc, char **argv) {
       ->check(CLI::Range(0.5, 2.0))
       ->default_val(1.2);
   classify
-      ->add_option("--min-unique-evidence", classifyConfig.min_unique_evidence,
-                   "Minimum IMCF unique-edge hits required before testing (1-10)")
-      ->check(CLI::Range(1, 10))
-      ->default_val(5);
-  classify
-      ->add_flag("--adaptive-fdr,!--no-adaptive-fdr",
-                 classifyConfig.adaptive_fdr,
-                 "Enable per-read background-calibrated threshold")
-      ->default_val(true);
-  classify
-      ->add_option("--fdr-z", classifyConfig.fdr_z,
-                   "Z for Poisson(mu)+Z*sqrt(mu) threshold")
-      ->default_val(3.0);
-  classify
-      ->add_option("--min-eval-count", classifyConfig.min_eval_count,
-                   "Minimum #evaluated syncmers to classify")
-      ->default_val(0);
-  classify
       ->add_option("-t,--threads", classifyConfig.threads,
                    "Number of threads for classifying")
       ->default_val(default_threads);
@@ -485,9 +438,6 @@ int main(int argc, char **argv) {
       ->default_val(400);
   auto emFlag = classify->add_flag("-e,--EM", classifyConfig.em,
                                    "Enable EM mode (default)");
-  auto vemFlag =
-      classify->add_flag("-V,--VEM", classifyConfig.vem, "Enable VEM mode")
-          ->excludes(emFlag);
   classify
       ->add_option("--em-threshold", classifyConfig.emThreshold, "EM threshold")
       ->default_val(0.001);
@@ -498,56 +448,9 @@ int main(int argc, char **argv) {
                    "Posterior acceptance threshold")
       ->default_val(0.56);
   classify
-      ->add_option("--post-margin", classifyConfig.post_margin,
-                   "Minimum gap between top posteriors")
-      ->default_val(0.03);
-  classify->add_option("--post-ratio", classifyConfig.post_ratio,
-                       "Minimum ratio between top1 and top2 posteriors")
-      ->default_val(1.30);
-  classify
-      ->add_option("--post-relax-abs", classifyConfig.post_relax_abs,
-                   "Absolute posterior floor for relaxed gate")
-      ->default_val(0.50);
-  classify
-      ->add_option("--post-relax-ratio", classifyConfig.post_relax_ratio,
-                   "Ratio required when using relaxed gate")
-      ->default_val(1.50);
-  classify
-      ->add_option("--post-relax-delta", classifyConfig.post_relax_delta,
-                   "Gap required when using relaxed gate")
-      ->default_val(0.08);
-  classify
-      ->add_option("--post-relax-delta-abs",
-                   classifyConfig.post_relax_delta_abs,
-                   "Absolute posterior floor for gap-based relaxed gate")
-      ->default_val(0.52);
-  classify
       ->add_option("--post-pi-min", classifyConfig.post_pi_min,
                    "Minimum global class weight")
       ->default_val(5e-4);
-  classify
-      ->add_flag("--evidence-override,!--no-evidence-override",
-                 classifyConfig.evidence_override,
-                 "Allow strong pre-EM evidence to bypass posterior filter")
-      ->default_val(false);
-  classify
-      ->add_option("--em-temp", classifyConfig.em_temp,
-                   "Softmax temperature inside EM/VEM")
-      ->default_val(1.10);
-  classify
-      ->add_option("--em-prior-strength", classifyConfig.em_prior_strength,
-                   "Dirichlet pseudo-count mass for abundance prior")
-      ->default_val(0.25);
-  classify
-      ->add_option("--em-coexist-penalty",
-                   classifyConfig.em_coexist_penalty,
-                   "Penalty term when candidates are near-tied")
-      ->default_val(0.20);
-  classify
-      ->add_flag("--output-posterior,!--no-output-posterior",
-                 classifyConfig.output_posterior,
-                 "Write posterior probabilities to the TSV output")
-      ->default_val("true");
   // TODO: 后处理相关参数暂时废弃，内部逻辑维持默认行为
   classify->add_flag("-q,--quiet", classifyQuietRequested, "Quiet output");
 

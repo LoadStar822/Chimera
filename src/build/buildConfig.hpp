@@ -37,11 +37,6 @@ namespace ChimeraBuild {
 		return seed >> shift;
 	}
 
-	enum class HashFreqMode {
-		Off,
-		BasicFilter
-	};
-
 	struct BuildConfig {
 		std::string taxonomy_kind{ "auto" };
 		std::string taxonomy_version{ "auto" };
@@ -60,23 +55,10 @@ namespace ChimeraBuild {
 		bool verbose = true;
 		double load_factor{ 0.95 };
 		size_t max_hashes_per_taxid = 0;
-		HashFreqMode hash_freq_mode{ HashFreqMode::BasicFilter };
-		uint32_t hash_sketch_width{ 1u << 22 };
-		uint32_t hash_sketch_depth{ 4 };
-		double hash_filter_quantile{ 0.999 };
-		bool adaptive_cutoff = false;
+		uint32_t presence_unique_deg{ 1 };
 	};
 
 	inline std::ostream& operator<<(std::ostream& os, const BuildConfig& config) {
-		auto hashFreqModeToString = [](HashFreqMode mode) {
-			switch (mode) {
-			case HashFreqMode::Off:
-				return "off";
-			case HashFreqMode::BasicFilter:
-			default:
-				return "basic";
-			}
-		};
 		os << std::string(50, '=') << std::endl;
 		os << " Build Configuration " << std::endl;
 		os << std::string(50, '=') << std::endl;
@@ -98,11 +80,7 @@ namespace ChimeraBuild {
 			<< std::setw(25) << "Threads:" << config.threads << std::endl
 		<< std::setw(25) << "Load factor:" << config.load_factor << std::endl
 			<< std::setw(25) << "Max hashes per taxid:" << config.max_hashes_per_taxid << std::endl
-			<< std::setw(25) << "Hash freq mode:" << hashFreqModeToString(config.hash_freq_mode) << std::endl
-			<< std::setw(25) << "Hash sketch depth:" << config.hash_sketch_depth << std::endl
-			<< std::setw(25) << "Hash sketch width:" << config.hash_sketch_width << std::endl
-			<< std::setw(25) << "Hash filter quantile:" << config.hash_filter_quantile << std::endl
-			<< std::setw(25) << "Adaptive cutoff:" << std::boolalpha << config.adaptive_cutoff << std::noboolalpha << std::endl
+			<< std::setw(25) << "Presence unique deg:" << config.presence_unique_deg << std::endl
 			<< std::setw(25) << "Verbose:" << config.verbose << std::endl;
 
 		os << std::string(50, '=') << std::endl;
@@ -148,6 +126,7 @@ namespace ChimeraBuild {
 	uint16_t strobeWmin{ 0 };
 	uint16_t strobeWmax{ 0 };
 	uint8_t strobeK{ 0 };
+	uint32_t presenceUniqueDeg{ 1 };
 
 	template <class Archive>
 	void serialize(Archive& archive) {
@@ -170,20 +149,23 @@ namespace ChimeraBuild {
 				       strobeOrder,
 				       strobeWmin,
 				       strobeWmax,
-				       strobeK);
+				       strobeK,
+				       presenceUniqueDeg);
 			} catch (const cereal::Exception&) {
 				featureMethod = 0;
 				strobeOrder = 0;
 				strobeWmin = 0;
 				strobeWmax = 0;
 				strobeK = 0;
+				presenceUniqueDeg = 1;
 			}
 		} else {
 			archive(featureMethod,
 			       strobeOrder,
 			       strobeWmin,
 			       strobeWmax,
-			       strobeK);
+			       strobeK,
+			       presenceUniqueDeg);
 		}
 	}
 	};

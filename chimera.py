@@ -139,17 +139,6 @@ def parse_arguments():
         default="auto",
         help="taxonomy 数据版本标识，例如 ncbi-taxdump-2025-09-15 或 gtdb-rs226",
     )
-    build_parser.add_argument(
-        "--adaptive-cutoff",
-        action="store_true",
-        help="启用基于文件规模的自适应 cutoff",
-    )
-    build_parser.add_argument(
-        "--hash-freq-mode",
-        choices=["off", "basic"],
-        default="basic",
-        help="Hash frequency filter mode (off|basic)",
-    )
 
     # Download and Build combined subcommand
     download_build_parser = subparsers.add_parser(
@@ -205,6 +194,12 @@ def parse_arguments():
         help="Maximum number of hashes per taxid",
     )
     download_build_parser.add_argument(
+        "--presence-unique-deg",
+        type=int,
+        default=1,
+        help="Degree cutoff (<=) treated as unique signature for coverage meta",
+    )
+    download_build_parser.add_argument(
         "--taxonomy-kind",
         dest="taxonomy_kind",
         default="auto",
@@ -216,17 +211,6 @@ def parse_arguments():
         dest="taxonomy_version",
         default="auto",
         help="taxonomy 数据版本标识，例如 ncbi-taxdump-2025-09-15 或 gtdb-rs226",
-    )
-    download_build_parser.add_argument(
-        "--adaptive-cutoff",
-        action="store_true",
-        help="启用基于文件规模的自适应 cutoff",
-    )
-    download_build_parser.add_argument(
-        "--hash-freq-mode",
-        choices=["off", "basic"],
-        default="basic",
-        help="Hash frequency filter mode (off|basic)",
     )
 
     # Classify subcommand
@@ -279,49 +263,24 @@ def parse_arguments():
         help="Limit candidates before EM/VEM to top K (default 16)",
     )
     classify_parser.add_argument(
-        "--presence-caller",
-        choices=["tdfdr", "hard_cutoff"],
-        default=None,
-        help="Presence caller strategy (tdfdr|hard_cutoff)",
-    )
-    classify_parser.add_argument(
-        "--presence-q",
+        "--presence-pi",
         type=float,
         default=None,
-        help="Target q-value cutoff for presence calling",
+        help="Presence prior probability for coverage model (0-1)",
     )
     classify_parser.add_argument(
-        "--presence-report-only",
-        dest="presence_report_only",
-        action="store_true",
-        default=None,
-        help="将 presence 先验仅用于报告，不裁剪候选 (默认关闭)",
-    )
-    classify_parser.add_argument(
-        "--presence-hard-filter",
-        dest="presence_report_only",
-        action="store_false",
-        help="启用 presence 硬裁剪 (默认)",
-    )
-    classify_parser.add_argument(
-        "--presence-abundance-prior",
+        "--presence-tau",
         type=float,
         default=None,
-        help="Abundance-driven prior weight applied to tdFDR p-values",
+        help="Log posterior odds threshold for coverage model",
     )
     classify_parser.add_argument(
-        "--auto-q-tune",
-        dest="auto_q_tune",
-        action="store_true",
+        "--presence-noise",
+        type=float,
         default=None,
-        help="Enable auto q tuning (default on)",
+        help="Override noise μ for coverage model; <=0 auto",
     )
-    classify_parser.add_argument(
-        "--no-auto-q-tune",
-        dest="auto_q_tune",
-        action="store_false",
-        help="Disable auto q tuning",
-    )
+    # presence-unique-deg 固定随数据库，分类侧不再暴露参数
     classify_parser.add_argument(
         "--decoy-mode",
         default=None,
@@ -340,77 +299,10 @@ def parse_arguments():
         help="Exclusive edge weighting gamma",
     )
     classify_parser.add_argument(
-        "--min-unique-evidence",
-        type=int,
-        default=None,
-        help="Minimum IMCF unique-edge hits required to test presence",
-    )
-    classify_parser.add_argument(
-        "--adaptive-fdr",
-        dest="adaptive_fdr",
-        action="store_true",
-        default=None,
-        help="Enable per-read noise-calibrated threshold (default on)",
-    )
-    classify_parser.add_argument(
-        "--no-adaptive-fdr",
-        dest="adaptive_fdr",
-        action="store_false",
-        help="Disable per-read noise-calibrated threshold",
-    )
-    classify_parser.add_argument(
-        "--fdr-z",
-        type=float,
-        default=None,
-        help="Z score for Poisson(mu)+Z*sqrt(mu) threshold (default 3.0)",
-    )
-    classify_parser.add_argument(
-        "--min-eval-count",
-        type=int,
-        default=None,
-        help="Minimum evaluated syncmers required to classify (default auto)",
-    )
-    classify_parser.add_argument(
         "--post-thres",
         type=float,
         default=None,
         help="Posterior acceptance threshold (default 0.56)",
-    )
-    classify_parser.add_argument(
-        "--post-margin",
-        type=float,
-        default=None,
-        help="Minimum gap between top posteriors (default 0.03)",
-    )
-    classify_parser.add_argument(
-        "--post-ratio",
-        type=float,
-        default=None,
-        help="Minimum ratio between top1 and top2 posteriors (default 1.30)",
-    )
-    classify_parser.add_argument(
-        "--post-relax-abs",
-        type=float,
-        default=None,
-        help="Absolute posterior floor for relaxed gate",
-    )
-    classify_parser.add_argument(
-        "--post-relax-ratio",
-        type=float,
-        default=None,
-        help="Ratio threshold for relaxed gate",
-    )
-    classify_parser.add_argument(
-        "--post-relax-delta",
-        type=float,
-        default=None,
-        help="Gap threshold for relaxed gate",
-    )
-    classify_parser.add_argument(
-        "--post-relax-delta-abs",
-        type=float,
-        default=None,
-        help="Absolute posterior floor for gap-based relaxed gate",
     )
     classify_parser.add_argument(
         "--post-pi-min",
@@ -418,27 +310,7 @@ def parse_arguments():
         default=None,
         help="Minimum global class weight (default 0.0005)",
     )
-    classify_parser.add_argument(
-        "--evidence-override",
-        dest="evidence_override",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Allow strong pre-EM evidence to bypass posterior filter",
-    )
     # NOTE: LCA 及后处理相关参数暂时废弃，内部逻辑继续沿用默认值
-    classify_parser.add_argument(
-        "--output-posterior",
-        dest="output_posterior",
-        action="store_true",
-        default=None,
-        help="Write posterior probabilities to the TSV output",
-    )
-    classify_parser.add_argument(
-        "--no-output-posterior",
-        dest="output_posterior",
-        action="store_false",
-        help="Do not write posterior probabilities to the TSV output",
-    )
     classify_parser.add_argument(
         "-t",
         "--threads",
@@ -454,9 +326,6 @@ def parse_arguments():
         "--em",
         action="store_true",
         help="Use EM algorithm for classification (default)",
-    )
-    classify_parser.add_argument(
-        "-V", "--vem", action="store_true", help="Use VEM algorithm for classification"
     )
     classify_parser.add_argument(
         "--em-iter", type=int, default=80, help="Number of EM iterations"
@@ -526,9 +395,8 @@ def parse_arguments():
 
     args = parser.parse_args()
 
-    if args.command == "classify":
-        if not any([args.em, args.vem]):
-            args.em = True
+    if args.command == "classify" and not args.em:
+        args.em = True
 
     if args.command in {"build", "download_and_build"}:
         if args.syncmer_s < 1:
@@ -648,10 +516,10 @@ def run_chimera(args, chimera_path):
             command.extend(["-l", str(args.min_length)])
         command.extend(["-t", str(args.threads)])
         command.extend(["--load-factor", str(args.load_factor)])
-        if args.adaptive_cutoff:
-            command.append("--adaptive-cutoff")
-        command.extend(["--hash-freq-mode", args.hash_freq_mode])
         command.extend(["-M", str(args.max_hashes)])
+        command.extend(
+            ["--presence-unique-deg", str(args.presence_unique_deg)]
+        )
 
     elif args.command == "classify":
         if args.single:
@@ -670,84 +538,34 @@ def run_chimera(args, chimera_path):
             command.extend(["--first-filter-beta", str(args.first_filter_beta)])
         if args.pre_em_topk is not None:
             command.extend(["--pre-em-topk", str(args.pre_em_topk)])
-        if args.presence_caller is not None:
-            command.extend(["--presence-caller", args.presence_caller])
-        if args.presence_q is not None:
-            command.extend(["--presence-q", str(args.presence_q)])
-        if args.presence_report_only is True:
-            command.append("--presence-report-only")
-        elif args.presence_report_only is False:
-            command.append("--presence-hard-filter")
-        if args.presence_abundance_prior is not None:
+        if args.presence_pi is not None:
+            command.extend(["--presence-pi", str(args.presence_pi)])
+        if args.presence_tau is not None:
+            command.extend(["--presence-tau", str(args.presence_tau)])
+        if args.presence_noise is not None:
+            command.extend(["--presence-noise", str(args.presence_noise)])
+        if args.presence_unique_deg is not None:
             command.extend(
-                ["--presence-abundance-prior", str(args.presence_abundance_prior)]
+                ["--presence-unique-deg", str(args.presence_unique_deg)]
             )
-        if args.auto_q_tune is True:
-            command.append("--auto-q-tune")
-        elif args.auto_q_tune is False:
-            command.append("--no-auto-q-tune")
         if args.decoy_mode is not None:
             command.extend(["--decoy-mode", args.decoy_mode])
         if args.decoy_reps is not None:
             command.extend(["--decoy-reps", str(args.decoy_reps)])
         if args.exclusive_gamma is not None:
             command.extend(["--exclusive-gamma", str(args.exclusive_gamma)])
-        if args.min_unique_evidence is not None:
-            command.extend(["--min-unique-evidence", str(args.min_unique_evidence)])
-        if args.adaptive_fdr is True:
-            command.append("--adaptive-fdr")
-        elif args.adaptive_fdr is False:
-            command.append("--no-adaptive-fdr")
-        if args.fdr_z is not None:
-            command.extend(["--fdr-z", str(args.fdr_z)])
-        if args.min_eval_count is not None:
-            command.extend(["--min-eval-count", str(args.min_eval_count)])
         if args.post_thres is not None:
             command.extend(["--post-thres", str(args.post_thres)])
-        if args.post_margin is not None:
-            command.extend(["--post-margin", str(args.post_margin)])
-        if args.post_ratio is not None:
-            command.extend(["--post-ratio", str(args.post_ratio)])
-        if args.post_relax_abs is not None:
-            command.extend(["--post-relax-abs", str(args.post_relax_abs)])
-        if args.post_relax_ratio is not None:
-            command.extend(["--post-relax-ratio", str(args.post_relax_ratio)])
-        if args.post_relax_delta is not None:
-            command.extend(["--post-relax-delta", str(args.post_relax_delta)])
-        if args.post_relax_delta_abs is not None:
-            command.extend(
-                ["--post-relax-delta-abs", str(args.post_relax_delta_abs)]
-            )
+        # posterior gating now只用 post_thres + post_pi_min
         if args.post_pi_min is not None:
             command.extend(["--post-pi-min", str(args.post_pi_min)])
-        if args.evidence_override is True:
-            command.append("--evidence-override")
-        elif args.evidence_override is False:
-            command.append("--no-evidence-override")
-        if args.output_posterior is True:
-            command.append("--output-posterior")
-        elif args.output_posterior is False:
-            command.append("--no-output-posterior")
         command.extend(["-t", str(args.threads)])
         command.extend(["-b", str(args.batch_size)])
         if args.em:
             command.append("-e")
             command.extend(["--em-iter", str(args.em_iter)])
             command.extend(["--em-threshold", str(args.em_threshold)])
-        if args.vem:
-            command.append("-V")
-            command.extend(["--em-iter", str(args.em_iter)])
-            command.extend(["--em-threshold", str(args.em_threshold)])
-        if args.em_temp is not None:
-            command.extend(["--em-temp", str(args.em_temp)])
-        if args.em_prior_strength is not None:
-            command.extend(
-                ["--em-prior-strength", str(args.em_prior_strength)]
-            )
-        if args.em_coexist_penalty is not None:
-            command.extend(
-                ["--em-coexist-penalty", str(args.em_coexist_penalty)]
-            )
+        # EM 温度/先验/penalty 固定内部默认
 
     # Execute the command using the provided run function
     downloader.run_command(command)

@@ -40,6 +40,7 @@
 
 #include <utils/FeatureHasher.hpp>
 #include <utils/CountMinSketch.hpp>
+#include <utils/PresenceModel.hpp>
 
 namespace ChimeraBuild {
 	static inline uint64_t mix64(uint64_t value) {
@@ -59,7 +60,6 @@ namespace ChimeraBuild {
 	};
 
 	struct HashFrequencyContext {
-		HashFreqMode mode{ HashFreqMode::Off };
 		double quantile{ 0.999 };
 		std::unique_ptr<CountMinSketch> sketch;
 		HashFreqStats stats{};
@@ -68,7 +68,7 @@ namespace ChimeraBuild {
 		std::atomic<uint64_t> passB_filtered_hashes{ 0 };
 
 		bool enabled() const {
-			return mode != HashFreqMode::Off && static_cast<bool>(sketch);
+			return static_cast<bool>(sketch);
 		}
 	};
 
@@ -187,22 +187,16 @@ namespace ChimeraBuild {
 	                                       const robin_hood::unordered_flat_map<std::string, std::vector<std::string>> &inputFiles,
 	                                       HashFrequencyContext &context)
 	{
+		constexpr uint32_t kSketchDepth = 4;
+		constexpr uint32_t kSketchWidth = 1u << 22;
 		context.passA_total_hashes.store(0, std::memory_order_relaxed);
 		context.passB_total_hashes.store(0, std::memory_order_relaxed);
 		context.passB_filtered_hashes.store(0, std::memory_order_relaxed);
 		context.stats = {};
-		if (context.mode == HashFreqMode::Off) {
-			context.sketch.reset();
-			return;
-		}
-		if (config.hash_sketch_depth == 0 || config.hash_sketch_width == 0) {
-			throw std::invalid_argument("Hash sketch depth and width must be positive");
-		}
-		std::cout << "Building hash frequency sketch (mode="
-		          << (context.mode == HashFreqMode::BasicFilter ? "basic" : "off")
-		          << ", depth=" << config.hash_sketch_depth
-		          << ", width=" << config.hash_sketch_width << ")..." << std::endl;
-		context.sketch = std::make_unique<CountMinSketch>(config.hash_sketch_depth, config.hash_sketch_width);
+		context.quantile = 0.999;
+		std::cout << "Building hash frequency sketch (depth=" << kSketchDepth
+		          << ", width=" << kSketchWidth << ")..." << std::endl;
+		context.sketch = std::make_unique<CountMinSketch>(kSketchDepth, kSketchWidth);
 		std::vector<std::string> all_files;
 		for (const auto &entry : inputFiles) {
 			for (const auto &filename : entry.second) {
@@ -595,41 +589,13 @@ namespace ChimeraBuild {
 				// Thread-local file information
 				FileInfo localFileInfo = {};
 
-			// Calculate the threshold
-			uint8_t cutoff = 0;
-			if (config.adaptive_cutoff)
-			{
-				// 基于文件大小估算 cutoff，仅在显式开启时触发
-				std::filesystem::path filepath(filename);
-				size_t filesize = std::filesystem::file_size(filepath);
-				bool is_compressed = file_is_compressed(filepath);
-
-				size_t adjusted_filesize = filesize * 2 / (is_compressed ? 1 : 3);
-
-				if (adjusted_filesize <= 314'572'800ULL) // 300 MB
-					cutoff = 1;
-				else if (adjusted_filesize <= 524'288'000ULL) // 500 MB
-					cutoff = 3;
-				else if (adjusted_filesize <= 1'073'741'824ULL) // 1 GB
-					cutoff = 10;
-				else if (adjusted_filesize <= 3'221'225'472ULL) // 3 GB
-					cutoff = 20;
-				else
-					cutoff = 50;
-			}
-
-			// 未启用 adaptive_cutoff 时强制采用流式路径，max_hashes 仍由 flush_buffer 控制
-			const bool streaming = (!config.adaptive_cutoff);
-
 			// Open the sequence file
 			seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ filename };
 			std::vector<uint64_t> hashes;
 			hashes.reserve(4096);
 
-			if (streaming)
+			for (auto &record : fin)
 			{
-				for (auto &record : fin)
-				{
 					auto &seq = record.sequence();
 
 					if (seq.size() < min_required)
@@ -672,73 +638,6 @@ namespace ChimeraBuild {
 						flush_buffer(taxid_index, thread_buffer, tid);
 					}
 				}
-			}
-			else
-			{
-				robin_hood::unordered_flat_map<uint64_t, uint8_t> local_hash_counts;
-				for (auto &record : fin)
-				{
-					auto &seq = record.sequence();
-
-					if (seq.size() < min_required)
-					{
-						localFileInfo.skippedSeqNum++;
-						continue;
-					}
-					localFileInfo.sequenceNum++;
-					localFileInfo.bpLength += seq.size();
-
-					hashes.clear();
-					chimera::feature::compute_hashes_append(seq, feature_params, hashes);
-					for (uint64_t hash : hashes)
-					{
-						uint8_t &count = local_hash_counts[hash];
-						if (count < 255)
-							++count;
-					}
-				}
-
-				std::vector<uint64_t> filtered_hashes;
-				filtered_hashes.reserve(local_hash_counts.size());
-				for (const auto &[hash, count] : local_hash_counts)
-				{
-					if (count >= cutoff)
-					{
-						filtered_hashes.emplace_back(hash);
-					}
-				}
-
-				local_hash_counts.clear();
-
-				if (freq_filter_enabled && !filtered_hashes.empty())
-				{
-					size_t write_idx = 0;
-					for (uint64_t hash : filtered_hashes)
-					{
-						if (keep_hash(hash))
-						{
-							filtered_hashes[write_idx++] = hash;
-						}
-					}
-					filtered_hashes.resize(write_idx);
-				}
-
-				if (max_hashes > 0 && filtered_hashes.size() > max_hashes)
-				{
-					filtered_hashes.resize(max_hashes);
-				}
-
-				if (!filtered_hashes.empty())
-				{
-					thread_buffer.insert(thread_buffer.end(), filtered_hashes.begin(), filtered_hashes.end());
-					pendingHashCounts[taxid_index].fetch_add(filtered_hashes.size(), std::memory_order_relaxed);
-					if (thread_buffer.size() * sizeof(uint64_t) >= hash_buffer_flush_bytes)
-					{
-						flush_buffer(taxid_index, thread_buffer, tid);
-					}
-				}
-			}
-
 				// Update global hash count
 				{
 					std::lock_guard<std::mutex> lock(fileInfo_mutex);
@@ -790,8 +689,83 @@ namespace ChimeraBuild {
 						std::error_code ec;
 						std::filesystem::remove(part_path, ec);
 					}
-				}
 			}
+		}
+	}
+
+	static chimera::presence::CoverageMeta compute_presence_meta(
+	    const robin_hood::unordered_flat_map<std::string, uint64_t> &hashCount,
+	    std::string_view featureSuffix,
+	    const HashFrequencyContext *hashFreqContext,
+	    uint32_t uniqueDegThreshold,
+	    uint16_t threads) {
+		chimera::presence::CoverageMeta meta;
+		meta.unique_deg_threshold = std::max<uint32_t>(1, uniqueDegThreshold);
+		if (hashCount.empty()) {
+			return meta;
+		}
+		const bool hasSketch = (hashFreqContext != nullptr) &&
+		                       hashFreqContext->enabled() &&
+		                       static_cast<bool>(hashFreqContext->sketch);
+		std::vector<std::string> taxids;
+		taxids.reserve(hashCount.size());
+		for (const auto &kv : hashCount) {
+			taxids.push_back(kv.first);
+		}
+
+#pragma omp parallel
+		{
+			std::vector<chimera::presence::CoverageEntry> local;
+			std::vector<uint64_t> buffer;
+			buffer.resize(1u << 14);
+
+#pragma omp for schedule(dynamic)
+			for (size_t i = 0; i < taxids.size(); ++i) {
+				const std::string &taxid = taxids[i];
+				std::string path = tmp_hash_path(taxid, featureSuffix);
+				std::ifstream is(path, std::ios::binary);
+				if (!is.is_open()) {
+#pragma omp critical(imcf_log)
+					std::cerr << "Coverage meta: failed to open feature file "
+					          << path << std::endl;
+					continue;
+				}
+				uint64_t unique = 0;
+				uint64_t total = 0;
+				while (is) {
+					is.read(reinterpret_cast<char *>(buffer.data()),
+					        static_cast<std::streamsize>(buffer.size() *
+					                                     sizeof(uint64_t)));
+					std::streamsize bytes = is.gcount();
+					if (bytes <= 0) {
+						break;
+					}
+					size_t got = static_cast<size_t>(bytes) / sizeof(uint64_t);
+					total += got;
+					for (size_t k = 0; k < got; ++k) {
+						uint32_t df_est = 1;
+						if (hasSketch) {
+							df_est = hashFreqContext->sketch->estimate(buffer[k]);
+						}
+						if (df_est <= meta.unique_deg_threshold) {
+							++unique;
+						}
+					}
+				}
+				if (unique > total) {
+					unique = total;
+				}
+				local.push_back({taxid, unique, total});
+			}
+
+#pragma omp critical
+			{
+				meta.entries.insert(meta.entries.end(), local.begin(),
+				                    local.end());
+			}
+		}
+
+		return meta;
 	}
 
 	/**
@@ -1199,7 +1173,8 @@ namespace ChimeraBuild {
 		const std::string& output_file,
 		std::vector<std::vector<std::string>>& indexToTaxid,
 		IMCFConfig& imcfConfig,
-		bool needIndexStructures)
+		bool needIndexStructures,
+		const chimera::presence::CoverageMeta* presenceMeta)
 	{
 	// Open the output file
 	std::ofstream os(output_file + ".imcf", std::ios::binary);
@@ -1269,6 +1244,9 @@ namespace ChimeraBuild {
 		archive(imcf);
 		archive(indexToTaxid);
 		archive(imcfConfig);
+		if (presenceMeta) {
+			archive(*presenceMeta);
+		}
 		os.close();
 		return true;
 	});
@@ -1416,11 +1394,7 @@ namespace ChimeraBuild {
 		}
 
 		HashFrequencyContext hashFreqContext;
-		hashFreqContext.mode = config.hash_freq_mode;
-		hashFreqContext.quantile = config.hash_filter_quantile;
-		if (hashFreqContext.mode != HashFreqMode::Off) {
-			build_hash_frequency_sketch(config, inputFiles, hashFreqContext);
-		}
+		build_hash_frequency_sketch(config, inputFiles, hashFreqContext);
 
 		std::filesystem::path dir = "tmp";
 		createOrResetDirectory(dir, config);
@@ -1448,9 +1422,29 @@ namespace ChimeraBuild {
 				std::ostringstream ratio_stream;
 				double ratio = static_cast<double>(filtered) * 100.0 / static_cast<double>(total_checked);
 				ratio_stream << std::fixed << std::setprecision(2) << ratio;
-				std::cout << " (" << ratio_stream.str() << "%)";
+			std::cout << " (" << ratio_stream.str() << "%)";
 			}
 			std::cout << " with df >= " << hashFreqContext.stats.df_high_threshold << std::endl;
+		}
+
+		chimera::feature::Method imcf_feature_method{};
+		uint64_t imcf_feature_seed = 0;
+		make_feature_params(config, imcf_feature_method, imcf_feature_seed);
+		const std::string feature_suffix =
+		    (imcf_feature_method == chimera::feature::Method::Strobemer) ? ".strb" : ".sync";
+
+		std::cout << "Estimating per-genome unique signatures (deg <= "
+		          << config.presence_unique_deg << ")..." << std::endl;
+		auto presence_meta = compute_presence_meta(
+		    hashCount, feature_suffix,
+		    hashFreqContext.enabled() ? &hashFreqContext : nullptr,
+		    config.presence_unique_deg, config.threads);
+		if (presence_meta.entries.empty()) {
+			std::cout << "  coverage meta: empty (fallback to runtime heuristics)"
+			          << std::endl;
+		} else {
+			std::cout << "  coverage meta: " << presence_meta.entries.size()
+			          << " taxa cached" << std::endl;
 		}
 
 		auto partition_start = std::chrono::high_resolution_clock::now();
@@ -1466,10 +1460,6 @@ namespace ChimeraBuild {
 
 		auto imcf_build_start = std::chrono::high_resolution_clock::now();
 		std::cout << "Building IMCF..." << std::endl;
-		uint64_t imcf_feature_seed = 0;
-		chimera::feature::Method imcf_feature_method{};
-		make_feature_params(config, imcf_feature_method, imcf_feature_seed);
-		const std::string feature_suffix = (imcf_feature_method == chimera::feature::Method::Strobemer) ? ".strb" : ".sync";
 		IMCFConfig imcfConfig;
 		imcfConfig.loadFactor = config.load_factor;
 		imcfConfig.kmerSize = config.kmer_size;
@@ -1478,6 +1468,7 @@ namespace ChimeraBuild {
 		imcfConfig.seed64 = imcf_feature_seed;
 		imcfConfig.fpSalt = IMCFConfig::DefaultFingerprintSalt;
 		imcfConfig.hashVersion = IMCFConfig::CurrentHashVersion;
+		imcfConfig.presenceUniqueDeg = config.presence_unique_deg;
 		if (imcf_feature_method == chimera::feature::Method::Strobemer) {
 			imcfConfig.featureMethod = 1;
 			imcfConfig.strobeOrder = config.strobemer_order;
@@ -1514,7 +1505,8 @@ namespace ChimeraBuild {
 
 		auto save_start = std::chrono::high_resolution_clock::now();
 		std::cout << "Saving IMCF..." << std::endl;
-		saveIMCF(imcf, config.output_file, indexToTaxid, imcfConfig, true);
+		saveIMCF(imcf, config.output_file, indexToTaxid, imcfConfig, true,
+		         &presence_meta);
 		auto save_end = std::chrono::high_resolution_clock::now();
 		auto save_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(save_end - save_start).count();
 		if (config.verbose) {
