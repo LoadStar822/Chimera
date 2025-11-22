@@ -56,7 +56,8 @@ inline std::pair<std::vector<classifyResult>, std::unordered_map<std::string, do
 VEMAlgorithm(const std::vector<classifyResult>& input,
 	size_t max_iter,
 	double tol,
-	const VEMOptions& options) {
+	const VEMOptions& options,
+	const std::unordered_map<std::string, double>* prior_scale = nullptr) {
 	std::vector<classifyResult> results = input;
 	std::unordered_set<std::string> taxid_set;
 	for (const auto& record : results) {
@@ -80,12 +81,23 @@ VEMAlgorithm(const std::vector<classifyResult>& input,
 		abundance_prior[taxid] = 0.0;
 	}
 	double abundance_sum = 0.0;
+	auto resolve_scale = [&](const std::string& taxid) -> double {
+		if (!prior_scale) {
+			return 1.0;
+		}
+		auto it = prior_scale->find(taxid);
+		if (it == prior_scale->end() || !(it->second > 0.0)) {
+			return 1.0;
+		}
+		return it->second;
+	};
 	for (const auto& record : results) {
 		for (const auto& [taxid, count] : record.taxidCount) {
 			if (vem_detail::is_unclassified(taxid)) {
 				continue;
 			}
-			double contrib = static_cast<double>(count);
+			double scale = resolve_scale(taxid);
+			double contrib = static_cast<double>(count) / scale;
 			abundance_prior[taxid] += contrib;
 			abundance_sum += contrib;
 		}

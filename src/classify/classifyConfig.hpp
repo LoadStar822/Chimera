@@ -125,6 +125,9 @@ namespace ChimeraClassify {
 		std::unordered_set<std::string> uniqueTaxids;
 		robin_hood::unordered_flat_map<std::string, size_t> taxidTotalMatches;
 		robin_hood::unordered_flat_map<std::string, size_t> taxidUniqueMatches;
+		robin_hood::unordered_flat_map<std::string, size_t> rejectReasons;
+		robin_hood::unordered_flat_map<std::string,
+			robin_hood::unordered_flat_map<std::string, size_t>> rejectByTaxid;
 	};
 
 	struct batchReads {
@@ -138,6 +141,9 @@ namespace ChimeraClassify {
 		std::vector<std::pair<std::string, size_t>> taxidCount;
 		std::vector<std::pair<std::string, double>> posteriors;
 		double evaluated{ 0.0 }; // 实际参与判别的 syncmer 数，用于归一化
+		std::string reject_reason; // 为空表示未拒绝或接受
+		std::string best_taxid_hint; // 最佳候选 taxid（即使未被接受）
+		bool presence_passed{ false }; // 是否通过 presence 层
 	};
 
 	struct DecisionConfig {

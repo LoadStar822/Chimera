@@ -3,16 +3,22 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 class CountMinSketch {
 public:
   CountMinSketch(uint32_t depth, uint32_t width);
+  CountMinSketch(uint32_t depth, uint32_t width,
+                 const std::vector<uint32_t> &counters);
 
   void add(uint64_t key);
   uint32_t estimate(uint64_t key) const;
 
   uint32_t depth() const { return d_; }
   uint32_t width() const { return w_; }
+  size_t size() const { return size_; }
+
+  void exportCounts(std::vector<uint32_t> &out) const;
 
   template <typename F>
   void forEachCounter(F&& f) const {

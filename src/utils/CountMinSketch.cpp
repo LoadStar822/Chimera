@@ -16,6 +16,21 @@ CountMinSketch::CountMinSketch(uint32_t depth, uint32_t width)
   }
 }
 
+CountMinSketch::CountMinSketch(uint32_t depth, uint32_t width,
+                               const std::vector<uint32_t> &counters)
+    : d_(depth), w_(width), size_(static_cast<size_t>(depth) * static_cast<size_t>(width)) {
+  if (d_ == 0 || w_ == 0) {
+    throw std::invalid_argument("CountMinSketch dimensions must be non-zero");
+  }
+  if (counters.size() != size_) {
+    throw std::invalid_argument("CountMinSketch counters size mismatch");
+  }
+  table_ = std::make_unique<std::atomic<uint32_t>[]>(size_);
+  for (size_t i = 0; i < size_; ++i) {
+    table_[i].store(counters[i], std::memory_order_relaxed);
+  }
+}
+
 void CountMinSketch::add(uint64_t key) {
   for (uint32_t row = 0; row < d_; ++row) {
     const uint32_t column = index(row, key);
@@ -36,6 +51,13 @@ uint32_t CountMinSketch::estimate(uint64_t key) const {
     return 0;
   }
   return estimate_value;
+}
+
+void CountMinSketch::exportCounts(std::vector<uint32_t> &out) const {
+  out.resize(size_);
+  for (size_t i = 0; i < size_; ++i) {
+    out[i] = table_[i].load(std::memory_order_relaxed);
+  }
 }
 
 uint32_t CountMinSketch::index(uint32_t row, uint64_t key) const {

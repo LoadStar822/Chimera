@@ -53,16 +53,10 @@ namespace ChimeraBuild {
 		uint64_t expectedCount;
 	};
 
-	struct HashFreqStats {
-		uint32_t df_high_threshold{ std::numeric_limits<uint32_t>::max() };
-		uint32_t df_max_observed{ 0 };
-		uint64_t nonzero_counters{ 0 };
-	};
-
 	struct HashFrequencyContext {
 		double quantile{ 0.999 };
 		std::unique_ptr<CountMinSketch> sketch;
-		HashFreqStats stats{};
+		chimera::presence::HashFreqStats stats{};
 		std::atomic<uint64_t> passA_total_hashes{ 0 };
 		std::atomic<uint64_t> passB_total_hashes{ 0 };
 		std::atomic<uint64_t> passB_filtered_hashes{ 0 };
@@ -138,9 +132,9 @@ namespace ChimeraBuild {
 		}
 	}
 
-	static HashFreqStats compute_hash_freq_stats(const CountMinSketch &cms, double quantile)
+	static chimera::presence::HashFreqStats compute_hash_freq_stats(const CountMinSketch &cms, double quantile)
 	{
-		HashFreqStats stats{};
+		chimera::presence::HashFreqStats stats{};
 		std::array<uint64_t, 32> histogram{};
 		cms.forEachCounter([&](uint32_t value) {
 			if (value == 0) {
@@ -393,7 +387,8 @@ namespace ChimeraBuild {
 		robin_hood::unordered_flat_map<std::string, std::vector<std::string>>& inputFiles,
 		robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
 		FileInfo& fileInfo,
-		HashFrequencyContext* hashFreqContext)
+		HashFrequencyContext* hashFreqContext,
+		robin_hood::unordered_flat_map<std::string, uint64_t>* bpCount = nullptr)
 	{
 	chimera::feature::Method feature_method{};
 	uint64_t feature_seed = 0;
@@ -438,6 +433,10 @@ namespace ChimeraBuild {
 		std::vector<std::atomic<size_t>> pendingHashCounts(index);
 		for (auto &pending : pendingHashCounts) {
 			pending.store(0, std::memory_order_relaxed);
+		}
+		std::vector<std::atomic<uint64_t>> bpCounters(index);
+		for (auto &bp : bpCounters) {
+			bp.store(0, std::memory_order_relaxed);
 		}
 		// Global file information statistics
 		FileInfo globalFileInfo = {};
@@ -598,13 +597,15 @@ namespace ChimeraBuild {
 			{
 					auto &seq = record.sequence();
 
-					if (seq.size() < min_required)
+					const uint64_t seq_len = seq.size();
+					bpCounters[taxid_index].fetch_add(seq_len, std::memory_order_relaxed);
+					if (seq_len < min_required)
 					{
 						localFileInfo.skippedSeqNum++;
 						continue;
 					}
 					localFileInfo.sequenceNum++;
-					localFileInfo.bpLength += seq.size();
+					localFileInfo.bpLength += seq_len;
 
 					hashes.clear();
 					chimera::feature::compute_hashes_append(seq, feature_params, hashes);
@@ -654,6 +655,13 @@ namespace ChimeraBuild {
 			}
 		}
 
+		if (bpCount) {
+			for (size_t idx = 0; idx < index_to_taxid.size(); ++idx) {
+				const std::string &taxid = index_to_taxid[idx];
+				(*bpCount)[taxid] = bpCounters[idx].load(std::memory_order_relaxed);
+			}
+		}
+
 			for (size_t idx = 0; idx < index_to_taxid.size(); ++idx)
 			{
 				const std::string &taxid = index_to_taxid[idx];
@@ -697,10 +705,15 @@ namespace ChimeraBuild {
 	    const robin_hood::unordered_flat_map<std::string, uint64_t> &hashCount,
 	    std::string_view featureSuffix,
 	    const HashFrequencyContext *hashFreqContext,
+	    const robin_hood::unordered_flat_map<std::string, uint64_t> *bpCount,
+	    uint16_t effectiveSpan,
+	    uint16_t refReadLen,
 	    uint32_t uniqueDegThreshold,
 	    uint16_t threads) {
 		chimera::presence::CoverageMeta meta;
 		meta.unique_deg_threshold = std::max<uint32_t>(1, uniqueDegThreshold);
+		meta.ref_read_length = refReadLen;
+		meta.effective_span = effectiveSpan;
 		if (hashCount.empty()) {
 			return meta;
 		}
@@ -755,7 +768,30 @@ namespace ChimeraBuild {
 				if (unique > total) {
 					unique = total;
 				}
-				local.push_back({taxid, unique, total});
+				uint64_t genome_bp = 0;
+				if (bpCount) {
+					auto itbp = bpCount->find(taxid);
+					if (itbp != bpCount->end()) {
+						genome_bp = itbp->second;
+					}
+				}
+				const uint16_t span_used = (effectiveSpan > 0) ? effectiveSpan : static_cast<uint16_t>(1);
+				const double window = std::max<int64_t>(
+				    1, static_cast<int64_t>(refReadLen) - static_cast<int64_t>(span_used) + 1);
+				double density = 0.0;
+				if (genome_bp > 0 && unique > 0) {
+					density = static_cast<double>(unique) /
+					          static_cast<double>(genome_bp);
+				}
+				double expected_ref = (density > 0.0) ? density * window : 0.0;
+				chimera::presence::CoverageEntry entry{};
+				entry.taxid = taxid;
+				entry.unique_signatures = unique;
+				entry.total_signatures = total;
+				entry.genome_length = genome_bp;
+				entry.unique_density = density;
+				entry.expected_unique_per_ref_read = expected_ref;
+				local.push_back(entry);
 			}
 
 #pragma omp critical
@@ -763,6 +799,16 @@ namespace ChimeraBuild {
 				meta.entries.insert(meta.entries.end(), local.begin(),
 				                    local.end());
 			}
+		}
+
+		if (hasSketch && hashFreqContext->sketch) {
+			meta.freq_model.depth = hashFreqContext->sketch->depth();
+			meta.freq_model.width = hashFreqContext->sketch->width();
+			meta.freq_model.quantile = hashFreqContext->quantile;
+			meta.freq_model.stats = hashFreqContext->stats;
+			meta.freq_model.total_hashes = hashFreqContext->passA_total_hashes.load(std::memory_order_relaxed);
+			meta.freq_model.filtered_hashes = hashFreqContext->passB_filtered_hashes.load(std::memory_order_relaxed);
+			hashFreqContext->sketch->exportCounts(meta.freq_model.counters);
 		}
 
 		return meta;
@@ -1383,6 +1429,7 @@ namespace ChimeraBuild {
 			return;
 		}
 		robin_hood::unordered_flat_map<std::string, uint64_t> hashCount;
+		robin_hood::unordered_flat_map<std::string, uint64_t> bpCount;
 		robin_hood::unordered_flat_map<std::string, std::vector<std::string>> inputFiles;
 		parseInputFile(config.input_file, inputFiles, hashCount, fileInfo);
 		auto read_end = std::chrono::high_resolution_clock::now();
@@ -1400,7 +1447,9 @@ namespace ChimeraBuild {
 		createOrResetDirectory(dir, config);
 		auto calculate_start = std::chrono::high_resolution_clock::now();
 		std::cout << "Calculating feature hashes..." << std::endl;
-		syncmer_count(config, inputFiles, hashCount, fileInfo, hashFreqContext.enabled() ? &hashFreqContext : nullptr);
+		syncmer_count(config, inputFiles, hashCount, fileInfo,
+		              hashFreqContext.enabled() ? &hashFreqContext : nullptr,
+		              &bpCount);
 		auto calculate_end = std::chrono::high_resolution_clock::now();
 		auto calculate_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(calculate_end - calculate_start).count();
 		if (config.verbose) {
@@ -1429,15 +1478,20 @@ namespace ChimeraBuild {
 
 		chimera::feature::Method imcf_feature_method{};
 		uint64_t imcf_feature_seed = 0;
-		make_feature_params(config, imcf_feature_method, imcf_feature_seed);
+		auto imcf_feature_params = make_feature_params(config, imcf_feature_method, imcf_feature_seed);
 		const std::string feature_suffix =
 		    (imcf_feature_method == chimera::feature::Method::Strobemer) ? ".strb" : ".sync";
+		const uint16_t effective_span = static_cast<uint16_t>(
+		    std::min<size_t>(std::numeric_limits<uint16_t>::max(),
+		                     chimera::feature::min_required_length(imcf_feature_params)));
+		constexpr uint16_t ref_read_len = 150;
 
 		std::cout << "Estimating per-genome unique signatures (deg <= "
 		          << config.presence_unique_deg << ")..." << std::endl;
 		auto presence_meta = compute_presence_meta(
 		    hashCount, feature_suffix,
 		    hashFreqContext.enabled() ? &hashFreqContext : nullptr,
+		    &bpCount, effective_span, ref_read_len,
 		    config.presence_unique_deg, config.threads);
 		if (presence_meta.entries.empty()) {
 			std::cout << "  coverage meta: empty (fallback to runtime heuristics)"
