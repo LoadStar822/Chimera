@@ -24,6 +24,7 @@
 #include <iomanip>
 #include <fstream>
 #include <sstream>
+#include <string_view>
 #include <string>
 #include <omp.h>
 #include <robin_hood.h>
@@ -43,6 +44,7 @@ namespace ChimeraBuild {
 	std::vector<std::vector<std::string>> buildIMCF(
 		chimera::imcf::InterleavedMergedCuckooFilter& imcf,
 		const std::vector<chimera::imcf::Group>& groups,
-		const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount);
+		const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
+		std::string_view featureSuffix);
 	void run(BuildConfig config);
 }
