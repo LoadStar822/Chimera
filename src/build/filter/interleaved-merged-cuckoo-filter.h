@@ -142,112 +142,160 @@ inline std::vector<Group> partitionHashCount(
   }
   size_t maxTaxids = static_cast<size_t>(maxTaxidsPerGroup);
 
-  // Step 1: Calculate the median of the hash counts and set a threshold
+  // 1) 计算全局统计量，用更小的阈值做细粒度切分
   std::vector<uint64_t> counts;
   counts.reserve(hashCount.size());
+  uint64_t totalHashes = 0;
   for (const auto &[taxid, count] : hashCount) {
     counts.push_back(count);
+    totalHashes += count;
   }
-
   std::sort(counts.begin(), counts.end());
-  uint64_t median = counts[counts.size() / 2];
+  const uint64_t median = counts[counts.size() / 2];
+  const uint64_t mean =
+      counts.empty() ? 0 : (totalHashes / static_cast<uint64_t>(counts.size()));
 
-  uint64_t threshold = 0;
-  if (median == 0) {
-    threshold = 1;
-  } else if (median > std::numeric_limits<uint64_t>::max() / 64ull) {
-    threshold = std::numeric_limits<uint64_t>::max();
-  } else {
-    threshold = median * 64ull;
-  }
-  if (threshold == 0) {
-    threshold = 1;
-  }
+  const uint64_t baseMedian = median == 0 ? 1 : median;
+  const uint64_t thresholdFromMedian =
+      (baseMedian > std::numeric_limits<uint64_t>::max() / 4ull)
+          ? std::numeric_limits<uint64_t>::max()
+          : baseMedian * 4ull;
+  const uint64_t thresholdFromMean = (mean == 0) ? thresholdFromMedian : mean;
+  uint64_t threshold =
+      std::max<uint64_t>(1, std::min<uint64_t>(thresholdFromMedian,
+                                               thresholdFromMean));
 
-  // Step 2: Create chunks for hash counts exceeding the threshold
-  std::vector<HashChunk> hashChunks;
-  for (const auto &[taxid, count] : hashCount) {
-    if (count > threshold) {
-      uint64_t numChunks = count / threshold;
-      if (count % threshold != 0) {
-        ++numChunks;
-      }
-      numChunks = std::max<uint64_t>(1, numChunks);
-      uint64_t chunkSize = numChunks ? count / numChunks : count;
-      for (uint64_t i = 0; i < numChunks; ++i) {
-        uint64_t current = chunkSize;
-        if (i == numChunks - 1) {
-          current = count - chunkSize * (numChunks - 1);
-        }
-        hashChunks.push_back({taxid, current});
-      }
-    } else {
-      hashChunks.push_back({taxid, count});
-    }
-  }
+  const double kTargetImbalance = 1.05; // 目标 M/A
 
-  // Step 3: Sort the chunks by hash count in descending order
-  std::sort(hashChunks.begin(), hashChunks.end(),
-            [](const HashChunk &a, const HashChunk &b) {
-              return a.hashCount > b.hashCount;
-            });
-
-  // Step 4: Create groups and assign chunks using a priority queue
-  size_t groupNum = (hashChunks.size() + maxTaxids - 1) / maxTaxids;
-  groupNum = std::max<size_t>(1, groupNum);
-  std::vector<Group> groups(groupNum);
-  std::vector<robin_hood::unordered_flat_set<std::string>> used(groupNum);
-
-  auto cmp = [&](const int a, const int b) -> bool {
-    return groups[a].totalHash > groups[b].totalHash;
-  };
-  std::priority_queue<int, std::vector<int>, decltype(cmp)> minHeap(cmp);
-  for (size_t i = 0; i < groupNum; ++i) {
-    minHeap.push(static_cast<int>(i));
-  }
-
-  for (const auto &chunk : hashChunks) {
-    std::vector<int> popped;
-    int target = -1;
-    while (!minHeap.empty()) {
-      int cand = minHeap.top();
-      minHeap.pop();
-      if (groups[cand].taxids.size() >= maxTaxids ||
-          used[cand].contains(chunk.taxid)) {
-        popped.push_back(cand);
+  auto makeChunks = [&](uint64_t splitThreshold) {
+    std::vector<HashChunk> chunks;
+    chunks.reserve(hashCount.size() * 2);
+    for (const auto &[taxid, count] : hashCount) {
+      if (count == 0) {
+        chunks.push_back({taxid, 0});
         continue;
       }
-      target = cand;
+      if (count <= splitThreshold) {
+        chunks.push_back({taxid, count});
+        continue;
+      }
+      uint64_t numChunks = (count + splitThreshold - 1) / splitThreshold;
+      numChunks = std::max<uint64_t>(1, numChunks);
+      uint64_t chunkSize = (count + numChunks - 1) / numChunks;
+      uint64_t assigned = 0;
+      for (uint64_t i = 0; i < numChunks; ++i) {
+        uint64_t remaining = count - assigned;
+        uint64_t current = std::min<uint64_t>(chunkSize, remaining);
+        if (i == numChunks - 1) {
+          current = remaining;
+        }
+        if (current == 0) {
+          break;
+        }
+        chunks.push_back({taxid, current});
+        assigned += current;
+      }
+    }
+    std::sort(chunks.begin(), chunks.end(),
+              [](const HashChunk &a, const HashChunk &b) {
+                return a.hashCount > b.hashCount;
+              });
+    return chunks;
+  };
+
+  auto packChunks = [&](size_t seedGroupCount,
+                        const std::vector<HashChunk> &chunks) {
+    std::vector<Group> groups(seedGroupCount);
+    std::vector<robin_hood::unordered_flat_set<std::string>> used(seedGroupCount);
+
+    auto cmp = [&](size_t a, size_t b) {
+      return groups[a].totalHash > groups[b].totalHash;
+    };
+    std::priority_queue<size_t, std::vector<size_t>, decltype(cmp)> minHeap(cmp);
+    for (size_t i = 0; i < seedGroupCount; ++i) {
+      minHeap.push(i);
+    }
+
+    for (const auto &chunk : chunks) {
+      size_t target = std::numeric_limits<size_t>::max();
+      std::vector<size_t> popped;
+      while (!minHeap.empty()) {
+        size_t cand = minHeap.top();
+        minHeap.pop();
+        if (groups[cand].taxids.size() >= maxTaxids ||
+            used[cand].contains(chunk.taxid)) {
+          popped.push_back(cand);
+          continue;
+        }
+        target = cand;
+        break;
+      }
+
+      if (target == std::numeric_limits<size_t>::max()) {
+        groups.emplace_back();
+        used.emplace_back();
+        target = groups.size() - 1;
+      }
+      for (size_t idx : popped) {
+        minHeap.push(idx);
+      }
+
+      groups[target].taxids.push_back(chunk.taxid);
+      groups[target].assignedHashes.push_back(chunk.hashCount);
+      groups[target].totalHash += chunk.hashCount;
+      used[target].insert(chunk.taxid);
+      minHeap.push(target);
+    }
+
+    std::vector<Group> compact;
+    compact.reserve(groups.size());
+    for (auto &g : groups) {
+      if (!g.taxids.empty()) {
+        compact.push_back(std::move(g));
+      }
+    }
+    return compact;
+  };
+
+  size_t seedGroups =
+      std::max<size_t>(1, (hashCount.size() + maxTaxids - 1) / maxTaxids);
+
+  std::vector<Group> bestGroups;
+  double bestRatio = std::numeric_limits<double>::infinity();
+  uint64_t currentThreshold = threshold;
+
+  for (int iter = 0; iter < 6; ++iter) {
+    auto hashChunks = makeChunks(currentThreshold);
+    auto groups = packChunks(seedGroups, hashChunks);
+    if (groups.empty()) {
+      return groups;
+    }
+    double maxLoad = 0.0;
+    for (const auto &g : groups) {
+      if (g.totalHash > maxLoad) {
+        maxLoad = static_cast<double>(g.totalHash);
+      }
+    }
+    double avgLoad =
+        groups.empty()
+            ? 0.0
+            : static_cast<double>(totalHashes) /
+                  static_cast<double>(groups.size());
+    double ratio = (avgLoad == 0.0) ? 0.0 : (maxLoad / avgLoad);
+    if (ratio < bestRatio) {
+      bestRatio = ratio;
+      bestGroups = groups;
+    }
+    if (ratio <= kTargetImbalance || currentThreshold <= 1) {
       break;
     }
-
-    if (target == -1) {
-      for (int idx : popped) {
-        minHeap.push(idx);
-      }
-      groups.emplace_back();
-      used.emplace_back();
-      target = static_cast<int>(groups.size() - 1);
-    } else {
-      for (int idx : popped) {
-        minHeap.push(idx);
-      }
-    }
-
-    if (groups[target].taxids.size() >= maxTaxids) {
-      groups.emplace_back();
-      used.emplace_back();
-      target = static_cast<int>(groups.size() - 1);
-    }
-
-    groups[target].taxids.push_back(chunk.taxid);
-    groups[target].assignedHashes.push_back(chunk.hashCount);
-    groups[target].totalHash += chunk.hashCount;
-    used[target].insert(chunk.taxid);
-    minHeap.push(target);
+    currentThreshold = std::max<uint64_t>(1, currentThreshold / 2);
   }
 
-  return groups;
+  if (bestGroups.empty()) {
+    bestGroups = packChunks(seedGroups, makeChunks(threshold));
+  }
+  return bestGroups;
 }
 
 class InterleavedMergedCuckooFilter {

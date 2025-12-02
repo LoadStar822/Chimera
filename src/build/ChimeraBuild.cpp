@@ -176,21 +176,7 @@ void run(BuildConfig config) {
                        chimera::feature::min_required_length(
                            imcf_feature_params)));
   constexpr uint16_t ref_read_len = 150;
-  std::cout << "Estimating per-genome unique signatures (deg <= "
-            << config.presence_unique_deg << ")..." << std::endl;
-  auto presence_meta =
-      compute_presence_meta(hashCount, feature_suffix,
-                            hashFreqContext.enabled() ? &hashFreqContext
-                                                      : nullptr,
-                            &bpCount, effective_span, ref_read_len,
-                            config.presence_unique_deg, config.threads);
-  if (presence_meta.entries.empty()) {
-    std::cout << "  coverage meta: empty (fallback to runtime heuristics)"
-              << std::endl;
-  } else {
-    std::cout << "  coverage meta: " << presence_meta.entries.size()
-              << " taxa cached" << std::endl;
-  }
+  chimera::presence::CoverageMeta presence_meta;
   auto partition_start = std::chrono::high_resolution_clock::now();
   std::cout << "Partitioning hashcout..." << std::endl;
   std::vector<chimera::imcf::Group> groups =
@@ -241,7 +227,17 @@ void run(BuildConfig config) {
   }
   chimera::imcf::InterleavedMergedCuckooFilter imcf(groups, imcfConfig);
   std::vector<std::vector<std::string>> indexToTaxid =
-      buildIMCF(imcf, groups, hashCount, feature_suffix);
+      buildIMCF(imcf, groups, hashCount, feature_suffix,
+                hashFreqContext.enabled() ? &hashFreqContext : nullptr,
+                &bpCount, effective_span, ref_read_len,
+                config.presence_unique_deg, &presence_meta);
+  if (presence_meta.entries.empty()) {
+    std::cout << "  coverage meta: empty (fallback to runtime heuristics)"
+              << std::endl;
+  } else {
+    std::cout << "  coverage meta: " << presence_meta.entries.size()
+              << " taxa cached" << std::endl;
+  }
   auto imcf_build_end = std::chrono::high_resolution_clock::now();
   auto imcf_build_total_time =
       std::chrono::duration_cast<std::chrono::milliseconds>(imcf_build_end -
