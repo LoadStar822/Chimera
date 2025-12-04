@@ -52,9 +52,6 @@
 #include <vector>
 #include <xxhash.h>
 
-#ifdef IMCF_MIRROR64
-#include <sys/mman.h>
-#endif
 
 static inline size_t ceil_div_u64(uint64_t a, uint64_t b) {
   return (size_t)((a + b - 1) / b);
@@ -307,54 +304,6 @@ class InterleavedMergedCuckooFilter {
   size_t tagNum{4};
   int MaxCuckooCount{500};
   size_t hashSize{};
-#ifdef IMCF_MIRROR64
-  std::vector<uint64_t> bucketMirror;
-  bool bitStorageReleased{false};
-  size_t segmentShift{20};
-  size_t segmentSizeBuckets{1ull << 20};
-  size_t segmentCount{0};
-  bool segmentAdviceEnabled{false};
-
-  struct SegmentPrefetch {
-    const InterleavedMergedCuckooFilter &parent;
-    size_t touched[2]{};
-    size_t count{0};
-
-    SegmentPrefetch(const InterleavedMergedCuckooFilter &p, size_t h1,
-                    size_t h2)
-        : parent(p) {
-      request(h1);
-      if (h2 != h1) {
-        request(h2);
-      }
-    }
-
-    void request(size_t bucket) {
-      if (!parent.hasSegmentAdvice()) {
-        return;
-      }
-      size_t seg = parent.segmentIndex(bucket);
-      for (size_t i = 0; i < count; ++i) {
-        if (touched[i] == seg) {
-          return;
-        }
-      }
-      parent.adviseSegment(seg, MADV_WILLNEED);
-      if (count < 2) {
-        touched[count++] = seg;
-      }
-    }
-
-    ~SegmentPrefetch() {
-      if (!parent.hasSegmentAdvice()) {
-        return;
-      }
-      for (size_t i = 0; i < count; ++i) {
-        parent.adviseSegment(touched[i], MADV_DONTNEED);
-      }
-    }
-  };
-#endif
   std::vector<std::vector<uint32_t>> activeGroups;
   struct StashEntry {
     uint64_t bucket{0};
@@ -434,103 +383,14 @@ class InterleavedMergedCuckooFilter {
 
   inline uint64_t readBucket64(size_t bucket, size_t bin) const {
     size_t linear = bucketLinearIndex(bucket, bin);
-#ifdef IMCF_MIRROR64
-    return bucketMirror[linear];
-#else
     return readBucketRaw(linear);
-#endif
   }
 
   inline void writeBucket64(size_t bucket, size_t bin, uint64_t value) {
     size_t linear = bucketLinearIndex(bucket, bin);
-#ifdef IMCF_MIRROR64
-    bucketMirror[linear] = value;
-    if (!bitStorageReleased) {
-      writeBucketRaw(linear, value);
-    }
-#else
     writeBucketRaw(linear, value);
-#endif
   }
 
-#ifdef IMCF_MIRROR64
-  inline size_t segmentIndex(size_t bucket) const {
-    return bucket >> segmentShift;
-  }
-
-  inline void prepareSegmentAdvice() {
-    if (segmentShift >= sizeof(size_t) * 8 - 1) {
-      segmentShift = static_cast<size_t>(sizeof(size_t) * 8 - 2);
-    }
-    segmentSizeBuckets = static_cast<size_t>(1) << segmentShift;
-    if (segmentSizeBuckets == 0) {
-      segmentSizeBuckets = 1ULL << 20;
-    }
-    if (bucketMirror.empty() || hashSize == 0) {
-      segmentAdviceEnabled = false;
-      segmentCount = 0;
-      return;
-    }
-    segmentCount = (hashSize + segmentSizeBuckets - 1) / segmentSizeBuckets;
-    segmentAdviceEnabled = segmentCount > 0;
-    if (segmentAdviceEnabled) {
-      void *ptr = const_cast<uint64_t *>(bucketMirror.data());
-      size_t bytes = bucketMirror.size() * sizeof(uint64_t);
-      ::madvise(ptr, bytes, MADV_SEQUENTIAL);
-    }
-  }
-
-  inline void adviseSegment(size_t segment, int advice) const {
-    if (!segmentAdviceEnabled || segment >= segmentCount) {
-      return;
-    }
-    size_t startBucket = segment * segmentSizeBuckets;
-    if (startBucket >= hashSize) {
-      return;
-    }
-    size_t buckets = std::min(segmentSizeBuckets, hashSize - startBucket);
-    if (buckets == 0) {
-      return;
-    }
-    size_t elements = buckets * binNum;
-    void *ptr =
-        const_cast<uint64_t *>(bucketMirror.data() + startBucket * binNum);
-    size_t bytes = elements * sizeof(uint64_t);
-    ::madvise(ptr, bytes, advice);
-  }
-
-  inline bool hasSegmentAdvice() const { return segmentAdviceEnabled; }
-
-  inline void initializeMirrorStorage() {
-    bucketMirror.clear();
-    if (hashSize == 0 || binNum == 0) {
-      bitStorageReleased = false;
-      prepareSegmentAdvice();
-      return;
-    }
-    bucketMirror.assign(hashSize * binNum, 0);
-    bitStorageReleased = false;
-    prepareSegmentAdvice();
-  }
-
-  inline void rebuildMirrorFromBitVector() {
-    if (hashSize == 0 || binNum == 0) {
-      bucketMirror.clear();
-      bitStorageReleased = false;
-      prepareSegmentAdvice();
-      return;
-    }
-    bucketMirror.resize(hashSize * binNum);
-    for (size_t bucket = 0; bucket < hashSize; ++bucket) {
-      for (size_t bin = 0; bin < binNum; ++bin) {
-        size_t linear = bucketLinearIndex(bucket, bin);
-        bucketMirror[linear] = readBucketRaw(linear);
-      }
-    }
-    bitStorageReleased = false;
-    prepareSegmentAdvice();
-  }
-#endif
 
   inline void fetchActiveBins(size_t bucket, uint16_t fingerprint,
                               std::vector<uint32_t> &out) const {
@@ -646,24 +506,11 @@ public:
 
     config.binNum = binNum;
     config.binSize = binSize;
-#ifdef IMCF_MIRROR64
-    initializeMirrorStorage();
-#endif
     stash.assign(binNum, {});
   }
 
   template <class Archive> void serialize(Archive &ar) {
     ar(data, binNum, binSize, tagNum, MaxCuckooCount, hashSize, stash);
-#ifdef IMCF_MIRROR64
-    if constexpr (Archive::is_loading::value) {
-      rebuildMirrorFromBitVector();
-    } else {
-      if (bitStorageReleased) {
-        throw std::runtime_error(
-            "IMCF mirror: bit-vector released, cannot serialize");
-      }
-    }
-#endif
     if constexpr (Archive::is_loading::value) {
       if (stash.size() != binNum) {
         stash.resize(binNum);
@@ -1164,10 +1011,6 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
     size_t hash1 = hashIndex(value);
     size_t hash2 = altHash(hash1, fingerprint);
 
-#ifdef IMCF_MIRROR64
-    [[maybe_unused]] SegmentPrefetch segmentPrefetch(*this, hash1, hash2);
-#endif
-
     const uint64_t fpBroadcast =
         static_cast<uint64_t>(fingerprint) * 0x0001000100010001ULL;
     const uint64_t fpMask = 0x0FFF0FFF0FFF0FFFULL;
@@ -1308,10 +1151,6 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
     uint16_t fingerprint = reduceTo12bit(value);
     size_t hash1 = hashIndex(value);
     size_t hash2 = altHash(hash1, fingerprint);
-
-#ifdef IMCF_MIRROR64
-    [[maybe_unused]] SegmentPrefetch segmentPrefetch(*this, hash1, hash2);
-#endif
 
     const uint64_t fpBroadcast =
         static_cast<uint64_t>(fingerprint) * 0x0001000100010001ULL;
@@ -1519,14 +1358,6 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
   inline bool hasActiveIndex() const {
     return activeGroups.size() == hashSize && !activeGroups.empty();
   }
-
-#ifdef IMCF_MIRROR64
-  inline void releaseBitStorage() {
-    sdsl::bit_vector empty;
-    empty.swap(data);
-    bitStorageReleased = true;
-  }
-#endif
 
   inline void buildActiveGroups() {
     if (hashSize == 0 || binNum == 0) {

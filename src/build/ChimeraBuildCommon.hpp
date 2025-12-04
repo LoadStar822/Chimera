@@ -18,7 +18,8 @@ uint64_t mix64(uint64_t value);
 struct TaxidShardPlan {
   size_t groupIndex;
   size_t slotIndex;
-  uint64_t expectedCount;
+  uint64_t count;           // exact number of hashes assigned to this shard
+  uint64_t fileOffsetStart; // starting hash index inside tmp/<taxid> file
 };
 
 struct HashFrequencyContext {

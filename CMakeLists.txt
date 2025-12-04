@@ -126,7 +126,6 @@ target_link_libraries(Chimera
 target_compile_definitions(Chimera
     PRIVATE
     CHIMERA_HAS_STROBEMERS=1
-    IMCF_MIRROR64
 )
 
 # 设置包含目录
@@ -171,7 +170,6 @@ target_link_libraries(imcf_filter_tests
 target_compile_definitions(imcf_filter_tests
     PRIVATE
     CHIMERA_HAS_STROBEMERS=1
-    IMCF_MIRROR64
 )
 
 if (OpenMP_CXX_FOUND)
@@ -218,7 +216,6 @@ target_link_libraries(syncmer_tests
 target_compile_definitions(syncmer_tests
     PRIVATE
     CHIMERA_HAS_STROBEMERS=1
-    IMCF_MIRROR64
 )
 
 if (OpenMP_CXX_FOUND)

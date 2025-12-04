@@ -83,6 +83,8 @@ uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>
 		const std::string suffix(featureSuffix);
 		robin_hood::unordered_flat_map<std::string, std::vector<TaxidShardPlan>> shardPlan;
 		shardPlan.reserve(hashCount.size());
+		robin_hood::unordered_flat_map<std::string, uint64_t> shardOffset;
+		shardOffset.reserve(hashCount.size());
 
 		const bool collectCoverage = coverageMeta != nullptr;
 		const uint32_t uniqueDeg =
@@ -108,12 +110,18 @@ uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>
 				throw std::runtime_error("IMCF build: taxid list and assigned hash quotas length mismatch");
 			}
 			for (size_t slot = 0; slot < group.taxids.size(); ++slot) {
-				uint64_t expected = group.assignedHashes[slot];
-				if (expected == 0) {
+				uint64_t count = group.assignedHashes[slot];
+				if (count == 0) {
 					continue;
 				}
 				auto& plans = shardPlan[group.taxids[slot]];
-				plans.push_back({ groupIdx, slot, expected });
+				uint64_t offset = 0;
+				auto itOff = shardOffset.find(group.taxids[slot]);
+				if (itOff != shardOffset.end()) {
+					offset = itOff->second;
+				}
+				plans.push_back({ groupIdx, slot, count, offset });
+				shardOffset[group.taxids[slot]] = offset + count;
 			}
 		}
 
@@ -121,7 +129,7 @@ uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>
 		for (const auto& [taxid, plans] : shardPlan) {
 			uint64_t shardTotal = 0;
 			for (const auto& plan : plans) {
-				shardTotal += plan.expectedCount;
+				shardTotal += plan.count;
 			}
 			auto it = hashCount.find(taxid);
 			if (it == hashCount.end()) {
@@ -146,9 +154,10 @@ uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>
 
 	struct ShardEntry {
 		std::string taxid;
-		const std::vector<TaxidShardPlan>* plans;
-		uint64_t startHash{0};
-		uint64_t nHashes{0};
+		size_t groupIndex;
+		size_t slotIndex;
+		uint64_t fileOffset;
+		uint64_t nHashes;
 	};
 	std::vector<ShardEntry> shardEntries;
 	shardEntries.reserve(shardPlan.size() * 4);
@@ -161,7 +170,7 @@ uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>
 
 	for (auto& kv : shardPlan) {
 		const std::string& taxid = kv.first;
-		const auto* plans = &kv.second;
+		const auto& plans = kv.second;
 		auto it = hashCount.find(taxid);
 		uint64_t totalHashes = (it == hashCount.end()) ? 0 : it->second;
 		if (totalHashes == 0) {
@@ -171,29 +180,80 @@ uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>
 		    targetChunk,
 		    threadCount > 0 ? (totalHashes / (static_cast<uint64_t>(threadCount) * 4ull)) : targetChunk);
 		chunkSize = std::max<uint64_t>(chunkSize, targetChunk);
-		for (uint64_t start = 0; start < totalHashes; start += chunkSize) {
-			uint64_t len = std::min<uint64_t>(chunkSize, totalHashes - start);
-			shardEntries.push_back({taxid, plans, start, len});
+
+		for (const auto& plan : plans) {
+			if (plan.count == 0) {
+				continue;
+			}
+			uint64_t start = plan.fileOffsetStart;
+			uint64_t remaining = plan.count;
+			while (remaining > 0) {
+				uint64_t len = std::min<uint64_t>(chunkSize, remaining);
+				shardEntries.push_back({taxid, plan.groupIndex, plan.slotIndex, start, len});
+				start += len;
+				remaining -= len;
+			}
 		}
 	}
 	// 优先分配重负载 taxid，避免长尾串行
 	std::sort(shardEntries.begin(), shardEntries.end(),
 		      [&](const ShardEntry& a, const ShardEntry& b) {
-			          if (a.nHashes == b.nHashes) {
-				          return a.taxid < b.taxid;
-			          }
-			          return a.nHashes > b.nHashes;
-		          });
+		          if (a.nHashes == b.nHashes) {
+			          return a.taxid < b.taxid;
+		          }
+		          return a.nHashes > b.nHashes;
+		      });
 
-	std::vector<std::mutex> groupLocks(groups.size());
+	if (shardEntries.empty()) {
+		return indexToTaxid;
+	}
+
+	constexpr size_t kReadBlockBytes = 4 * 1024 * 1024; // 4MB
+	using InsertionPair = std::pair<uint64_t, uint16_t>;
+
+	const size_t kDefaultBatches = 10;
+	const uint64_t kMemoryBudgetBytes = 15ull * 1024ull * 1024ull * 1024ull; // ~15GB target for batch buffers
+	const uint64_t bytesPerPair = sizeof(InsertionPair);
+	uint64_t totalShardHashes = 0;
+	for (const auto& entry : shardEntries) {
+		totalShardHashes += entry.nHashes;
+	}
+	uint64_t minBatches = 1;
+	if (bytesPerPair > 0 && kMemoryBudgetBytes > 0) {
+		minBatches = (totalShardHashes * bytesPerPair + kMemoryBudgetBytes - 1) / kMemoryBudgetBytes;
+		if (minBatches == 0) {
+			minBatches = 1;
+		}
+	}
+	size_t numBatches = std::max<size_t>(kDefaultBatches, static_cast<size_t>(minBatches));
+	numBatches = std::min<size_t>(numBatches, shardEntries.size());
+	if (numBatches == 0) {
+		numBatches = 1;
+	}
+	uint64_t targetBatchSize = (totalShardHashes + numBatches - 1) / numBatches;
+	std::vector<std::pair<size_t, size_t>> batchRanges;
+	batchRanges.reserve(numBatches);
+	size_t batchStart = 0;
+	uint64_t batchAccum = 0;
+	for (size_t idx = 0; idx < shardEntries.size(); ++idx) {
+		batchAccum += shardEntries[idx].nHashes;
+		bool split = (batchRanges.size() + 1 < numBatches) && (batchAccum >= targetBatchSize);
+		if (split) {
+			batchRanges.emplace_back(batchStart, idx + 1);
+			batchStart = idx + 1;
+			batchAccum = 0;
+		}
+	}
+	batchRanges.emplace_back(batchStart, shardEntries.size());
+
 	std::unique_ptr<std::atomic<uint64_t>[]> globalUnique;
 	std::unique_ptr<std::atomic<uint64_t>[]> globalTotal;
 	robin_hood::unordered_flat_map<std::string, size_t> taxidToIndex;
 	if (collectCoverage) {
 		size_t idx = 0;
 		taxidToIndex.reserve(shardPlan.size());
-		for (const auto& kv : shardPlan) {
-			taxidToIndex[kv.first] = idx++;
+		for (const auto& kvPlan : shardPlan) {
+			taxidToIndex[kvPlan.first] = idx++;
 		}
 		size_t n = taxidToIndex.size();
 		globalUnique.reset(new std::atomic<uint64_t>[n]);
@@ -204,28 +264,48 @@ uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>
 		}
 	}
 
-		std::vector<uint64_t> groupSuccess(groups.size(), 0);
-		std::vector<uint64_t> groupFailures(groups.size(), 0);
-		std::vector<std::vector<uint64_t>> slotSuccess(groups.size());
-		std::vector<std::vector<uint64_t>> slotFailures(groups.size());
-		for (size_t g = 0; g < groups.size(); ++g) {
-			size_t slotCount = groups[g].taxids.size();
-			slotSuccess[g].assign(slotCount, 0);
-			slotFailures[g].assign(slotCount, 0);
+	std::vector<uint64_t> groupSuccess(groups.size(), 0);
+	std::vector<uint64_t> groupFailures(groups.size(), 0);
+	std::vector<std::vector<uint64_t>> slotSuccess(groups.size());
+	std::vector<std::vector<uint64_t>> slotFailures(groups.size());
+	for (size_t g = 0; g < groups.size(); ++g) {
+		size_t slotCount = groups[g].taxids.size();
+		slotSuccess[g].assign(slotCount, 0);
+		slotFailures[g].assign(slotCount, 0);
+	}
+
+	const auto shardEntriesView = std::span<const ShardEntry>(shardEntries.data(), shardEntries.size());
+
+	const int numThreads = static_cast<int>(threadCount == 0 ? 1 : threadCount);
+	std::vector<std::vector<std::vector<InsertionPair>>> threadBuffers(static_cast<size_t>(numThreads));
+
+	for (const auto& range : batchRanges) {
+		size_t batchStartIdx = range.first;
+		size_t batchEndIdx = range.second;
+
+		for (auto& tb : threadBuffers) {
+			tb.resize(groups.size());
+			for (auto& buf : tb) {
+				buf.clear();
+			}
 		}
-
-		constexpr size_t kFlushThreshold = 131072;     // 128K hashes
-		constexpr size_t kReadBlockBytes = 4 * 1024 * 1024; // 4MB
-
-		const auto shardEntriesView = std::span<const ShardEntry>(shardEntries.data(), shardEntries.size());
 
 	#pragma omp parallel
 		{
-#pragma omp for schedule(dynamic, 1)
-			for (size_t entryIdx = 0; entryIdx < shardEntriesView.size(); ++entryIdx) {
+			int tid = 0;
+#ifdef _OPENMP
+			tid = omp_get_thread_num();
+#endif
+			auto& myBuffers = threadBuffers[static_cast<size_t>(tid)];
+			if (myBuffers.size() < groups.size()) {
+				myBuffers.resize(groups.size());
+			}
+			std::vector<uint64_t> readBlock(kReadBlockBytes / sizeof(uint64_t));
+
+		#pragma omp for schedule(guided, 4)
+			for (size_t entryIdx = batchStartIdx; entryIdx < batchEndIdx; ++entryIdx) {
 				const auto& entry = shardEntriesView[entryIdx];
 				const std::string& taxid = entry.taxid;
-				const auto& plans = *entry.plans;
 				std::ifstream ifile(tmp_hash_path(taxid, suffix), std::ios::binary);
 				if (!ifile) {
 #pragma omp critical(imcf_log)
@@ -233,74 +313,10 @@ uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>
 					continue;
 				}
 
-				const uint64_t totalWeight = [&]() {
-					uint64_t sum = 0;
-					for (const auto& p : plans) {
-						sum += p.expectedCount;
-					}
-					return sum;
-				}();
-				if (totalWeight == 0) {
-					continue;
-				}
-
-				std::vector<std::vector<uint64_t>> slotBuffers(plans.size());
-				for (size_t i = 0; i < plans.size(); ++i) {
-					uint64_t expect = plans[i].expectedCount;
-					size_t reserveSize = static_cast<size_t>(std::min<uint64_t>(expect, static_cast<uint64_t>(kFlushThreshold)));
-					if (reserveSize > 0) {
-						slotBuffers[i].reserve(reserveSize);
-					}
-				}
-
-				auto flushSlot = [&](size_t planIdx) {
-					auto& buffer = slotBuffers[planIdx];
-					if (buffer.empty()) {
-						return;
-					}
-					const auto& plan = plans[planIdx];
-					std::lock_guard<std::mutex> guard(groupLocks[plan.groupIndex]);
-					uint64_t success = 0;
-					uint64_t failure = 0;
-					for (uint64_t value : buffer) {
-						if (imcf.insertTag(plan.groupIndex, value, plan.slotIndex)) {
-							++success;
-						}
-						else {
-							++failure;
-						}
-					}
-					groupSuccess[plan.groupIndex] += success;
-					groupFailures[plan.groupIndex] += failure;
-					slotSuccess[plan.groupIndex][plan.slotIndex] += success;
-					slotFailures[plan.groupIndex][plan.slotIndex] += failure;
-					buffer.clear();
-				};
-
-				auto pickShard = [&](uint64_t hash) -> size_t {
-					uint64_t r = mix64(hash) % totalWeight;
-					for (size_t idx = 0; idx < plans.size(); ++idx) {
-						uint64_t quota = plans[idx].expectedCount;
-						if (quota == 0) {
-							continue;
-						}
-						if (r < quota) {
-							return idx;
-						}
-						r -= quota;
-					}
-					return plans.size();
-				};
-
-				std::vector<uint64_t> readBlock(kReadBlockBytes / sizeof(uint64_t));
+				ifile.seekg(static_cast<std::streamoff>(entry.fileOffset * sizeof(uint64_t)), std::ios::beg);
+				uint64_t remaining = entry.nHashes;
 				uint64_t uniqueCount = 0;
 				uint64_t totalCount = 0;
-
-				uint64_t remaining = entry.nHashes;
-				if (entry.startHash > 0) {
-					ifile.seekg(static_cast<std::streamoff>(entry.startHash * sizeof(uint64_t)),
-					            std::ios::beg);
-				}
 
 				while (ifile && remaining > 0) {
 					uint64_t toRead = std::min<uint64_t>(remaining,
@@ -315,7 +331,6 @@ uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>
 					if (hashesRead == 0) {
 						break;
 					}
-					bool overflow = false;
 					for (size_t h = 0; h < hashesRead; ++h) {
 						uint64_t hash = readBlock[h];
 						if (collectCoverage) {
@@ -328,22 +343,7 @@ uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>
 								++uniqueCount;
 							}
 						}
-						size_t shard = pickShard(hash);
-						if (shard >= plans.size()) {
-							// Extra syncmers beyond planned quota
-#pragma omp critical(imcf_log)
-							std::cerr << "Warning: taxid " << taxid
-								<< " produced more syncmers than expected; extra entries ignored" << std::endl;
-							overflow = true;
-							break;
-						}
-						slotBuffers[shard].push_back(hash);
-						if (slotBuffers[shard].size() >= kFlushThreshold) {
-							flushSlot(shard);
-						}
-					}
-					if (overflow) {
-						break;
+						myBuffers[entry.groupIndex].emplace_back(hash, static_cast<uint16_t>(entry.slotIndex));
 					}
 					if (hashesRead > remaining) {
 						remaining = 0;
@@ -352,31 +352,19 @@ uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>
 					}
 				}
 
+				if (remaining != 0) {
+#pragma omp critical(imcf_log)
+					std::cerr << "Warning: shard read underflow for taxid " << taxid
+						<< ", expected " << entry.nHashes << " hashes, missing " << remaining << std::endl;
+				}
+
 				if (!ifile.eof() && ifile.fail()) {
 #pragma omp critical(imcf_log)
 					std::cerr << "Warning: failed to read syncmer file completely for taxid " << taxid << std::endl;
 				}
 				ifile.close();
 
-				for (size_t shardIdx = 0; shardIdx < plans.size(); ++shardIdx) {
-					flushSlot(shardIdx);
-				}
-
 				if (collectCoverage) {
-					if (uniqueCount > totalCount) {
-						uniqueCount = totalCount;
-					}
-					chimera::presence::CoverageEntry entry{};
-					entry.taxid = taxid;
-					entry.unique_signatures = uniqueCount;
-					entry.total_signatures = totalCount;
-					uint64_t genome_bp = 0;
-					if (bpCount) {
-						auto itbp = bpCount->find(taxid);
-						if (itbp != bpCount->end()) {
-							genome_bp = itbp->second;
-						}
-					}
 					auto itIdx = taxidToIndex.find(taxid);
 					if (itIdx != taxidToIndex.end()) {
 						size_t aggIdx = itIdx->second;
@@ -386,6 +374,42 @@ uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>
 				}
 			}
 		}
+
+	#pragma omp parallel for schedule(dynamic)
+		for (size_t groupIdx = 0; groupIdx < groups.size(); ++groupIdx) {
+			size_t totalSize = 0;
+			for (const auto& tb : threadBuffers) {
+				totalSize += tb[groupIdx].size();
+			}
+			if (totalSize == 0) {
+				continue;
+			}
+			std::vector<InsertionPair> aggregatedBuffer;
+			aggregatedBuffer.reserve(totalSize);
+			for (auto& tb : threadBuffers) {
+				auto& buf = tb[groupIdx];
+				aggregatedBuffer.insert(aggregatedBuffer.end(),
+				                      std::make_move_iterator(buf.begin()),
+				                      std::make_move_iterator(buf.end()));
+				std::vector<InsertionPair>().swap(buf); // release memory for this group asap
+			}
+
+			uint64_t success = 0;
+			uint64_t failure = 0;
+			for (const auto& pair : aggregatedBuffer) {
+				if (imcf.insertTag(groupIdx, pair.first, pair.second)) {
+					++success;
+					++slotSuccess[groupIdx][static_cast<size_t>(pair.second)];
+				} else {
+					++failure;
+					++slotFailures[groupIdx][static_cast<size_t>(pair.second)];
+				}
+			}
+			groupSuccess[groupIdx] += success;
+			groupFailures[groupIdx] += failure;
+			std::vector<InsertionPair>().swap(aggregatedBuffer);
+		}
+	}
 
 		uint64_t totalInserted = 0;
 		uint64_t totalFailed = 0;

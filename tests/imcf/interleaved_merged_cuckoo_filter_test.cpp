@@ -560,14 +560,6 @@ static void test_route_and_subset() {
   expect_true(routed.size() == 2, "路由应返回两个命中分组");
   expect_true(routed[0] == 0 && routed[1] == 1, "路由结果需升序列出分组");
 
-#ifdef IMCF_MIRROR64
-  filter.releaseBitStorage();
-  routed.clear();
-  filter.route(value, routed);
-  expect_true(routed.size() == 2 && routed[0] == 0 && routed[1] == 1,
-              "释放 bit_vector 后路由仍应依赖镜像正常工作");
-#endif
-
   std::vector<uint64_t> minimizers{value};
   std::vector<uint32_t> subset{0, 1, 5};
   std::sort(subset.begin(), subset.end());
