@@ -476,24 +476,11 @@ void postEmDecision(
       continue;
     }
 
-    double gap = top_score - second_score;
-    bool keep_multi = (second_score > 0.0 && gap < 0.10 &&
-                       top_score >= 0.35 && second_score >= 0.25);
-    if (keep_multi) {
-      result.taxidCount.clear();
-      auto to_count = [&](double p) -> size_t {
-        if (result.evaluated <= 0.0) {
-          return static_cast<size_t>(std::ceil(p * 10.0));
-        }
-        double c = std::round(p * result.evaluated);
-        return static_cast<size_t>(std::max<double>(1.0, c));
-      };
-      result.taxidCount.emplace_back(top.first, to_count(top_score));
-      result.taxidCount.emplace_back(result.posteriors[1].first,
-                                     to_count(result.posteriors[1].second));
-      result.reject_reason.clear();
-      continue;
-    }
+    // keep_multi 逻辑会把丰度拆给多个物种，EM 后期希望赢家通吃，故跳过。
+    // double gap = top_score - second_score;
+    // bool keep_multi = (second_score > 0.0 && gap < 0.10 &&
+    //                    top_score >= 0.35 && second_score >= 0.25);
+    // if (keep_multi) { ... }
 
     result.taxidCount.clear();
     result.taxidCount.emplace_back(kUnclassified, 1);

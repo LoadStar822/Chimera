@@ -603,6 +603,14 @@ void processSequence(
   bool marginAccept = (bestRounded >= thrConfNeed) && dc.accept;
   highConfPre = highConfPre && marginAccept;
 
+  // --- EM 模式下的模糊保护 ---
+  // 当使用 EM 时，如果 Top1/Top2 的分值比例不足 3 倍，视为不确定，让其进入 EM。
+  // 过低的比例容易被近缘物种或 decoy 抢占，需延后由 EM 全局推断。
+  if (config.em && best_ratio < 3.0) {
+    highConfPre = false;
+  }
+  // --------------------------------
+
   classifyResult result;
   result.evaluated = eff_eval;
   result.id = id;
@@ -626,10 +634,10 @@ void processSequence(
   if (beta <= 0.0) {
     beta = 0.8;
   }
-  beta = std::clamp(beta, 0.0, 1.0);
-  if (use_em && beta < 0.50) {
-    beta = 0.50;
+  if (config.em) {
+    beta = 0.45; // EM 模式放宽初筛门槛，确保真实物种不被挡在外
   }
+  beta = std::clamp(beta, 0.0, 1.0);
   size_t thr_beta =
       static_cast<size_t>(std::floor(beta * std::max(0.0, maxEvidence)));
   size_t thr_eval = static_cast<size_t>(std::ceil(

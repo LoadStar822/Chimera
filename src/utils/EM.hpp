@@ -75,66 +75,86 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 		taxid_list.emplace_back(taxid);
 	}
 
-	std::unordered_map<std::string, double> abundance_prior;
-	abundance_prior.reserve(taxid_list.size());
-	for (const auto& taxid : taxid_list) {
-		abundance_prior[taxid] = 0.0;
-	}
-	double abundance_sum = 0.0;
-	auto resolve_scale = [&](const std::string& taxid) -> double {
-		if (!prior_scale) {
-			return 1.0;
-		}
-		auto it = prior_scale->find(taxid);
-		if (it == prior_scale->end() || !(it->second > 0.0)) {
-			return 1.0;
-		}
-		return it->second;
-	};
-	for (const auto& record : results) {
-		for (const auto& [taxid, count] : record.taxidCount) {
-			if (detail::is_unclassified(taxid)) {
-				continue;
-			}
-			double scale = resolve_scale(taxid);
-			double contrib = static_cast<double>(count) / scale;
-			abundance_prior[taxid] += contrib;
-			abundance_sum += contrib;
-		}
-	}
-	if (abundance_sum <= 0.0) {
-		double uniform = 1.0 / static_cast<double>(std::max<size_t>(1, taxid_list.size()));
-		for (auto& entry : abundance_prior) {
-			entry.second = uniform;
-		}
-	} else {
-		constexpr double prior_exponent = 0.75;
-		double norm = 0.0;
-		for (auto& entry : abundance_prior) {
-			double value = std::max(entry.second, options.eps);
-			double smooth = std::pow(value, prior_exponent);
-			entry.second = smooth;
-			norm += smooth;
-		}
-		norm = std::max(norm, options.eps * static_cast<double>(taxid_list.size()));
-		for (auto& entry : abundance_prior) {
-			entry.second /= norm;
-		}
-	}
-
-	std::unordered_map<std::string, double> pi;
 	if (taxid_list.empty()) {
+		std::unordered_map<std::string, double> pi;
 		return { results, pi };
 	}
 
-	double uniform = 1.0 / static_cast<double>(taxid_list.size());
-	for (const auto& taxid : taxid_list) {
-		double prior = abundance_prior[taxid];
-		if (!(prior > 0.0)) {
-			prior = uniform;
+	auto normalize_distribution = [&](std::unordered_map<std::string, double>& dist) {
+		double sum = 0.0;
+		for (const auto& kv : dist) {
+			sum += kv.second;
 		}
-		pi[taxid] = prior;
+		if (!(sum > 0.0)) {
+			double uniform = 1.0 / static_cast<double>(taxid_list.size());
+			for (auto& kv : dist) {
+				kv.second = uniform;
+			}
+			return;
+		}
+		double inv_sum = 1.0 / sum;
+		for (auto& kv : dist) {
+			kv.second *= inv_sum;
+		}
+	};
+
+	// 使用加权证据初始化，让共享 reads 也能提供初始贡献
+	std::unordered_map<std::string, double> weighted_evidence;
+	weighted_evidence.reserve(taxid_list.size());
+	for (const auto& record : results) {
+		if (record.taxidCount.empty()) continue;
+
+		double total_count = 0.0;
+		for (const auto& kv : record.taxidCount) {
+			if (!detail::is_unclassified(kv.first)) {
+				total_count += static_cast<double>(kv.second);
+			}
+		}
+
+		if (total_count <= 0.0) continue;
+
+		// Soft assignment：按比例分配该 read 的权重
+		for (const auto& kv : record.taxidCount) {
+			if (detail::is_unclassified(kv.first)) continue;
+			weighted_evidence[kv.first] +=
+				static_cast<double>(kv.second) / total_count;
+		}
 	}
+
+	auto get_scale = [&](const std::string& taxid) -> double {
+		if (!prior_scale) return 1.0;
+		auto it = prior_scale->find(taxid);
+		if (it == prior_scale->end() || !(it->second > 0.0)) return 1.0;
+		return std::sqrt(it->second);
+	};
+
+	std::unordered_map<std::string, double> pi;
+	pi.reserve(taxid_list.size());
+	double background_prior = 1e-9;
+	for (const auto& taxid : taxid_list) {
+		double u = 0.0;
+		auto it_w = weighted_evidence.find(taxid);
+		if (it_w != weighted_evidence.end()) {
+			u = it_w->second;
+		}
+
+		double s = get_scale(taxid);
+		double init_val = u * s;
+
+		// 若没有 evidence 但 prior_scale>0，则给极小值兜底
+		if (init_val <= 0.0 && prior_scale && s > 0.0) {
+			init_val = 1e-5;
+		}
+		if (init_val <= 0.0) {
+			init_val = background_prior;
+		}
+
+		pi[taxid] = init_val;
+	}
+
+	normalize_distribution(pi);
+
+	std::unordered_map<std::string, double> abundance_prior = pi;
 
 	size_t iteration = 0;
 	while (iteration < max_iter) {
@@ -262,12 +282,24 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 			denominator = 1.0;
 		}
 
+		// Sparsity: 相对剪枝，抑制低丰度噪声
+		double max_expected = 0.0;
+		for (const auto& kv : expected_counts) {
+			if (kv.second > max_expected) {
+				max_expected = kv.second;
+			}
+		}
+		double prune_thres = max_expected * 0.001; // 低于主导物种千分之一的视为噪声
+
 		double diff = 0.0;
 		for (const auto& taxid : taxid_list) {
 			double expected = 0.0;
 			auto it = expected_counts.find(taxid);
 			if (it != expected_counts.end()) {
 				expected = it->second;
+			}
+			if (expected < prune_thres) {
+				expected = 0.0;
 			}
 			double prior_component = (prior_mass > 0.0)
 			                             ? prior_mass * abundance_prior[taxid]

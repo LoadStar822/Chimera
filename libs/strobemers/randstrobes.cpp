@@ -66,6 +66,29 @@ std::ostream& operator<<(std::ostream& os, const Syncmer& syncmer) {
     return os;
 }
 
+RandstrobeGenerator::RandstrobeGenerator(
+    const std::string& seq,
+    SyncmerParameters syncmer_parameters,
+    RandstrobeParameters randstrobe_parameters
+)
+    : syncmer_iterator(std::in_place_type<SyncmerIterator>, seq, syncmer_parameters)
+    , parameters(randstrobe_parameters)
+{ }
+
+RandstrobeGenerator::RandstrobeGenerator(
+    std::span<const uint8_t> seq,
+    SyncmerParameters syncmer_parameters,
+    RandstrobeParameters randstrobe_parameters
+)
+    : syncmer_iterator(std::in_place_type<SyncmerIteratorEncoded>, seq, syncmer_parameters)
+    , parameters(randstrobe_parameters)
+{ }
+
+Syncmer RandstrobeGenerator::next_syncmer()
+{
+    return std::visit([](auto & it) { return it.next(); }, syncmer_iterator);
+}
+
 Syncmer SyncmerIterator::next() {
     const size_t window_size = static_cast<size_t>(parameters.k - parameters.s + 1);
     for ( ; i < seq.length(); ++i) {
@@ -114,6 +137,54 @@ Syncmer SyncmerIterator::next() {
         }
     }
     return Syncmer{0, 0}; // end marker
+}
+
+Syncmer SyncmerIteratorEncoded::next() {
+    const size_t window_size = static_cast<size_t>(parameters.k - parameters.s + 1);
+    for ( ; i < seq.size(); ++i) {
+        const uint8_t base = seq[i];
+        if (base < 4) {
+            const int c = static_cast<int>(base);
+            xk[0] = (xk[0] << 2 | c) & kmask;                  // forward strand
+            xk[1] = xk[1] >> 2 | (uint64_t)(3 - c) << kshift;  // reverse strand
+            xs[0] = (xs[0] << 2 | c) & smask;                  // forward strand
+            xs[1] = xs[1] >> 2 | (uint64_t)(3 - c) << sshift;  // reverse strand
+            if (++l < static_cast<size_t>(parameters.s)) {
+                continue;
+            }
+
+            uint64_t ys = std::min(xs[0], xs[1]);
+            uint64_t hash_s = syncmer_smer_hash(ys);
+            qs.push_back(hash_s);
+            while (!qs_min_candidates.empty() && qs_min_candidates.back() > hash_s) {
+                qs_min_candidates.pop_back();
+            }
+            qs_min_candidates.push_back(hash_s);
+            if (qs.size() < window_size) {
+                continue;
+            }
+            if (qs.size() > window_size) {
+                uint64_t front = qs.front();
+                qs.pop_front();
+                if (!qs_min_candidates.empty() && front == qs_min_candidates.front()) {
+                    qs_min_candidates.pop_front();
+                }
+            }
+            qs_min_val = qs_min_candidates.empty() ? UINT64_MAX : qs_min_candidates.front();
+            if (qs[parameters.t_syncmer - 1] == qs_min_val) {
+                uint64_t yk = std::min(xk[0], xk[1]);
+                auto syncmer = Syncmer{syncmer_kmer_hash(yk), i - parameters.k + 1};
+                i++;
+                return syncmer;
+            }
+        } else {
+            qs_min_val = UINT64_MAX;
+            l = xs[0] = xs[1] = xk[0] = xk[1] = 0;
+            qs.clear();
+            qs_min_candidates.clear();
+        }
+    }
+    return Syncmer{0, 0};
 }
 
 std::vector<Syncmer> canonical_syncmers(
@@ -181,7 +252,7 @@ Randstrobe RandstrobeIterator::get(unsigned int strobe1_index) const {
 
 Randstrobe RandstrobeGenerator::next() {
     while (syncmers.size() <= parameters.w_max) {
-        Syncmer syncmer = syncmer_iterator.next();
+        Syncmer syncmer = next_syncmer();
         if (syncmer.is_end()) {
             break;
         }

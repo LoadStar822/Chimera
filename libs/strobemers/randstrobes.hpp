@@ -9,6 +9,8 @@
 #include <string_view>
 #include <inttypes.h>
 #include <array>
+#include <span>
+#include <variant>
 
 #include "indexparameters.hpp"
 
@@ -160,6 +162,30 @@ private:
     size_t i = 0;
 };
 
+class SyncmerIteratorEncoded {
+public:
+    SyncmerIteratorEncoded(std::span<const uint8_t> seq, SyncmerParameters parameters)
+        : seq(seq), parameters(parameters) { }
+
+    Syncmer next();
+
+private:
+    const std::span<const uint8_t> seq;
+    const SyncmerParameters parameters;
+
+    const uint64_t kmask = (1ULL << 2*parameters.k) - 1;
+    const uint64_t smask = (1ULL << 2*parameters.s) - 1;
+    const uint64_t kshift = (parameters.k - 1) * 2;
+    const uint64_t sshift = (parameters.s - 1) * 2;
+    std::deque<uint64_t> qs;  // s-mer hashes
+    std::deque<uint64_t> qs_min_candidates; // monotonic queue for current minimum
+    uint64_t qs_min_val = UINT64_MAX;
+    size_t l = 0;
+    uint64_t xk[2] = {0, 0};
+    uint64_t xs[2] = {0, 0};
+    size_t i = 0;
+};
+
 /*
  * Iterate over randstrobes while generating syncmers on the fly
  *
@@ -172,15 +198,22 @@ public:
         const std::string& seq,
         SyncmerParameters syncmer_parameters,
         RandstrobeParameters randstrobe_parameters
-    ) : syncmer_iterator(SyncmerIterator(seq, syncmer_parameters))
-      , parameters(randstrobe_parameters)
-    { }
+    );
+
+    RandstrobeGenerator(
+        std::span<const uint8_t> seq,
+        SyncmerParameters syncmer_parameters,
+        RandstrobeParameters randstrobe_parameters
+    );
 
     Randstrobe next();
     Randstrobe end() const { return Randstrobe{0, 0, 0, 0}; }
 
 private:
-    SyncmerIterator syncmer_iterator;
+    Syncmer next_syncmer();
+
+    using IteratorVariant = std::variant<SyncmerIterator, SyncmerIteratorEncoded>;
+    IteratorVariant syncmer_iterator;
     const RandstrobeParameters parameters;
     std::deque<Syncmer> syncmers;
 };
@@ -189,4 +222,3 @@ private:
 std::vector<Syncmer> canonical_syncmers(const std::string_view seq, SyncmerParameters parameters);
 
 #endif
-

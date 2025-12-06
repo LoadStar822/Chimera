@@ -103,11 +103,8 @@ bool compute_hashes_strobemer_append_(const std::vector<seqan3::dna4> & seq,
     if (sequence_length < params.k || params.k < 8)
         return false;
 
-    thread_local std::string sequence;
-    sequence.clear();
-    sequence.reserve(sequence_length);
-    for (auto base : seq)
-        sequence.push_back(seqan3::to_char(base));
+    const std::span<const uint8_t> seq_span{
+        reinterpret_cast<const uint8_t *>(seq.data()), seq.size()};
 
     const int k = static_cast<int>(params.k);
     const int s_value = derive_syncmer_s(k);
@@ -127,7 +124,7 @@ bool compute_hashes_strobemer_append_(const std::vector<seqan3::dna4> & seq,
                                          w_max,
                                          main_hash_mask};
 
-        RandstrobeGenerator generator(sequence, syncmer_params, rand_params);
+        RandstrobeGenerator generator(seq_span, syncmer_params, rand_params);
         const Randstrobe sentinel = generator.end();
 
         const size_t expected = sequence_length / std::max<int>(1, k);

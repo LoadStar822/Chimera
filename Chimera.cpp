@@ -440,9 +440,9 @@ int main(int argc, char **argv) {
                                    "Enable EM mode (default)");
   classify
       ->add_option("--em-threshold", classifyConfig.emThreshold, "EM threshold")
-      ->default_val(0.001);
+      ->default_val(1e-4);
   classify->add_option("--em-iter", classifyConfig.emIter, "EM iteration")
-      ->default_val(80);
+      ->default_val(100);
   classify
       ->add_option("--post-thres", classifyConfig.post_thres,
                    "Posterior acceptance threshold")

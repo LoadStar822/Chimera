@@ -338,14 +338,22 @@ void run(ClassifyConfig config) {
     std::cout.flags(oldFlags);
     std::cout.precision(oldPrecision);
   }
-  auto filterStats = apply_presence_filter(presenceDecision, tax,
-                                           classifyResults, fileInfo);
-  if (config.verbose &&
-      (filterStats.trimmedAssignments > 0 ||
-       filterStats.forcedUnclassified > 0)) {
-    std::cout << "Presence filter: trimmed " << filterStats.trimmedAssignments
-              << " assignments, forced " << filterStats.forcedUnclassified
-              << " reads to unclassified" << std::endl;
+  PresenceFilterStats filterStats{};
+  if (!config.em) {
+    filterStats =
+        apply_presence_filter(presenceDecision, tax, classifyResults, fileInfo);
+    if (config.verbose &&
+        (filterStats.trimmedAssignments > 0 ||
+         filterStats.forcedUnclassified > 0)) {
+      std::cout << "Presence filter: trimmed " << filterStats.trimmedAssignments
+                << " assignments, forced " << filterStats.forcedUnclassified
+                << " reads to unclassified" << std::endl;
+    }
+  } else if (config.verbose) {
+    std::cout
+        << "[Info] EM enabled: Skipping pre-EM presence filter to preserve "
+           "shared candidates."
+        << std::endl;
   }
 
   std::unordered_map<std::string, double> emPriorScale;
@@ -394,9 +402,9 @@ void run(ClassifyConfig config) {
     auto EMstart = std::chrono::high_resolution_clock::now();
     std::cout << "Running EM algorithm..." << std::endl;
     EMOptions options;
-    options.temp = 1.10;
-    options.prior_strength = 0.25;
-    options.coexist_penalty = 0.20;
+    options.temp = 1.05;
+    options.prior_strength = 0.0; // 关闭先验强度，避免剪枝被“回血”
+    options.coexist_penalty = 0.0;
     auto [posterior, weights] =
         EMAlgorithm(classifyResults, config.emIter, config.emThreshold, options,
                     emPriorScale.empty() ? nullptr : &emPriorScale);
