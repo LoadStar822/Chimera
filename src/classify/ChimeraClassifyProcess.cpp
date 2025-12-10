@@ -78,8 +78,9 @@ void processSequence(
     }
   };
 
-  size_t targetSample = hashNum / 4;
-  targetSample = std::clamp<size_t>(targetSample, 16, 96);
+  // Sample a subset of hashes for coarse candidate selection.
+  size_t targetSample = hashNum / 2;
+  targetSample = std::clamp<size_t>(targetSample, config.hash_sample_min, config.hash_sample_max);
   const size_t sampleBudget = std::min<size_t>(targetSample, hashs1.size());
   std::vector<uint64_t> sampleVals;
   if (sampleBudget > 0) {
@@ -341,7 +342,7 @@ void processSequence(
     size_t df = routedBinsBuf.empty() ? deg : routedBinsBuf.size();
     double idf = std::log2((totalBins + 1.0) /
                            (static_cast<double>(df) + 1.0));
-    idf = std::clamp(idf, 0.5, 5.0);
+    idf = std::clamp(idf, 0.5, config.idf_max);
 
     double freqFactor = 1.0;
     if (weightCtx.enabled()) {

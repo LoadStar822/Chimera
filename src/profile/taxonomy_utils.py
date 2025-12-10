@@ -13,6 +13,7 @@ from typing import Dict, Iterator, Optional
 class TaxonomyMeta:
     kind: str = "auto"
     version: str = "auto"
+    genome_length_file: Optional[str] = None
 
 
 @dataclass
@@ -57,6 +58,7 @@ def read_taxonomy_meta(meta_path: Optional[str]) -> TaxonomyMeta:
     if not path.exists():
         return TaxonomyMeta()
     meta = TaxonomyMeta()
+    base_dir = path.parent
     try:
         with path.open("r", encoding="utf-8") as fh:
             for line in fh:
@@ -69,6 +71,12 @@ def read_taxonomy_meta(meta_path: Optional[str]) -> TaxonomyMeta:
                     meta.kind = value or "auto"
                 elif key == "taxonomy_version":
                     meta.version = value or "auto"
+                elif key == "genome_length_file":
+                    if value:
+                        candidate = Path(value)
+                        if not candidate.is_absolute():
+                            candidate = base_dir / candidate
+                        meta.genome_length_file = str(candidate)
     except OSError:
         return TaxonomyMeta()
     return meta
@@ -93,4 +101,3 @@ def load_gtdb_taxonomy(info_path: str) -> GtdbTaxonomy:
     if not parent:
         raise ValueError(f"GTDB taxonomy 信息文件中未解析到任何节点: {info_path}")
     return GtdbTaxonomy(parent=parent, rank=rank, name=name)
-

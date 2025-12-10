@@ -389,6 +389,15 @@ void postEmDecision(
     std::vector<classifyResult> &results, const DecisionConfig &decisionConfig,
     const std::unordered_map<std::string, double> &classWeights) {
   constexpr const char *kUnclassified = "unclassified";
+  std::ostream *dump_post = nullptr;
+  std::ofstream dump_file;
+  const char *dump_path = std::getenv("CHIMERA_DUMP_POSTERIOR");
+  if (dump_path && *dump_path) {
+    dump_file.open(dump_path);
+    if (dump_file.good()) {
+      dump_post = &dump_file;
+    }
+  }
 
   auto format_val = [](double value) {
     std::ostringstream oss;
@@ -399,7 +408,7 @@ void postEmDecision(
 
   auto prune_by_global_pi = [&](classifyResult &res, double pi_min) {
     if (pi_min <= 0.0 || res.posteriors.empty() || classWeights.empty()) {
-      return;
+      return false;
     }
     std::vector<std::pair<std::string, double>> kept;
     kept.reserve(res.posteriors.size());
@@ -412,9 +421,9 @@ void postEmDecision(
         sum += kv.second;
       }
     }
+    // Soft behavior: if nothing survives, keep original posteriors.
     if (kept.empty()) {
-      res.posteriors.clear();
-      return;
+      return false;
     }
     if (sum > 0.0) {
       for (auto &kv : kept) {
@@ -422,6 +431,7 @@ void postEmDecision(
       }
     }
     res.posteriors.swap(kept);
+    return true;
   };
 
   for (auto &result : results) {
@@ -437,6 +447,14 @@ void postEmDecision(
     auto posterior = result.posteriors;
     std::sort(posterior.begin(), posterior.end(),
               [](const auto &a, const auto &b) { return a.second > b.second; });
+
+    if (dump_post) {
+      (*dump_post) << result.id;
+      for (const auto &kv : posterior) {
+        (*dump_post) << '\t' << kv.first << ':' << kv.second;
+      }
+      (*dump_post) << '\n';
+    }
 
     const auto &top = posterior.front();
     double top_score = top.second;
@@ -471,7 +489,57 @@ void postEmDecision(
 
     if (pass) {
       result.taxidCount.clear();
-      result.taxidCount.emplace_back(top.first, 0);
+
+      double total_evidence = result.evaluated;
+      if (!(total_evidence > 0.0)) {
+        total_evidence = 1.0;
+      }
+
+      double alpha = std::max(1.0, decisionConfig.posterior_power);
+      double sum_adj = 0.0;
+      for (const auto &kv : result.posteriors) {
+        double post = kv.second;
+        if (!(post > 0.0)) {
+          continue;
+        }
+        if (post < decisionConfig.posterior_min_fraction) {
+          continue;
+        }
+        sum_adj += std::pow(post, alpha);
+      }
+
+      if (sum_adj <= 0.0) {
+        auto fallback = static_cast<size_t>(
+            std::max<double>(1.0, std::llround(total_evidence)));
+        result.taxidCount.emplace_back(top.first, fallback);
+        result.reject_reason.clear();
+        continue;
+      }
+
+      for (const auto &kv : result.posteriors) {
+        const std::string &taxid = kv.first;
+        double post = kv.second;
+        if (!(post > 0.0)) {
+          continue;
+        }
+        if (post < decisionConfig.posterior_min_fraction) {
+          continue;
+        }
+        double weight = std::pow(post, alpha) / sum_adj;
+        double frac = weight * total_evidence;
+        auto count_val = static_cast<size_t>(std::llround(frac));
+        if (count_val == 0) {
+          continue;
+        }
+        result.taxidCount.emplace_back(taxid, count_val);
+      }
+
+      if (result.taxidCount.empty()) {
+        auto fallback = static_cast<size_t>(
+            std::max<double>(1.0, std::llround(total_evidence)));
+        result.taxidCount.emplace_back(top.first, fallback);
+      }
+
       result.reject_reason.clear();
       continue;
     }

@@ -28,6 +28,10 @@ LEVEL_ALIASES = {
 }
 
 UNCLASSIFIED = "unclassified"
+# Tail 截断：以百分比计，0.01 = 0.01%
+MIN_REL_ABUNDANCE = 0.01
+# 最小 evidence：posterior_evidence 票数下限，过滤低支持的长尾假阳性
+MIN_EVIDENCE = 10
 
 
 def _normalize_rank(rank: Optional[str]) -> Optional[str]:
@@ -100,18 +104,51 @@ def _parse_primary_taxid(line: str, expect_numeric: bool) -> Optional[str]:
 
 
 def _collect_taxids(
-    input_files: Iterable[str], expect_numeric: bool
+    input_files: Iterable[str], expect_numeric: bool, soft: bool = True
 ) -> Tuple[Counter[str], int]:
     taxid_counts: Counter[str] = Counter()
     unclassified_reads = 0
     for input_file in input_files:
         with open(input_file, "r", errors="ignore") as infile:
-            for line in infile:
-                taxid = _parse_primary_taxid(line, expect_numeric=expect_numeric)
-                if taxid is None:
-                    unclassified_reads += 1
+            for raw in infile:
+                line = raw.rstrip("\n")
+                if not line:
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 2:
+                    continue
+
+                tokens = parts[1:]
+                if soft:
+                    has_taxid = False
+                    for token in tokens:
+                        token = token.strip()
+                        if not token or token.startswith("POST_TOP2="):
+                            continue
+                        if token.lower() == UNCLASSIFIED:
+                            continue
+                        if ":" not in token:
+                            continue
+                        tid_token, count_token = token.split(":", 1)
+                        tid_token = tid_token.strip()
+                        if expect_numeric and not tid_token.isdigit():
+                            continue
+                        try:
+                            c = float(count_token)
+                        except ValueError:
+                            continue
+                        if c <= 0:
+                            continue
+                        has_taxid = True
+                        taxid_counts[tid_token] += c
+                    if not has_taxid:
+                        unclassified_reads += 1
                 else:
-                    taxid_counts[taxid] += 1
+                    taxid = _parse_primary_taxid(line, expect_numeric=expect_numeric)
+                    if taxid is None:
+                        unclassified_reads += 1
+                    else:
+                        taxid_counts[taxid] += 1
     return taxid_counts, unclassified_reads
 
 
@@ -234,7 +271,7 @@ def process_file(
 
     expect_numeric = resolved_kind != "gtdb"
     taxid_counts, base_unclassified = _collect_taxids(
-        input_files, expect_numeric=expect_numeric
+        input_files, expect_numeric=expect_numeric, soft=True
     )
 
     if resolved_kind == "gtdb":
@@ -266,6 +303,8 @@ def process_file(
     }
 
     with open(output_file + ".tsv", "w") as outfile:
+        outfile.write("# abundance_mode=soft_seq\n")
+        outfile.write("# count_unit=posterior_evidence\n")
         outfile.write("Taxon\tCount\tRelative Abundance (%)\tShannon Index\tSimpson Index\n")
 
         for level, taxon_counter in count_by_level.items():
@@ -289,8 +328,24 @@ def process_file(
             if unclassified_item:
                 items.append(unclassified_item)
 
+            # Tail 截断：移除丰度极低且证据不足的物种，减少虚假 presence
+            filtered_items = []
             for taxon, count in items:
-                relative_abundance = (count / total_count) * 100 if total_count > 0 else 0.0
+                rel = (count / total_count) * 100 if total_count > 0 else 0.0
+                if rel < MIN_REL_ABUNDANCE and count < MIN_EVIDENCE:
+                    continue
+                filtered_items.append((taxon, count))
+
+            if not filtered_items:
+                # 阈值过高导致清空时，保留原始未截断结果
+                filtered_items = items
+
+            total_filtered = sum(c for _, c in filtered_items)
+            shannon_index = calculate_shannon_index(Counter(dict(filtered_items)))
+            simpson_index = calculate_simpson_index(Counter(dict(filtered_items)))
+
+            for taxon, count in filtered_items:
+                relative_abundance = (count / total_filtered) * 100 if total_filtered > 0 else 0.0
                 outfile.write(
                     f"{taxon}\t{count}\t{relative_abundance:.2f}\t{shannon_index:.4f}\t{simpson_index:.4f}\n"
                 )

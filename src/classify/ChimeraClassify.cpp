@@ -403,8 +403,10 @@ void run(ClassifyConfig config) {
     std::cout << "Running EM algorithm..." << std::endl;
     EMOptions options;
     options.temp = 1.05;
-    options.prior_strength = 0.0; // 关闭先验强度，避免剪枝被“回血”
-    options.coexist_penalty = 0.0;
+    options.prior_strength = config.em_prior_strength; // 可选先验强度，默认 0
+    options.coexist_penalty = config.em_coexist_penalty;
+    options.prune_ratio = config.em_prune_ratio;
+    options.conf_power = config.em_conf_power;
     auto [posterior, weights] =
         EMAlgorithm(classifyResults, config.emIter, config.emThreshold, options,
                     emPriorScale.empty() ? nullptr : &emPriorScale);
@@ -423,6 +425,7 @@ void run(ClassifyConfig config) {
     DecisionConfig decisionConfig;
     decisionConfig.posterior_threshold = config.post_thres;
     decisionConfig.min_class_weight = config.post_pi_min;
+    decisionConfig.posterior_power = 1.5;
 
     postEmDecision(classifyResults, decisionConfig, classWeights);
     fileInfo.classifiedNum = 0;

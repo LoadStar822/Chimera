@@ -27,6 +27,8 @@ struct EMOptions {
 	double temp = 1.0;
 	double prior_strength = 0.0;
 	double coexist_penalty = 0.0;
+	double prune_ratio = 1e-3; // relative threshold to max_expected for sparsity
+	double conf_power = 0.0;   // confidence weighting exponent; 0 disables
 };
 
 namespace detail {
@@ -257,7 +259,22 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 				for (const auto& entry : log_components) {
 					double q = std::exp(entry.second - normalizer);
 					posterior.emplace_back(entry.first, q);
-					local_expected[entry.first] += q;
+				}
+
+				// confidence-weighted expected counts
+				double max_post = 0.0;
+				for (const auto& p : posterior) {
+					if (p.second > max_post) max_post = p.second;
+				}
+				double conf_w = 1.0;
+				if (options.conf_power > 0.0 && max_post > 0.0) {
+					conf_w = std::pow(max_post, options.conf_power);
+				}
+				double base_w = (source.evaluated > 0.0) ? source.evaluated : 1.0;
+				double weight = base_w * conf_w;
+
+				for (const auto& p : posterior) {
+					local_expected[p.first] += weight * p.second;
 				}
 
 				destination.posteriors = std::move(posterior);
@@ -289,7 +306,7 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 				max_expected = kv.second;
 			}
 		}
-		double prune_thres = max_expected * 0.001; // 低于主导物种千分之一的视为噪声
+		double prune_thres = max_expected * options.prune_ratio; // 低于主导物种一定比例的视为噪声
 
 		double diff = 0.0;
 		for (const auto& taxid : taxid_list) {

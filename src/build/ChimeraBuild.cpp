@@ -13,6 +13,7 @@
 #include <limits>
 #include <sstream>
 #include <thread>
+#include <vector>
 
 namespace ChimeraBuild {
 
@@ -30,6 +31,61 @@ void run(BuildConfig config) {
     config.threads = static_cast<uint16_t>(hardwareThreads);
   }
   const char *kTaxonomyMetaFilename = "taxonomy.meta";
+  auto export_genome_length = [&](const auto &bpCountMap) {
+    if (bpCountMap.empty()) {
+      return;
+    }
+    std::filesystem::path dataset_dir =
+        std::filesystem::path(config.input_file).parent_path();
+    if (dataset_dir.empty()) {
+      return;
+    }
+
+    std::filesystem::path len_path = dataset_dir / "tax.len";
+    try {
+      std::ofstream len_out(len_path, std::ios::trunc);
+      if (!len_out.is_open()) {
+        std::cerr << "Failed to write genome length file: " << len_path
+                  << std::endl;
+      } else {
+        for (const auto &kv : bpCountMap) {
+          len_out << kv.first << '\t' << kv.second << '\n';
+        }
+      }
+    } catch (const std::exception &e) {
+      std::cerr << "Failed to export genome lengths: " << e.what()
+                << std::endl;
+      return;
+    }
+
+    std::filesystem::path meta_path = dataset_dir / kTaxonomyMetaFilename;
+    try {
+      std::vector<std::string> lines;
+      if (std::filesystem::exists(meta_path)) {
+        std::ifstream in(meta_path);
+        std::string line;
+        while (std::getline(in, line)) {
+          if (line.rfind("genome_length_file=", 0) == 0) {
+            continue;
+          }
+          lines.push_back(line);
+        }
+      }
+      lines.push_back("genome_length_file=tax.len");
+      std::ofstream out(meta_path, std::ios::trunc);
+      if (!out.is_open()) {
+        std::cerr << "Failed to update taxonomy meta: " << meta_path
+                  << std::endl;
+      } else {
+        for (const auto &line : lines) {
+          out << line << '\n';
+        }
+      }
+    } catch (const std::exception &e) {
+      std::cerr << "Failed to update taxonomy meta: " << e.what()
+                << std::endl;
+    }
+  };
   auto trim = [](std::string &value) {
     while (!value.empty() &&
            std::isspace(static_cast<unsigned char>(value.front()))) {
@@ -266,6 +322,7 @@ void run(BuildConfig config) {
   auto build_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                               build_end - build_start)
                               .count();
+  export_genome_length(bpCount);
   if (config.verbose) {
     std::cout << "Total build time: ";
     print_build_time(build_total_time);
