@@ -15,11 +15,122 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <thread>
+
+namespace {
+
+static std::vector<std::string> split_tab(const std::string &line) {
+  std::vector<std::string> parts;
+  std::string field;
+  std::stringstream ss(line);
+  while (std::getline(ss, field, '\t')) {
+    parts.push_back(field);
+  }
+  return parts;
+}
+
+static bool try_parse_double(const std::string &s, double &out) {
+  try {
+    size_t idx = 0;
+    out = std::stod(s, &idx);
+    return idx > 0;
+  } catch (...) {
+    return false;
+  }
+}
+
+static std::unordered_map<std::string, double>
+load_weight_map_file(const std::string &path) {
+  std::unordered_map<std::string, double> weights;
+  std::ifstream is(path);
+  if (!is.is_open()) {
+    throw std::runtime_error("Failed to open weight map file: " + path);
+  }
+
+  std::string line;
+  if (!std::getline(is, line)) {
+    return weights;
+  }
+
+  auto header_cols = split_tab(line);
+  auto find_col = [&](const std::string &name) -> int {
+    for (size_t i = 0; i < header_cols.size(); ++i) {
+      if (header_cols[i] == name) {
+        return static_cast<int>(i);
+      }
+    }
+    return -1;
+  };
+
+  int w_idx = find_col("number_reads");
+  int id_idx = -1;
+  const std::vector<std::string> id_candidates = {
+      "#anonymous_contig_id", "anonymous_contig_id", "contig_id", "read_id", "id"};
+  for (const auto &cand : id_candidates) {
+    id_idx = find_col(cand);
+    if (id_idx >= 0) {
+      break;
+    }
+  }
+
+  auto add_weight = [&](const std::string &id, double w) {
+    if (id.empty()) {
+      return;
+    }
+    if (!(w > 0.0)) {
+      w = 1.0;
+    }
+    weights[id] = w;
+  };
+
+  if (w_idx >= 0 && id_idx >= 0) {
+    // CAMI-style mapping.tsv with header.
+    while (std::getline(is, line)) {
+      if (line.empty() || line[0] == '#') {
+        continue;
+      }
+      auto cols = split_tab(line);
+      if (static_cast<int>(cols.size()) <= std::max(w_idx, id_idx)) {
+        continue;
+      }
+      double w = 1.0;
+      try_parse_double(cols[w_idx], w);
+      add_weight(cols[id_idx], w);
+    }
+    return weights;
+  }
+
+  // Fallback: plain id<TAB>weight (no header). Try to parse the first line too.
+  auto parse_two_col = [&](const std::string &ln) {
+    if (ln.empty() || ln[0] == '#') {
+      return;
+    }
+    auto cols = split_tab(ln);
+    if (cols.size() < 2) {
+      return;
+    }
+    double w = 0.0;
+    if (!try_parse_double(cols[1], w)) {
+      return;
+    }
+    add_weight(cols[0], w);
+  };
+
+  parse_two_col(line);
+  while (std::getline(is, line)) {
+    parse_two_col(line);
+  }
+  return weights;
+}
+
+} // namespace
 
 namespace ChimeraClassify {
 
@@ -50,7 +161,8 @@ void run(ClassifyConfig config) {
 
   FileInfo fileInfo;
   seqan3::contrib::bgzf_thread_count = config.threads;
-  moodycamel::ConcurrentQueue<batchReads> readQueue;
+  std::vector<moodycamel::ConcurrentQueue<batchReads>> readQueues(
+      static_cast<size_t>(std::max<uint16_t>(1, config.threads)));
   std::vector<classifyResult> classifyResults;
   std::unordered_map<std::string, double> classWeights;
   bool posteriorModelUsed = false;
@@ -59,7 +171,7 @@ void run(ClassifyConfig config) {
   std::atomic<bool> producer_done{false};
   auto readEnd = readStart;
   std::thread producer([&]() {
-    parseReads(readQueue, config, fileInfo);
+    parseReads(readQueues, config, fileInfo);
     readEnd = std::chrono::high_resolution_clock::now();
     if (config.verbose) {
       auto readDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -89,6 +201,60 @@ void run(ClassifyConfig config) {
     } catch (const std::exception &ex) {
       std::cerr << "Warning: 无法加载频率 Sketch，回退到旧权重模型: " << ex.what()
                 << std::endl;
+    }
+  }
+  if (config.verbose) {
+    std::cout << "DB presence meta: entries=" << coverageMeta.entries.size()
+              << ", ref_read_len=" << coverageMeta.ref_read_length
+              << ", span=" << coverageMeta.effective_span
+              << ", unique_deg=" << coverageMeta.unique_deg_threshold
+              << ", freq_model.enabled=" << coverageMeta.freq_model.enabled()
+              << ", freq_model.depth=" << coverageMeta.freq_model.depth
+              << ", freq_model.width=" << coverageMeta.freq_model.width
+              << ", counters=" << coverageMeta.freq_model.counters.size()
+              << std::endl;
+    size_t uniq_nonzero = 0;
+    uint64_t uniq_max = 0;
+    size_t density_nonzero = 0;
+    double density_max = 0.0;
+    size_t genome_nonzero = 0;
+    for (const auto &entry : coverageMeta.entries) {
+      if (entry.unique_signatures > 0) {
+        ++uniq_nonzero;
+        if (entry.unique_signatures > uniq_max) {
+          uniq_max = entry.unique_signatures;
+        }
+      }
+      if (entry.unique_density > 0.0) {
+        ++density_nonzero;
+        if (entry.unique_density > density_max) {
+          density_max = entry.unique_density;
+        }
+      }
+      if (entry.genome_length > 0) {
+        ++genome_nonzero;
+      }
+    }
+    std::cout << "DB presence meta stats: unique_nonzero=" << uniq_nonzero
+              << ", unique_max=" << uniq_max
+              << ", density_nonzero=" << density_nonzero
+              << ", density_max=" << std::scientific << density_max
+              << std::defaultfloat << ", genome_nonzero=" << genome_nonzero
+              << std::endl;
+  }
+
+  std::unordered_map<std::string, double> sampleWeights;
+  if (!config.weight_map_file.empty()) {
+    std::cout << "Loading sample weight map: " << config.weight_map_file
+              << std::endl;
+    sampleWeights = load_weight_map_file(config.weight_map_file);
+    if (sampleWeights.empty()) {
+      std::cerr << "Warning: weight map parsed empty; fallback to default weights."
+                << std::endl;
+    } else {
+      std::cout << "Loaded " << sampleWeights.size()
+                << " sample weights." << std::endl;
+      weightCtx.sampleWeights = &sampleWeights;
     }
   }
   auto normalize_kind = [](std::string &value) {
@@ -284,14 +450,21 @@ void run(ClassifyConfig config) {
   PresenceSummary *presencePtr = &presenceSummary;
   uint64_t presenceSeed = 0;
   std::hash<std::string> hasher;
-  presenceSeed = hasher(config.outputFile);
-  presenceSeed ^= (hasher(config.dbFile) << 1);
+  // Stable seed: avoid run_dir/output path affecting decoy randomness so metrics
+  // are reproducible across repeated runs on the same dataset+DB.
+  if (!config.singleFiles.empty()) {
+    presenceSeed ^= hasher(config.singleFiles.front());
+  }
+  if (!config.pairedFiles.empty()) {
+    presenceSeed ^= (hasher(config.pairedFiles.front()) << 1);
+  }
+  presenceSeed ^= (hasher(config.dbFile) << 2);
   presenceSeed ^= static_cast<uint64_t>(imcfConfig.fpSalt);
 
   auto classifyStart = std::chrono::high_resolution_clock::now();
   std::cout << "Classifying sequences by imcf (feature=" << config.feature
             << ")..." << std::endl;
-  classify_streaming(imcfConfig, readQueue, config, imcf, indexToTaxid, tax,
+  classify_streaming(imcfConfig, readQueues, config, imcf, indexToTaxid, tax,
                      classifyResults, fileInfo, producer_done, feature_params,
                      feature_min_len, weightCtx, presencePtr, presenceSeed);
   auto classifyEnd = std::chrono::high_resolution_clock::now();
@@ -299,6 +472,13 @@ void run(ClassifyConfig config) {
       std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd -
                                                             classifyStart);
   producer.join();
+  // Determinism: classify_streaming merges thread-local batches in the order
+  // threads finish, which is non-deterministic. Sort by read/contig id before
+  // downstream EM/post-processing so repeated runs are stable.
+  std::sort(classifyResults.begin(), classifyResults.end(),
+            [](const classifyResult &a, const classifyResult &b) {
+              return a.id < b.id;
+            });
   if (config.verbose) {
     std::cout << "Classify time: ";
     print_classify_time(classifyDuration.count());
@@ -323,18 +503,51 @@ void run(ClassifyConfig config) {
               << std::endl;
   }
 
-  PresenceDecision presenceDecision =
-      evaluate_presence_coverage(presenceSummary, tax, config, coverageMeta,
-                                 fileInfo.sequenceNum, fileInfo.avgLen);
+  size_t presenceTotalReads = fileInfo.sequenceNum;
+  size_t presenceMeanReadLen = fileInfo.avgLen;
+  if (weightCtx.has_sample_weights()) {
+    presenceMeanReadLen = (coverageMeta.ref_read_length > 0)
+                              ? static_cast<size_t>(coverageMeta.ref_read_length)
+                              : static_cast<size_t>(150);
+  }
+
+  PresenceDecision presenceDecision = evaluate_presence_coverage(
+      presenceSummary, tax, config, coverageMeta, presenceTotalReads,
+      presenceMeanReadLen);
   if (config.verbose) {
     auto oldFlags = std::cout.flags();
     auto oldPrecision = std::cout.precision();
     std::cout << "Presence caller (coverage): tests=" << presenceDecision.tested
               << ", accepted=" << presenceDecision.acceptedCount
-              << ", mu=" << std::scientific << std::setprecision(3)
+              << ", mu=" << std::scientific << std::setprecision(6)
               << presenceDecision.noiseMu << ", pi=" << config.presence_pi
               << ", tau=" << config.presence_tau << std::defaultfloat
               << std::endl;
+
+    if (!presenceDecision.logPosteriors.empty()) {
+      std::vector<double> vals;
+      vals.reserve(presenceDecision.logPosteriors.size());
+      for (const auto &kv : presenceDecision.logPosteriors) {
+        vals.push_back(kv.second);
+      }
+      std::sort(vals.begin(), vals.end());
+      auto pick = [&](double q) -> double {
+        if (vals.empty()) {
+          return 0.0;
+        }
+        q = std::clamp(q, 0.0, 1.0);
+        size_t idx = static_cast<size_t>(
+            std::floor(q * static_cast<double>(vals.size() - 1)));
+        if (idx >= vals.size()) {
+          idx = vals.size() - 1;
+        }
+        return vals[idx];
+      };
+      std::cout << "Presence logPosterior: p50=" << std::fixed
+                << std::setprecision(3) << pick(0.50)
+                << ", p90=" << pick(0.90) << ", p99=" << pick(0.99)
+                << ", max=" << vals.back() << std::defaultfloat << std::endl;
+    }
     std::cout.flags(oldFlags);
     std::cout.precision(oldPrecision);
   }
@@ -427,7 +640,8 @@ void run(ClassifyConfig config) {
     decisionConfig.min_class_weight = config.post_pi_min;
     decisionConfig.posterior_power = 1.5;
 
-    postEmDecision(classifyResults, decisionConfig, classWeights);
+    postEmDecision(classifyResults, decisionConfig, classWeights, tax,
+                   &presenceDecision);
     fileInfo.classifiedNum = 0;
     fileInfo.unclassifiedNum = 0;
     for (const auto &result : classifyResults) {

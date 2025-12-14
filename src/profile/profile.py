@@ -103,9 +103,49 @@ def _parse_primary_taxid(line: str, expect_numeric: bool) -> Optional[str]:
     return None
 
 
+def _parse_primary_taxid_and_count(
+    line: str, expect_numeric: bool
+) -> Optional[Tuple[str, float]]:
+    line = line.strip()
+    if not line:
+        return None
+    parts = [token.strip() for token in line.split("\t") if token.strip()]
+    if len(parts) < 2:
+        return None
+    for token in parts[1:]:
+        if not token or token.startswith("POST_TOP2="):
+            continue
+        if token.lower() == UNCLASSIFIED:
+            return None
+        if ":" not in token:
+            continue
+        tid_token, count_token = token.split(":", 1)
+        tid_token = tid_token.strip()
+        if expect_numeric and not tid_token.isdigit():
+            continue
+        try:
+            c = float(count_token)
+        except ValueError:
+            continue
+        if c <= 0:
+            continue
+        return tid_token, c
+    return None
+
+
 def _collect_taxids(
-    input_files: Iterable[str], expect_numeric: bool, soft: bool = True
+    input_files: Iterable[str], expect_numeric: bool, abundance_mode: str = "soft_seq"
 ) -> Tuple[Counter[str], int]:
+    mode = (abundance_mode or "soft_seq").strip().lower()
+    if mode in {"soft", "soft_seq", "soft_tax"}:
+        mode = "soft_seq"
+    elif mode in {"hard", "hard_seq"}:
+        mode = "hard_seq"
+    elif mode in {"top1"}:
+        mode = "top1"
+    else:
+        raise ValueError(f"Unknown abundance_mode: {abundance_mode}")
+
     taxid_counts: Counter[str] = Counter()
     unclassified_reads = 0
     for input_file in input_files:
@@ -119,7 +159,7 @@ def _collect_taxids(
                     continue
 
                 tokens = parts[1:]
-                if soft:
+                if mode == "soft_seq":
                     has_taxid = False
                     for token in tokens:
                         token = token.strip()
@@ -143,7 +183,16 @@ def _collect_taxids(
                         taxid_counts[tid_token] += c
                     if not has_taxid:
                         unclassified_reads += 1
-                else:
+                elif mode == "hard_seq":
+                    parsed = _parse_primary_taxid_and_count(
+                        line, expect_numeric=expect_numeric
+                    )
+                    if parsed is None:
+                        unclassified_reads += 1
+                    else:
+                        tid, c = parsed
+                        taxid_counts[tid] += c
+                else:  # top1
                     taxid = _parse_primary_taxid(line, expect_numeric=expect_numeric)
                     if taxid is None:
                         unclassified_reads += 1
@@ -258,6 +307,7 @@ def process_file(
     taxonomy_version: str = "auto",
     taxonomy_info: Optional[str] = None,
     taxonomy_meta: Optional[str] = None,
+    abundance_mode: str = "soft_seq",
 ) -> None:
     meta = read_taxonomy_meta(taxonomy_meta)
     resolved_kind = normalize_kind(taxonomy_kind)
@@ -271,7 +321,7 @@ def process_file(
 
     expect_numeric = resolved_kind != "gtdb"
     taxid_counts, base_unclassified = _collect_taxids(
-        input_files, expect_numeric=expect_numeric, soft=True
+        input_files, expect_numeric=expect_numeric, abundance_mode=abundance_mode
     )
 
     if resolved_kind == "gtdb":
@@ -303,8 +353,18 @@ def process_file(
     }
 
     with open(output_file + ".tsv", "w") as outfile:
-        outfile.write("# abundance_mode=soft_seq\n")
-        outfile.write("# count_unit=posterior_evidence\n")
+        mode = (abundance_mode or "soft_seq").strip().lower()
+        if mode in {"soft", "soft_seq", "soft_tax"}:
+            mode = "soft_seq"
+        elif mode in {"hard", "hard_seq"}:
+            mode = "hard_seq"
+        elif mode in {"top1"}:
+            mode = "top1"
+        else:
+            mode = "soft_seq"
+        outfile.write(f"# abundance_mode={mode}\n")
+        count_unit = "sequence" if mode == "top1" else "posterior_evidence"
+        outfile.write(f"# count_unit={count_unit}\n")
         outfile.write("Taxon\tCount\tRelative Abundance (%)\tShannon Index\tSimpson Index\n")
 
         for level, taxon_counter in count_by_level.items():

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 
@@ -88,7 +89,10 @@ IMCFIndexStatus loadFilter(
   if (coverageMeta) {
     try {
       archive(*coverageMeta);
-    } catch (const cereal::Exception &) {
+    } catch (const cereal::Exception &exc) {
+      std::cerr << "[warn] CoverageMeta deserialize failed: " << exc.what()
+                << " (DB likely old/incompatible). Presence/frequency model will fallback."
+                << std::endl;
       coverageMeta->entries.clear();
       coverageMeta->unique_deg_threshold = 1;
     }

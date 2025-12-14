@@ -97,7 +97,7 @@ VEMAlgorithm(const std::vector<classifyResult>& input,
 				continue;
 			}
 			double scale = resolve_scale(taxid);
-			double contrib = static_cast<double>(count) / scale;
+			double contrib = count / scale;
 			abundance_prior[taxid] += contrib;
 			abundance_sum += contrib;
 		}
@@ -178,56 +178,56 @@ VEMAlgorithm(const std::vector<classifyResult>& input,
 				auto& destination = results[i];
 				destination.posteriors.clear();
 
-			std::vector<std::pair<std::string, double>> candidates;
-			double max_count = 0.0;
-			double second_count = 0.0;
-			std::string best_taxid;
-			for (const auto& [taxid, count] : source.taxidCount) {
-				if (vem_detail::is_unclassified(taxid)) {
-					continue;
+				std::vector<std::pair<std::string, double>> candidates;
+				double max_count = 0.0;
+				double second_count = 0.0;
+				std::string best_taxid;
+				for (const auto& [taxid, count] : source.taxidCount) {
+					if (vem_detail::is_unclassified(taxid)) {
+						continue;
+					}
+					double c = count / source.evaluated;
+					candidates.emplace_back(taxid, c);
+					if (c > max_count) {
+						second_count = max_count;
+						max_count = c;
+						best_taxid = taxid;
+					} else if (c > second_count) {
+						second_count = c;
+					}
 				}
-				double c = static_cast<double>(count) / source.evaluated;
-				candidates.emplace_back(taxid, c);
-				if (c > max_count) {
-					second_count = max_count;
-					max_count = c;
-					best_taxid = taxid;
-				} else if (c > second_count) {
-					second_count = c;
-				}
-			}
 
 				if (candidates.empty()) {
 					continue;
 				}
 
-			double denom = max_count + options.eps * static_cast<double>(candidates.size());
-			if (denom <= 0.0) {
-				denom = options.eps * static_cast<double>(candidates.size());
-			}
-			double penalty_scale = 0.0;
-			if (options.coexist_penalty > 0.0 && second_count > 0.0) {
-				double ratio_est = max_count /
-				                 std::max(second_count, options.eps);
-				double tightness = std::clamp((1.5 - ratio_est) / 0.5, 0.0, 1.0);
-				penalty_scale = options.coexist_penalty * tightness;
-			}
+				double denom = max_count + options.eps * static_cast<double>(candidates.size());
+				if (denom <= 0.0) {
+					denom = options.eps * static_cast<double>(candidates.size());
+				}
+				double penalty_scale = 0.0;
+				if (options.coexist_penalty > 0.0 && second_count > 0.0) {
+					double ratio_est = max_count /
+					                 std::max(second_count, options.eps);
+					double tightness = std::clamp((1.5 - ratio_est) / 0.5, 0.0, 1.0);
+					penalty_scale = options.coexist_penalty * tightness;
+				}
 
 				std::vector<std::pair<std::string, double>> log_components;
 				log_components.reserve(candidates.size());
-			for (const auto& [taxid, c] : candidates) {
-				auto it_pi = expected_log_pi.find(taxid);
-				if (it_pi == expected_log_pi.end()) {
-					continue;
+				for (const auto& [taxid, c] : candidates) {
+					auto it_pi = expected_log_pi.find(taxid);
+					if (it_pi == expected_log_pi.end()) {
+						continue;
+					}
+					double likelihood = (c + options.eps) / denom;
+					double log_likelihood = options.temp * std::log(std::max(likelihood, options.eps));
+					double coexist = 0.0;
+					if (!best_taxid.empty() && taxid != best_taxid) {
+						coexist = penalty_scale;
+					}
+					log_components.emplace_back(taxid, it_pi->second + log_likelihood - coexist);
 				}
-				double likelihood = (c + options.eps) / denom;
-				double log_likelihood = options.temp * std::log(std::max(likelihood, options.eps));
-				double coexist = 0.0;
-				if (!best_taxid.empty() && taxid != best_taxid) {
-					coexist = penalty_scale;
-				}
-				log_components.emplace_back(taxid, it_pi->second + log_likelihood - coexist);
-			}
 
 				if (log_components.empty()) {
 					continue;

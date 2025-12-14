@@ -35,11 +35,12 @@
 #include <seqan3/core/debug_stream.hpp>
 
 namespace ChimeraClassify {
-	struct ClassifyConfig {
-		std::vector<std::string> singleFiles;
-		std::vector<std::string> pairedFiles;
-		std::string outputFile;
-		std::string dbFile;
+		struct ClassifyConfig {
+			std::vector<std::string> singleFiles;
+			std::vector<std::string> pairedFiles;
+			std::string weight_map_file; // optional contig/read weight map (CAMI mapping.tsv or id<TAB>weight)
+			std::string outputFile;
+			std::string dbFile;
 		std::string feature{ "auto" };
 		uint8_t strobemer_k{ 0 };      // inherit from DB unless >0
 		uint8_t strobemer_order{ 0 };
@@ -66,14 +67,14 @@ namespace ChimeraClassify {
 	size_t emIter;
 	double em_prune_ratio = 2e-4;   // relative to max_expected in EM sparsity
 	double em_prior_strength = 1.0; // Dirichlet mass; 0 uses alpha only
-	double em_coexist_penalty = 0.0; // penalty for near-tied taxa in EM softmax
-	double em_conf_power = 0.0;     // confidence exponent for EM M-step (0 disables)
+		double em_coexist_penalty = 0.6; // penalty for near-tied taxa in EM softmax
+	double em_conf_power = 2.0;     // confidence exponent for EM M-step (0 disables)
 	double post_thres = 0.56;
 	double post_pi_min = 5e-4;
 	size_t hash_sample_min = 16;
 	size_t hash_sample_max = 96;
-	double idf_max = 5.0;
-	};
+		double idf_max = 8.0;
+		};
 
 	inline std::ostream& operator<<(std::ostream& os, const ClassifyConfig& config) {
 		os << std::string(40, '=') << std::endl;
@@ -85,13 +86,15 @@ namespace ChimeraClassify {
 		for (const auto& file : config.singleFiles) {
 			os << std::setw(20) << "" << file << std::endl;
 		}
-		os << std::setw(20) << "Paired files:" << std::endl;
-		for (const auto& file : config.pairedFiles) {
-			os << std::setw(20) << "" << file << std::endl;
-		}
-		os << std::setw(20) << "Output file:" << config.outputFile << std::endl
-			<< std::setw(20) << "Database file:" << config.dbFile << std::endl
-			<< std::setw(20) << "Feature method:" << config.feature << std::endl
+			os << std::setw(20) << "Paired files:" << std::endl;
+			for (const auto& file : config.pairedFiles) {
+				os << std::setw(20) << "" << file << std::endl;
+			}
+			os << std::setw(20) << "Weight map:"
+				<< (config.weight_map_file.empty() ? "none" : config.weight_map_file) << std::endl;
+			os << std::setw(20) << "Output file:" << config.outputFile << std::endl
+				<< std::setw(20) << "Database file:" << config.dbFile << std::endl
+				<< std::setw(20) << "Feature method:" << config.feature << std::endl
 			<< std::setw(20) << "Strobemer k:" << static_cast<int>(config.strobemer_k) << std::endl
 			<< std::setw(20) << "Strobemer order:" << static_cast<int>(config.strobemer_order) << std::endl
 			<< std::setw(20) << "Strobemer w_min:" << config.strobemer_w_min << std::endl
@@ -150,15 +153,16 @@ namespace ChimeraClassify {
 		std::vector< std::vector< seqan3::dna4 > > seqs2{};
 	};
 
-	struct classifyResult {
-		std::string id;
-		std::vector<std::pair<std::string, size_t>> taxidCount;
-		std::vector<std::pair<std::string, double>> posteriors;
-		double evaluated{ 0.0 }; // 实际参与判别的 syncmer 数，用于归一化
-		std::string reject_reason; // 为空表示未拒绝或接受
-		std::string best_taxid_hint; // 最佳候选 taxid（即使未被接受）
-		bool presence_passed{ false }; // 是否通过 presence 层
-	};
+		struct classifyResult {
+			std::string id;
+			std::vector<std::pair<std::string, double>> taxidCount;
+			std::vector<std::pair<std::string, double>> posteriors;
+			double evaluated{ 0.0 }; // 实际参与判别的 syncmer 数，用于归一化
+			double sample_weight{ 0.0 }; // 可选样本权重（如 CAMI number_reads）；0 表示未提供
+			std::string reject_reason; // 为空表示未拒绝或接受
+			std::string best_taxid_hint; // 最佳候选 taxid（即使未被接受）
+			bool presence_passed{ false }; // 是否通过 presence 层
+		};
 
 	struct DecisionConfig {
 		double posterior_threshold = 0.56;

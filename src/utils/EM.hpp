@@ -109,7 +109,7 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 		double total_count = 0.0;
 		for (const auto& kv : record.taxidCount) {
 			if (!detail::is_unclassified(kv.first)) {
-				total_count += static_cast<double>(kv.second);
+				total_count += kv.second;
 			}
 		}
 
@@ -119,7 +119,7 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 		for (const auto& kv : record.taxidCount) {
 			if (detail::is_unclassified(kv.first)) continue;
 			weighted_evidence[kv.first] +=
-				static_cast<double>(kv.second) / total_count;
+				kv.second / total_count;
 		}
 	}
 
@@ -189,58 +189,58 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 				auto& destination = results[i];
 				destination.posteriors.clear();
 
-			std::vector<std::pair<std::string, double>> candidates;
-			double max_count = 0.0;
-			double second_count = 0.0;
-			std::string best_taxid;
-			for (const auto& [taxid, count] : source.taxidCount) {
-				if (detail::is_unclassified(taxid)) {
-					continue;
-				}
-				double c = static_cast<double>(count) / source.evaluated;
-				candidates.emplace_back(taxid, c);
-				if (c > max_count) {
-					second_count = max_count;
-					max_count = c;
-					best_taxid = taxid;
-				} else if (c > second_count) {
-					second_count = c;
-				}
-			}
-
-				if (candidates.empty()) {
-					continue;
+				std::vector<std::pair<std::string, double>> candidates;
+				double max_count = 0.0;
+				double second_count = 0.0;
+				std::string best_taxid;
+				for (const auto& [taxid, count] : source.taxidCount) {
+					if (detail::is_unclassified(taxid)) {
+						continue;
+					}
+					double c = count / source.evaluated;
+					candidates.emplace_back(taxid, c);
+					if (c > max_count) {
+						second_count = max_count;
+						max_count = c;
+						best_taxid = taxid;
+					} else if (c > second_count) {
+						second_count = c;
+					}
 				}
 
-			double denom = max_count + options.eps * static_cast<double>(candidates.size());
-			if (denom <= 0.0) {
-				denom = options.eps * static_cast<double>(candidates.size());
-			}
-			double penalty_scale = 0.0;
-			if (options.coexist_penalty > 0.0 && second_count > 0.0) {
-				double ratio_est = max_count /
-				                 std::max(second_count, options.eps);
-				double tightness = std::clamp((1.5 - ratio_est) / 0.5, 0.0, 1.0);
-				penalty_scale = options.coexist_penalty * tightness;
-			}
+					if (candidates.empty()) {
+						continue;
+					}
 
-				std::vector<std::pair<std::string, double>> log_components;
-				log_components.reserve(candidates.size());
-			for (const auto& [taxid, c] : candidates) {
-				auto it = pi.find(taxid);
-				if (it == pi.end()) {
-					continue;
+				double denom = max_count + options.eps * static_cast<double>(candidates.size());
+				if (denom <= 0.0) {
+					denom = options.eps * static_cast<double>(candidates.size());
 				}
-				double likelihood = (c + options.eps) / denom;
-				double log_likelihood = options.temp * std::log(std::max(likelihood, options.eps));
-				double prior = std::max(it->second, options.eps);
-				double log_prior = std::log(prior);
-				double coexist = 0.0;
-				if (!best_taxid.empty() && taxid != best_taxid) {
-					coexist = penalty_scale;
+				double penalty_scale = 0.0;
+				if (options.coexist_penalty > 0.0 && second_count > 0.0) {
+					double ratio_est = max_count /
+					                 std::max(second_count, options.eps);
+					double tightness = std::clamp((1.5 - ratio_est) / 0.5, 0.0, 1.0);
+					penalty_scale = options.coexist_penalty * tightness;
 				}
-				log_components.emplace_back(taxid, log_prior + log_likelihood - coexist);
-			}
+
+					std::vector<std::pair<std::string, double>> log_components;
+					log_components.reserve(candidates.size());
+				for (const auto& [taxid, c] : candidates) {
+					auto it = pi.find(taxid);
+					if (it == pi.end()) {
+						continue;
+					}
+					double likelihood = (c + options.eps) / denom;
+					double log_likelihood = options.temp * std::log(std::max(likelihood, options.eps));
+					double prior = std::max(it->second, options.eps);
+					double log_prior = std::log(prior);
+					double coexist = 0.0;
+					if (!best_taxid.empty() && taxid != best_taxid) {
+						coexist = penalty_scale;
+					}
+					log_components.emplace_back(taxid, log_prior + log_likelihood - coexist);
+				}
 
 				if (log_components.empty()) {
 					continue;
@@ -270,8 +270,10 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 				if (options.conf_power > 0.0 && max_post > 0.0) {
 					conf_w = std::pow(max_post, options.conf_power);
 				}
-				double base_w = (source.evaluated > 0.0) ? source.evaluated : 1.0;
-				double weight = base_w * conf_w;
+					double base_w = (source.sample_weight > 0.0)
+					                     ? source.sample_weight
+					                     : ((source.evaluated > 0.0) ? source.evaluated : 1.0);
+					double weight = base_w * conf_w;
 
 				for (const auto& p : posterior) {
 					local_expected[p.first] += weight * p.second;

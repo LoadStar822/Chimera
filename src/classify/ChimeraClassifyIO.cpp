@@ -82,103 +82,111 @@ ReadStats sample_read_stats(const ClassifyConfig &config, size_t max_reads) {
   return stats;
 }
 
-void parseReads(moodycamel::ConcurrentQueue<batchReads> &readQueue,
+void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
                 ClassifyConfig config, FileInfo &fileInfo) {
+  if (readQueues.empty()) {
+    throw std::runtime_error("readQueues is empty");
+  }
+
+  const size_t shardCount = readQueues.size();
+  std::hash<std::string> hasher;
+
+  auto init_batch = [&](batchReads &batch, bool paired) {
+    batch.ids.reserve(config.batchSize);
+    batch.seqs.reserve(config.batchSize);
+    if (paired) {
+      batch.seqs2.reserve(config.batchSize);
+    }
+  };
+
+  auto flush_batch = [&](size_t shard, batchReads &batch, bool paired) {
+    if (batch.ids.empty()) {
+      return;
+    }
+    readQueues[shard].enqueue(std::move(batch));
+    batchReads fresh;
+    init_batch(fresh, paired);
+    batch = std::move(fresh);
+  };
+
   size_t totalSequences = 0;
   size_t totalFiles = 0;
 
   if (!config.singleFiles.empty()) {
-#pragma omp parallel
-    {
-      std::vector<batchReads> localBatches;
-      size_t localSeq = 0;
-      size_t localFiles = 0;
+    std::vector<batchReads> pending(shardCount);
+    for (auto &b : pending) {
+      init_batch(b, false);
+    }
 
-#pragma omp for schedule(dynamic)
-      for (size_t i = 0; i < config.singleFiles.size(); ++i) {
-        const auto &file = config.singleFiles[i];
-        ++localFiles;
+    for (const auto &file : config.singleFiles) {
+      ++totalFiles;
 
-        seqan3::sequence_file_input<
-            raptor::dna4_traits,
-            seqan3::fields<seqan3::field::id, seqan3::field::seq>>
-            fin{file};
+      seqan3::sequence_file_input<
+          raptor::dna4_traits,
+          seqan3::fields<seqan3::field::id, seqan3::field::seq>>
+          fin{file};
 
-        for (auto &&rec : fin | seqan3::views::chunk(config.batchSize)) {
-          batchReads batch;
-          for (auto &&r : rec) {
-            batch.ids.emplace_back(std::move(r.id()));
-            batch.seqs.emplace_back(std::move(r.sequence()));
-          }
-          localSeq += batch.ids.size();
-          localBatches.emplace_back(std::move(batch));
+      for (auto &&r : fin) {
+        std::string id = std::move(r.id());
+        size_t shard = hasher(id) % shardCount;
+        auto &batch = pending[shard];
+        batch.ids.emplace_back(std::move(id));
+        batch.seqs.emplace_back(std::move(r.sequence()));
+        ++totalSequences;
+        if (batch.ids.size() >= config.batchSize) {
+          flush_batch(shard, batch, false);
         }
       }
+    }
 
-      for (auto &batch : localBatches) {
-        readQueue.enqueue(std::move(batch));
-      }
-
-#pragma omp atomic
-      totalSequences += localSeq;
-#pragma omp atomic
-      totalFiles += localFiles;
+    for (size_t shard = 0; shard < shardCount; ++shard) {
+      flush_batch(shard, pending[shard], false);
     }
   } else if (!config.pairedFiles.empty()) {
     if (config.pairedFiles.size() % 2 != 0) {
       throw std::runtime_error("Paired input requires an even number of files");
     }
 
-#pragma omp parallel
-    {
-      std::vector<batchReads> localBatches;
-      size_t localSeq = 0;
-      size_t localFiles = 0;
+    std::vector<batchReads> pending(shardCount);
+    for (auto &b : pending) {
+      init_batch(b, true);
+    }
 
-#pragma omp for schedule(dynamic)
-      for (size_t i = 0; i < config.pairedFiles.size(); i += 2) {
-        localFiles += 2;
+    for (size_t i = 0; i < config.pairedFiles.size(); i += 2) {
+      totalFiles += 2;
 
-        seqan3::sequence_file_input<
-            raptor::dna4_traits,
-            seqan3::fields<seqan3::field::id, seqan3::field::seq>>
-            fin1{config.pairedFiles[i]};
-        seqan3::sequence_file_input<
-            raptor::dna4_traits,
-            seqan3::fields<seqan3::field::id, seqan3::field::seq>>
-            fin2{config.pairedFiles[i + 1]};
+      seqan3::sequence_file_input<
+          raptor::dna4_traits,
+          seqan3::fields<seqan3::field::id, seqan3::field::seq>>
+          fin1{config.pairedFiles[i]};
+      seqan3::sequence_file_input<
+          raptor::dna4_traits,
+          seqan3::fields<seqan3::field::id, seqan3::field::seq>>
+          fin2{config.pairedFiles[i + 1]};
 
-        auto range1 = fin1 | seqan3::views::chunk(config.batchSize);
-        auto range2 = fin2 | seqan3::views::chunk(config.batchSize);
+      auto it1 = fin1.begin();
+      auto end1 = fin1.end();
+      auto it2 = fin2.begin();
+      auto end2 = fin2.end();
 
-        auto it1 = range1.begin();
-        auto end1 = range1.end();
-        auto it2 = range2.begin();
-        auto end2 = range2.end();
-
-        for (; it1 != end1 && it2 != end2; ++it1, ++it2) {
-          batchReads batch;
-          for (auto &&r : *it1) {
-            batch.ids.emplace_back(std::move(r.id()));
-            batch.seqs.emplace_back(std::move(r.sequence()));
-          }
-          for (auto &&r : *it2) {
-            batch.seqs2.emplace_back(std::move(r.sequence()));
-          }
-
-          localSeq += batch.ids.size();
-          localBatches.emplace_back(std::move(batch));
+      for (; it1 != end1 && it2 != end2; ++it1, ++it2) {
+        auto rec1 = *it1;
+        auto rec2 = *it2;
+        std::string id = std::move(rec1.id());
+        size_t shard = hasher(id) % shardCount;
+        auto &batch = pending[shard];
+        batch.ids.emplace_back(std::move(id));
+        batch.seqs.emplace_back(std::move(rec1.sequence()));
+        batch.seqs2.emplace_back(std::move(rec2.sequence()));
+        ++totalSequences;
+        if (batch.ids.size() >= config.batchSize) {
+          flush_batch(shard, batch, true);
         }
       }
+    }
 
-      for (auto &batch : localBatches) {
-        readQueue.enqueue(std::move(batch));
-      }
-
-#pragma omp atomic
-      totalSequences += localSeq;
-#pragma omp atomic
-      totalFiles += localFiles;
+    for (size_t shard = 0; shard < shardCount; ++shard) {
+      flush_batch(shard, pending[shard], true);
     }
   } else {
     throw std::runtime_error("No input files specified");

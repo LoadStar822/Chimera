@@ -50,8 +50,11 @@
 #include <vector>
 
 namespace ChimeraClassify {
-void run(ClassifyConfig config);
-void postEmDecision(
-    std::vector<classifyResult> &results, const DecisionConfig &decisionConfig,
-    const std::unordered_map<std::string, double> &classWeights);
+	struct TaxDict;
+	struct PresenceDecision;
+	void run(ClassifyConfig config);
+	void postEmDecision(
+	    std::vector<classifyResult> &results, const DecisionConfig &decisionConfig,
+	    const std::unordered_map<std::string, double> &classWeights,
+	    const TaxDict &tax, const PresenceDecision *presenceDecision);
 } // namespace ChimeraClassify

@@ -1,5 +1,6 @@
 #include "ChimeraBuildCommon.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -71,18 +72,21 @@ void build_hash_frequency_sketch(
   context.passB_filtered_hashes.store(0, std::memory_order_relaxed);
   context.stats = {};
   context.quantile = 0.999;
-  std::cout << "Building hash frequency sketch (depth=" << kSketchDepth
+  std::cout << "Building hash frequency sketch (taxon-DF; depth=" << kSketchDepth
             << ", width=" << kSketchWidth << ")..." << std::endl;
   context.sketch = std::make_unique<CountMinSketch>(kSketchDepth, kSketchWidth);
-  std::vector<std::string> all_files;
-  for (const auto &entry : inputFiles) {
-    for (const auto &filename : entry.second) {
-      all_files.push_back(filename);
-    }
-  }
-  if (all_files.empty()) {
+  if (inputFiles.empty()) {
     context.stats = {};
     return;
+  }
+  struct TaxonFiles {
+    const std::string *taxid;
+    const std::vector<std::string> *files;
+  };
+  std::vector<TaxonFiles> taxa;
+  taxa.reserve(inputFiles.size());
+  for (const auto &entry : inputFiles) {
+    taxa.push_back({&entry.first, &entry.second});
   }
   chimera::feature::Method feature_method{};
   uint64_t feature_seed = 0;
@@ -94,38 +98,63 @@ void build_hash_frequency_sketch(
       std::max<size_t>(config.min_length, feature_min_length);
   auto sketch_start = std::chrono::high_resolution_clock::now();
 
-#pragma omp parallel
+  const uint16_t sketch_threads =
+      std::max<uint16_t>(1, std::min<uint16_t>(config.threads, 32));
+#pragma omp parallel num_threads(sketch_threads)
   {
     std::vector<uint64_t> hashes;
     hashes.reserve(4096);
+    std::vector<uint64_t> taxon_hashes;
+    taxon_hashes.reserve(4096);
     uint64_t local_hash_total = 0;
 
 #pragma omp for schedule(dynamic)
-    for (size_t idx = 0; idx < all_files.size(); ++idx) {
-      const std::string &filename = all_files[idx];
-      try {
-        seqan3::sequence_file_input<
-            raptor::dna4_traits,
-            seqan3::fields<seqan3::field::id, seqan3::field::seq>>
-            fin{filename};
-        for (auto &record : fin) {
-          auto &seq = record.sequence();
-          if (seq.size() < min_required) {
-            continue;
+    for (size_t idx = 0; idx < taxa.size(); ++idx) {
+      const auto &taxon = taxa[idx];
+      if (taxon.files == nullptr || taxon.files->empty()) {
+        continue;
+      }
+      taxon_hashes.clear();
+      for (const auto &filename : *taxon.files) {
+        try {
+          seqan3::sequence_file_input<
+              raptor::dna4_traits,
+              seqan3::fields<seqan3::field::id, seqan3::field::seq>>
+              fin{filename};
+          for (auto &record : fin) {
+            auto &seq = record.sequence();
+            if (seq.size() < min_required) {
+              continue;
+            }
+            hashes.clear();
+            chimera::feature::compute_hashes_append(seq, feature_params, hashes);
+            taxon_hashes.insert(taxon_hashes.end(), hashes.begin(), hashes.end());
           }
-          hashes.clear();
-          chimera::feature::compute_hashes_append(seq, feature_params, hashes);
-          local_hash_total += hashes.size();
-          for (uint64_t hash : hashes) {
-            context.sketch->add(hash);
-          }
-        }
-      } catch (const std::exception &ex) {
+        } catch (const std::exception &ex) {
 #pragma omp critical(sketch_log)
-        {
-          std::cerr << "Failed to read sequence file for sketch: " << filename
-                    << " (" << ex.what() << ")" << std::endl;
+          {
+            std::cerr << "Failed to read sequence file for sketch: "
+                      << filename;
+            if (taxon.taxid) {
+              std::cerr << " taxid=" << *taxon.taxid;
+            }
+            std::cerr << " (" << ex.what() << ")" << std::endl;
+          }
         }
+      }
+      if (taxon_hashes.empty()) {
+        continue;
+      }
+      std::sort(taxon_hashes.begin(), taxon_hashes.end());
+      auto last = std::unique(taxon_hashes.begin(), taxon_hashes.end());
+      const size_t unique_count = static_cast<size_t>(last - taxon_hashes.begin());
+      local_hash_total += unique_count;
+      for (size_t i = 0; i < unique_count; ++i) {
+        context.sketch->add(taxon_hashes[i]);
+      }
+      if (taxon_hashes.capacity() > (1u << 24)) {
+        std::vector<uint64_t>().swap(taxon_hashes);
+        taxon_hashes.reserve(4096);
       }
     }
 
@@ -144,7 +173,7 @@ void build_hash_frequency_sketch(
   const auto hashed =
       context.passA_total_hashes.load(std::memory_order_relaxed);
   std::cout << "Sketch summary:" << std::endl;
-  std::cout << "  Streamed hashes: " << hashed << std::endl;
+  std::cout << "  Streamed taxon-unique hashes: " << hashed << std::endl;
   std::cout << "  Active counters: " << context.stats.nonzero_counters
             << std::endl;
   std::cout << "  Max df estimate: " << context.stats.df_max_observed

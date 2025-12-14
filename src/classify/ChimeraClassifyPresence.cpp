@@ -4,30 +4,62 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <sstream>
 
 namespace ChimeraClassify {
+
+namespace {
+constexpr double kPresenceFixedScale = 1048576.0; // 2^20
+
+inline uint64_t to_fixed(double value) {
+  if (!(value > 0.0)) {
+    return 0;
+  }
+  long double scaled = static_cast<long double>(value) *
+                       static_cast<long double>(kPresenceFixedScale);
+  if (!(scaled > 0.0)) {
+    return 0;
+  }
+  long double rounded = std::llround(scaled);
+  if (!(rounded > 0.0)) {
+    return 0;
+  }
+  long double max_u64 = static_cast<long double>(
+      std::numeric_limits<uint64_t>::max());
+  if (rounded >= max_u64) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return static_cast<uint64_t>(rounded);
+}
+
+inline double from_fixed(uint64_t value) {
+  return static_cast<double>(value) / kPresenceFixedScale;
+}
+} // namespace
 
 PresenceAccumulator::PresenceAccumulator(size_t reps) : decoyReps(reps) {}
 
 PresenceStats &PresenceAccumulator::touch(uint32_t tid) {
   auto [it, inserted] = stats.try_emplace(tid);
   if (decoyReps > 0 && it->second.decoys.size() != decoyReps) {
-    it->second.decoys.resize(decoyReps, 0.0);
+    it->second.decoys.resize(decoyReps, 0);
   }
   (void)inserted;
   return it->second;
 }
 
-void PresenceAccumulator::add_target(uint32_t tid, double weight,
-                                     bool uniqueEdge) {
+void PresenceAccumulator::add_target(uint32_t tid, double hit_weight,
+                                     double score_weight, bool uniqueEdge) {
   PresenceStats &entry = touch(tid);
-  entry.score += weight;
-  entry.hits += 1.0;
+  const uint64_t hit_inc = to_fixed(hit_weight);
+  const uint64_t score_inc = to_fixed(score_weight);
+  entry.score += score_inc;
+  entry.hits += hit_inc;
   if (uniqueEdge) {
-    entry.uniqueHits += 1;
-    entry.uniqueScore += weight;
+    entry.uniqueHits += hit_inc;
+    entry.uniqueScore += score_inc;
   }
 }
 
@@ -36,7 +68,7 @@ void PresenceAccumulator::add_decoy(size_t rep, uint32_t tid, double weight) {
     return;
   }
   PresenceStats &entry = touch(tid);
-  entry.decoys[rep] += weight;
+  entry.decoys[rep] += to_fixed(weight);
 }
 
 PresenceSummary::PresenceSummary(size_t reps) : decoyReps(reps) {}
@@ -50,7 +82,7 @@ void PresenceSummary::merge(const PresenceAccumulator &acc) {
     dst.uniqueHits += entry.uniqueHits;
     if (decoyReps > 0) {
       if (dst.decoys.size() != decoyReps) {
-        dst.decoys.resize(decoyReps, 0.0);
+        dst.decoys.resize(decoyReps, 0);
       }
       size_t copy = std::min(decoyReps, entry.decoys.size());
       for (size_t i = 0; i < copy; ++i) {
@@ -76,8 +108,8 @@ static PresenceDecision evaluate_presence_tdFDR(const PresenceSummary &summary,
   for (const auto &[tid, stats] : summary.stats) {
     double decoyMax = 0.0;
     if (!stats.decoys.empty()) {
-      decoyMax =
-          *std::max_element(stats.decoys.begin(), stats.decoys.end());
+      decoyMax = from_fixed(
+          *std::max_element(stats.decoys.begin(), stats.decoys.end()));
     }
     pooled.push_back(decoyMax);
   }
@@ -103,7 +135,7 @@ static PresenceDecision evaluate_presence_tdFDR(const PresenceSummary &summary,
                     std::log1p(-config.presence_pi);
   double tau = config.presence_tau;
   for (const auto &[tid, stats] : summary.stats) {
-    double score = stats.score;
+    double score = from_fixed(stats.score);
     if (score <= 0.0) {
       continue;
     }
@@ -201,10 +233,10 @@ PresenceFilterStats apply_presence_filter(const PresenceDecision &decision,
   return stats;
 }
 
-PresenceDecision evaluate_presence_coverage(
+static PresenceDecision evaluate_presence_coverage_impl(
     const PresenceSummary &summary, const TaxDict &tax,
     const ClassifyConfig &config, const chimera::presence::CoverageMeta &meta,
-    size_t totalReads, size_t meanReadLen) {
+    size_t totalReads, size_t meanReadLen, bool unique_only) {
   PresenceDecision decision;
   decision.threshold = config.presence_tau;
   decision.priorPi = config.presence_pi;
@@ -314,19 +346,31 @@ PresenceDecision evaluate_presence_coverage(
   if (!(mu > 0.0)) {
     double muAccum = 0.0;
     double weightSum = 0.0;
+    size_t usable_taxa = 0;
     for (const auto &[tid, stats] : summary.stats) {
       double exposure = resolve_exposure(tid);
       if (exposure <= 0.0) {
-        continue;
+        exposure = resolve_unique(tid);
+      }
+      if (exposure <= 0.0) {
+        exposure = std::max(1.0, from_fixed(stats.hits));
       }
       if (!stats.decoys.empty()) {
-        double decoyMean = std::accumulate(stats.decoys.begin(),
-                                           stats.decoys.end(), 0.0) /
-                           static_cast<double>(stats.decoys.size());
+        double decoyMean = 0.0;
+        for (uint64_t d : stats.decoys) {
+          decoyMean += from_fixed(d);
+        }
+        decoyMean /= static_cast<double>(stats.decoys.size());
         double mu_j = decoyMean / exposure;
         muAccum += mu_j * exposure;
         weightSum += exposure;
+        ++usable_taxa;
       }
+    }
+    if (config.verbose) {
+      std::cout << "presence mu-est: usable_taxa=" << usable_taxa
+                << ", weightSum=" << std::scientific << weightSum
+                << std::defaultfloat << std::endl;
     }
     if (weightSum > 0.0) {
       mu = muAccum / weightSum;
@@ -342,19 +386,27 @@ PresenceDecision evaluate_presence_coverage(
   double logPriorOdds = std::log(pi) - std::log1p(-pi);
 
   decision.tested = summary.stats.size();
-  for (const auto &[tid, stats] : summary.stats) {
-    double exposure = resolve_exposure(tid);
-    if (exposure <= 0.0) {
-      exposure = resolve_unique(tid);
-    }
-    if (exposure <= 0.0) {
-      exposure = std::max(1.0, stats.hits);
-    }
-    double u_eff = std::max<double>(exposure, u_min_effective);
-    double C = (stats.uniqueHits > 0)
-                   ? static_cast<double>(stats.uniqueHits)
-                   : ((stats.uniqueScore > 0.0) ? stats.uniqueScore
-                                                : stats.score);
+	  for (const auto &[tid, stats] : summary.stats) {
+	    double exposure = resolve_exposure(tid);
+	    if (exposure <= 0.0) {
+	      exposure = resolve_unique(tid);
+	    }
+	    if (exposure <= 0.0) {
+	      exposure = std::max(1.0, from_fixed(stats.hits));
+	    }
+	    double u_eff = std::max<double>(exposure, u_min_effective);
+	    const double unique_hits = from_fixed(stats.uniqueHits);
+	    const double unique_score = from_fixed(stats.uniqueScore);
+	    const double score = from_fixed(stats.score);
+	    double C = 0.0;
+	    if (unique_only) {
+	      C = (unique_hits > 0.0) ? unique_hits
+	                              : std::max(0.0, unique_score);
+	    } else {
+	      C = (unique_hits > 0.0)
+	              ? unique_hits
+	              : ((unique_score > 0.0) ? unique_score : score);
+	    }
     double lambda_hat = std::max(0.0, (C / u_eff) - mu);
     double logBF = 0.0;
     if (mu > 0.0) {
@@ -385,9 +437,26 @@ PresenceDecision evaluate_presence_coverage(
   return decision;
 }
 
+PresenceDecision evaluate_presence_coverage(
+    const PresenceSummary &summary, const TaxDict &tax,
+    const ClassifyConfig &config, const chimera::presence::CoverageMeta &meta,
+    size_t totalReads, size_t meanReadLen) {
+  return evaluate_presence_coverage_impl(summary, tax, config, meta, totalReads,
+                                        meanReadLen, false);
+}
+
+PresenceDecision evaluate_presence_coverage_unique(
+    const PresenceSummary &summary, const TaxDict &tax,
+    const ClassifyConfig &config, const chimera::presence::CoverageMeta &meta,
+    size_t totalReads, size_t meanReadLen) {
+  return evaluate_presence_coverage_impl(summary, tax, config, meta, totalReads,
+                                        meanReadLen, true);
+}
+
 void postEmDecision(
     std::vector<classifyResult> &results, const DecisionConfig &decisionConfig,
-    const std::unordered_map<std::string, double> &classWeights) {
+    const std::unordered_map<std::string, double> &classWeights,
+    const TaxDict &tax, const PresenceDecision *presenceDecision) {
   constexpr const char *kUnclassified = "unclassified";
   std::ostream *dump_post = nullptr;
   std::ofstream dump_file;
@@ -406,6 +475,65 @@ void postEmDecision(
     return oss.str();
   };
 
+  enum class PresenceLevel {
+    kUnknown = 0,
+    kAccepted = 1,
+    kRejected = 2,
+  };
+
+  constexpr double kPresencePiFloor = 1e-6;
+  constexpr double kRejectFactor = 2.0;
+  constexpr double kRejectDynPostBoost = 0.04;
+
+  double presence_tau = std::numeric_limits<double>::infinity();
+  double presence_strict_tau = std::numeric_limits<double>::infinity();
+  if (presenceDecision && !presenceDecision->logPosteriors.empty()) {
+    presence_tau = presenceDecision->threshold;
+    presence_strict_tau = presence_tau;
+    constexpr size_t kPresenceCap = 2048;
+    std::vector<double> vals;
+    vals.reserve(presenceDecision->logPosteriors.size());
+    for (const auto &kv : presenceDecision->logPosteriors) {
+      vals.push_back(kv.second);
+    }
+    if (vals.size() > kPresenceCap) {
+      auto nth = vals.end() - static_cast<std::ptrdiff_t>(kPresenceCap);
+      std::nth_element(vals.begin(), nth, vals.end());
+      presence_strict_tau = std::max(presence_strict_tau, *nth);
+    }
+  }
+
+  auto presence_level = [&](const std::string &taxid) -> PresenceLevel {
+    if (!presenceDecision) {
+      return PresenceLevel::kUnknown;
+    }
+    if (presenceDecision->logPosteriors.empty()) {
+      return PresenceLevel::kUnknown;
+    }
+    if (taxid == kUnclassified) {
+      return PresenceLevel::kUnknown;
+    }
+    auto it = tax.str2id.find(taxid);
+    if (it == tax.str2id.end()) {
+      return PresenceLevel::kUnknown;
+    }
+    uint32_t tid = it->second;
+    auto it_lp = presenceDecision->logPosteriors.find(tid);
+    if (it_lp == presenceDecision->logPosteriors.end()) {
+      return PresenceLevel::kUnknown;
+    }
+    const double lp = it_lp->second;
+    if (lp >= presence_strict_tau) {
+      return PresenceLevel::kAccepted;
+    }
+    // When strict_tau is raised by cap, do not treat remaining taxa as rejected;
+    // keep a neutral zone for lp in [tau, strict_tau).
+    if (lp < presence_tau) {
+      return PresenceLevel::kRejected;
+    }
+    return PresenceLevel::kUnknown;
+  };
+
   auto prune_by_global_pi = [&](classifyResult &res, double pi_min) {
     if (pi_min <= 0.0 || res.posteriors.empty() || classWeights.empty()) {
       return false;
@@ -414,9 +542,16 @@ void postEmDecision(
     kept.reserve(res.posteriors.size());
     double sum = 0.0;
     for (const auto &kv : res.posteriors) {
+      PresenceLevel pres = presence_level(kv.first);
       auto weight_it = classWeights.find(kv.first);
       double w = (weight_it != classWeights.end()) ? weight_it->second : 0.0;
-      if (w >= pi_min) {
+      double local_pi_min = pi_min;
+      if (pres == PresenceLevel::kAccepted) {
+        local_pi_min = std::min(pi_min, kPresencePiFloor);
+      } else if (pres == PresenceLevel::kRejected) {
+        local_pi_min = pi_min * kRejectFactor;
+      }
+      if (w >= local_pi_min) {
         kept.push_back(kv);
         sum += kv.second;
       }
@@ -440,7 +575,7 @@ void postEmDecision(
     }
     if (result.posteriors.empty()) {
       result.taxidCount.clear();
-      result.taxidCount.emplace_back(kUnclassified, 1);
+      result.taxidCount.emplace_back(kUnclassified, 1.0);
       continue;
     }
 
@@ -460,6 +595,11 @@ void postEmDecision(
     double top_score = top.second;
     double second_score = (posterior.size() > 1) ? posterior[1].second : 0.0;
 
+    PresenceLevel top_presence = presence_level(top.first);
+    if (top_presence == PresenceLevel::kAccepted) {
+      result.presence_passed = true;
+    }
+
     double dyn_post = decisionConfig.posterior_threshold;
     double evalWeight = result.evaluated;
     if (evalWeight < 24.0) {
@@ -468,6 +608,10 @@ void postEmDecision(
       dyn_post = std::max(dyn_post, 0.56);
     } else {
       dyn_post = std::max(dyn_post, 0.52);
+    }
+    if (top_presence == PresenceLevel::kRejected) {
+      dyn_post = std::max(dyn_post,
+                          decisionConfig.posterior_threshold + kRejectDynPostBoost);
     }
     if (result.presence_passed) {
       dyn_post = std::max(0.40, dyn_post - 0.10);
@@ -480,7 +624,13 @@ void postEmDecision(
       auto weight_it = classWeights.find(top.first);
       if (weight_it != classWeights.end()) {
         class_weight = weight_it->second;
-        weight_ok = (class_weight >= decisionConfig.min_class_weight);
+        double pi_min = decisionConfig.min_class_weight;
+        if (top_presence == PresenceLevel::kAccepted) {
+          pi_min = std::min(pi_min, kPresencePiFloor);
+        } else if (top_presence == PresenceLevel::kRejected) {
+          pi_min = std::min(1.0, pi_min * kRejectFactor);
+        }
+        weight_ok = (class_weight >= pi_min);
       }
     }
     bool pass = weight_ok && (top_score >= dyn_post);
@@ -490,12 +640,13 @@ void postEmDecision(
     if (pass) {
       result.taxidCount.clear();
 
-      double total_evidence = result.evaluated;
+      double total_evidence =
+          (result.sample_weight > 0.0) ? result.sample_weight : result.evaluated;
       if (!(total_evidence > 0.0)) {
         total_evidence = 1.0;
       }
 
-      double alpha = std::max(1.0, decisionConfig.posterior_power);
+	      double alpha = std::max(1.0, decisionConfig.posterior_power);
       double sum_adj = 0.0;
       for (const auto &kv : result.posteriors) {
         double post = kv.second;
@@ -509,8 +660,8 @@ void postEmDecision(
       }
 
       if (sum_adj <= 0.0) {
-        auto fallback = static_cast<size_t>(
-            std::max<double>(1.0, std::llround(total_evidence)));
+        double fallback =
+            static_cast<double>(std::max<double>(1.0, std::llround(total_evidence)));
         result.taxidCount.emplace_back(top.first, fallback);
         result.reject_reason.clear();
         continue;
@@ -522,21 +673,28 @@ void postEmDecision(
         if (!(post > 0.0)) {
           continue;
         }
+        // Presence coverage provides a sample-level false-positive control.
+        // When a taxon is confidently rejected by presence, avoid allocating
+        // abundance mass to it as a minor posterior tail (keep top1 behavior).
+        if (presence_level(taxid) == PresenceLevel::kRejected &&
+            taxid != top.first) {
+          continue;
+        }
         if (post < decisionConfig.posterior_min_fraction) {
           continue;
         }
         double weight = std::pow(post, alpha) / sum_adj;
         double frac = weight * total_evidence;
-        auto count_val = static_cast<size_t>(std::llround(frac));
-        if (count_val == 0) {
+        double count_val = static_cast<double>(std::llround(frac));
+        if (!(count_val > 0.0)) {
           continue;
         }
         result.taxidCount.emplace_back(taxid, count_val);
       }
 
       if (result.taxidCount.empty()) {
-        auto fallback = static_cast<size_t>(
-            std::max<double>(1.0, std::llround(total_evidence)));
+        double fallback =
+            static_cast<double>(std::max<double>(1.0, std::llround(total_evidence)));
         result.taxidCount.emplace_back(top.first, fallback);
       }
 
@@ -551,7 +709,7 @@ void postEmDecision(
     // if (keep_multi) { ... }
 
     result.taxidCount.clear();
-    result.taxidCount.emplace_back(kUnclassified, 1);
+    result.taxidCount.emplace_back(kUnclassified, 1.0);
     if (result.reject_reason.empty()) {
       result.reject_reason = weight_ok ? "em_post" : "posterior_weight";
     }

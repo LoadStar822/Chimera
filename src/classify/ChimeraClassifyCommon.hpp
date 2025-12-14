@@ -42,8 +42,10 @@ struct WeightingContext {
   const CountMinSketch *freqSketch{nullptr};
   chimera::presence::HashFreqStats freqStats{};
   double freqQuantile{0.0};
+  const std::unordered_map<std::string, double> *sampleWeights{nullptr};
 
   bool enabled() const { return freqSketch != nullptr; }
+  bool has_sample_weights() const { return sampleWeights != nullptr; }
 };
 
 struct ReadStats {
@@ -74,7 +76,7 @@ TaxDict build_tax_dict(const std::vector<std::vector<std::string>> &idx2tax);
 
 void print_classify_time(long long milliseconds);
 
-void parseReads(moodycamel::ConcurrentQueue<batchReads> &readQueue,
+void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
                 ClassifyConfig config, FileInfo &fileInfo);
 
 struct IMCFIndexStatus {
@@ -104,11 +106,11 @@ struct GroupHeat {
 };
 
 struct PresenceStats {
-  double score{0.0};
-  double uniqueScore{0.0};
-  double hits{0.0};
+  uint64_t score{0};
+  uint64_t uniqueScore{0};
+  uint64_t hits{0};
   uint64_t uniqueHits{0};
-  std::vector<double> decoys;
+  std::vector<uint64_t> decoys;
 };
 
 struct PresenceAccumulator {
@@ -117,7 +119,8 @@ struct PresenceAccumulator {
 
   explicit PresenceAccumulator(size_t reps = 0);
   PresenceStats &touch(uint32_t tid);
-  void add_target(uint32_t tid, double weight, bool uniqueEdge);
+  void add_target(uint32_t tid, double hit_weight, double score_weight,
+                  bool uniqueEdge);
   void add_decoy(size_t rep, uint32_t tid, double weight);
 };
 
@@ -144,6 +147,11 @@ struct PresenceDecision {
 };
 
 PresenceDecision evaluate_presence_coverage(
+    const PresenceSummary &summary, const TaxDict &tax,
+    const ClassifyConfig &config, const chimera::presence::CoverageMeta &meta,
+    size_t totalReads, size_t meanReadLen);
+
+PresenceDecision evaluate_presence_coverage_unique(
     const PresenceSummary &summary, const TaxDict &tax,
     const ClassifyConfig &config, const chimera::presence::CoverageMeta &meta,
     size_t totalReads, size_t meanReadLen);
@@ -177,7 +185,8 @@ void processBatch(
 
 void classify_streaming(
     ChimeraBuild::IMCFConfig &imcfConfig,
-    moodycamel::ConcurrentQueue<batchReads> &readQueue, ClassifyConfig &config,
+    std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
+    ClassifyConfig &config,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf,
     std::vector<std::vector<std::string>> &indexToTaxid, const TaxDict &tax,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
@@ -187,7 +196,7 @@ void classify_streaming(
     uint64_t decoySeed);
 
 void classify(ChimeraBuild::IMCFConfig &imcfConfig,
-              moodycamel::ConcurrentQueue<batchReads> &readQueue,
+              std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
               ClassifyConfig &config,
               chimera::imcf::InterleavedMergedCuckooFilter &imcf,
               std::vector<std::vector<std::string>> &indexToTaxid,

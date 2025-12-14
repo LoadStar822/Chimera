@@ -388,6 +388,13 @@ def parse_arguments():
         default=None,
         help="指向 taxonomy.meta 元数据文件（若未提供将尝试在输入文件同目录查找）",
     )
+    profile_parser.add_argument(
+        "--abundance-mode",
+        dest="abundance_mode",
+        default="soft_seq",
+        choices=["soft_seq", "hard_seq", "top1", "soft_tax", "soft", "hard"],
+        help="丰度统计模式：soft_seq(默认，累加所有 taxid:count) / hard_seq(仅 top1 的 taxid:count) / top1(仅 top1，每条序列计 1)。",
+    )
 
     if len(sys.argv) == 1:
         parser.print_help(sys.stderr)
@@ -486,6 +493,7 @@ def run_chimera(args, chimera_path):
                 taxonomy_version=args.taxonomy_version,
                 taxonomy_info=args.taxonomy_info,
                 taxonomy_meta=args.taxonomy_meta,
+                abundance_mode=args.abundance_mode,
             )
         except ValueError as exc:
             print(f"Profile failed: {exc}")

@@ -69,6 +69,27 @@ void processSequence(
   const size_t presenceDecoyReps =
       presenceEnabled ? presenceAcc->decoyReps : 0;
   const double exclusiveGamma = std::max(0.0, config.exclusive_gamma);
+  constexpr double kUniqueEdgeBonus = 3.0;
+  const bool has_sample_weight = weightCtx.has_sample_weights();
+  double sample_weight = 1.0;
+  if (has_sample_weight && weightCtx.sampleWeights) {
+    auto it_w = weightCtx.sampleWeights->find(id);
+    if (it_w != weightCtx.sampleWeights->end()) {
+      sample_weight = it_w->second;
+    }
+  }
+  if (!(sample_weight > 0.0)) {
+    sample_weight = 1.0;
+  }
+  // Presence model is sensitive to extremely large sample weights (read counts).
+  // Use a tempered weight so presence stays a useful gate instead of saturating.
+  double presence_weight = sample_weight;
+  if (has_sample_weight) {
+    presence_weight = std::sqrt(sample_weight);
+    if (!(presence_weight > 0.0)) {
+      presence_weight = 1.0;
+    }
+  }
 
   auto note_reject = [&](const std::string &reason,
                          const std::string &taxid_hint) {
@@ -85,13 +106,62 @@ void processSequence(
   std::vector<uint64_t> sampleVals;
   if (sampleBudget > 0) {
     sampleVals.reserve(sampleBudget);
-    size_t step = std::max<size_t>(1, hashs1.size() / sampleBudget);
-    for (size_t i = 0; i < hashs1.size() && sampleVals.size() < sampleBudget;
-         i += step) {
-      sampleVals.push_back(hashs1[i]);
-    }
-    if (sampleVals.size() < sampleBudget && !hashs1.empty()) {
-      sampleVals.push_back(hashs1.back());
+    if (hashs1.size() <= sampleBudget) {
+      sampleVals = hashs1;
+    } else if (weightCtx.freqSketch) {
+      // Mix: prefer rarer hashes for a sharper candidate set, but keep some
+      // uniform coverage to avoid missing genus-level candidates.
+      const size_t rareQuota = std::max<size_t>(1, sampleBudget / 2);
+      const size_t over =
+          std::min<size_t>(hashs1.size(), std::max<size_t>(sampleBudget * 8, sampleBudget));
+      std::vector<std::pair<uint32_t, uint64_t>> scored;
+      scored.reserve(over);
+      size_t step = std::max<size_t>(1, hashs1.size() / over);
+      for (size_t i = 0; i < hashs1.size() && scored.size() < over; i += step) {
+        uint64_t v = hashs1[i];
+        scored.emplace_back(weightCtx.freqSketch->estimate(v), v);
+      }
+      if (!hashs1.empty() && scored.size() < over) {
+        uint64_t v = hashs1.back();
+        scored.emplace_back(weightCtx.freqSketch->estimate(v), v);
+      }
+      std::sort(scored.begin(), scored.end(),
+                [](const auto &a, const auto &b) {
+                  if (a.first != b.first) {
+                    return a.first < b.first;
+                  }
+                  return a.second < b.second;
+                });
+      for (const auto &kv : scored) {
+        sampleVals.push_back(kv.second);
+        if (sampleVals.size() >= rareQuota) {
+          break;
+        }
+      }
+      // Top up with a coarse uniform stride.
+      size_t step2 = std::max<size_t>(1, hashs1.size() / sampleBudget);
+      for (size_t i = 0; i < hashs1.size() && sampleVals.size() < sampleBudget;
+           i += step2) {
+        sampleVals.push_back(hashs1[i]);
+      }
+      if (sampleVals.size() < sampleBudget && !hashs1.empty()) {
+        sampleVals.push_back(hashs1.back());
+      }
+      std::sort(sampleVals.begin(), sampleVals.end());
+      sampleVals.erase(std::unique(sampleVals.begin(), sampleVals.end()),
+                       sampleVals.end());
+      if (sampleVals.size() > sampleBudget) {
+        sampleVals.resize(sampleBudget);
+      }
+    } else {
+      size_t step = std::max<size_t>(1, hashs1.size() / sampleBudget);
+      for (size_t i = 0; i < hashs1.size() && sampleVals.size() < sampleBudget;
+           i += step) {
+        sampleVals.push_back(hashs1[i]);
+      }
+      if (sampleVals.size() < sampleBudget && !hashs1.empty()) {
+        sampleVals.push_back(hashs1.back());
+      }
     }
   }
 
@@ -315,13 +385,9 @@ void processSequence(
         std::unique(minimizerTids.begin(), minimizerTids.end()),
         minimizerTids.end());
 
-    size_t deg = minimizerTids.size();
-    if (deg == 0) {
+    const size_t deg_subset = minimizerTids.size();
+    if (deg_subset == 0) {
       return 0.0;
-    }
-    double exclusivityWeight = 1.0;
-    if (exclusiveGamma > 0.0 && deg > 0) {
-      exclusivityWeight = std::pow(static_cast<double>(deg), -exclusiveGamma);
     }
 
     double totalBins = subset ? static_cast<double>(subset->size())
@@ -339,20 +405,28 @@ void processSequence(
           routedBinsBuf.end());
     }
 
-    size_t df = routedBinsBuf.empty() ? deg : routedBinsBuf.size();
-    double idf = std::log2((totalBins + 1.0) /
-                           (static_cast<double>(df) + 1.0));
-    idf = std::clamp(idf, 0.5, config.idf_max);
+    const size_t df_bins =
+        routedBinsBuf.empty() ? deg_subset : routedBinsBuf.size();
+
+    double exclusivityWeight = 1.0;
+    if (exclusiveGamma > 0.0 && deg_subset > 0) {
+      exclusivityWeight =
+          std::pow(static_cast<double>(deg_subset), -exclusiveGamma);
+    }
+
+	    double idf = std::log2((totalBins + 1.0) /
+	                           (static_cast<double>(df_bins) + 1.0));
+	    idf = std::clamp(idf, 0.5, config.idf_max);
 
     double freqFactor = 1.0;
     if (weightCtx.enabled()) {
       uint32_t df_est = weightCtx.freqSketch->estimate(value);
       double vocab = static_cast<double>(
           std::max<uint64_t>(1, weightCtx.freqStats.nonzero_counters));
-      double bg_idf =
-          std::log((vocab + 1.0) / (static_cast<double>(df_est) + 1.0));
-      bg_idf = bg_idf / std::log(2.0);
-      bg_idf = std::clamp(bg_idf, 0.25, 6.0);
+	      double bg_idf =
+	          std::log((vocab + 1.0) / (static_cast<double>(df_est) + 1.0));
+	      bg_idf = bg_idf / std::log(2.0);
+	      bg_idf = std::clamp(bg_idf, 0.25, 6.0);
       if (weightCtx.freqStats.df_high_threshold !=
               std::numeric_limits<uint32_t>::max() &&
           df_est >= weightCtx.freqStats.df_high_threshold) {
@@ -365,34 +439,45 @@ void processSequence(
         } else {
           freqFactor *= 0.25;
         }
-      }
-      freqFactor *= bg_idf;
-      freqFactor = std::clamp(freqFactor, 0.05, 8.0);
-    }
+	      }
+	      freqFactor *= bg_idf;
+	      freqFactor = std::clamp(freqFactor, 0.05, 8.0);
+	    }
 
-    double denom = std::log2(2.0 + static_cast<double>(deg));
-    double weight = denom > 0.0 ? 1.0 / denom : 1.0;
-    double contrib = idf * weight * freqFactor * exclusivityWeight;
+	    // Globalize uniqueness: avoid treating hashes as unique just because they
+	    // only appear in the current candidate bin subset.
+	    const bool uniqueEdge = (deg_subset == 1 && df_bins == 1);
+	    double denom = std::log2(2.0 + static_cast<double>(deg_subset));
+	    double weight = denom > 0.0 ? 1.0 / denom : 1.0;
+	    double contrib = idf * weight * freqFactor * exclusivityWeight;
+	    if (uniqueEdge) {
+	      contrib *= kUniqueEdgeBonus;
+	    } else if (df_bins <= 2) {
+	      contrib *= 1.5;
+	    }
     for (uint32_t tid : minimizerTids) {
       tidScore[tid] += contrib;
       ++consistencyHits[tid];
     }
-    if (presenceEnabled && !minimizerTids.empty()) {
-      bool uniqueEdge = (deg == 1);
-      for (uint32_t tid : minimizerTids) {
-        presenceAcc->add_target(tid, exclusivityWeight, uniqueEdge);
-      }
-      if (presenceDecoyReps > 0 && deg > 0) {
+	    if (presenceEnabled && !minimizerTids.empty()) {
+	      const double hit_weight = presence_weight;
+	      const double score_weight = exclusivityWeight * hit_weight;
+	      for (uint32_t tid : minimizerTids) {
+	        presenceAcc->add_target(tid, hit_weight, score_weight, uniqueEdge);
+	      }
+      if (presenceDecoyReps > 0 && deg_subset > 0) {
         for (size_t rep = 0; rep < presenceDecoyReps; ++rep) {
           uint64_t mix = splitmix64(
               value ^ (static_cast<uint64_t>(rep + 1) << 17) ^ decoySeed);
-          size_t pick = static_cast<size_t>(mix % deg);
+          size_t pick = static_cast<size_t>(mix % deg_subset);
           uint32_t decoyTid = minimizerTids[pick];
-          presenceAcc->add_decoy(rep, decoyTid, exclusivityWeight);
+          presenceAcc->add_decoy(rep, decoyTid,
+                                 score_weight *
+                                     static_cast<double>(deg_subset));
         }
       }
     }
-    if (deg == 1 && !minimizerTids.empty()) {
+    if (uniqueEdge && !minimizerTids.empty()) {
       ++uniqueHits[minimizerTids.front()];
     }
 
@@ -615,17 +700,23 @@ void processSequence(
   classifyResult result;
   result.evaluated = eff_eval;
   result.id = id;
+  if (weightCtx.has_sample_weights()) {
+    auto it_w = weightCtx.sampleWeights->find(id);
+    result.sample_weight = (it_w != weightCtx.sampleWeights->end())
+                               ? it_w->second
+                               : 1.0;
+  }
   result.best_taxid_hint = bestTaxidStr;
-  std::pair<std::string, std::size_t> maxCount;
+  const double effCap = std::max(1.0, eff_eval);
+  std::pair<std::string, double> maxCount;
   bool maxCountValid = false;
 
-  size_t effRounded =
-      static_cast<size_t>(std::max<double>(1.0, std::llround(eff_eval)));
-  if (!maxCountValid && bestRounded > 0 &&
-      bestTid < tax.id2str.size()) {
-    maxCount = std::make_pair(
-        tax.id2str[bestTid], std::min(bestRounded, effRounded));
-    maxCountValid = true;
+  if (!maxCountValid && bestTid < tax.id2str.size()) {
+    double bestEvidence = std::clamp(best, 0.0, effCap);
+    if (bestEvidence > 0.0) {
+      maxCount = std::make_pair(tax.id2str[bestTid], bestEvidence);
+      maxCountValid = true;
+    }
   }
 
   bool use_em = config.em && !highConfPre;
@@ -700,22 +791,19 @@ void processSequence(
   }
 
   if (highConfPre && bestTid < tax.id2str.size()) {
-    size_t bestRoundedDirect =
-        static_cast<size_t>(std::max<double>(1.0, std::llround(best)));
+    double bestEvidence = std::clamp(best, 0.0, effCap);
     const std::string &taxid = tax.id2str[bestTid];
-    result.taxidCount.emplace_back(taxid, bestRoundedDirect);
-    maxCount = std::make_pair(taxid, bestRoundedDirect);
+    result.taxidCount.emplace_back(taxid, bestEvidence);
+    maxCount = std::make_pair(taxid, bestEvidence);
     maxCountValid = true;
 
   } else {
     for (const auto &[tid_id, rawScore] : tidScore) {
-      size_t rounded =
-          static_cast<size_t>(std::max<double>(0.0, std::llround(rawScore)));
-      size_t countVal = std::min(rounded, effRounded);
-      if (countVal >= thr_final) {
+      double countVal = std::clamp(rawScore, 0.0, effCap);
+      if (countVal >= static_cast<double>(thr_final)) {
         const std::string &taxid = tax.id2str[tid_id];
         result.taxidCount.emplace_back(taxid, countVal);
-        if (countVal == bestRounded) {
+        if (tid_id == bestTid) {
           maxCount = std::make_pair(taxid, countVal);
           maxCountValid = true;
         }
@@ -724,7 +812,7 @@ void processSequence(
   }
 
   if (result.taxidCount.empty() && use_em && maxCountValid &&
-      maxCount.second > 0) {
+      maxCount.second > 0.0) {
     result.taxidCount.emplace_back(maxCount);
   }
 
@@ -768,12 +856,16 @@ void processSequence(
 
     fileInfo.classifiedNum++;
     if (result.taxidCount.size() == 1) {
+      if (!maxCountValid) {
+        maxCount = result.taxidCount.front();
+        maxCountValid = true;
+      }
       result.taxidCount.clear();
       result.taxidCount.emplace_back(maxCount);
     }
   } else {
     fileInfo.unclassifiedNum++;
-    result.taxidCount.emplace_back("unclassified", 1);
+    result.taxidCount.emplace_back("unclassified", 1.0);
     if (result.reject_reason.empty()) {
       if (!maxCountValid && tidScore.empty()) {
         result.reject_reason = "no_candidate";
@@ -858,7 +950,8 @@ void processBatch(
 
 void classify_streaming(
     ChimeraBuild::IMCFConfig &imcfConfig,
-    moodycamel::ConcurrentQueue<batchReads> &readQueue, ClassifyConfig &config,
+    std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
+    ClassifyConfig &config,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf,
     std::vector<std::vector<std::string>> &indexToTaxid, const TaxDict &tax,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
@@ -869,6 +962,16 @@ void classify_streaming(
 
 #pragma omp parallel
   {
+#ifdef _OPENMP
+    const int thread_id = omp_get_thread_num();
+#else
+    const int thread_id = 0;
+#endif
+    moodycamel::ConcurrentQueue<batchReads> &readQueue =
+        readQueues[static_cast<size_t>(
+            std::clamp<int>(thread_id, 0,
+                            static_cast<int>(readQueues.size() - 1)))];
+
     batchReads batch;
     std::vector<classifyResult> localClassifyResults;
     FileInfo localFileInfo;
@@ -934,7 +1037,8 @@ void classify_streaming(
 
 void classify(
     ChimeraBuild::IMCFConfig &imcfConfig,
-    moodycamel::ConcurrentQueue<batchReads> &readQueue, ClassifyConfig &config,
+    std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
+    ClassifyConfig &config,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf,
     std::vector<std::vector<std::string>> &indexToTaxid, const TaxDict &tax,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
@@ -943,6 +1047,16 @@ void classify(
 
 #pragma omp parallel
   {
+#ifdef _OPENMP
+    const int thread_id = omp_get_thread_num();
+#else
+    const int thread_id = 0;
+#endif
+    moodycamel::ConcurrentQueue<batchReads> &readQueue =
+        readQueues[static_cast<size_t>(
+            std::clamp<int>(thread_id, 0,
+                            static_cast<int>(readQueues.size() - 1)))];
+
     batchReads batch;
     std::vector<classifyResult> localClassifyResults;
     FileInfo localFileInfo;

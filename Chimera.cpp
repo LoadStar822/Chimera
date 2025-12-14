@@ -179,7 +179,7 @@ int main(int argc, char **argv) {
       ->add_option("--presence-unique-deg", buildConfig.presence_unique_deg,
                    "Degree cutoff (<=) treated as unique signature for coverage meta")
       ->default_val(1)
-      ->check(CLI::Range(1, 8));
+      ->check(CLI::Range(1, 65535));
   build
       ->add_option("--feature", buildConfig.feature,
                    "Feature 提取方式 (syncmer|strobemer|auto)")
@@ -285,6 +285,10 @@ int main(int argc, char **argv) {
               singleOpt) // Ensure that single and paired are mutually exclusive
           ->each([](const std::string &) {
           }); // Use each to allow multiple inputs for paired
+
+  classify->add_option("--weight-map", classifyConfig.weight_map_file,
+                       "Optional contig/read weight map: id<TAB>weight or CAMI mapping.tsv")
+      ->check(CLI::ExistingFile);
 
   // Custom validation function to ensure that the --paired option must have an
   // even number of files
@@ -457,12 +461,12 @@ int main(int argc, char **argv) {
       ->add_option("--em-coexist-penalty", classifyConfig.em_coexist_penalty,
                    "Penalty when multiple taxa tie in EM (0 disables)")
       ->check(CLI::Range(0.0, 1.0))
-      ->default_val(0.0);
+      ->default_val(0.6);
   classify
       ->add_option("--em-conf-power", classifyConfig.em_conf_power,
                    "Confidence exponent for EM M-step weighting (0 disables)")
       ->check(CLI::Range(0.0, 3.0))
-      ->default_val(0.0);
+      ->default_val(2.0);
   classify
       ->add_option("--hash-sample-max", classifyConfig.hash_sample_max,
                    "Max sampled hashes for coarse candidate selection")
@@ -477,7 +481,7 @@ int main(int argc, char **argv) {
       ->add_option("--idf-max", classifyConfig.idf_max,
                    "Upper cap for IDF weight in evaluate_minimizer")
       ->check(CLI::Range(1.0, 50.0))
-      ->default_val(5.0);
+      ->default_val(8.0);
   classify
       ->add_option("--post-thres", classifyConfig.post_thres,
                    "Posterior acceptance threshold")
