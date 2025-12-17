@@ -148,9 +148,6 @@ void run(ClassifyConfig config) {
     config.threads = static_cast<uint16_t>(hardwareThreads);
   }
 
-  if (!config.em) {
-    config.em = true;
-  }
   if (config.verbose) {
     std::cout << config << std::endl;
   }
@@ -551,10 +548,59 @@ void run(ClassifyConfig config) {
     std::cout.flags(oldFlags);
     std::cout.precision(oldPrecision);
   }
+
+  const char *dump_presence_path = std::getenv("CHIMERA_DUMP_PRESENCE");
+  if (dump_presence_path && *dump_presence_path &&
+      !presenceDecision.logPosteriors.empty()) {
+    std::ofstream dump_presence(dump_presence_path);
+    if (dump_presence.good()) {
+      double pi = std::clamp(config.presence_pi, 1e-9, 1.0 - 1e-6);
+      double logPriorOdds = std::log(pi) - std::log1p(-pi);
+      dump_presence << "# presence_model=coverage\n";
+      dump_presence << "# tested=" << presenceDecision.tested
+                    << "\n# accepted=" << presenceDecision.acceptedCount
+                    << "\n# mu=" << std::scientific << presenceDecision.noiseMu
+                    << "\n# pi=" << std::defaultfloat << pi
+                    << "\n# tau=" << presenceDecision.threshold << "\n";
+      dump_presence << "taxid\tlogPosterior\tlogBF\tposterior\tlambda_hat\taccepted\n";
+      std::vector<std::pair<uint32_t, double>> rows;
+      rows.reserve(presenceDecision.logPosteriors.size());
+      for (const auto &kv : presenceDecision.logPosteriors) {
+        rows.emplace_back(kv.first, kv.second);
+      }
+      std::sort(rows.begin(), rows.end(),
+                [](const auto &a, const auto &b) { return a.second > b.second; });
+      dump_presence.setf(std::ios::fixed);
+      dump_presence << std::setprecision(6);
+      for (const auto &[tid, logPosterior] : rows) {
+        std::string taxid = std::to_string(tid);
+        if (tid < tax.id2str.size()) {
+          taxid = tax.id2str[tid];
+        }
+        double posteriorProb = 0.0;
+        if (auto itp = presenceDecision.posteriors.find(tid);
+            itp != presenceDecision.posteriors.end()) {
+          posteriorProb = itp->second;
+        }
+        double lambda_hat = 0.0;
+        if (auto itl = presenceDecision.lambdaHats.find(tid);
+            itl != presenceDecision.lambdaHats.end()) {
+          lambda_hat = itl->second;
+        }
+        double logBF = logPosterior - logPriorOdds;
+        bool accepted =
+            presenceDecision.accepted.find(tid) != presenceDecision.accepted.end();
+        dump_presence << taxid << '\t' << logPosterior << '\t' << logBF << '\t'
+                      << posteriorProb << '\t' << lambda_hat << '\t'
+                      << (accepted ? 1 : 0) << '\n';
+      }
+    }
+  }
   PresenceFilterStats filterStats{};
-  if (!config.em) {
-    filterStats =
-        apply_presence_filter(presenceDecision, tax, classifyResults, fileInfo);
+  if (!config.em || config.presence_pre_filter) {
+    // Presence filter is a strong precision gate for short-read datasets.
+    filterStats = apply_presence_filter(presenceDecision, tax, classifyResults,
+                                        fileInfo);
     if (config.verbose &&
         (filterStats.trimmedAssignments > 0 ||
          filterStats.forcedUnclassified > 0)) {
@@ -562,11 +608,6 @@ void run(ClassifyConfig config) {
                 << " assignments, forced " << filterStats.forcedUnclassified
                 << " reads to unclassified" << std::endl;
     }
-  } else if (config.verbose) {
-    std::cout
-        << "[Info] EM enabled: Skipping pre-EM presence filter to preserve "
-           "shared candidates."
-        << std::endl;
   }
 
   std::unordered_map<std::string, double> emPriorScale;

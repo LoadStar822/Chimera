@@ -55,16 +55,17 @@ namespace ChimeraClassify {
 		std::string decoy_mode{ "imcf-edge-shuffle" };
 		uint32_t decoy_reps = 3;
 		double exclusive_gamma = 1.2;
-		double presence_pi = 1e-3;
-		double presence_tau = 4.6;
-		double presence_noise = 0.0; // <=0 表示自动估计
-		uint32_t presence_u_min = 1;
-		uint16_t threads;
-		bool verbose = true;
-		size_t batchSize;
-	bool em = false;
-	double emThreshold;
-	size_t emIter;
+			double presence_pi = 1e-3;
+			double presence_tau = 4.6;
+			double presence_noise = 0.0; // <=0 表示自动估计
+			uint32_t presence_u_min = 1;
+			bool presence_pre_filter = false; // allow pre-EM presence filter to hard-prune candidates
+			uint16_t threads;
+			bool verbose = true;
+			size_t batchSize;
+		bool em = true;
+		double emThreshold;
+		size_t emIter;
 	double em_prune_ratio = 2e-4;   // relative to max_expected in EM sparsity
 	double em_prior_strength = 1.0; // Dirichlet mass; 0 uses alpha only
 		double em_coexist_penalty = 0.6; // penalty for near-tied taxa in EM softmax
@@ -106,11 +107,12 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "First filter beta:" << config.firstFilterBeta << std::endl
 			<< std::setw(20) << "Pre-EM topK:" << config.preEmTopK << std::endl
 			<< std::setw(20) << "Presence pi:" << config.presence_pi << std::endl
-			<< std::setw(20) << "Presence tau:" << config.presence_tau << std::endl
-			<< std::setw(20) << "Presence noise:" << config.presence_noise << std::endl
-			<< std::setw(20) << "Presence U min:" << config.presence_u_min << std::endl
-			<< std::setw(20) << "Decoy mode:" << config.decoy_mode << std::endl
-			<< std::setw(20) << "Decoy reps:" << config.decoy_reps << std::endl
+				<< std::setw(20) << "Presence tau:" << config.presence_tau << std::endl
+				<< std::setw(20) << "Presence noise:" << config.presence_noise << std::endl
+				<< std::setw(20) << "Presence U min:" << config.presence_u_min << std::endl
+				<< std::setw(20) << "Presence pre:" << config.presence_pre_filter << std::endl
+				<< std::setw(20) << "Decoy mode:" << config.decoy_mode << std::endl
+				<< std::setw(20) << "Decoy reps:" << config.decoy_reps << std::endl
 			<< std::setw(20) << "Exclusive gamma:" << config.exclusive_gamma << std::endl
 			<< std::setw(20) << "Batch size:" << config.batchSize << std::endl
 			<< std::setw(20) << "EM:" << config.em << std::endl

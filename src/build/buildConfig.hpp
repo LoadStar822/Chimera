@@ -53,8 +53,27 @@ namespace ChimeraBuild {
 		uint64_t min_length{ 0 };
 		uint16_t threads;
 		bool verbose = true;
-		double load_factor{ 0.95 };
+		double load_factor{ 0.8 };
 		size_t max_hashes_per_taxid = 0;
+		// Core-IDF signature selection
+		double core_alpha{ 1.0 };
+		double core_beta{ 2.0 };
+		uint32_t taxid_file_cap{ 256 };
+		double sig_oversample{ 6.0 };
+		size_t sig_s_min{ 512 };
+		size_t sig_s_max{ 131072 };
+		size_t k_base{ 400000 };
+		size_t k_min{ 100000 };
+		// DF-aware deterministic sampling during DB build.
+		// Keeps all hashes with small df and progressively down-samples common hashes.
+		bool df_sampling{ false };
+		uint32_t df_sampling_ref{ 64 };
+		double df_sampling_gamma{ 1.0 };
+		// Global sampling scale (0 => auto, larger => keep more).
+		double df_sampling_scale{ 0.0 };
+		// Block-level exact dedup within each taxid (sort+unique per block).
+		bool block_dedup{ true };
+		size_t dedup_block_hashes{ 1u << 20 };
 		uint32_t presence_unique_deg{ 1 };
 	};
 
@@ -78,8 +97,22 @@ namespace ChimeraBuild {
 			<< std::setw(25) << "Syncmer offset:" << config.syncmer_position << std::endl
 			<< std::setw(25) << "Minimum length:" << config.min_length << std::endl
 			<< std::setw(25) << "Threads:" << config.threads << std::endl
-		<< std::setw(25) << "Load factor:" << config.load_factor << std::endl
-			<< std::setw(25) << "Max hashes per taxid:" << config.max_hashes_per_taxid << std::endl
+			<< std::setw(25) << "Load factor:" << config.load_factor << std::endl
+			<< std::setw(25) << "K max per taxid:" << config.max_hashes_per_taxid << std::endl
+			<< std::setw(25) << "Core alpha:" << config.core_alpha << std::endl
+			<< std::setw(25) << "Core beta:" << config.core_beta << std::endl
+			<< std::setw(25) << "Taxid file cap:" << config.taxid_file_cap << std::endl
+			<< std::setw(25) << "Sig oversample:" << config.sig_oversample << std::endl
+			<< std::setw(25) << "Sig s min:" << config.sig_s_min << std::endl
+			<< std::setw(25) << "Sig s max:" << config.sig_s_max << std::endl
+			<< std::setw(25) << "K base:" << config.k_base << std::endl
+			<< std::setw(25) << "K min:" << config.k_min << std::endl
+			<< std::setw(25) << "DF sampling:" << (config.df_sampling ? "true" : "false") << std::endl
+			<< std::setw(25) << "DF sample ref:" << config.df_sampling_ref << std::endl
+			<< std::setw(25) << "DF sample gamma:" << config.df_sampling_gamma << std::endl
+			<< std::setw(25) << "DF sample scale:" << (config.df_sampling_scale > 0.0 ? std::to_string(config.df_sampling_scale) : "auto") << std::endl
+			<< std::setw(25) << "Block dedup:" << (config.block_dedup ? "true" : "false") << std::endl
+			<< std::setw(25) << "Dedup block hashes:" << config.dedup_block_hashes << std::endl
 			<< std::setw(25) << "Presence unique deg:" << config.presence_unique_deg << std::endl
 			<< std::setw(25) << "Verbose:" << config.verbose << std::endl;
 

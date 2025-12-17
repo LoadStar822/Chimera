@@ -109,7 +109,8 @@ int main(int argc, char **argv) {
   if (hardware_threads > max_threads) {
     hardware_threads = max_threads;
   }
-  const auto default_threads = static_cast<uint16_t>(hardware_threads);
+  const auto default_threads = static_cast<uint16_t>(
+      std::min<unsigned int>(hardware_threads, 192u));
 
   bool buildQuietRequested = false;
   bool classifyQuietRequested = false;
@@ -170,11 +171,43 @@ int main(int argc, char **argv) {
   build
       ->add_option("--load-factor", buildConfig.load_factor,
                    "IMCF 滤器负载因子")
-      ->default_val(0.85);
+      ->default_val(0.8);
   build
-      ->add_option("-M,--max-hashes", buildConfig.max_hashes_per_taxid,
-                   "Maximum number of hashes per taxid")
+      ->add_option("-M,--max-hashes,--k-max", buildConfig.max_hashes_per_taxid,
+                   "每 taxid 最多写入的 hash 数 (0=>auto=2e6)")
       ->default_val(0);
+  build
+      ->add_option("--k-base", buildConfig.k_base,
+                   "每 taxid 的基准 hash 预算 (5Mb 时)")
+      ->default_val(400000);
+  build
+      ->add_option("--k-min", buildConfig.k_min,
+                   "每 taxid 最少写入的 hash 数")
+      ->default_val(100000);
+  build
+      ->add_option("--core-alpha", buildConfig.core_alpha,
+                   "Core-IDF 中的 core 平滑项 alpha")
+      ->default_val(1.0);
+  build
+      ->add_option("--core-beta", buildConfig.core_beta,
+                   "Core-IDF 中的 core 指数 beta")
+      ->default_val(2.0);
+  build
+      ->add_option("--taxid-file-cap", buildConfig.taxid_file_cap,
+                   "每个 taxid 参与 Core-IDF 的 genome 文件上限 (0=>不限制)")
+      ->default_val(256);
+  build
+      ->add_option("--sig-oversample", buildConfig.sig_oversample,
+                   "候选池倍率: 目标 K 的 oversample 倍")
+      ->default_val(6.0);
+  build
+      ->add_option("--sig-s-min", buildConfig.sig_s_min,
+                   "每文件签名最小大小")
+      ->default_val(512);
+  build
+      ->add_option("--sig-s-max", buildConfig.sig_s_max,
+                   "每文件签名最大大小")
+      ->default_val(131072);
   build
       ->add_option("--presence-unique-deg", buildConfig.presence_unique_deg,
                    "Degree cutoff (<=) treated as unique signature for coverage meta")
@@ -264,6 +297,18 @@ int main(int argc, char **argv) {
     }
     if (buildConfig.strobemer_order != 2) {
       throw CLI::ValidationError("--strobe-order 当前仅支持取 2");
+    }
+    if (buildConfig.sig_s_min == 0) {
+      throw CLI::ValidationError("--sig-s-min must be > 0");
+    }
+    if (buildConfig.sig_s_max < buildConfig.sig_s_min) {
+      throw CLI::ValidationError("--sig-s-max must be >= --sig-s-min");
+    }
+    if (buildConfig.sig_oversample < 1.0) {
+      throw CLI::ValidationError("--sig-oversample must be >= 1");
+    }
+    if (buildConfig.core_alpha < 0.0 || buildConfig.core_beta < 0.0) {
+      throw CLI::ValidationError("--core-alpha/--core-beta must be >= 0");
     }
     buildConfig.verbose = !buildQuietRequested;
   });
@@ -440,8 +485,13 @@ int main(int argc, char **argv) {
       ->add_option("-b,--batch-size", classifyConfig.batchSize,
                    "Batch size for classifying")
       ->default_val(400);
+  bool classifyNoEm = false;
   auto emFlag = classify->add_flag("-e,--EM", classifyConfig.em,
-                                   "Enable EM mode (default)");
+                                   "Enable EM mode (default; use --no-em to disable)");
+  auto noEmFlag =
+      classify->add_flag("--no-em", classifyNoEm, "Disable EM mode");
+  noEmFlag->excludes(emFlag);
+  emFlag->excludes(noEmFlag);
   classify
       ->add_option("--em-threshold", classifyConfig.emThreshold, "EM threshold")
       ->default_val(1e-4);
@@ -490,6 +540,9 @@ int main(int argc, char **argv) {
       ->add_option("--post-pi-min", classifyConfig.post_pi_min,
                    "Minimum global class weight")
       ->default_val(5e-4);
+  classify->add_flag(
+      "--presence-pre-filter", classifyConfig.presence_pre_filter,
+      "Apply presence filter before EM/VEM (hard-prune candidates; may increase unclassified)");
   // TODO: 后处理相关参数暂时废弃，内部逻辑维持默认行为
   classify->add_flag("-q,--quiet", classifyQuietRequested, "Quiet output");
 
@@ -499,6 +552,10 @@ int main(int argc, char **argv) {
   }
 
   CLI11_PARSE(app, argc, argv);
+
+  if (classifyNoEm) {
+    classifyConfig.em = false;
+  }
 
   if (show_version) {
     std::cout << "======================================" << std::endl;

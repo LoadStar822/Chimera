@@ -32,6 +32,9 @@ UNCLASSIFIED = "unclassified"
 MIN_REL_ABUNDANCE = 0.01
 # 最小 evidence：posterior_evidence 票数下限，过滤低支持的长尾假阳性
 MIN_EVIDENCE = 10
+# 低多样性样本（典型：MOCK）更激进的 species 截断：减少长尾假阳性
+LOW_DIVERSITY_SHANNON = 3.2
+LOW_DIVERSITY_SPECIES_MIN_REL_ABUNDANCE = 0.8
 
 
 def _normalize_rank(rank: Optional[str]) -> Optional[str]:
@@ -395,6 +398,18 @@ def process_file(
                 if rel < MIN_REL_ABUNDANCE and count < MIN_EVIDENCE:
                     continue
                 filtered_items.append((taxon, count))
+
+            if level == "species" and filtered_items and shannon_index < LOW_DIVERSITY_SHANNON:
+                aggressive = []
+                for taxon, count in filtered_items:
+                    if taxon == UNCLASSIFIED:
+                        aggressive.append((taxon, count))
+                        continue
+                    rel = (count / total_count) * 100 if total_count > 0 else 0.0
+                    if rel >= LOW_DIVERSITY_SPECIES_MIN_REL_ABUNDANCE:
+                        aggressive.append((taxon, count))
+                if aggressive:
+                    filtered_items = aggressive
 
             if not filtered_items:
                 # 阈值过高导致清空时，保留原始未截断结果

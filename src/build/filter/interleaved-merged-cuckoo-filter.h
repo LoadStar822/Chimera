@@ -374,11 +374,13 @@ class InterleavedMergedCuckooFilter {
   }
 
   inline uint64_t readBucketRaw(size_t bucketLinear) const {
-    return data.get_int(bucketBitOffset(bucketLinear), 64);
+    // 桶布局为 4×16bit，总长度固定 64bit，且 bit_offset 总是 64 的倍数。
+    // 直接按 word 访问可避免 sdsl::int_vector 的 get_int/set_int 抽象开销。
+    return data.data()[bucketLinear];
   }
 
   inline void writeBucketRaw(size_t bucketLinear, uint64_t value) {
-    data.set_int(bucketBitOffset(bucketLinear), value, 64);
+    data.data()[bucketLinear] = value;
   }
 
   inline uint64_t readBucket64(size_t bucket, size_t bin) const {

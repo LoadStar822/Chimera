@@ -11,11 +11,101 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <queue>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace ChimeraBuild {
+
+static std::vector<chimera::imcf::Group> partitionHashCountNoSplit(
+    const robin_hood::unordered_flat_map<std::string, uint64_t> &hashCount,
+    int maxTaxidsPerGroup = 16) {
+  if (hashCount.empty()) {
+    return {};
+  }
+  if (maxTaxidsPerGroup <= 0) {
+    throw std::invalid_argument(
+        "IMCF partition: maxTaxidsPerGroup must be positive");
+  }
+
+  const size_t maxTaxids = static_cast<size_t>(maxTaxidsPerGroup);
+  std::vector<std::pair<std::string, uint64_t>> items;
+  items.reserve(hashCount.size());
+  for (const auto &kv : hashCount) {
+    items.emplace_back(kv.first, kv.second);
+  }
+  std::sort(items.begin(), items.end(),
+            [](const auto &a, const auto &b) {
+              if (a.second != b.second) {
+                return a.second > b.second;
+              }
+              return a.first < b.first;
+            });
+
+  size_t groupCount = (items.size() + maxTaxids - 1) / maxTaxids;
+  groupCount = std::max<size_t>(1, groupCount);
+  std::vector<chimera::imcf::Group> groups(groupCount);
+
+  struct QueueItem {
+    uint64_t total{0};
+    size_t size{0};
+    size_t index{0};
+  };
+  struct QueueCmp {
+    bool operator()(const QueueItem &a, const QueueItem &b) const {
+      if (a.total != b.total) {
+        return a.total > b.total;
+      }
+      if (a.size != b.size) {
+        return a.size > b.size;
+      }
+      return a.index > b.index;
+    }
+  };
+
+  std::priority_queue<QueueItem, std::vector<QueueItem>, QueueCmp> pq;
+  for (size_t i = 0; i < groupCount; ++i) {
+    pq.push({0, 0, i});
+  }
+
+  for (const auto &item : items) {
+    if (pq.empty()) {
+      groups.emplace_back();
+      pq.push({0, 0, groups.size() - 1});
+    }
+
+    while (!pq.empty()) {
+      QueueItem head = pq.top();
+      pq.pop();
+
+      auto &group = groups[head.index];
+      if (head.total != group.totalHash || head.size != group.taxids.size()) {
+        continue; // stale
+      }
+      if (group.taxids.size() >= maxTaxids) {
+        continue;
+      }
+
+      group.taxids.push_back(item.first);
+      group.assignedHashes.push_back(item.second);
+      group.totalHash += item.second;
+      pq.push({group.totalHash, group.taxids.size(), head.index});
+      break;
+    }
+  }
+
+  std::vector<chimera::imcf::Group> compact;
+  compact.reserve(groups.size());
+  for (auto &g : groups) {
+    if (!g.taxids.empty()) {
+      compact.push_back(std::move(g));
+    }
+  }
+  return compact;
+}
 
 void run(BuildConfig config) {
   if (config.threads == 0) {
@@ -208,17 +298,38 @@ void run(BuildConfig config) {
         hashFreqContext.passB_total_hashes.load(std::memory_order_relaxed);
     const uint64_t filtered = hashFreqContext.passB_filtered_hashes.load(
         std::memory_order_relaxed);
-    std::cout << "Hash frequency filter dropped " << filtered << " / "
-              << total_checked << " hashes";
-    if (total_checked > 0) {
-      std::ostringstream ratio_stream;
-      double ratio = static_cast<double>(filtered) * 100.0 /
+    const uint64_t sampled_out =
+        hashFreqContext.passB_sampled_out_hashes.load(std::memory_order_relaxed);
+    const uint64_t kept =
+        (total_checked >= filtered + sampled_out)
+            ? (total_checked - filtered - sampled_out)
+            : 0;
+
+    auto fmt_ratio = [&](uint64_t num) -> std::string {
+      if (total_checked == 0) {
+        return "0.00";
+      }
+      std::ostringstream ss;
+      double ratio = static_cast<double>(num) * 100.0 /
                      static_cast<double>(total_checked);
-      ratio_stream << std::fixed << std::setprecision(2) << ratio;
-      std::cout << " (" << ratio_stream.str() << "%)";
-    }
-    std::cout << " with df >= " << hashFreqContext.stats.df_high_threshold
+      ss << std::fixed << std::setprecision(2) << ratio;
+      return ss.str();
+    };
+
+    std::cout << "Hash DF filter dropped " << filtered << " / " << total_checked
+              << " (" << fmt_ratio(filtered) << "%)"
+              << " with df >= " << hashFreqContext.stats.df_high_threshold
               << std::endl;
+    if (config.df_sampling) {
+      std::cout << "Hash DF sampling dropped " << sampled_out << " / "
+                << total_checked << " (" << fmt_ratio(sampled_out) << "%)"
+                << " [ref=" << std::max<uint32_t>(1u, config.df_sampling_ref)
+                << ", gamma=" << std::max(0.0, config.df_sampling_gamma)
+                << ", scale=" << std::max(0.0, config.df_sampling_scale) << "]"
+                << std::endl;
+    }
+    std::cout << "Hash DF kept " << kept << " / " << total_checked << " ("
+              << fmt_ratio(kept) << "%)" << std::endl;
   }
   chimera::feature::Method imcf_feature_method{};
   uint64_t imcf_feature_seed = 0;
@@ -234,9 +345,14 @@ void run(BuildConfig config) {
   constexpr uint16_t ref_read_len = 150;
   chimera::presence::CoverageMeta presence_meta;
   auto partition_start = std::chrono::high_resolution_clock::now();
-  std::cout << "Partitioning hashcout..." << std::endl;
-  std::vector<chimera::imcf::Group> groups =
-      chimera::imcf::partitionHashCount(hashCount, 16);
+  std::vector<chimera::imcf::Group> groups;
+  if (config.max_hashes_per_taxid > 0) {
+    std::cout << "Partitioning hashcout (no-split)..." << std::endl;
+    groups = partitionHashCountNoSplit(hashCount, 16);
+  } else {
+    std::cout << "Partitioning hashcout..." << std::endl;
+    groups = chimera::imcf::partitionHashCount(hashCount, 16);
+  }
   auto partition_end = std::chrono::high_resolution_clock::now();
   auto partition_total_time =
       std::chrono::duration_cast<std::chrono::milliseconds>(partition_end -

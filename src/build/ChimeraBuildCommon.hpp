@@ -29,6 +29,7 @@ struct HashFrequencyContext {
   std::atomic<uint64_t> passA_total_hashes{0};
   std::atomic<uint64_t> passB_total_hashes{0};
   std::atomic<uint64_t> passB_filtered_hashes{0};
+  std::atomic<uint64_t> passB_sampled_out_hashes{0};
 
   bool enabled() const { return static_cast<bool>(sketch); }
 };
@@ -65,8 +66,6 @@ void syncmer_count(
 
 std::string tmp_hash_path(const std::string &taxid,
                           std::string_view suffix);
-std::string tmp_hash_thread_path(const std::string &taxid,
-                                 std::string_view suffix, int thread_id);
 
 void saveIMCF(chimera::imcf::InterleavedMergedCuckooFilter &imcf,
               const std::string &output_file,

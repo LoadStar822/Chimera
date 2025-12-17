@@ -323,8 +323,8 @@ void processSequence(
 
   std::vector<uint32_t> minimizerTids;
   minimizerTids.reserve(16);
-  std::vector<uint32_t> routedBinsBuf;
-  routedBinsBuf.reserve(16);
+  std::vector<uint32_t> minimizerBins;
+  minimizerBins.reserve(16);
 
   double eff_eval = 0.0;
   size_t n_eval = 0;
@@ -354,6 +354,8 @@ void processSequence(
   auto evaluate_minimizer = [&](uint64_t value,
                                 const std::vector<uint32_t> *subset) -> double {
     minimizerTids.clear();
+    minimizerBins.clear();
+    uint32_t last_hit_bin = std::numeric_limits<uint32_t>::max();
     auto emit = [&](uint32_t bin, uint16_t sp) {
       if (bin >= tax.idx2id.size()) {
         return;
@@ -367,6 +369,10 @@ void processSequence(
         return;
       }
       minimizerTids.push_back(tid);
+      if (bin != last_hit_bin) {
+        minimizerBins.push_back(bin);
+        last_hit_bin = bin;
+      }
       ++binHitCount[bin];
     };
 
@@ -390,23 +396,16 @@ void processSequence(
       return 0.0;
     }
 
-    double totalBins = subset ? static_cast<double>(subset->size())
-                              : static_cast<double>(binNumAll);
-    if (totalBins <= 0.0) {
-      totalBins = static_cast<double>(binNumAll);
+    size_t df_bins = 0;
+    if (!minimizerBins.empty()) {
+      std::sort(minimizerBins.begin(), minimizerBins.end());
+      minimizerBins.erase(std::unique(minimizerBins.begin(), minimizerBins.end()),
+                          minimizerBins.end());
+      df_bins = minimizerBins.size();
     }
-
-    routedBinsBuf.clear();
-    imcf.route(value, routedBinsBuf);
-    if (!routedBinsBuf.empty()) {
-      std::sort(routedBinsBuf.begin(), routedBinsBuf.end());
-      routedBinsBuf.erase(
-          std::unique(routedBinsBuf.begin(), routedBinsBuf.end()),
-          routedBinsBuf.end());
+    if (df_bins == 0) {
+      df_bins = deg_subset;
     }
-
-    const size_t df_bins =
-        routedBinsBuf.empty() ? deg_subset : routedBinsBuf.size();
 
     double exclusivityWeight = 1.0;
     if (exclusiveGamma > 0.0 && deg_subset > 0) {
@@ -414,19 +413,25 @@ void processSequence(
           std::pow(static_cast<double>(deg_subset), -exclusiveGamma);
     }
 
-	    double idf = std::log2((totalBins + 1.0) /
-	                           (static_cast<double>(df_bins) + 1.0));
-	    idf = std::clamp(idf, 0.5, config.idf_max);
+    double totalBins = subset ? static_cast<double>(subset->size())
+                              : static_cast<double>(binNumAll);
+    if (totalBins <= 0.0) {
+      totalBins = static_cast<double>(binNumAll);
+    }
+
+    double idf = std::log2((totalBins + 1.0) /
+                           (static_cast<double>(df_bins) + 1.0));
+    idf = std::clamp(idf, 0.5, config.idf_max);
 
     double freqFactor = 1.0;
     if (weightCtx.enabled()) {
       uint32_t df_est = weightCtx.freqSketch->estimate(value);
       double vocab = static_cast<double>(
           std::max<uint64_t>(1, weightCtx.freqStats.nonzero_counters));
-	      double bg_idf =
-	          std::log((vocab + 1.0) / (static_cast<double>(df_est) + 1.0));
-	      bg_idf = bg_idf / std::log(2.0);
-	      bg_idf = std::clamp(bg_idf, 0.25, 6.0);
+      double bg_idf =
+          std::log((vocab + 1.0) / (static_cast<double>(df_est) + 1.0));
+      bg_idf = bg_idf / std::log(2.0);
+      bg_idf = std::clamp(bg_idf, 0.25, 6.0);
       if (weightCtx.freqStats.df_high_threshold !=
               std::numeric_limits<uint32_t>::max() &&
           df_est >= weightCtx.freqStats.df_high_threshold) {
@@ -439,41 +444,39 @@ void processSequence(
         } else {
           freqFactor *= 0.25;
         }
-	      }
-	      freqFactor *= bg_idf;
-	      freqFactor = std::clamp(freqFactor, 0.05, 8.0);
-	    }
+      }
+      freqFactor *= bg_idf;
+      freqFactor = std::clamp(freqFactor, 0.05, 8.0);
+    }
 
-	    // Globalize uniqueness: avoid treating hashes as unique just because they
-	    // only appear in the current candidate bin subset.
-	    const bool uniqueEdge = (deg_subset == 1 && df_bins == 1);
-	    double denom = std::log2(2.0 + static_cast<double>(deg_subset));
-	    double weight = denom > 0.0 ? 1.0 / denom : 1.0;
-	    double contrib = idf * weight * freqFactor * exclusivityWeight;
-	    if (uniqueEdge) {
-	      contrib *= kUniqueEdgeBonus;
-	    } else if (df_bins <= 2) {
-	      contrib *= 1.5;
-	    }
+    // Globalize uniqueness: avoid treating hashes as unique just because they
+    // only appear in the current candidate subset.
+    const bool uniqueEdge = (deg_subset == 1 && df_bins == 1);
+    double denom = std::log2(2.0 + static_cast<double>(deg_subset));
+    double weight = denom > 0.0 ? 1.0 / denom : 1.0;
+    double contrib = idf * weight * freqFactor * exclusivityWeight;
+    if (uniqueEdge) {
+      contrib *= kUniqueEdgeBonus;
+    } else if (df_bins <= 2) {
+      contrib *= 1.5;
+    }
     for (uint32_t tid : minimizerTids) {
       tidScore[tid] += contrib;
       ++consistencyHits[tid];
     }
-	    if (presenceEnabled && !minimizerTids.empty()) {
-	      const double hit_weight = presence_weight;
-	      const double score_weight = exclusivityWeight * hit_weight;
-	      for (uint32_t tid : minimizerTids) {
-	        presenceAcc->add_target(tid, hit_weight, score_weight, uniqueEdge);
-	      }
+    if (presenceEnabled && !minimizerTids.empty()) {
+      const double hit_weight = presence_weight;
+      const double score_weight = exclusivityWeight * hit_weight;
+      for (uint32_t tid : minimizerTids) {
+        presenceAcc->add_target(tid, hit_weight, score_weight, uniqueEdge);
+      }
       if (presenceDecoyReps > 0 && deg_subset > 0) {
         for (size_t rep = 0; rep < presenceDecoyReps; ++rep) {
           uint64_t mix = splitmix64(
               value ^ (static_cast<uint64_t>(rep + 1) << 17) ^ decoySeed);
           size_t pick = static_cast<size_t>(mix % deg_subset);
           uint32_t decoyTid = minimizerTids[pick];
-          presenceAcc->add_decoy(rep, decoyTid,
-                                 score_weight *
-                                     static_cast<double>(deg_subset));
+          presenceAcc->add_decoy(rep, decoyTid, score_weight);
         }
       }
     }
