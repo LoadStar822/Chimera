@@ -249,6 +249,22 @@ void saveResult(std::vector<classifyResult> classifyResults,
         os << taxid << ':' << count << '\t';
       }
     }
+    if (config.dump_post_topk > 0 && !result.posteriors.empty() && !handled) {
+      const size_t k =
+          std::min<size_t>(static_cast<size_t>(config.dump_post_topk),
+                           result.posteriors.size());
+      std::ostringstream oss;
+      oss.setf(std::ios::fixed);
+      oss << std::setprecision(6);
+      oss << "POST_TOPK=";
+      for (size_t i = 0; i < k; ++i) {
+        if (i) {
+          oss << ',';
+        }
+        oss << result.posteriors[i].first << ':' << result.posteriors[i].second;
+      }
+      os << oss.str() << '\t';
+    }
     os << '\n';
   }
   os.close();

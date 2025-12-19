@@ -522,66 +522,76 @@ void postEmDecision(
     if (it_lp == presenceDecision->logPosteriors.end()) {
       return PresenceLevel::kUnknown;
     }
-    const double lp = it_lp->second;
-    if (lp >= presence_strict_tau) {
-      return PresenceLevel::kAccepted;
-    }
-    // When strict_tau is raised by cap, do not treat remaining taxa as rejected;
-    // keep a neutral zone for lp in [tau, strict_tau).
-    if (lp < presence_tau) {
-      return PresenceLevel::kRejected;
-    }
-    return PresenceLevel::kUnknown;
-  };
-
-  auto prune_by_global_pi = [&](classifyResult &res, double pi_min) {
-    if (pi_min <= 0.0 || res.posteriors.empty() || classWeights.empty()) {
-      return false;
-    }
-    std::vector<std::pair<std::string, double>> kept;
-    kept.reserve(res.posteriors.size());
-    double sum = 0.0;
-    for (const auto &kv : res.posteriors) {
-      PresenceLevel pres = presence_level(kv.first);
-      auto weight_it = classWeights.find(kv.first);
-      double w = (weight_it != classWeights.end()) ? weight_it->second : 0.0;
-      double local_pi_min = pi_min;
-      if (pres == PresenceLevel::kAccepted) {
-        local_pi_min = std::min(pi_min, kPresencePiFloor);
-      } else if (pres == PresenceLevel::kRejected) {
-        local_pi_min = pi_min * kRejectFactor;
-      }
-      if (w >= local_pi_min) {
-        kept.push_back(kv);
-        sum += kv.second;
-      }
-    }
-    // Soft behavior: if nothing survives, keep original posteriors.
-    if (kept.empty()) {
-      return false;
-    }
-    if (sum > 0.0) {
-      for (auto &kv : kept) {
-        kv.second /= sum;
-      }
-    }
-    res.posteriors.swap(kept);
-    return true;
-  };
+	    const double lp = it_lp->second;
+	    if (lp >= presence_strict_tau) {
+	      return PresenceLevel::kAccepted;
+	    }
+	    // Use symmetric strong-negative rejection to avoid over-penalizing
+	    // mid-confidence taxa (especially in high-diversity samples).
+	    // Accept: lp >= strict_tau (possibly raised by cap).
+	    // Reject:  lp <= -tau (strong evidence of absence).
+	    // Else:    Unknown (neutral).
+	    if (lp <= -presence_tau) {
+	      return PresenceLevel::kRejected;
+	    }
+	    return PresenceLevel::kUnknown;
+	  };
 
   for (auto &result : results) {
-    if (decisionConfig.min_class_weight > 0.0) {
-      prune_by_global_pi(result, decisionConfig.min_class_weight);
-    }
-    if (result.posteriors.empty()) {
+    // Keep the full posterior list (sorted) for dumping/analysis (POST_TOPK),
+    // but use a pruned+renormalized view for final decisions and taxidCount
+    // to avoid exploding long-tail allocations.
+    auto posterior_full = std::move(result.posteriors);
+    if (posterior_full.empty()) {
       result.taxidCount.clear();
       result.taxidCount.emplace_back(kUnclassified, 1.0);
       continue;
     }
-
-    auto posterior = result.posteriors;
-    std::sort(posterior.begin(), posterior.end(),
+    std::sort(posterior_full.begin(), posterior_full.end(),
               [](const auto &a, const auto &b) { return a.second > b.second; });
+    result.posteriors = std::move(posterior_full);
+
+    std::vector<std::pair<std::string, double>> posterior;
+    posterior.reserve(result.posteriors.size());
+
+    if (decisionConfig.min_class_weight > 0.0) {
+      // Decouple posterior pruning from the final read-level gate:
+      // pruning too hard can erase low-abundance true taxa from the posterior list,
+      // while gating should remain conservative to control long-tail FPs.
+      const double pi_prune =
+          std::min(decisionConfig.min_class_weight, 1e-4);
+      if (pi_prune > 0.0 && !classWeights.empty()) {
+        double sum = 0.0;
+        for (const auto &kv : result.posteriors) {
+          PresenceLevel pres = presence_level(kv.first);
+          auto weight_it = classWeights.find(kv.first);
+          double w =
+              (weight_it != classWeights.end()) ? weight_it->second : 0.0;
+          double local_pi_min = pi_prune;
+          if (pres == PresenceLevel::kAccepted) {
+            local_pi_min = std::min(pi_prune, kPresencePiFloor);
+          } else if (pres == PresenceLevel::kRejected) {
+            local_pi_min = pi_prune * kRejectFactor;
+          }
+          if (w >= local_pi_min) {
+            posterior.push_back(kv);
+            sum += kv.second;
+          }
+        }
+        // Soft behavior: if nothing survives, keep the original (full) posterior.
+        if (posterior.empty()) {
+          posterior = result.posteriors;
+        } else if (sum > 0.0) {
+          for (auto &kv : posterior) {
+            kv.second /= sum;
+          }
+        }
+      } else {
+        posterior = result.posteriors;
+      }
+    } else {
+      posterior = result.posteriors;
+    }
 
     if (dump_post) {
       (*dump_post) << result.id;
@@ -630,12 +640,30 @@ void postEmDecision(
         } else if (top_presence == PresenceLevel::kRejected) {
           pi_min = std::min(1.0, pi_min * kRejectFactor);
         }
+        // Soft gate: when the read-level posterior is very confident and well-separated,
+        // allow a lower global pi threshold to avoid rejecting low-abundance true taxa.
+        // This is intentionally conservative (needs both high posterior and a clear gap).
+        if (top_presence != PresenceLevel::kRejected && pi_min > 0.0 &&
+            top_score > dyn_post && dyn_post < 0.999) {
+          auto clamp01 = [](double x) {
+            return std::max(0.0, std::min(1.0, x));
+          };
+          double soft =
+              clamp01((top_score - dyn_post) / (1.0 - dyn_post));
+          double gap = top_score - second_score;
+          double gap_factor = clamp01(gap / 0.20);
+          soft *= gap_factor;
+          // emphasize only very confident cases
+          soft *= soft;
+          // do not relax all the way down to presence floor unless presence already passed
+          constexpr double kSoftPiFloor = 1e-5;
+          const double floor = std::max(kPresencePiFloor, kSoftPiFloor);
+          pi_min = (1.0 - soft) * pi_min + soft * floor;
+        }
         weight_ok = (class_weight >= pi_min);
       }
     }
     bool pass = weight_ok && (top_score >= dyn_post);
-
-    result.posteriors = std::move(posterior);
 
     if (pass) {
       result.taxidCount.clear();
@@ -647,54 +675,102 @@ void postEmDecision(
       }
 
 	      double alpha = std::max(1.0, decisionConfig.posterior_power);
-      double sum_adj = 0.0;
-      for (const auto &kv : result.posteriors) {
-        double post = kv.second;
-        if (!(post > 0.0)) {
-          continue;
-        }
-        if (post < decisionConfig.posterior_min_fraction) {
-          continue;
-        }
-        sum_adj += std::pow(post, alpha);
-      }
-
-      if (sum_adj <= 0.0) {
-        double fallback =
-            static_cast<double>(std::max<double>(1.0, std::llround(total_evidence)));
-        result.taxidCount.emplace_back(top.first, fallback);
-        result.reject_reason.clear();
-        continue;
-      }
-
-      for (const auto &kv : result.posteriors) {
-        const std::string &taxid = kv.first;
-        double post = kv.second;
-        if (!(post > 0.0)) {
-          continue;
-        }
-        // Presence coverage provides a sample-level false-positive control.
-        // When a taxon is confidently rejected by presence, avoid allocating
-        // abundance mass to it as a minor posterior tail (keep top1 behavior).
-        if (presence_level(taxid) == PresenceLevel::kRejected &&
-            taxid != top.first) {
-          continue;
-        }
-        if (post < decisionConfig.posterior_min_fraction) {
-          continue;
-        }
-        double weight = std::pow(post, alpha) / sum_adj;
-        double frac = weight * total_evidence;
-        double count_val = static_cast<double>(std::llround(frac));
-        if (!(count_val > 0.0)) {
-          continue;
-        }
-        result.taxidCount.emplace_back(taxid, count_val);
-      }
-
-      if (result.taxidCount.empty()) {
-        double fallback =
-            static_cast<double>(std::max<double>(1.0, std::llround(total_evidence)));
+	      double head_mass = decisionConfig.posterior_head_mass;
+	      if (!(head_mass > 0.0 && head_mass <= 1.0)) {
+	        head_mass = 0.95;
+	      }
+	      size_t max_taxa = static_cast<size_t>(decisionConfig.posterior_max_taxa);
+	      if (max_taxa < 1) {
+	        max_taxa = 1;
+	      }
+	
+	      auto eligible = [&](const std::string &taxid, double post) -> bool {
+	        if (!(post > 0.0)) {
+	          return false;
+	        }
+	        if (post < decisionConfig.posterior_min_fraction) {
+	          return false;
+	        }
+	        if (taxid != top.first &&
+	            presence_level(taxid) == PresenceLevel::kRejected) {
+	          return false;
+	        }
+	        return true;
+	      };
+	
+	      double sum_adj_total = 0.0;
+	      for (const auto &kv : posterior) {
+	        const std::string &taxid = kv.first;
+	        double post = kv.second;
+	        if (!eligible(taxid, post)) {
+	          continue;
+	        }
+	        sum_adj_total += std::pow(post, alpha);
+	      }
+	
+	      if (sum_adj_total <= 0.0) {
+	        double fallback =
+	            static_cast<double>(std::max<double>(1.0, std::llround(total_evidence)));
+	        result.taxidCount.emplace_back(top.first, fallback);
+	        result.reject_reason.clear();
+	        continue;
+	      }
+	
+	      // Per-read posterior head truncation:
+	      // keep only the top taxa covering `head_mass` of sum(post^alpha),
+	      // and at most `max_taxa` taxa, to suppress long-tail non-zero outputs.
+	      double sum_adj_kept = 0.0;
+	      double cum_adj = 0.0;
+	      size_t kept = 0;
+	      for (const auto &kv : posterior) {
+	        const std::string &taxid = kv.first;
+	        double post = kv.second;
+	        if (!eligible(taxid, post)) {
+	          continue;
+	        }
+	        double adj = std::pow(post, alpha);
+	        cum_adj += adj;
+	        sum_adj_kept += adj;
+	        kept += 1;
+	        if (kept >= max_taxa || cum_adj >= head_mass * sum_adj_total) {
+	          break;
+	        }
+	      }
+	      if (sum_adj_kept <= 0.0) {
+	        double fallback =
+	            static_cast<double>(std::max<double>(1.0, std::llround(total_evidence)));
+	        result.taxidCount.emplace_back(top.first, fallback);
+	        result.reject_reason.clear();
+	        continue;
+	      }
+	
+	      cum_adj = 0.0;
+	      kept = 0;
+	      for (const auto &kv : posterior) {
+	        const std::string &taxid = kv.first;
+	        double post = kv.second;
+	        if (!eligible(taxid, post)) {
+	          continue;
+	        }
+	        double adj = std::pow(post, alpha);
+	        cum_adj += adj;
+	        kept += 1;
+	
+	        double weight = adj / sum_adj_kept;
+	        double frac = weight * total_evidence;
+	        double count_val = static_cast<double>(std::llround(frac));
+	        if (count_val > 0.0) {
+	          result.taxidCount.emplace_back(taxid, count_val);
+	        }
+	
+	        if (kept >= max_taxa || cum_adj >= head_mass * sum_adj_total) {
+	          break;
+	        }
+	      }
+	
+	      if (result.taxidCount.empty()) {
+	        double fallback =
+	            static_cast<double>(std::max<double>(1.0, std::llround(total_evidence)));
         result.taxidCount.emplace_back(top.first, fallback);
       }
 

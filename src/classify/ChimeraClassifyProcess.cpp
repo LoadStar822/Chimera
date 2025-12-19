@@ -1,6 +1,7 @@
 #include "ChimeraClassifyCommon.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -368,6 +369,9 @@ void processSequence(
       if (tid >= tax.id2str.size()) {
         return;
       }
+      if (weightCtx.tid2speciesRep && tid < weightCtx.tid2speciesRep->size()) {
+        tid = (*weightCtx.tid2speciesRep)[tid];
+      }
       minimizerTids.push_back(tid);
       if (bin != last_hit_bin) {
         minimizerBins.push_back(bin);
@@ -395,6 +399,25 @@ void processSequence(
     if (deg_subset == 0) {
       return 0.0;
     }
+    size_t deg_effective = deg_subset;
+    if (config.deg_by_species && weightCtx.tid2speciesGroup &&
+        deg_subset > 1) {
+      std::vector<uint32_t> groups;
+      groups.reserve(deg_subset);
+      const auto &map = *weightCtx.tid2speciesGroup;
+      for (uint32_t tid : minimizerTids) {
+        if (tid < map.size()) {
+          groups.push_back(map[tid]);
+        } else {
+          groups.push_back(0x80000000u | tid);
+        }
+      }
+      std::sort(groups.begin(), groups.end());
+      groups.erase(std::unique(groups.begin(), groups.end()), groups.end());
+      if (!groups.empty()) {
+        deg_effective = groups.size();
+      }
+    }
 
     size_t df_bins = 0;
     if (!minimizerBins.empty()) {
@@ -408,9 +431,9 @@ void processSequence(
     }
 
     double exclusivityWeight = 1.0;
-    if (exclusiveGamma > 0.0 && deg_subset > 0) {
+    if (exclusiveGamma > 0.0 && deg_effective > 0) {
       exclusivityWeight =
-          std::pow(static_cast<double>(deg_subset), -exclusiveGamma);
+          std::pow(static_cast<double>(deg_effective), -exclusiveGamma);
     }
 
     double totalBins = subset ? static_cast<double>(subset->size())
@@ -435,8 +458,8 @@ void processSequence(
       if (weightCtx.freqStats.df_high_threshold !=
               std::numeric_limits<uint32_t>::max() &&
           df_est >= weightCtx.freqStats.df_high_threshold) {
-        double damp =
-            std::log2(static_cast<double>(weightCtx.freqStats.df_high_threshold + 1.0));
+        double damp = std::log2(
+            static_cast<double>(weightCtx.freqStats.df_high_threshold + 1.0));
         double denom = std::log2(static_cast<double>(df_est + 2.0));
         if (denom > 0.0) {
           damp = std::clamp(damp / denom, 0.05, 0.5);
@@ -445,14 +468,14 @@ void processSequence(
           freqFactor *= 0.25;
         }
       }
-      freqFactor *= bg_idf;
-      freqFactor = std::clamp(freqFactor, 0.05, 8.0);
-    }
+    freqFactor *= bg_idf;
+    freqFactor = std::clamp(freqFactor, 0.05, 8.0);
+  }
 
     // Globalize uniqueness: avoid treating hashes as unique just because they
     // only appear in the current candidate subset.
-    const bool uniqueEdge = (deg_subset == 1 && df_bins == 1);
-    double denom = std::log2(2.0 + static_cast<double>(deg_subset));
+    const bool uniqueEdge = (deg_effective == 1 && df_bins == 1);
+    double denom = std::log2(2.0 + static_cast<double>(deg_effective));
     double weight = denom > 0.0 ? 1.0 / denom : 1.0;
     double contrib = idf * weight * freqFactor * exclusivityWeight;
     if (uniqueEdge) {
@@ -830,8 +853,92 @@ void processSequence(
     dynamicTopK = std::max<size_t>(96, dynamicTopK);
   } else if (best_ratio >= 2.5 &&
              best >= thr_conf + std::max(1.0, eff_eval / 16.0) &&
-             dynamicTopK > 8) {
+             dynamicTopK > 8 &&
+             // Respect explicit user requests for larger pre-EM candidate lists.
+             // Otherwise, large DBs with many strain/assembly taxids can saturate
+             // the top-K with same-species variants, preventing sister species
+             // from entering EM/posterior lists.
+             config.preEmTopK <= 16) {
     dynamicTopK = 16;
+  }
+
+  // NCBI-only (optional): collapse strain/subspecies taxids to ONE representative
+  // per species before pre-EM topK truncation, so TopK is not saturated by
+  // same-species variants and sister species can enter EM/posterior lists.
+  //
+  // Important: keep the representative taxid string (not the species taxid),
+  // so downstream presence/meta that relies on DB taxids stays consistent.
+  if (use_em && config.collapse_strain_candidates && weightCtx.ncbiTaxdump &&
+      weightCtx.ncbiTaxdump->enabled() && !result.taxidCount.empty()) {
+    auto parse_u32 = [](const std::string &s, uint32_t &out) -> bool {
+      if (s.empty()) {
+        return false;
+      }
+      for (unsigned char c : s) {
+        if (!std::isdigit(c)) {
+          return false;
+        }
+      }
+      try {
+        unsigned long v = std::stoul(s);
+        if (v > std::numeric_limits<uint32_t>::max()) {
+          return false;
+        }
+        out = static_cast<uint32_t>(v);
+        return true;
+      } catch (...) {
+        return false;
+      }
+    };
+
+    robin_hood::unordered_flat_map<uint32_t, std::pair<std::string, double>>
+        bestBySpecies;
+    bestBySpecies.reserve(result.taxidCount.size());
+    std::vector<std::pair<std::string, double>> passthrough;
+    passthrough.reserve(4);
+    double unclassifiedScore = 0.0;
+    bool hasUnclassified = false;
+
+    for (const auto &kv : result.taxidCount) {
+      const std::string &taxid = kv.first;
+      const double score = kv.second;
+      if (taxid == "unclassified") {
+        hasUnclassified = true;
+        unclassifiedScore += score;
+        continue;
+      }
+      uint32_t tid = 0;
+      if (!parse_u32(taxid, tid)) {
+        passthrough.push_back(kv);
+        continue;
+      }
+      const uint32_t sid = weightCtx.ncbiTaxdump->to_species(tid);
+      auto it = bestBySpecies.find(sid);
+      if (it == bestBySpecies.end() || score > it->second.second) {
+        bestBySpecies[sid] = kv; // keep representative taxid with max score
+      }
+    }
+
+    std::vector<std::pair<std::string, double>> collapsed;
+    collapsed.reserve(bestBySpecies.size() + passthrough.size() +
+                      (hasUnclassified ? 1 : 0));
+    for (const auto &kv : bestBySpecies) {
+      collapsed.push_back(kv.second);
+    }
+    for (const auto &kv : passthrough) {
+      collapsed.push_back(kv);
+    }
+    if (hasUnclassified) {
+      collapsed.emplace_back("unclassified", unclassifiedScore);
+    }
+    std::sort(collapsed.begin(), collapsed.end(),
+              [](const auto &a, const auto &b) {
+                if (a.second != b.second) {
+                  return a.second > b.second;
+                }
+                return a.first < b.first;
+              });
+    result.taxidCount.swap(collapsed);
   }
 
   if (!result.taxidCount.empty() && use_em) {

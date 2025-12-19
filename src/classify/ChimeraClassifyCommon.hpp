@@ -38,11 +38,58 @@ struct MarginDecision {
 
 MarginDecision decide_high_conf(size_t best, size_t second, double eff_eval);
 
+// Optional NCBI taxonomy helper: map a taxid (including strain/subspecies) to its
+// species-level ancestor taxid by walking nodes.dmp parent pointers.
+struct NcbiTaxdump {
+  std::vector<uint32_t> parent;
+  std::vector<uint8_t> is_species; // 1 if rank == species
+
+  bool enabled() const {
+    return !parent.empty() && parent.size() == is_species.size();
+  }
+
+  uint32_t to_species(uint32_t tid) const {
+    if (!enabled() || tid == 0 || tid >= is_species.size()) {
+      return tid;
+    }
+    if (is_species[tid]) {
+      return tid;
+    }
+    uint32_t cur = tid;
+    // Walk up until we hit species or root; keep a small step cap to avoid cycles.
+    for (int steps = 0; steps < 128; ++steps) {
+      if (cur == 0 || cur >= parent.size()) {
+        break;
+      }
+      uint32_t p = parent[cur];
+      if (p == 0 || p == cur) {
+        break;
+      }
+      cur = p;
+      if (cur < is_species.size() && is_species[cur]) {
+        return cur;
+      }
+    }
+    return tid;
+  }
+};
+
 struct WeightingContext {
   const CountMinSketch *freqSketch{nullptr};
   chimera::presence::HashFreqStats freqStats{};
   double freqQuantile{0.0};
   const std::unordered_map<std::string, double> *sampleWeights{nullptr};
+  // Optional NCBI taxonomy helper (when available in current environment).
+  const NcbiTaxdump *ncbiTaxdump{nullptr};
+  // Optional NCBI-only: map internal tid_id -> representative tid_id of its
+  // species (collapsing strain/subspecies taxids). This avoids per-hit taxdump
+  // lookups in hot loops.
+  const std::vector<uint32_t> *tid2speciesRep{nullptr};
+  // Optional NCBI-only: map internal tid_id -> species group id (numeric NCBI
+  // species taxid, or a stable synthetic id for non-numeric taxids). Used for
+  // computing deg/exclusivity at the species level without changing output
+  // taxids or breaking presence coverage meta.
+  const std::vector<uint32_t> *tid2speciesGroup{nullptr};
 
   bool enabled() const { return freqSketch != nullptr; }
   bool has_sample_weights() const { return sampleWeights != nullptr; }

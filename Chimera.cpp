@@ -445,6 +445,15 @@ int main(int argc, char **argv) {
       ->add_option("--pre-em-topk", classifyConfig.preEmTopK,
                    "Keep top-K candidates per read before EM/VEM")
       ->default_val(16);
+  classify->add_flag(
+      "--collapse-strain-hits", classifyConfig.collapse_strain_hits,
+      "[NCBI-only] Collapse per-hash hit lists to 1 representative taxid per species (reduces strain saturation; changes scoring).");
+  classify->add_flag(
+      "--collapse-strain-candidates", classifyConfig.collapse_strain_candidates,
+      "[NCBI-only] Collapse pre-EM candidates to 1 representative per species before topK truncation (reduces strain saturation; lighter than --collapse-strain-hits).");
+  classify->add_flag(
+      "--deg-by-species", classifyConfig.deg_by_species,
+      "[NCBI-only] Compute deg/exclusivity by species groups (mitigates strain saturation) while keeping output taxids unchanged.");
   classify
       ->add_option("--presence-pi", classifyConfig.presence_pi,
                    "Presence prior P(z=1) for coverage模型 (0-1)")
@@ -474,8 +483,8 @@ int main(int argc, char **argv) {
       ->default_val(3);
   classify
       ->add_option("--exclusive-gamma", classifyConfig.exclusive_gamma,
-                   "Exclusive edge weighting gamma (0.5-2.0)")
-      ->check(CLI::Range(0.5, 2.0))
+                   "Exclusive edge weighting gamma (0.0-2.0)")
+      ->check(CLI::Range(0.0, 2.0))
       ->default_val(1.2);
   classify
       ->add_option("-t,--threads", classifyConfig.threads,
@@ -540,6 +549,11 @@ int main(int argc, char **argv) {
       ->add_option("--post-pi-min", classifyConfig.post_pi_min,
                    "Minimum global class weight")
       ->default_val(5e-4);
+  classify
+      ->add_option("--dump-post-topk", classifyConfig.dump_post_topk,
+                   "Dump top-K posterior candidates as POST_TOPK=... token in output TSV (0 disables)")
+      ->check(CLI::Range(0u, 512u))
+      ->default_val(0);
   classify->add_flag(
       "--presence-pre-filter", classifyConfig.presence_pre_filter,
       "Apply presence filter before EM/VEM (hard-prune candidates; may increase unclassified)");

@@ -392,8 +392,121 @@ def parse_arguments():
         "--abundance-mode",
         dest="abundance_mode",
         default="soft_seq",
-        choices=["soft_seq", "hard_seq", "top1", "soft_tax", "soft", "hard"],
-        help="丰度统计模式：soft_seq(默认，累加所有 taxid:count) / hard_seq(仅 top1 的 taxid:count) / top1(仅 top1，每条序列计 1)。",
+        choices=["soft_seq", "hard_seq", "top1", "soft_tax", "soft", "hard", "post_topk", "post"],
+        help="丰度统计模式：soft_seq(默认，累加所有 taxid:count) / hard_seq(仅 top1 的 taxid:count) / top1(仅 top1，每条序列计 1) / post_topk(用 POST_TOPK posterior 将每条序列的总质量软分配到候选 taxid)。",
+    )
+    profile_parser.add_argument(
+        "--hd-species-head-mass",
+        type=float,
+        default=97.0,
+        help="高多样性样本：species 输出的 head mass（百分比），用于抑制非零长尾物种数（默认 97.0）",
+    )
+    profile_parser.add_argument(
+        "--hd-genus-mode",
+        choices=["none", "headmass", "topn_ratio"],
+        default="none",
+        help="高多样性样本：species 层级的 genus 内收敛模式（none/headmass/topn_ratio；默认 none）",
+    )
+    profile_parser.add_argument(
+        "--hd-genus-head-mass",
+        type=float,
+        default=90.0,
+        help="genus_headmass 模式：每个 genus 内保留覆盖的 head mass（百分比；默认 90.0）",
+    )
+    profile_parser.add_argument(
+        "--hd-genus-max-species",
+        type=int,
+        default=3,
+        help="每个 genus 最多保留的 species 数（默认 3）",
+    )
+    profile_parser.add_argument(
+        "--hd-genus-topn",
+        type=int,
+        default=3,
+        help="topn_ratio 模式：每个 genus 至少保留 topN（默认 3）",
+    )
+    profile_parser.add_argument(
+        "--hd-genus-rel-min-in-genus",
+        type=float,
+        default=10.0,
+        help="topn_ratio 模式：保留 genus 内相对质量 >= R%% 的 species（默认 10.0）",
+    )
+    profile_parser.add_argument(
+        "--hd-shape-mode",
+        choices=["none", "global_headmass", "genus_headmass"],
+        default="none",
+        help="高多样性样本：species 层级的 support–mass 形状特征过滤（none/global_headmass/genus_headmass；默认 none）",
+    )
+    profile_parser.add_argument(
+        "--hd-shape-alpha",
+        type=float,
+        default=0.0,
+        help="shape score: α in Score=logM+αlogN−βlog(M/N)−γ*skew+δlog(share_support)（默认 0.0）",
+    )
+    profile_parser.add_argument(
+        "--hd-shape-beta",
+        type=float,
+        default=0.0,
+        help="shape score: β in Score=logM+αlogN−βlog(M/N)−γ*skew+δlog(share_support)（默认 0.0）",
+    )
+    profile_parser.add_argument(
+        "--hd-shape-gamma",
+        type=float,
+        default=0.0,
+        help="shape score: γ in Score=logM+αlogN−βlog(M/N)−γ*skew+δlog(share_support)（默认 0.0）",
+    )
+    profile_parser.add_argument(
+        "--hd-shape-delta",
+        type=float,
+        default=0.0,
+        help="shape score: δ in Score=logM+αlogN−βlog(M/N)−γ*skew+δlog(share_support)（默认 0.0）",
+    )
+    profile_parser.add_argument(
+        "--hd-shape-topk",
+        type=int,
+        default=8,
+        help="shape score: 计算 skew 时每个物种保留的 topK contig 权重（默认 8；0 表示禁用 skew）",
+    )
+    profile_parser.add_argument(
+        "--hd-shape-global-head-mass",
+        type=float,
+        default=97.0,
+        help="global_headmass 模式：按 shape score 排序后保留覆盖的 head mass（百分比；默认 97.0）",
+    )
+    profile_parser.add_argument(
+        "--hd-shape-genus-head-mass",
+        type=float,
+        default=90.0,
+        help="genus_headmass 模式：每个 genus 内按 shape score 排序后保留覆盖的 head mass（百分比；默认 90.0）",
+    )
+    profile_parser.add_argument(
+        "--hd-shape-genus-max-species",
+        type=int,
+        default=3,
+        help="genus_headmass 模式：每个 genus 最多保留的 species 数（默认 3）",
+    )
+    profile_parser.add_argument(
+        "--hd-intragenus-map",
+        action="store_true",
+        help="高多样性样本：使用 classify 输出的 POST_TOPK 做属内 MAP 纠错（默认关闭；需要重新跑一次 classify 生成 POST_TOPK）",
+    )
+    profile_parser.add_argument(
+        "--hd-intragenus-topk",
+        type=int,
+        default=5,
+        help="属内 MAP：使用 POST_TOPK 的前 K 个候选（默认 5）",
+    )
+    profile_parser.add_argument(
+        "--hd-intragenus-beta",
+        type=float,
+        default=1.0,
+        help="属内 MAP：全局属内先验的权重 β（默认 1.0）",
+    )
+    profile_parser.add_argument(
+        "--hd-intragenus-gap",
+        type=float,
+        default=0.10,
+        help="属内 MAP：仅当 top1-top2 posterior gap < 该阈值时尝试纠错（默认 0.10；设 0 可更激进）",
     )
 
     if len(sys.argv) == 1:
@@ -494,6 +607,25 @@ def run_chimera(args, chimera_path):
                 taxonomy_info=args.taxonomy_info,
                 taxonomy_meta=args.taxonomy_meta,
                 abundance_mode=args.abundance_mode,
+                hd_species_head_mass=args.hd_species_head_mass,
+                hd_genus_mode=args.hd_genus_mode,
+                hd_genus_head_mass=args.hd_genus_head_mass,
+                hd_genus_max_species=args.hd_genus_max_species,
+                hd_genus_topn=args.hd_genus_topn,
+                hd_genus_rel_min_in_genus=args.hd_genus_rel_min_in_genus,
+                hd_shape_mode=args.hd_shape_mode,
+                hd_shape_alpha=args.hd_shape_alpha,
+                hd_shape_beta=args.hd_shape_beta,
+                hd_shape_gamma=args.hd_shape_gamma,
+                hd_shape_delta=args.hd_shape_delta,
+                hd_shape_topk=args.hd_shape_topk,
+                hd_shape_global_head_mass=args.hd_shape_global_head_mass,
+                hd_shape_genus_head_mass=args.hd_shape_genus_head_mass,
+                hd_shape_genus_max_species=args.hd_shape_genus_max_species,
+                hd_intragenus_map=args.hd_intragenus_map,
+                hd_intragenus_topk=args.hd_intragenus_topk,
+                hd_intragenus_beta=args.hd_intragenus_beta,
+                hd_intragenus_gap=args.hd_intragenus_gap,
             )
         except ValueError as exc:
             print(f"Profile failed: {exc}")

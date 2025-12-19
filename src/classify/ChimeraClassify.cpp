@@ -14,8 +14,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -130,6 +133,108 @@ load_weight_map_file(const std::string &path) {
   return weights;
 }
 
+static inline std::string trim_copy(std::string s) {
+  auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
+  while (!s.empty() && is_space(static_cast<unsigned char>(s.front()))) {
+    s.erase(s.begin());
+  }
+  while (!s.empty() && is_space(static_cast<unsigned char>(s.back()))) {
+    s.pop_back();
+  }
+  return s;
+}
+
+static std::unique_ptr<ChimeraClassify::NcbiTaxdump>
+maybe_load_ncbi_taxdump(const std::string &taxonomyKind, bool verbose) {
+  if (taxonomyKind != "ncbi") {
+    return nullptr;
+  }
+  const char *env_dir = std::getenv("CHIMERA_NCBI_TAXDUMP_DIR");
+  std::filesystem::path base =
+      env_dir && *env_dir ? env_dir
+                          : "/mnt/sda/tianqinzhong/project/SimDataset/taxdump";
+  std::filesystem::path nodes = base / "nodes.dmp";
+  if (!std::filesystem::exists(nodes)) {
+    if (verbose) {
+      std::cerr << "Warning: nodes.dmp not found, skip strain->species collapse: "
+                << nodes.string() << std::endl;
+    }
+    return nullptr;
+  }
+
+  std::ifstream is(nodes);
+  if (!is.is_open()) {
+    if (verbose) {
+      std::cerr << "Warning: cannot open nodes.dmp, skip strain->species collapse: "
+                << nodes.string() << std::endl;
+    }
+    return nullptr;
+  }
+
+  auto tax = std::make_unique<ChimeraClassify::NcbiTaxdump>();
+  std::string line;
+  uint32_t max_id = 0;
+  size_t species_nodes = 0;
+  size_t parsed = 0;
+  while (std::getline(is, line)) {
+    if (line.empty()) {
+      continue;
+    }
+    // nodes.dmp: tax_id <tab>|<tab> parent_tax_id <tab>|<tab> rank <tab>| ...
+    std::vector<std::string> fields;
+    fields.reserve(8);
+    std::stringstream ss(line);
+    std::string tok;
+    while (std::getline(ss, tok, '\t')) {
+      tok = trim_copy(tok);
+      if (tok.empty() || tok == "|") {
+        continue;
+      }
+      fields.push_back(tok);
+      if (fields.size() >= 3) {
+        // only need the first 3 meaningful fields
+        break;
+      }
+    }
+    if (fields.size() < 3) {
+      continue;
+    }
+    uint32_t tid = 0;
+    uint32_t parent = 0;
+    try {
+      tid = static_cast<uint32_t>(std::stoul(fields[0]));
+      parent = static_cast<uint32_t>(std::stoul(fields[1]));
+    } catch (...) {
+      continue;
+    }
+    const std::string &rank = fields[2];
+    if (tid >= tax->parent.size()) {
+      tax->parent.resize(static_cast<size_t>(tid) + 1, 0);
+      tax->is_species.resize(static_cast<size_t>(tid) + 1, 0);
+    }
+    tax->parent[tid] = parent;
+    const bool is_sp = (rank == "species");
+    tax->is_species[tid] = is_sp ? 1 : 0;
+    if (is_sp) {
+      ++species_nodes;
+    }
+    if (tid > max_id) {
+      max_id = tid;
+    }
+    ++parsed;
+  }
+
+  if (!tax->enabled()) {
+    return nullptr;
+  }
+  if (verbose) {
+    std::cout << "Loaded NCBI nodes.dmp for strain->species collapse: "
+              << "nodes=" << parsed << ", max_id=" << max_id
+              << ", species_nodes=" << species_nodes << std::endl;
+  }
+  return tax;
+}
+
 } // namespace
 
 namespace ChimeraClassify {
@@ -187,6 +292,7 @@ void run(ClassifyConfig config) {
       loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid, &coverageMeta);
   WeightingContext weightCtx;
   std::unique_ptr<CountMinSketch> freqSketch;
+  std::unique_ptr<NcbiTaxdump> ncbiTaxdump;
   if (coverageMeta.freq_model.enabled()) {
     try {
       freqSketch = std::make_unique<CountMinSketch>(
@@ -292,6 +398,13 @@ void run(ClassifyConfig config) {
           << ") 不一致，请检查参数 –-taxonomy-version。";
       throw std::runtime_error(oss.str());
     }
+  }
+  // Optional NCBI strain/subspecies -> species collapse.
+  // This helps avoid candidate saturation by many strain taxids, which can
+  // prevent sister species from entering pre-EM/posterior lists.
+  ncbiTaxdump = maybe_load_ncbi_taxdump(config.taxonomyKind, config.verbose);
+  if (ncbiTaxdump && ncbiTaxdump->enabled()) {
+    weightCtx.ncbiTaxdump = ncbiTaxdump.get();
   }
   if (indexStatus.builtActive) {
     rebuildActiveMs = indexStatus.activeMs;
@@ -438,6 +551,113 @@ void run(ClassifyConfig config) {
   }
 
   const TaxDict tax = build_tax_dict(indexToTaxid);
+  std::vector<uint32_t> tid2speciesGroup;
+  if (config.deg_by_species && weightCtx.ncbiTaxdump &&
+      weightCtx.ncbiTaxdump->enabled()) {
+    tid2speciesGroup.resize(tax.id2str.size(), 0);
+    auto parse_u32 = [](const std::string &s, uint32_t &out) -> bool {
+      if (s.empty()) {
+        return false;
+      }
+      for (unsigned char c : s) {
+        if (!std::isdigit(c)) {
+          return false;
+        }
+      }
+      try {
+        unsigned long v = std::stoul(s);
+        if (v > std::numeric_limits<uint32_t>::max()) {
+          return false;
+        }
+        out = static_cast<uint32_t>(v);
+        return true;
+      } catch (...) {
+        return false;
+      }
+    };
+
+    size_t numeric = 0;
+    size_t mapped = 0;
+    for (uint32_t tid_id = 0; tid_id < tax.id2str.size(); ++tid_id) {
+      const std::string &taxid = tax.id2str[tid_id];
+      uint32_t tid = 0;
+      if (parse_u32(taxid, tid)) {
+        ++numeric;
+        uint32_t sid = weightCtx.ncbiTaxdump->to_species(tid);
+        tid2speciesGroup[tid_id] = sid;
+        ++mapped;
+      } else {
+        // Stable synthetic id to avoid collisions with real numeric taxids.
+        tid2speciesGroup[tid_id] = 0x80000000u | tid_id;
+      }
+    }
+    weightCtx.tid2speciesGroup = &tid2speciesGroup;
+    if (config.verbose) {
+      std::cout << "NCBI tid->species group mapping for deg: tids="
+                << tax.id2str.size() << ", numeric=" << numeric
+                << ", mapped=" << mapped << std::endl;
+    }
+  }
+  std::vector<uint32_t> tid2speciesRep;
+  if (config.collapse_strain_hits && weightCtx.ncbiTaxdump &&
+      weightCtx.ncbiTaxdump->enabled()) {
+    tid2speciesRep.resize(tax.id2str.size());
+    for (uint32_t i = 0; i < tid2speciesRep.size(); ++i) {
+      tid2speciesRep[i] = i;
+    }
+
+    auto parse_u32 = [](const std::string &s, uint32_t &out) -> bool {
+      if (s.empty()) {
+        return false;
+      }
+      for (unsigned char c : s) {
+        if (!std::isdigit(c)) {
+          return false;
+        }
+      }
+      try {
+        unsigned long v = std::stoul(s);
+        if (v > std::numeric_limits<uint32_t>::max()) {
+          return false;
+        }
+        out = static_cast<uint32_t>(v);
+        return true;
+      } catch (...) {
+        return false;
+      }
+    };
+
+    robin_hood::unordered_flat_map<uint32_t, uint32_t> species2rep;
+    species2rep.reserve(tax.id2str.size() / 2 + 1);
+    size_t numeric = 0;
+    size_t collapsed = 0;
+    for (uint32_t tid_id = 0; tid_id < tax.id2str.size(); ++tid_id) {
+      const std::string &taxid = tax.id2str[tid_id];
+      uint32_t tid = 0;
+      if (!parse_u32(taxid, tid)) {
+        continue;
+      }
+      ++numeric;
+      uint32_t sid = weightCtx.ncbiTaxdump->to_species(tid);
+      auto it = species2rep.find(sid);
+      if (it == species2rep.end()) {
+        species2rep.emplace(sid, tid_id);
+        tid2speciesRep[tid_id] = tid_id;
+      } else {
+        tid2speciesRep[tid_id] = it->second;
+        if (it->second != tid_id) {
+          ++collapsed;
+        }
+      }
+    }
+    weightCtx.tid2speciesRep = &tid2speciesRep;
+    if (config.verbose) {
+      std::cout << "NCBI tid->species representative mapping: tids="
+                << tax.id2str.size() << ", numeric=" << numeric
+                << ", species=" << species2rep.size()
+                << ", collapsed=" << collapsed << std::endl;
+    }
+  }
   if (config.decoy_reps == 0 && !(config.presence_noise > 0.0) &&
       config.verbose) {
     std::cerr << "Warning: decoy_reps=0，覆盖模型的噪声将退回默认 μ=1e-4；建议 decoy_reps>=1"
@@ -675,11 +895,102 @@ void run(ClassifyConfig config) {
       print_classify_time(EMduration.count());
     }
   }
-  if (posteriorModelUsed) {
-    DecisionConfig decisionConfig;
-    decisionConfig.posterior_threshold = config.post_thres;
-    decisionConfig.min_class_weight = config.post_pi_min;
-    decisionConfig.posterior_power = 1.5;
+	  if (posteriorModelUsed) {
+	    DecisionConfig decisionConfig;
+	    decisionConfig.posterior_threshold = config.post_thres;
+	    // Auto-tune post_pi_min for high-diversity samples:
+	    // a fixed global pi cut (e.g., 5e-4) can hard-kill low-abundance true taxa,
+	    // causing massive unclassified reads on datasets like CAMI-long.
+	    // We only relax the threshold when the EM weight distribution shows a
+	    // heavy tail AND the head is not dominating (to avoid low-diversity mocks).
+	    double tuned_post_pi_min = config.post_pi_min;
+	    if (tuned_post_pi_min > 0.0 && !classWeights.empty()) {
+	      std::vector<double> weights;
+	      weights.reserve(classWeights.size());
+	      double total_mass = 0.0;
+	      for (const auto &kv : classWeights) {
+	        double w = kv.second;
+	        if (w > 0.0) {
+	          weights.push_back(w);
+	          total_mass += w;
+	        }
+	      }
+	      if (total_mass > 0.0 && weights.size() > 1) {
+	        std::sort(weights.begin(), weights.end(),
+	                  [](double a, double b) { return a > b; });
+	        double top10_mass = 0.0;
+	        const size_t topK = std::min<size_t>(10, weights.size());
+	        for (size_t i = 0; i < topK; ++i) {
+	          top10_mass += weights[i];
+	        }
+	        top10_mass /= total_mass;
+	        double top50_mass = 0.0;
+	        const size_t topK50 = std::min<size_t>(50, weights.size());
+	        for (size_t i = 0; i < topK50; ++i) {
+	          top50_mass += weights[i];
+	        }
+	        top50_mass /= total_mass;
+	
+	        auto tail_mass = [&](double pi_min) -> double {
+	          if (!(pi_min > 0.0)) {
+	            return 0.0;
+	          }
+	          double tail = 0.0;
+	          // weights are sorted desc, so scan from the end.
+	          for (size_t i = weights.size(); i-- > 0;) {
+	            double w = weights[i];
+	            if (w >= pi_min) {
+	              break;
+	            }
+	            tail += w;
+	          }
+	          return tail / total_mass;
+	        };
+	
+	        const double base = tuned_post_pi_min;
+	        const double tail_base = tail_mass(base);
+	        const double tail_trigger = 0.02;     // only relax when base kills >2% mass
+	        // Low-diversity guard: avoid relaxing global pi in head-heavy samples,
+	        // otherwise many ambiguous reads get forced into random taxa, exploding FPs.
+	        const double head_guard10 = 0.65;
+	        const double head_guard50 = 0.90;
+	        const bool head_heavy =
+	            (top10_mass >= head_guard10) || (top50_mass >= head_guard50);
+	        if (tail_base > tail_trigger && !head_heavy) {
+	          const double target_tail = 0.01;    // aim to kill <=1% mass by global pi cut
+	          const std::array<double, 4> candidates = {5e-4, 2e-4, 1e-4, 5e-5};
+	          double tuned = base;
+	          for (double c : candidates) {
+	            if (c > base) {
+	              continue;
+	            }
+	            tuned = c;
+	            if (tail_mass(c) <= target_tail) {
+	              break;
+	            }
+	          }
+	          tuned_post_pi_min = tuned;
+	        }
+	        if (config.verbose) {
+	          std::cout << "Auto post_pi_min: base=" << config.post_pi_min
+	                    << " tuned=" << tuned_post_pi_min
+	                    << " top10_mass=" << top10_mass
+	                    << " top50_mass=" << top50_mass
+	                    << " tail_mass=" << tail_base << std::endl;
+	        }
+	      }
+	    }
+	    decisionConfig.min_class_weight = tuned_post_pi_min;
+	    // Tail-control for abundance/profile: when we relax global pi to recover recall,
+	    // we should also limit per-read posterior tail allocation to avoid exploding
+	    // the number of tiny non-zero taxa (presence precision is very sensitive).
+	    decisionConfig.posterior_head_mass = 0.95;
+	    decisionConfig.posterior_max_taxa = 8;
+	    if (tuned_post_pi_min > 0.0 && tuned_post_pi_min < config.post_pi_min) {
+	      decisionConfig.posterior_head_mass = 0.90;
+	      decisionConfig.posterior_max_taxa = 5;
+	    }
+	    decisionConfig.posterior_power = 1.5;
 
     postEmDecision(classifyResults, decisionConfig, classWeights, tax,
                    &presenceDecision);

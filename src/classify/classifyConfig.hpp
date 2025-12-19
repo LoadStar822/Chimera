@@ -52,6 +52,18 @@ namespace ChimeraClassify {
 		bool adaptive_shot = true;
 		double firstFilterBeta = 0.8;
 		size_t preEmTopK = 16;
+		// NCBI-only experimental knobs for strain/assembly saturation:
+		// - collapse_strain_hits: collapse per-hash hit lists to 1 representative taxid per species
+		//   (affects scoring/deg on the hot path; can change behavior).
+		// - collapse_strain_candidates: collapse the pre-EM candidate list to 1 representative per species
+		//   before topK truncation (lighter; mainly affects candidate diversity).
+		bool collapse_strain_hits = false;
+		bool collapse_strain_candidates = false;
+		// NCBI-only: compute deg/exclusivity using species groups instead of raw taxid
+		// multiplicity. This helps avoid "strain saturation" (many strain taxids) from
+		// over-penalizing within-genus shared evidence, while keeping output taxids
+		// unchanged (still DB taxids).
+		bool deg_by_species = false;
 		std::string decoy_mode{ "imcf-edge-shuffle" };
 		uint32_t decoy_reps = 3;
 		double exclusive_gamma = 1.2;
@@ -72,6 +84,7 @@ namespace ChimeraClassify {
 	double em_conf_power = 2.0;     // confidence exponent for EM M-step (0 disables)
 	double post_thres = 0.56;
 	double post_pi_min = 5e-4;
+	uint32_t dump_post_topk = 0; // 输出 POST_TOPK=...（用于 profile 侧属内纠错；0 表示关闭）
 	size_t hash_sample_min = 16;
 	size_t hash_sample_max = 96;
 		double idf_max = 8.0;
@@ -106,6 +119,9 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Adaptive shot:" << config.adaptive_shot << std::endl
 			<< std::setw(20) << "First filter beta:" << config.firstFilterBeta << std::endl
 			<< std::setw(20) << "Pre-EM topK:" << config.preEmTopK << std::endl
+			<< std::setw(20) << "Collapse hits:" << config.collapse_strain_hits << std::endl
+			<< std::setw(20) << "Collapse cands:" << config.collapse_strain_candidates << std::endl
+			<< std::setw(20) << "Deg by species:" << config.deg_by_species << std::endl
 			<< std::setw(20) << "Presence pi:" << config.presence_pi << std::endl
 				<< std::setw(20) << "Presence tau:" << config.presence_tau << std::endl
 				<< std::setw(20) << "Presence noise:" << config.presence_noise << std::endl
@@ -126,7 +142,8 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Hash sample max:" << config.hash_sample_max << std::endl
 			<< std::setw(20) << "IDF max:" << config.idf_max << std::endl
 			<< std::setw(20) << "Posterior thres:" << config.post_thres << std::endl
-			<< std::setw(20) << "Posterior pi min:" << config.post_pi_min << std::endl;
+			<< std::setw(20) << "Posterior pi min:" << config.post_pi_min << std::endl
+			<< std::setw(20) << "Dump POST_TOPK:" << config.dump_post_topk << std::endl;
 		os << std::string(40, '=') << std::endl;
 
 		return os;
@@ -166,11 +183,13 @@ namespace ChimeraClassify {
 			bool presence_passed{ false }; // 是否通过 presence 层
 		};
 
-	struct DecisionConfig {
-		double posterior_threshold = 0.56;
-		double min_class_weight = 1e-4;
-		double posterior_min_fraction = 0.01; // 软分配时的最小 posterior 占比阈值
-		double posterior_power = 1.5;        // posterior^alpha 压尖，>1 越尖锐
-	};
-}
-#endif // !CLASSIFYCONFIG_HPP
+		struct DecisionConfig {
+			double posterior_threshold = 0.56;
+			double min_class_weight = 1e-4;
+			double posterior_min_fraction = 0.01; // 软分配时的最小 posterior 占比阈值
+			double posterior_power = 1.5;        // posterior^alpha 压尖，>1 越尖锐
+			double posterior_head_mass = 0.95;   // 每条 read 只保留 posterior^alpha 的头部质量（抑制长尾）
+			uint32_t posterior_max_taxa = 8;     // 每条 read 最多输出的 taxon 数（抑制长尾）
+		};
+	}
+	#endif // !CLASSIFYCONFIG_HPP
