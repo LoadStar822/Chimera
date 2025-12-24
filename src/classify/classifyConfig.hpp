@@ -181,6 +181,10 @@ namespace ChimeraClassify {
 		robin_hood::unordered_flat_map<std::string, size_t> rejectReasons;
 		robin_hood::unordered_flat_map<std::string,
 			robin_hood::unordered_flat_map<std::string, size_t>> rejectByTaxid;
+		size_t preem_route_reads{ 0 };
+		size_t preem_route_rare_reads{ 0 };
+		size_t preem_cap_checks{ 0 };
+		size_t preem_cap_expanded{ 0 };
 	};
 
 	struct batchReads {

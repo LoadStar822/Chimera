@@ -1088,8 +1088,32 @@ void run(ClassifyConfig config) {
       std::cout << ")" << std::endl;
     }
   };
+  auto print_preem_stats = [&]() {
+    if (fileInfo.preem_route_reads == 0 && fileInfo.preem_cap_checks == 0) {
+      return;
+    }
+    double rare_frac = 0.0;
+    if (fileInfo.preem_route_reads > 0) {
+      rare_frac = static_cast<double>(fileInfo.preem_route_rare_reads) /
+                  static_cast<double>(fileInfo.preem_route_reads);
+    }
+    double cap_frac = 0.0;
+    if (fileInfo.preem_cap_checks > 0) {
+      cap_frac = static_cast<double>(fileInfo.preem_cap_expanded) /
+                 static_cast<double>(fileInfo.preem_cap_checks);
+    }
+    std::cout << "[classify][auto] preem_route_rare="
+              << fileInfo.preem_route_rare_reads << "/"
+              << fileInfo.preem_route_reads << " (" << std::fixed
+              << std::setprecision(3) << rare_frac << ")"
+              << " cap_expand=" << fileInfo.preem_cap_expanded << "/"
+              << fileInfo.preem_cap_checks << " (" << cap_frac << ")"
+              << " head_mass_thresh=0.5 base_cap=256 max_cap=512"
+              << std::defaultfloat << std::endl;
+  };
   if (config.verbose) {
     print_rejects();
+    print_preem_stats();
   }
 
   auto saveStart = std::chrono::high_resolution_clock::now();

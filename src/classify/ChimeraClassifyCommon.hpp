@@ -123,6 +123,70 @@ inline bool allow_low_df_boost(std::size_t df_bins, bool has_freq,
   return df_est <= df_gate;
 }
 
+inline std::vector<uint64_t> select_rare_route_values(
+    const std::vector<std::pair<uint32_t, uint64_t>> &scored,
+    std::size_t budget) {
+  std::vector<uint64_t> out;
+  if (budget == 0 || scored.empty()) {
+    return out;
+  }
+  std::vector<std::pair<uint32_t, uint64_t>> ordered = scored;
+  std::sort(ordered.begin(), ordered.end(),
+            [](const auto &a, const auto &b) {
+              if (a.first != b.first) {
+                return a.first < b.first;
+              }
+              return a.second < b.second;
+            });
+  robin_hood::unordered_flat_set<uint64_t> seen;
+  seen.reserve(std::min<std::size_t>(budget * 2, ordered.size()));
+  for (const auto &kv : ordered) {
+    if (!seen.insert(kv.second).second) {
+      continue;
+    }
+    out.push_back(kv.second);
+    if (out.size() >= budget) {
+      break;
+    }
+  }
+  return out;
+}
+
+inline double compute_head_mass(
+    const std::vector<std::pair<uint32_t, uint32_t>> &ranked,
+    std::size_t topN, uint64_t total) {
+  if (total == 0 || ranked.empty() || topN == 0) {
+    return 0.0;
+  }
+  const std::size_t limit = std::min<std::size_t>(topN, ranked.size());
+  uint64_t sum = 0;
+  for (std::size_t i = 0; i < limit; ++i) {
+    sum += ranked[i].second;
+  }
+  return static_cast<double>(sum) / static_cast<double>(total);
+}
+
+inline std::size_t compute_candidate_cap(std::size_t baseCap,
+                                         std::size_t maxCap,
+                                         double headMass,
+                                         double headMassThresh,
+                                         std::size_t rankedSize) {
+  if (rankedSize == 0) {
+    return 0;
+  }
+  if (baseCap == 0) {
+    baseCap = 1;
+  }
+  if (maxCap < baseCap) {
+    maxCap = baseCap;
+  }
+  std::size_t cap = std::min<std::size_t>(baseCap, rankedSize);
+  if (rankedSize > baseCap && headMass < headMassThresh) {
+    cap = std::min<std::size_t>(maxCap, rankedSize);
+  }
+  return cap;
+}
+
 struct ReadStats {
   size_t count{0};
   size_t total_len{0};

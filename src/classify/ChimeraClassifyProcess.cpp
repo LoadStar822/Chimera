@@ -283,6 +283,29 @@ void processSequence(
     }
   }
 
+  std::vector<uint64_t> routeVals = sampleVals;
+  bool used_rare_route = false;
+  if (!sampleVals.empty() && weightCtx.freqSketch) {
+    std::vector<std::pair<uint32_t, uint64_t>> scored;
+    scored.reserve(sampleVals.size());
+    for (uint64_t v : sampleVals) {
+      scored.emplace_back(weightCtx.freqSketch->estimate(v), v);
+    }
+    const size_t routeBudget =
+        std::max<size_t>(1, sampleVals.size() / 2);
+    routeVals = select_rare_route_values(scored, routeBudget);
+    if (routeVals.empty()) {
+      routeVals = sampleVals;
+    }
+    used_rare_route = (routeVals.size() < sampleVals.size());
+  }
+  if (sampleBudget > 0) {
+    fileInfo.preem_route_reads += 1;
+    if (used_rare_route) {
+      fileInfo.preem_route_rare_reads += 1;
+    }
+  }
+
   std::vector<std::vector<uint32_t>> sampleCount;
   std::vector<std::pair<uint32_t, uint16_t>> touchedS;
   touchedS.reserve(64);
@@ -307,8 +330,12 @@ void processSequence(
     }
   }
 
-  const size_t candidateCap =
+  const size_t baseCandidateCap =
       std::min<size_t>(binNumAll, static_cast<size_t>(256));
+  const size_t maxCandidateCap =
+      std::min<size_t>(binNumAll, static_cast<size_t>(512));
+  size_t candidateCap = baseCandidateCap;
+  constexpr double kHeadMassThresh = 0.5;
   std::vector<uint32_t> topBins;
   bool fallback_full = (coarseTotal == 0);
 
@@ -317,10 +344,10 @@ void processSequence(
   robin_hood::unordered_flat_set<uint32_t> lowDegPreserve;
   lowDegPreserve.reserve(64);
 
-  if (!sampleVals.empty()) {
+  if (!routeVals.empty()) {
     std::vector<uint32_t> routed;
     routed.reserve(16);
-    for (auto v : sampleVals) {
+    for (auto v : routeVals) {
       routed.clear();
       imcf.route(v, routed);
       if (routed.empty()) {
@@ -348,6 +375,15 @@ void processSequence(
     }
     std::sort(ranked.begin(), ranked.end(),
               [](const auto &a, const auto &b) { return a.second > b.second; });
+
+    const double head_mass = compute_head_mass(ranked, 10, coarseTotal);
+    candidateCap = compute_candidate_cap(baseCandidateCap, maxCandidateCap,
+                                         head_mass, kHeadMassThresh,
+                                         ranked.size());
+    fileInfo.preem_cap_checks += 1;
+    if (candidateCap > baseCandidateCap) {
+      fileInfo.preem_cap_expanded += 1;
+    }
 
     uint64_t goal = static_cast<uint64_t>(
         std::ceil(static_cast<double>(coarseTotal) * coverageTarget));
