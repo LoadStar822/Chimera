@@ -473,6 +473,29 @@ int main(int argc, char **argv) {
       ->default_val(1)
       ->check(CLI::Range(1u, 16u));
   classify
+      ->add_option("--presence-breadth-bits", classifyConfig.presence_breadth_bits,
+                   "Sketch bits for presence breadth (power-of-two suggested)")
+      ->check(CLI::Range(64u, 1048576u))
+      ->default_val(2048);
+  classify
+      ->add_option("--presence-breadth-min-ratio",
+                   classifyConfig.presence_breadth_min_ratio,
+                   "Minimum breadth ratio (0 disables)")
+      ->check(CLI::Range(0.0, 1.0))
+      ->default_val(0.0);
+  classify
+      ->add_option("--presence-breadth-min-obs",
+                   classifyConfig.presence_breadth_min_obs,
+                   "Minimum observed unique signatures (0 disables)")
+      ->check(CLI::Range(0u, 100000000u))
+      ->default_val(0);
+  classify
+      ->add_option("--presence-breadth-penalty",
+                   classifyConfig.presence_breadth_penalty,
+                   "Penalty subtracted from logPosterior when breadth is low (0 disables)")
+      ->check(CLI::Range(0.0, 1e6))
+      ->default_val(0.0);
+  classify
       ->add_option("--decoy-mode", classifyConfig.decoy_mode,
                    "Decoy generation mode (imcf-edge-shuffle)")
       ->default_val("imcf-edge-shuffle");
@@ -550,10 +573,34 @@ int main(int argc, char **argv) {
                    "Minimum global class weight")
       ->default_val(5e-4);
   classify
+      ->add_option("--post-min-fraction", classifyConfig.post_min_fraction,
+                   "postEmDecision: ignore taxa with posterior < fraction (0 disables)")
+      ->check(CLI::Range(0.0, 1.0))
+      ->default_val(0.01);
+  classify
+      ->add_option("--post-power", classifyConfig.post_power,
+                   "postEmDecision: posterior^alpha sharpening (>=1)")
+      ->check(CLI::Range(0.0, 10.0))
+      ->default_val(1.5);
+  auto *postHeadMassOpt =
+      classify
+          ->add_option("--post-head-mass", classifyConfig.post_head_mass,
+                       "postEmDecision: keep top head_mass of sum(posterior^alpha) (0=>auto)")
+          ->check(CLI::Range(0.0, 1.0))
+          ->default_val(0.0);
+  postHeadMassOpt->default_str("auto");
+  auto *postMaxTaxaOpt =
+      classify
+          ->add_option("--post-max-taxa", classifyConfig.post_max_taxa,
+                       "postEmDecision: max taxa per read in taxidCount (0=>auto)")
+          ->check(CLI::Range(0u, 512u))
+          ->default_val(0);
+  postMaxTaxaOpt->default_str("auto");
+  classify
       ->add_option("--dump-post-topk", classifyConfig.dump_post_topk,
                    "Dump top-K posterior candidates as POST_TOPK=... token in output TSV (0 disables)")
       ->check(CLI::Range(0u, 512u))
-      ->default_val(0);
+      ->default_val(256);
   classify->add_flag(
       "--presence-pre-filter", classifyConfig.presence_pre_filter,
       "Apply presence filter before EM/VEM (hard-prune candidates; may increase unclassified)");

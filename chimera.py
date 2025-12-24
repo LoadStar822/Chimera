@@ -4,13 +4,17 @@ import shutil
 import sys
 from pathlib import Path
 
-from src.download import download as downloader
-from src.profile import conversion2Krona, profile
+from src.profile import profile
 
 
 def default_threads():
     cpu = os.cpu_count()
     return cpu if cpu and cpu > 0 else 1
+
+
+def get_downloader():
+    from src.download import download as downloader
+    return downloader
 
 
 def get_chimera_path():
@@ -280,6 +284,30 @@ def parse_arguments():
         default=None,
         help="Override noise μ for coverage model; <=0 auto",
     )
+    classify_parser.add_argument(
+        "--presence-breadth-bits",
+        type=int,
+        default=None,
+        help="Sketch bits for presence breadth (power-of-two suggested)",
+    )
+    classify_parser.add_argument(
+        "--presence-breadth-min-ratio",
+        type=float,
+        default=None,
+        help="Minimum breadth ratio (0 disables)",
+    )
+    classify_parser.add_argument(
+        "--presence-breadth-min-obs",
+        type=int,
+        default=None,
+        help="Minimum observed unique signatures (0 disables)",
+    )
+    classify_parser.add_argument(
+        "--presence-breadth-penalty",
+        type=float,
+        default=None,
+        help="Penalty subtracted from logPosterior when breadth is low (0 disables)",
+    )
     # presence-unique-deg 固定随数据库，分类侧不再暴露参数
     classify_parser.add_argument(
         "--decoy-mode",
@@ -487,8 +515,16 @@ def parse_arguments():
     )
     profile_parser.add_argument(
         "--hd-intragenus-map",
+        dest="hd_intragenus_map",
         action="store_true",
-        help="高多样性样本：使用 classify 输出的 POST_TOPK 做属内 MAP 纠错（默认关闭；需要重新跑一次 classify 生成 POST_TOPK）",
+        default=True,
+        help="高多样性样本：使用 classify 输出的 POST_TOPK 做属内 MAP 纠错（默认开启；需要重新跑一次 classify 生成 POST_TOPK）",
+    )
+    profile_parser.add_argument(
+        "--no-hd-intragenus-map",
+        dest="hd_intragenus_map",
+        action="store_false",
+        help="关闭属内 MAP 纠错",
     )
     profile_parser.add_argument(
         "--hd-intragenus-topk",
@@ -507,6 +543,36 @@ def parse_arguments():
         type=float,
         default=0.10,
         help="属内 MAP：仅当 top1-top2 posterior gap < 该阈值时尝试纠错（默认 0.10；设 0 可更激进）",
+    )
+    profile_parser.add_argument(
+        "--tail-rel-keep",
+        type=float,
+        default=0.0,
+        help="高多样性样本：species 层级尾巴门禁（tail gate）。当 rel < 该阈值(%%) 时，只有满足 support 条件的物种才允许保留；0 表示关闭。",
+    )
+    profile_parser.add_argument(
+        "--tail-top1-min",
+        type=int,
+        default=0,
+        help="tail gate：低丰度物种若 top1 support(出现次数) >= K 则保留；0 表示不使用该条件。",
+    )
+    profile_parser.add_argument(
+        "--tail-hip-prob",
+        type=float,
+        default=0.9,
+        help="tail gate：高置信 posterior support 的阈值 (POST_TOPK 中 p>=该值)。",
+    )
+    profile_parser.add_argument(
+        "--tail-hip-min",
+        type=int,
+        default=0,
+        help="tail gate：低丰度物种若 hiP support(出现次数) >= K 则保留；0 表示不使用该条件。",
+    )
+    profile_parser.add_argument(
+        "--tail-hip-topk",
+        type=int,
+        default=0,
+        help="tail gate：扫描 POST_TOPK 的前 K 个候选来统计 hiP support；0 表示扫描全部候选。",
     )
 
     if len(sys.argv) == 1:
@@ -530,8 +596,9 @@ def parse_arguments():
     return args
 
 
-def run_chimera(args, chimera_path):
+def run_chimera(args, chimera_path=None):
     if args.command == "download":
+        downloader = get_downloader()
         # 获取原始命令行参数
         cmd_args = sys.argv
         # 找到"download"在参数列表中的位置
@@ -552,6 +619,7 @@ def run_chimera(args, chimera_path):
         return 0
 
     if args.command == "download_and_build":
+        downloader = get_downloader()
         options = downloader.download(interactive=True)
         args.command = "build"
         args.input = os.path.join(options.output_dir, "target.tsv")
@@ -584,6 +652,8 @@ def run_chimera(args, chimera_path):
                 if candidate_info.exists():
                     args.taxonomy_info = str(candidate_info)
         if args.krona:
+            downloader = get_downloader()
+            from src.profile import conversion2Krona
             print("Converting file to Krona format...")
             conversion2Krona.convert_multiple_files_to_krona_format(
                 args.input,
@@ -626,12 +696,19 @@ def run_chimera(args, chimera_path):
                 hd_intragenus_topk=args.hd_intragenus_topk,
                 hd_intragenus_beta=args.hd_intragenus_beta,
                 hd_intragenus_gap=args.hd_intragenus_gap,
+                tail_rel_keep=args.tail_rel_keep,
+                tail_top1_min=args.tail_top1_min,
+                tail_hip_prob=args.tail_hip_prob,
+                tail_hip_min=args.tail_hip_min,
+                tail_hip_topk=args.tail_hip_topk,
             )
         except ValueError as exc:
             print(f"Profile failed: {exc}")
             return 1
         return 0
 
+    if chimera_path is None:
+        chimera_path = get_chimera_path()
     command = [chimera_path]
 
     if args.version:
@@ -684,6 +761,28 @@ def run_chimera(args, chimera_path):
             command.extend(["--presence-tau", str(args.presence_tau)])
         if args.presence_noise is not None:
             command.extend(["--presence-noise", str(args.presence_noise)])
+        if args.presence_breadth_bits is not None:
+            command.extend(
+                ["--presence-breadth-bits", str(args.presence_breadth_bits)]
+            )
+        if args.presence_breadth_min_ratio is not None:
+            command.extend(
+                [
+                    "--presence-breadth-min-ratio",
+                    str(args.presence_breadth_min_ratio),
+                ]
+            )
+        if args.presence_breadth_min_obs is not None:
+            command.extend(
+                ["--presence-breadth-min-obs", str(args.presence_breadth_min_obs)]
+            )
+        if args.presence_breadth_penalty is not None:
+            command.extend(
+                [
+                    "--presence-breadth-penalty",
+                    str(args.presence_breadth_penalty),
+                ]
+            )
         if args.presence_unique_deg is not None:
             command.extend(
                 ["--presence-unique-deg", str(args.presence_unique_deg)]
@@ -708,13 +807,13 @@ def run_chimera(args, chimera_path):
         # EM 温度/先验/penalty 固定内部默认
 
     # Execute the command using the provided run function
+    downloader = get_downloader()
     downloader.run_command(command)
 
 
 def main():
-    chimera_path = get_chimera_path()
     args = parse_arguments()
-    run_chimera(args, chimera_path)
+    run_chimera(args)
 
 
 if __name__ == "__main__":

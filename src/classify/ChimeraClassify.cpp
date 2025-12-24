@@ -599,7 +599,8 @@ void run(ClassifyConfig config) {
     }
   }
   std::vector<uint32_t> tid2speciesRep;
-  if (config.collapse_strain_hits && weightCtx.ncbiTaxdump &&
+  if ((config.collapse_strain_hits || config.collapse_strain_candidates) &&
+      weightCtx.ncbiTaxdump &&
       weightCtx.ncbiTaxdump->enabled()) {
     tid2speciesRep.resize(tax.id2str.size());
     for (uint32_t i = 0; i < tid2speciesRep.size(); ++i) {
@@ -981,16 +982,36 @@ void run(ClassifyConfig config) {
 	      }
 	    }
 	    decisionConfig.min_class_weight = tuned_post_pi_min;
-	    // Tail-control for abundance/profile: when we relax global pi to recover recall,
-	    // we should also limit per-read posterior tail allocation to avoid exploding
-	    // the number of tiny non-zero taxa (presence precision is very sensitive).
-	    decisionConfig.posterior_head_mass = 0.95;
-	    decisionConfig.posterior_max_taxa = 8;
+	    // postEmDecision tail controls:
+	    // - They govern how much posterior mass is allowed to fan out into multiple
+	    //   taxids for *taxidCount* (abundance/presence is very sensitive).
+	    // - POST_TOPK dump still uses the full posterior list.
+	    decisionConfig.posterior_min_fraction = config.post_min_fraction;
+	    decisionConfig.posterior_power = config.post_power;
+
+	    // Default/auto behavior: when we relax global pi to recover recall in
+	    // high-diversity samples, tighten per-read tail allocation to avoid
+	    // exploding the number of tiny non-zero taxa.
+	    double auto_head_mass = 0.95;
+	    uint32_t auto_max_taxa = 8;
 	    if (tuned_post_pi_min > 0.0 && tuned_post_pi_min < config.post_pi_min) {
-	      decisionConfig.posterior_head_mass = 0.90;
-	      decisionConfig.posterior_max_taxa = 5;
+	      auto_head_mass = 0.90;
+	      auto_max_taxa = 5;
 	    }
-	    decisionConfig.posterior_power = 1.5;
+	    decisionConfig.posterior_head_mass =
+	        (config.post_head_mass > 0.0) ? config.post_head_mass : auto_head_mass;
+	    decisionConfig.posterior_max_taxa =
+	        (config.post_max_taxa > 0) ? config.post_max_taxa : auto_max_taxa;
+
+	    if (config.verbose) {
+	      std::cout << "PostEM tail: min_fraction=" << decisionConfig.posterior_min_fraction
+	                << " power=" << decisionConfig.posterior_power
+	                << " head_mass=" << decisionConfig.posterior_head_mass
+	                << (config.post_head_mass > 0.0 ? " (cli)" : " (auto)")
+	                << " max_taxa=" << decisionConfig.posterior_max_taxa
+	                << (config.post_max_taxa > 0 ? " (cli)" : " (auto)")
+	                << std::endl;
+	    }
 
     postEmDecision(classifyResults, decisionConfig, classWeights, tax,
                    &presenceDecision);

@@ -683,6 +683,13 @@ void postEmDecision(
 	      if (max_taxa < 1) {
 	        max_taxa = 1;
 	      }
+
+	      // Winner-take-all for high-confidence reads to suppress long-tail spillover.
+	      constexpr double kPosteriorGapWTA = 0.15;
+	      if ((top_score - second_score) >= kPosteriorGapWTA) {
+	        head_mass = 1.0;
+	        max_taxa = 1;
+	      }
 	
 	      auto eligible = [&](const std::string &taxid, double post) -> bool {
 	        if (!(post > 0.0)) {

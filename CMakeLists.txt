@@ -82,9 +82,13 @@ file(GLOB_RECURSE SOURCES
 # 移除 CMake 生成的文件
 list(FILTER SOURCES EXCLUDE REGEX "CMakeFiles/")
 list(FILTER SOURCES EXCLUDE REGEX "/tests/")
+list(FILTER SOURCES EXCLUDE REGEX "/bench/")
+list(FILTER SOURCES EXCLUDE REGEX "/packed/")
+list(FILTER SOURCES EXCLUDE REGEX "/\\.worktrees/")
 list(FILTER SOURCES EXCLUDE REGEX "/libs/minions-master/")
 list(FILTER SOURCES EXCLUDE REGEX "/src/legacy/")
 list(FILTER SOURCES EXCLUDE REGEX "/libs/strobemers/")
+list(FILTER SOURCES EXCLUDE REGEX "/third_party/")
 
 list(APPEND SOURCES "${PROJECT_SOURCE_DIR}/src/utils/FeatureHasher.cpp")
 list(REMOVE_DUPLICATES SOURCES)
