@@ -3,10 +3,127 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <limits>
+#include <mutex>
 #include <numeric>
 #include <thread>
 #include <utility>
+
+namespace {
+
+std::ostream *preem_dump_stream() {
+  static std::once_flag once;
+  static std::mutex mu;
+  static std::ofstream ofs;
+  static bool enabled = false;
+  const char *path = std::getenv("CHIMERA_DUMP_PREEM");
+  if (!path || !*path) {
+    return nullptr;
+  }
+  std::string path_copy = path;
+  std::call_once(once, [&]() {
+    ofs.open(path_copy);
+    enabled = ofs.good();
+  });
+  if (!enabled) {
+    return nullptr;
+  }
+  return &ofs;
+}
+
+void dump_preem_line(const std::string &id,
+                     const std::vector<std::pair<std::string, double>> &items,
+                     bool high_conf_pre) {
+  auto *os = preem_dump_stream();
+  if (!os) {
+    return;
+  }
+  static std::mutex mu;
+  std::lock_guard<std::mutex> lock(mu);
+  (*os) << id;
+  (*os) << '\t' << "highconf=" << (high_conf_pre ? 1 : 0);
+  for (const auto &kv : items) {
+    (*os) << '\t' << kv.first << ':' << kv.second;
+  }
+  (*os) << '\n';
+}
+
+std::ostream *tidscore_dump_stream() {
+  static std::once_flag once;
+  static std::mutex mu;
+  static std::ofstream ofs;
+  static bool enabled = false;
+  const char *path = std::getenv("CHIMERA_DUMP_TIDSCORE");
+  if (!path || !*path) {
+    return nullptr;
+  }
+  std::string path_copy = path;
+  std::call_once(once, [&]() {
+    ofs.open(path_copy);
+    enabled = ofs.good();
+  });
+  if (!enabled) {
+    return nullptr;
+  }
+  return &ofs;
+}
+
+size_t tidscore_dump_topn() {
+  const char *val = std::getenv("CHIMERA_DUMP_TIDSCORE_TOPN");
+  if (!val || !*val) {
+    return 128;
+  }
+  try {
+    long long v = std::stoll(val);
+    if (v <= 0) {
+      return 0;
+    }
+    return static_cast<size_t>(v);
+  } catch (...) {
+    return 128;
+  }
+}
+
+void dump_tidscore_line(const std::string &id,
+                        const ChimeraClassify::TaxDict &tax,
+                        const robin_hood::unordered_flat_map<uint32_t, double> &tidScore) {
+  auto *os = tidscore_dump_stream();
+  if (!os || tidScore.empty()) {
+    return;
+  }
+  const size_t topn = tidscore_dump_topn();
+  if (topn == 0) {
+    return;
+  }
+  std::vector<std::pair<uint32_t, double>> items;
+  items.reserve(tidScore.size());
+  for (const auto &kv : tidScore) {
+    items.emplace_back(kv.first, kv.second);
+  }
+  if (items.size() > topn) {
+    std::nth_element(items.begin(), items.begin() + topn, items.end(),
+                     [](const auto &a, const auto &b) { return a.second > b.second; });
+    items.resize(topn);
+  }
+  std::sort(items.begin(), items.end(),
+            [](const auto &a, const auto &b) { return a.second > b.second; });
+
+  static std::mutex mu;
+  std::lock_guard<std::mutex> lock(mu);
+  (*os) << id;
+  for (const auto &kv : items) {
+    uint32_t tid_id = kv.first;
+    if (tid_id >= tax.id2str.size()) {
+      continue;
+    }
+    (*os) << '\t' << tax.id2str[tid_id] << ':' << kv.second;
+  }
+  (*os) << '\n';
+}
+
+} // namespace
 
 namespace ChimeraClassify {
 
@@ -447,8 +564,10 @@ void processSequence(
     idf = std::clamp(idf, 0.5, config.idf_max);
 
     double freqFactor = 1.0;
-    if (weightCtx.enabled()) {
-      uint32_t df_est = weightCtx.freqSketch->estimate(value);
+    const bool has_freq = weightCtx.enabled();
+    uint32_t df_est = 0;
+    if (has_freq) {
+      df_est = weightCtx.freqSketch->estimate(value);
       double vocab = static_cast<double>(
           std::max<uint64_t>(1, weightCtx.freqStats.nonzero_counters));
       double bg_idf =
@@ -468,19 +587,20 @@ void processSequence(
           freqFactor *= 0.25;
         }
       }
-    freqFactor *= bg_idf;
-    freqFactor = std::clamp(freqFactor, 0.05, 8.0);
-  }
+      freqFactor *= bg_idf;
+      freqFactor = std::clamp(freqFactor, 0.05, 8.0);
+    }
 
-    // Globalize uniqueness: avoid treating hashes as unique just because they
-    // only appear in the current candidate subset.
-    const bool uniqueEdge = (deg_effective == 1 && df_bins == 1);
+    const bool uniqueEdge = allow_unique_edge(
+        deg_effective, df_bins, has_freq, df_est, imcfConfig.presenceUniqueDeg);
+    const bool low_df_boost = allow_low_df_boost(
+        df_bins, has_freq, df_est, imcfConfig.presenceUniqueDeg);
     double denom = std::log2(2.0 + static_cast<double>(deg_effective));
     double weight = denom > 0.0 ? 1.0 / denom : 1.0;
     double contrib = idf * weight * freqFactor * exclusivityWeight;
     if (uniqueEdge) {
       contrib *= kUniqueEdgeBonus;
-    } else if (df_bins <= 2) {
+    } else if (low_df_boost) {
       contrib *= 1.5;
     }
     for (uint32_t tid : minimizerTids) {
@@ -706,6 +826,9 @@ void processSequence(
     uniqueRatio = stats.uniqueRatio;
   }
 
+  // Optional: dump raw tidScore (pre-EM candidates before thresholds).
+  dump_tidscore_line(id, tax, tidScore);
+
   size_t bestRounded =
       static_cast<size_t>(std::max<double>(0.0, std::llround(best)));
   size_t secondRounded =
@@ -837,6 +960,55 @@ void processSequence(
     }
   }
 
+  if (use_em && !highConfPre && result.taxidCount.size() == 1 &&
+      !tidScore.empty()) {
+    const bool unique_ok = (uniqueCount >= 3) ||
+                           (uniqueCount >= 2 && uniqueRatio >= 0.12);
+    if (!unique_ok) {
+      constexpr size_t kMinCand = 4;
+      if (result.taxidCount.size() < kMinCand) {
+        robin_hood::unordered_flat_set<uint32_t> seen;
+        seen.reserve(kMinCand + 2);
+        for (const auto &kv : result.taxidCount) {
+          auto it = tax.str2id.find(kv.first);
+          if (it != tax.str2id.end()) {
+            seen.insert(it->second);
+          }
+        }
+        std::vector<std::pair<uint32_t, double>> ranked;
+        ranked.reserve(tidScore.size());
+        for (const auto &kv : tidScore) {
+          ranked.emplace_back(kv.first, kv.second);
+        }
+        const size_t want =
+            std::min<size_t>(ranked.size(), kMinCand * 4);
+        if (want > 0) {
+          std::partial_sort(
+              ranked.begin(), ranked.begin() + want, ranked.end(),
+              [](const auto &a, const auto &b) { return a.second > b.second; });
+          for (size_t i = 0;
+               i < want && result.taxidCount.size() < kMinCand; ++i) {
+            const uint32_t tid_id = ranked[i].first;
+            if (seen.find(tid_id) != seen.end()) {
+              continue;
+            }
+            if (tid_id >= tax.id2str.size()) {
+              continue;
+            }
+            const std::string &taxid = tax.id2str[tid_id];
+            const double countVal =
+                std::clamp(ranked[i].second, 0.0, effCap);
+            if (countVal <= 0.0) {
+              continue;
+            }
+            result.taxidCount.emplace_back(taxid, countVal);
+            seen.insert(tid_id);
+          }
+        }
+      }
+    }
+  }
+
   if (result.taxidCount.empty() && use_em && maxCountValid &&
       maxCount.second > 0.0) {
     result.taxidCount.emplace_back(maxCount);
@@ -951,6 +1123,9 @@ void processSequence(
       result.taxidCount.resize(K);
     }
   }
+
+  // Optional: dump pre-EM candidate list for P1/P2 analysis.
+  dump_preem_line(result.id, result.taxidCount, highConfPre);
 
   if (!result.taxidCount.empty()) {
     for (const auto &entry : result.taxidCount) {

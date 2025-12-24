@@ -3,6 +3,7 @@
 
 #include "ChimeraClassify.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -94,6 +95,33 @@ struct WeightingContext {
   bool enabled() const { return freqSketch != nullptr; }
   bool has_sample_weights() const { return sampleWeights != nullptr; }
 };
+
+inline bool allow_unique_edge(std::size_t deg_effective, std::size_t df_bins,
+                              bool has_freq, uint32_t df_est,
+                              uint32_t unique_deg_threshold) {
+  if (deg_effective != 1 || df_bins != 1) {
+    return false;
+  }
+  if (!has_freq) {
+    return true;
+  }
+  const uint32_t threshold = std::max<uint32_t>(1u, unique_deg_threshold);
+  return df_est <= threshold;
+}
+
+inline bool allow_low_df_boost(std::size_t df_bins, bool has_freq,
+                               uint32_t df_est,
+                               uint32_t unique_deg_threshold) {
+  if (df_bins > 2) {
+    return false;
+  }
+  if (!has_freq) {
+    return true;
+  }
+  const uint32_t threshold = std::max<uint32_t>(1u, unique_deg_threshold);
+  const uint32_t df_gate = static_cast<uint32_t>(2u * threshold + 1u);
+  return df_est <= df_gate;
+}
 
 struct ReadStats {
   size_t count{0};
