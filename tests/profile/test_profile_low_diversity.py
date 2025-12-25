@@ -46,7 +46,43 @@ def test_dump_post_topk_default(repo_root: Path) -> None:
     assert value == 256, f"dump_post_topk default expected 256, got {value}"
 
 
-def test_low_diversity_uses_top1(repo_root: Path) -> None:
+def test_low_diversity_uses_post_topk_when_available(repo_root: Path) -> None:
+    profile = load_profile_module(repo_root)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        taxonomy_info = tmp_path / "taxonomy_info.tsv"
+        lines = [
+            "d1\t\t domain\t d__Bacteria",
+            "g1\td1\t genus\t g__Alpha",
+        ]
+        for i in range(1, 21):
+            lines.append(f"s{i}\tg1\t species\t s__Alpha_{i}")
+        taxonomy_info.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        classify_path = tmp_path / "ChimeraClassify.tsv"
+        with classify_path.open("w", encoding="utf-8") as fh:
+            for i in range(10):
+                tokens = ["s1:1"] + [f"s{j}:1" for j in range(2, 21)]
+                post = ",".join([f"s{j}:0.05" for j in range(1, 6)])
+                fh.write(f"read{i}\t" + "\t".join(tokens) + f"\tPOST_TOPK={post}\n")
+
+        out_path = tmp_path / "ChimeraAbundance"
+        profile.process_file(
+            input_files=[str(classify_path)],
+            output_file=str(out_path),
+            taxonomy_kind="gtdb",
+            taxonomy_info=str(taxonomy_info),
+            abundance_mode="soft_seq",
+        )
+
+        out_file = out_path.with_suffix(".tsv")
+        header = out_file.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
+        assert header.strip() == "# abundance_mode=post_topk", (
+            f"expected low-diversity auto switch to post_topk, got: {header}"
+        )
+
+
+def test_low_diversity_falls_back_to_top1_without_post_topk(repo_root: Path) -> None:
     profile = load_profile_module(repo_root)
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
@@ -77,7 +113,7 @@ def test_low_diversity_uses_top1(repo_root: Path) -> None:
         out_file = out_path.with_suffix(".tsv")
         header = out_file.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
         assert header.strip() == "# abundance_mode=top1", (
-            f"expected low-diversity auto switch to top1, got: {header}"
+            f"expected low-diversity fallback to top1, got: {header}"
         )
 
 
@@ -85,7 +121,8 @@ if __name__ == "__main__":
     repo_root = Path(__file__).resolve().parents[2]
     try:
         test_dump_post_topk_default(repo_root)
-        test_low_diversity_uses_top1(repo_root)
+        test_low_diversity_uses_post_topk_when_available(repo_root)
+        test_low_diversity_falls_back_to_top1_without_post_topk(repo_root)
     except AssertionError as exc:
         print(f"TEST FAILED: {exc}")
         sys.exit(1)

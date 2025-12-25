@@ -550,6 +550,26 @@ def _parse_post_topk_from_tokens(
     return []
 
 
+def _has_post_topk_tokens(
+    input_files: Iterable[str], max_lines: int = 2000
+) -> bool:
+    if max_lines <= 0:
+        return False
+    remaining = max_lines
+    for input_file in input_files:
+        try:
+            with open(input_file, "r", errors="ignore") as infile:
+                for raw in infile:
+                    if "POST_TOPK=" in raw:
+                        return True
+                    remaining -= 1
+                    if remaining <= 0:
+                        return False
+        except OSError:
+            continue
+    return False
+
+
 def _ncbi_taxid_to_species(
     tax: NCBITaxa, taxid: int, cache: Dict[int, Optional[str]]
 ) -> Optional[str]:
@@ -1520,6 +1540,9 @@ def process_file(
     species_counter = count_by_level.get("species")
     species_total = total_counts_by_level.get("species", 0)
     is_low_diversity = False
+    force_low_diversity = False
+    force_low_diversity_shannon: Optional[float] = None
+    has_post_topk: Optional[bool] = None
     if (
         normalized_mode == "soft_seq"
         and species_counter
@@ -1571,8 +1594,16 @@ def process_file(
         )
 
         if is_low_diversity:
-            print("[profile] detected low-diversity: switching abundance_mode to top1")
-            abundance_mode = "top1"
+            force_low_diversity = True
+            force_low_diversity_shannon = shannon_index
+            if has_post_topk is None:
+                has_post_topk = _has_post_topk_tokens(input_files)
+            if has_post_topk:
+                print("[profile] detected low-diversity: switching abundance_mode to post_topk")
+                abundance_mode = "post_topk"
+            else:
+                print("[profile] detected low-diversity: switching abundance_mode to top1")
+                abundance_mode = "top1"
             taxid_counts, base_unclassified = _collect_taxids(
                 input_files, expect_numeric=expect_numeric, abundance_mode=abundance_mode
             )
@@ -1627,6 +1658,8 @@ def process_file(
         mode = (abundance_mode or "soft_seq").strip().lower()
         if mode in {"soft", "soft_seq", "soft_tax"}:
             mode = "soft_seq"
+        elif mode in {"post_topk", "post"}:
+            mode = "post_topk"
         elif mode in {"hard", "hard_seq"}:
             mode = "hard_seq"
         elif mode in {"top1"}:
@@ -1757,9 +1790,28 @@ def process_file(
                     rels.append(rel)
                 rels.sort(reverse=True)
                 top_mass = sum(rels[:LOW_DIVERSITY_TOP_K])
-                is_low_diversity = (shannon_index < LOW_DIVERSITY_SHANNON) or (top_mass >= LOW_DIVERSITY_TOP_MASS)
+                if force_low_diversity:
+                    is_low_diversity = True
+                else:
+                    is_low_diversity = (shannon_index < LOW_DIVERSITY_SHANNON) or (
+                        top_mass >= LOW_DIVERSITY_TOP_MASS
+                    )
 
                 if is_low_diversity:
+                    low_div_shannon = (
+                        force_low_diversity_shannon
+                        if force_low_diversity_shannon is not None
+                        else shannon_index
+                    )
+                    cap_n = int(math.exp(low_div_shannon) * 4.0)
+                    cap_n = max(16, min(64, cap_n))
+                    ranked = [
+                        (taxon, count)
+                        for taxon, count in filtered_items
+                        if taxon != UNCLASSIFIED
+                    ]
+                    ranked.sort(key=lambda it: it[1], reverse=True)
+                    topn = {taxon for taxon, _ in ranked[:cap_n]}
                     aggressive = []
                     for taxon, count in filtered_items:
                         if taxon == UNCLASSIFIED:
@@ -1767,7 +1819,7 @@ def process_file(
                             continue
                         denom = eff_total if eff_total > 0 else total_count
                         rel = (count / denom) * 100 if denom > 0 else 0.0
-                        if rel >= LOW_DIVERSITY_SPECIES_MIN_REL_ABUNDANCE:
+                        if taxon in topn or rel >= LOW_DIVERSITY_SPECIES_MIN_REL_ABUNDANCE:
                             aggressive.append((taxon, count))
                     if aggressive:
                         filtered_items = aggressive
