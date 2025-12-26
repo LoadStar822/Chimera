@@ -68,3 +68,4 @@ bench/db_freq_sweep/*
 tmp/
 .worktrees/
 packed/
+/docs/
