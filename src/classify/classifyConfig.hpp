@@ -51,6 +51,7 @@ namespace ChimeraClassify {
 		double shotThreshold = 0.70;
 		bool adaptive_shot = true;
 		double firstFilterBeta = 0.8;
+		bool firstFilterBeta_user = false; // set when user or auto-override explicitly chooses beta
 		size_t preEmTopK = 16;
 		// NCBI-only experimental knobs for strain/assembly saturation:
 		// - collapse_strain_hits: collapse per-hash hit lists to 1 representative taxid per species
@@ -79,7 +80,7 @@ namespace ChimeraClassify {
 			uint16_t threads;
 			bool verbose = true;
 			size_t batchSize;
-		bool em = true;
+	bool em = true;
 		double emThreshold;
 		size_t emIter;
 	double em_prune_ratio = 2e-4;   // relative to max_expected in EM sparsity
@@ -94,6 +95,10 @@ namespace ChimeraClassify {
 	double post_head_mass = 0.0;     // 0 => auto (based on pi tuning); else (0,1]
 	uint32_t post_max_taxa = 0;      // 0 => auto (based on pi tuning); else >=1
 	uint32_t dump_post_topk = 256; // 输出 POST_TOPK=...（用于 profile 侧属内纠错）
+	bool low_div_auto = true;       // internal: auto low-diversity branch
+	bool low_div_active = false;    // internal: set when low-div branch is enabled
+	uint32_t low_div_probe_reads = 200000; // internal: probe reads for low-div detect
+	size_t max_reads = 0;           // internal: stop after N reads (0 disables)
 	size_t hash_sample_min = 16;
 	size_t hash_sample_max = 96;
 		double idf_max = 8.0;

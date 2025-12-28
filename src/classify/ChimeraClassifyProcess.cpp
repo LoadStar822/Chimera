@@ -50,6 +50,54 @@ void dump_preem_line(const std::string &id,
   (*os) << '\n';
 }
 
+std::ostream *preem_stats_stream() {
+  static std::once_flag once;
+  static std::mutex mu;
+  static std::ofstream ofs;
+  static bool enabled = false;
+  const char *path = std::getenv("CHIMERA_DUMP_PREEM_STATS");
+  if (!path || !*path) {
+    return nullptr;
+  }
+  std::string path_copy = path;
+  std::call_once(once, [&]() {
+    ofs.open(path_copy);
+    enabled = ofs.good();
+  });
+  if (!enabled) {
+    return nullptr;
+  }
+  return &ofs;
+}
+
+void dump_preem_stats(const std::string &id, bool high_conf_pre, bool use_em,
+                      double eff_eval, double best, double second,
+                      double best_ratio, double gap, size_t uniqueCount,
+                      double uniqueRatio, size_t thr_beta, size_t thr_eval,
+                      size_t thr_min_eval, size_t thr_final) {
+  auto *os = preem_stats_stream();
+  if (!os) {
+    return;
+  }
+  static std::mutex mu;
+  std::lock_guard<std::mutex> lock(mu);
+  (*os) << id
+        << "\thighconf=" << (high_conf_pre ? 1 : 0)
+        << "\tuse_em=" << (use_em ? 1 : 0)
+        << "\teff_eval=" << eff_eval
+        << "\tbest=" << best
+        << "\tsecond=" << second
+        << "\tbest_ratio=" << best_ratio
+        << "\tgap=" << gap
+        << "\tuniq_cnt=" << uniqueCount
+        << "\tuniq_ratio=" << uniqueRatio
+        << "\tthr_beta=" << thr_beta
+        << "\tthr_eval=" << thr_eval
+        << "\tthr_min_eval=" << thr_min_eval
+        << "\tthr_final=" << thr_final
+        << '\n';
+}
+
 std::ostream *tidscore_dump_stream() {
   static std::once_flag once;
   static std::mutex mu;
@@ -186,6 +234,23 @@ void processSequence(
   const bool presenceEnabled = (presenceAcc != nullptr);
   const size_t presenceDecoyReps =
       presenceEnabled ? presenceAcc->decoyReps : 0;
+  const uint32_t presenceSketchBits =
+      presenceEnabled ? presenceAcc->sketchBits : 0;
+  const bool presenceSketchPow2 =
+      (presenceSketchBits > 0) &&
+      ((presenceSketchBits & (presenceSketchBits - 1u)) == 0);
+  const uint32_t presenceSketchMask =
+      presenceSketchPow2 ? (presenceSketchBits - 1u) : 0u;
+  auto sketch_index = [&](uint64_t value) -> uint32_t {
+    if (presenceSketchBits == 0) {
+      return std::numeric_limits<uint32_t>::max();
+    }
+    uint64_t mix = splitmix64(value);
+    if (presenceSketchPow2) {
+      return static_cast<uint32_t>(mix & presenceSketchMask);
+    }
+    return static_cast<uint32_t>(mix % presenceSketchBits);
+  };
   const double exclusiveGamma = std::max(0.0, config.exclusive_gamma);
   constexpr double kUniqueEdgeBonus = 3.0;
   const bool has_sample_weight = weightCtx.has_sample_weights();
@@ -628,9 +693,12 @@ void processSequence(
     }
 
     const bool uniqueEdge = allow_unique_edge(
-        deg_effective, df_bins, has_freq, df_est, imcfConfig.presenceUniqueDeg);
+        deg_effective, df_bins, has_freq, weightCtx.freq_trusted, df_est,
+        imcfConfig.presenceUniqueDeg);
     const bool low_df_boost = allow_low_df_boost(
-        df_bins, has_freq, df_est, imcfConfig.presenceUniqueDeg);
+        df_bins, has_freq, weightCtx.freq_trusted, df_est,
+        imcfConfig.presenceUniqueDeg);
+    const bool localUniqueEdge = (deg_effective == 1 && df_bins == 1);
     double denom = std::log2(2.0 + static_cast<double>(deg_effective));
     double weight = denom > 0.0 ? 1.0 / denom : 1.0;
     double contrib = idf * weight * freqFactor * exclusivityWeight;
@@ -646,8 +714,20 @@ void processSequence(
     if (presenceEnabled && !minimizerTids.empty()) {
       const double hit_weight = presence_weight;
       const double score_weight = exclusivityWeight * hit_weight;
+      uint32_t unique_bucket = std::numeric_limits<uint32_t>::max();
+      uint32_t breadth_bucket = std::numeric_limits<uint32_t>::max();
+      if (localUniqueEdge && presenceSketchBits > 0) {
+        unique_bucket = sketch_index(value ^ 0x9e3779b97f4a7c15ULL);
+        if (!minimizerBins.empty()) {
+          breadth_bucket = sketch_index(
+              static_cast<uint64_t>(minimizerBins.front()) ^
+              0xd1b54a32d192ed03ULL);
+        }
+      }
       for (uint32_t tid : minimizerTids) {
-        presenceAcc->add_target(tid, hit_weight, score_weight, uniqueEdge);
+        presenceAcc->add_target(tid, hit_weight, score_weight, uniqueEdge,
+                                localUniqueEdge, unique_bucket,
+                                breadth_bucket);
       }
       if (presenceDecoyReps > 0 && deg_subset > 0) {
         for (size_t rep = 0; rep < presenceDecoyReps; ++rep) {
@@ -908,10 +988,12 @@ void processSequence(
 
   double maxEvidence = std::min(best, eff_eval);
   double beta = config.firstFilterBeta;
+  bool beta_user = config.firstFilterBeta_user;
   if (beta <= 0.0) {
     beta = 0.8;
+    beta_user = false;
   }
-  if (config.em) {
+  if (config.em && !beta_user) {
     beta = 0.45; // EM 模式放宽初筛门槛，确保真实物种不被挡在外
   }
   beta = std::clamp(beta, 0.0, 1.0);
@@ -975,6 +1057,13 @@ void processSequence(
     thr_final = std::max({thr_eval, thr_beta, thr_min_eval});
   }
 
+  size_t baseTopK =
+      config.preEmTopK > 0 ? static_cast<size_t>(config.preEmTopK) : 32;
+
+  dump_preem_stats(id, highConfPre, use_em, eff_eval, best, second, best_ratio,
+                   gap, uniqueCount, uniqueRatio, thr_beta, thr_eval,
+                   thr_min_eval, thr_final);
+
   if (highConfPre && bestTid < tax.id2str.size()) {
     double bestEvidence = std::clamp(best, 0.0, effCap);
     const std::string &taxid = tax.id2str[bestTid];
@@ -983,14 +1072,88 @@ void processSequence(
     maxCountValid = true;
 
   } else {
-    for (const auto &[tid_id, rawScore] : tidScore) {
-      double countVal = std::clamp(rawScore, 0.0, effCap);
-      if (countVal >= static_cast<double>(thr_final)) {
+    if (use_em && config.low_div_active && !tidScore.empty()) {
+      const size_t floorK = std::min<size_t>(128, baseTopK);
+      const size_t poolK = std::max(baseTopK, floorK);
+      std::vector<std::pair<uint32_t, double>> ranked;
+      ranked.reserve(tidScore.size());
+      for (const auto &kv : tidScore) {
+        ranked.emplace_back(kv.first, kv.second);
+      }
+      size_t want = std::min(poolK, ranked.size());
+      if (want > 0) {
+        std::partial_sort(
+            ranked.begin(), ranked.begin() + want, ranked.end(),
+            [](const auto &a, const auto &b) { return a.second > b.second; });
+        ranked.resize(want);
+      }
+
+      size_t thr_min_eval_lowdiv = thr_min_eval;
+      if (thr_min_eval > 0) {
+        thr_min_eval_lowdiv = std::max<size_t>(
+            1, static_cast<size_t>(std::floor(
+                   0.3 * static_cast<double>(thr_min_eval))));
+      }
+      size_t thr_base = std::max(thr_eval, thr_min_eval_lowdiv);
+
+      std::vector<std::pair<std::string, double>> floor;
+      std::vector<std::pair<std::string, double>> tail;
+      floor.reserve(floorK);
+      tail.reserve(ranked.size());
+      const size_t floorCount = std::min(floorK, ranked.size());
+      for (size_t i = 0; i < ranked.size(); ++i) {
+        const uint32_t tid_id = ranked[i].first;
+        if (tid_id >= tax.id2str.size()) {
+          continue;
+        }
+        const double countVal =
+            std::clamp(ranked[i].second, 0.0, effCap);
+        if (countVal <= 0.0) {
+          continue;
+        }
         const std::string &taxid = tax.id2str[tid_id];
-        result.taxidCount.emplace_back(taxid, countVal);
-        if (tid_id == bestTid) {
-          maxCount = std::make_pair(taxid, countVal);
-          maxCountValid = true;
+        if (i < floorCount) {
+          floor.emplace_back(taxid, countVal);
+        } else if (countVal >= static_cast<double>(thr_base)) {
+          tail.emplace_back(taxid, countVal);
+        }
+      }
+
+      size_t thr_beta_eval = std::min(thr_beta, thr_eval);
+      if (floor.size() + tail.size() > baseTopK && thr_beta_eval > 0) {
+        const double thr_beta_val = static_cast<double>(thr_beta_eval);
+        std::vector<std::pair<std::string, double>> tail_kept;
+        tail_kept.reserve(tail.size());
+        for (const auto &kv : tail) {
+          if (kv.second >= thr_beta_val) {
+            tail_kept.push_back(kv);
+          }
+        }
+        tail.swap(tail_kept);
+      }
+
+      result.taxidCount.reserve(floor.size() + tail.size());
+      result.taxidCount.insert(result.taxidCount.end(), floor.begin(),
+                               floor.end());
+      result.taxidCount.insert(result.taxidCount.end(), tail.begin(),
+                               tail.end());
+      if (baseTopK > 0 && result.taxidCount.size() > baseTopK) {
+        std::nth_element(
+            result.taxidCount.begin(),
+            result.taxidCount.begin() + baseTopK, result.taxidCount.end(),
+            [](const auto &a, const auto &b) { return a.second > b.second; });
+        result.taxidCount.resize(baseTopK);
+      }
+    } else {
+      for (const auto &[tid_id, rawScore] : tidScore) {
+        double countVal = std::clamp(rawScore, 0.0, effCap);
+        if (countVal >= static_cast<double>(thr_final)) {
+          const std::string &taxid = tax.id2str[tid_id];
+          result.taxidCount.emplace_back(taxid, countVal);
+          if (tid_id == bestTid) {
+            maxCount = std::make_pair(taxid, countVal);
+            maxCountValid = true;
+          }
         }
       }
     }
@@ -1050,8 +1213,6 @@ void processSequence(
     result.taxidCount.emplace_back(maxCount);
   }
 
-  size_t baseTopK =
-      config.preEmTopK > 0 ? static_cast<size_t>(config.preEmTopK) : 32;
   size_t dynamicTopK = baseTopK;
   double tieGapNeed = std::max(2.0, eff_eval / 24.0);
   bool nearTie = (gap < tieGapNeed) || (best_ratio < 1.30);
@@ -1164,6 +1325,17 @@ void processSequence(
   dump_preem_line(result.id, result.taxidCount, highConfPre);
 
   if (!result.taxidCount.empty()) {
+    if (presenceEnabled && presenceAcc) {
+      const auto &top = result.taxidCount.front();
+      if (top.first != "unclassified") {
+        auto itid = tax.str2id.find(top.first);
+        if (itid != tax.str2id.end()) {
+          bool unique_ok = (uniqueCount >= 3) ||
+                           (uniqueCount >= 2 && uniqueRatio >= 0.12);
+          presenceAcc->add_read_support(itid->second, unique_ok);
+        }
+      }
+    }
     for (const auto &entry : result.taxidCount) {
       fileInfo.taxidTotalMatches[entry.first] += 1;
     }
@@ -1302,7 +1474,8 @@ void classify_streaming(
     GroupHeat heat;
     heat.ensure(indexToTaxid.size());
     PresenceAccumulator presenceLocal(
-        presenceSummary ? presenceSummary->decoyReps : 0);
+        presenceSummary ? presenceSummary->decoyReps : 0,
+        presenceSummary ? presenceSummary->sketchBits : 0);
     PresenceAccumulator *presencePtr =
         presenceSummary ? &presenceLocal : nullptr;
 

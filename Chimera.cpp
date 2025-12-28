@@ -437,10 +437,11 @@ int main(int argc, char **argv) {
                  classifyConfig.adaptive_shot,
                  "Scale thresholds by actually evaluated syncmers")
       ->default_val(true);
-  classify
-      ->add_option("--first-filter-beta", classifyConfig.firstFilterBeta,
-                   "Keep bins >= beta * max count in first filter")
-      ->default_val(0.80);
+  auto *firstBetaOpt =
+      classify
+          ->add_option("--first-filter-beta", classifyConfig.firstFilterBeta,
+                       "Keep bins >= beta * max count in first filter")
+          ->default_val(0.80);
   classify
       ->add_option("--pre-em-topk", classifyConfig.preEmTopK,
                    "Keep top-K candidates per read before EM/VEM")
@@ -616,6 +617,10 @@ int main(int argc, char **argv) {
 
   if (classifyNoEm) {
     classifyConfig.em = false;
+  }
+  if (firstBetaOpt && firstBetaOpt->count() > 0 &&
+      classifyConfig.firstFilterBeta > 0.0) {
+    classifyConfig.firstFilterBeta_user = true;
   }
 
   if (show_version) {

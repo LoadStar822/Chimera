@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -80,6 +81,7 @@ struct WeightingContext {
   chimera::presence::HashFreqStats freqStats{};
   double freqQuantile{0.0};
   const std::unordered_map<std::string, double> *sampleWeights{nullptr};
+  bool freq_trusted{true};
   // Optional NCBI taxonomy helper (when available in current environment).
   const NcbiTaxdump *ncbiTaxdump{nullptr};
   // Optional NCBI-only: map internal tid_id -> representative tid_id of its
@@ -97,12 +99,12 @@ struct WeightingContext {
 };
 
 inline bool allow_unique_edge(std::size_t deg_effective, std::size_t df_bins,
-                              bool has_freq, uint32_t df_est,
-                              uint32_t unique_deg_threshold) {
+                              bool has_freq, bool freq_trusted,
+                              uint32_t df_est, uint32_t unique_deg_threshold) {
   if (deg_effective != 1 || df_bins != 1) {
     return false;
   }
-  if (!has_freq) {
+  if (!has_freq || !freq_trusted) {
     return true;
   }
   const uint32_t threshold = std::max<uint32_t>(1u, unique_deg_threshold);
@@ -110,12 +112,12 @@ inline bool allow_unique_edge(std::size_t deg_effective, std::size_t df_bins,
 }
 
 inline bool allow_low_df_boost(std::size_t df_bins, bool has_freq,
-                               uint32_t df_est,
+                               bool freq_trusted, uint32_t df_est,
                                uint32_t unique_deg_threshold) {
   if (df_bins > 2) {
     return false;
   }
-  if (!has_freq) {
+  if (!has_freq || !freq_trusted) {
     return true;
   }
   const uint32_t threshold = std::max<uint32_t>(1u, unique_deg_threshold);
@@ -187,6 +189,70 @@ inline std::size_t compute_candidate_cap(std::size_t baseCap,
   return cap;
 }
 
+struct LowDivStats {
+  double shannon{0.0};
+  double top_mass{0.0};
+  double eff_species{0.0};
+  std::size_t total{0};
+  std::size_t unclassified{0};
+};
+
+inline LowDivStats compute_low_div_stats(const std::vector<double> &counts,
+                                         std::size_t unclassified,
+                                         std::size_t topk) {
+  LowDivStats stats;
+  stats.unclassified = unclassified;
+  double total = 0.0;
+  for (double c : counts) {
+    if (c > 0.0) {
+      total += c;
+    }
+  }
+  stats.total = static_cast<std::size_t>(std::llround(total + unclassified));
+  if (!(total > 0.0)) {
+    return stats;
+  }
+
+  std::vector<double> rels;
+  rels.reserve(counts.size());
+  for (double c : counts) {
+    if (c <= 0.0) {
+      continue;
+    }
+    double p = c / total;
+    stats.shannon -= p * std::log(p);
+    rels.push_back(p);
+  }
+
+  std::sort(rels.begin(), rels.end(), std::greater<double>());
+  if (topk > 0 && !rels.empty()) {
+    const std::size_t limit = std::min(topk, rels.size());
+    for (std::size_t i = 0; i < limit; ++i) {
+      stats.top_mass += rels[i];
+    }
+  }
+  stats.eff_species = (stats.shannon > 0.0) ? std::exp(stats.shannon) : 0.0;
+  return stats;
+}
+
+inline bool is_low_diversity(const LowDivStats &stats,
+                             double top_mass_thresh,
+                             double eff_species_max) {
+  return (stats.top_mass >= top_mass_thresh) &&
+         (stats.eff_species <= eff_species_max);
+}
+
+inline void apply_low_div_overrides(ClassifyConfig &config) {
+  config.firstFilterBeta = 0.5;
+  config.firstFilterBeta_user = true;
+  config.preEmTopK = 256;
+  config.exclusive_gamma = 0.0;
+  config.em_conf_power = 1.0;
+  config.em_coexist_penalty = 0.0;
+  config.dump_post_topk = 0;
+  config.low_div_active = true;
+}
+
 struct ReadStats {
   size_t count{0};
   size_t total_len{0};
@@ -249,25 +315,37 @@ struct PresenceStats {
   uint64_t uniqueScore{0};
   uint64_t hits{0};
   uint64_t uniqueHits{0};
+  uint64_t readHits{0};
+  uint64_t uniqueReads{0};
   std::vector<uint64_t> decoys;
+  std::vector<uint64_t> uniqueSketch;
+  std::vector<uint64_t> breadthSketch;
 };
 
 struct PresenceAccumulator {
   size_t decoyReps{0};
+  uint32_t sketchBits{0};
+  size_t sketchWords{0};
   robin_hood::unordered_flat_map<uint32_t, PresenceStats> stats;
 
-  explicit PresenceAccumulator(size_t reps = 0);
+  explicit PresenceAccumulator(size_t reps = 0, uint32_t breadthBits = 0);
   PresenceStats &touch(uint32_t tid);
   void add_target(uint32_t tid, double hit_weight, double score_weight,
-                  bool uniqueEdge);
+                  bool uniqueEdge, bool localUniqueEdge,
+                  uint32_t unique_bucket,
+                  uint32_t breadth_bucket);
+  void add_read_support(uint32_t tid, bool uniqueRead);
   void add_decoy(size_t rep, uint32_t tid, double weight);
+  bool sketches_enabled() const { return sketchWords > 0; }
 };
 
 struct PresenceSummary {
   size_t decoyReps{0};
+  uint32_t sketchBits{0};
+  size_t sketchWords{0};
   robin_hood::unordered_flat_map<uint32_t, PresenceStats> stats;
 
-  explicit PresenceSummary(size_t reps = 0);
+  explicit PresenceSummary(size_t reps = 0, uint32_t breadthBits = 0);
   void merge(const PresenceAccumulator &acc);
 };
 

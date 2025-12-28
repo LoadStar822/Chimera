@@ -111,6 +111,8 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
 
   size_t totalSequences = 0;
   size_t totalFiles = 0;
+  const size_t max_reads = config.max_reads;
+  bool reached_limit = false;
 
   if (!config.singleFiles.empty()) {
     std::vector<batchReads> pending(shardCount);
@@ -133,9 +135,16 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
         batch.ids.emplace_back(std::move(id));
         batch.seqs.emplace_back(std::move(r.sequence()));
         ++totalSequences;
+        if (max_reads > 0 && totalSequences >= max_reads) {
+          reached_limit = true;
+          break;
+        }
         if (batch.ids.size() >= config.batchSize) {
           flush_batch(shard, batch, false);
         }
+      }
+      if (reached_limit) {
+        break;
       }
     }
 
@@ -179,9 +188,16 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
         batch.seqs.emplace_back(std::move(rec1.sequence()));
         batch.seqs2.emplace_back(std::move(rec2.sequence()));
         ++totalSequences;
+        if (max_reads > 0 && totalSequences >= max_reads) {
+          reached_limit = true;
+          break;
+        }
         if (batch.ids.size() >= config.batchSize) {
           flush_batch(shard, batch, true);
         }
+      }
+      if (reached_limit) {
+        break;
       }
     }
 

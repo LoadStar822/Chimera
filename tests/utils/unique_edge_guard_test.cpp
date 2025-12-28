@@ -43,7 +43,7 @@ int main() {
 
   {
     std::string message;
-    bool got = ChimeraClassify::allow_unique_edge(1, 1, true, 10, 1);
+    bool got = ChimeraClassify::allow_unique_edge(1, 1, true, true, 10, 1);
     if (!expect_false("unique_edge_global_blocks_high_df", got, message)) {
       ++failures;
       failure_messages.push_back(std::move(message));
@@ -52,7 +52,7 @@ int main() {
 
   {
     std::string message;
-    bool got = ChimeraClassify::allow_unique_edge(1, 1, true, 1, 1);
+    bool got = ChimeraClassify::allow_unique_edge(1, 1, true, true, 1, 1);
     if (!expect_true("unique_edge_allows_low_df", got, message)) {
       ++failures;
       failure_messages.push_back(std::move(message));
@@ -61,7 +61,7 @@ int main() {
 
   {
     std::string message;
-    bool got = ChimeraClassify::allow_unique_edge(1, 1, false, 42, 1);
+    bool got = ChimeraClassify::allow_unique_edge(1, 1, false, true, 42, 1);
     if (!expect_true("unique_edge_fallback_without_freq", got, message)) {
       ++failures;
       failure_messages.push_back(std::move(message));
@@ -70,7 +70,16 @@ int main() {
 
   {
     std::string message;
-    bool got = ChimeraClassify::allow_low_df_boost(2, true, 10, 1);
+    bool got = ChimeraClassify::allow_unique_edge(1, 1, true, false, 10, 1);
+    if (!expect_true("unique_edge_fallback_when_freq_untrusted", got, message)) {
+      ++failures;
+      failure_messages.push_back(std::move(message));
+    }
+  }
+
+  {
+    std::string message;
+    bool got = ChimeraClassify::allow_low_df_boost(2, true, true, 10, 1);
     if (!expect_false("low_df_boost_blocks_high_df", got, message)) {
       ++failures;
       failure_messages.push_back(std::move(message));
@@ -79,7 +88,7 @@ int main() {
 
   {
     std::string message;
-    bool got = ChimeraClassify::allow_low_df_boost(2, true, 1, 1);
+    bool got = ChimeraClassify::allow_low_df_boost(2, true, true, 1, 1);
     if (!expect_true("low_df_boost_allows_low_df", got, message)) {
       ++failures;
       failure_messages.push_back(std::move(message));
@@ -88,7 +97,7 @@ int main() {
 
   {
     std::string message;
-    bool got = ChimeraClassify::allow_low_df_boost(2, false, 10, 1);
+    bool got = ChimeraClassify::allow_low_df_boost(2, false, true, 10, 1);
     if (!expect_true("low_df_boost_fallback_without_freq", got, message)) {
       ++failures;
       failure_messages.push_back(std::move(message));
@@ -97,7 +106,16 @@ int main() {
 
   {
     std::string message;
-    bool got = ChimeraClassify::allow_low_df_boost(3, true, 1, 1);
+    bool got = ChimeraClassify::allow_low_df_boost(2, true, false, 10, 1);
+    if (!expect_true("low_df_boost_fallback_when_freq_untrusted", got, message)) {
+      ++failures;
+      failure_messages.push_back(std::move(message));
+    }
+  }
+
+  {
+    std::string message;
+    bool got = ChimeraClassify::allow_low_df_boost(3, true, true, 1, 1);
     if (!expect_false("low_df_boost_off_when_df_bins_large", got, message)) {
       ++failures;
       failure_messages.push_back(std::move(message));

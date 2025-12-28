@@ -12,6 +12,7 @@ namespace ChimeraClassify {
 
 namespace {
 constexpr double kPresenceFixedScale = 1048576.0; // 2^20
+constexpr uint32_t kInvalidBucket = std::numeric_limits<uint32_t>::max();
 
 inline uint64_t to_fixed(double value) {
   if (!(value > 0.0)) {
@@ -37,9 +38,50 @@ inline uint64_t to_fixed(double value) {
 inline double from_fixed(uint64_t value) {
   return static_cast<double>(value) / kPresenceFixedScale;
 }
+
+inline size_t sketch_words(uint32_t bits) {
+  if (bits == 0) {
+    return 0;
+  }
+  return static_cast<size_t>((bits + 63u) / 64u);
+}
+
+inline void ensure_sketch(PresenceStats &entry, size_t words) {
+  if (words == 0) {
+    return;
+  }
+  if (entry.uniqueSketch.size() != words) {
+    entry.uniqueSketch.assign(words, 0);
+  }
+  if (entry.breadthSketch.size() != words) {
+    entry.breadthSketch.assign(words, 0);
+  }
+}
+
+inline void set_sketch_bit(std::vector<uint64_t> &sketch, size_t words,
+                           uint32_t bucket) {
+  if (words == 0 || bucket == kInvalidBucket) {
+    return;
+  }
+  size_t idx = static_cast<size_t>(bucket >> 6);
+  if (idx >= words) {
+    return;
+  }
+  sketch[idx] |= (1ULL << (bucket & 63u));
+}
+
+inline uint32_t popcount_vec(const std::vector<uint64_t> &sketch) {
+  uint32_t total = 0;
+  for (uint64_t word : sketch) {
+    total += static_cast<uint32_t>(__builtin_popcountll(word));
+  }
+  return total;
+}
 } // namespace
 
-PresenceAccumulator::PresenceAccumulator(size_t reps) : decoyReps(reps) {}
+PresenceAccumulator::PresenceAccumulator(size_t reps, uint32_t breadthBits)
+    : decoyReps(reps), sketchBits(breadthBits),
+      sketchWords(sketch_words(breadthBits)) {}
 
 PresenceStats &PresenceAccumulator::touch(uint32_t tid) {
   auto [it, inserted] = stats.try_emplace(tid);
@@ -51,7 +93,10 @@ PresenceStats &PresenceAccumulator::touch(uint32_t tid) {
 }
 
 void PresenceAccumulator::add_target(uint32_t tid, double hit_weight,
-                                     double score_weight, bool uniqueEdge) {
+                                     double score_weight, bool uniqueEdge,
+                                     bool localUniqueEdge,
+                                     uint32_t unique_bucket,
+                                     uint32_t breadth_bucket) {
   PresenceStats &entry = touch(tid);
   const uint64_t hit_inc = to_fixed(hit_weight);
   const uint64_t score_inc = to_fixed(score_weight);
@@ -60,6 +105,11 @@ void PresenceAccumulator::add_target(uint32_t tid, double hit_weight,
   if (uniqueEdge) {
     entry.uniqueHits += hit_inc;
     entry.uniqueScore += score_inc;
+  }
+  if (localUniqueEdge && sketchWords > 0) {
+    ensure_sketch(entry, sketchWords);
+    set_sketch_bit(entry.uniqueSketch, sketchWords, unique_bucket);
+    set_sketch_bit(entry.breadthSketch, sketchWords, breadth_bucket);
   }
 }
 
@@ -71,7 +121,17 @@ void PresenceAccumulator::add_decoy(size_t rep, uint32_t tid, double weight) {
   entry.decoys[rep] += to_fixed(weight);
 }
 
-PresenceSummary::PresenceSummary(size_t reps) : decoyReps(reps) {}
+void PresenceAccumulator::add_read_support(uint32_t tid, bool uniqueRead) {
+  PresenceStats &entry = touch(tid);
+  entry.readHits += 1;
+  if (uniqueRead) {
+    entry.uniqueReads += 1;
+  }
+}
+
+PresenceSummary::PresenceSummary(size_t reps, uint32_t breadthBits)
+    : decoyReps(reps), sketchBits(breadthBits),
+      sketchWords(sketch_words(breadthBits)) {}
 
 void PresenceSummary::merge(const PresenceAccumulator &acc) {
   for (const auto &[tid, entry] : acc.stats) {
@@ -80,6 +140,24 @@ void PresenceSummary::merge(const PresenceAccumulator &acc) {
     dst.uniqueScore += entry.uniqueScore;
     dst.hits += entry.hits;
     dst.uniqueHits += entry.uniqueHits;
+    dst.readHits += entry.readHits;
+    dst.uniqueReads += entry.uniqueReads;
+    if (sketchWords > 0) {
+      if (!entry.uniqueSketch.empty()) {
+        ensure_sketch(dst, sketchWords);
+        size_t copy = std::min(sketchWords, entry.uniqueSketch.size());
+        for (size_t i = 0; i < copy; ++i) {
+          dst.uniqueSketch[i] |= entry.uniqueSketch[i];
+        }
+      }
+      if (!entry.breadthSketch.empty()) {
+        ensure_sketch(dst, sketchWords);
+        size_t copy = std::min(sketchWords, entry.breadthSketch.size());
+        for (size_t i = 0; i < copy; ++i) {
+          dst.breadthSketch[i] |= entry.breadthSketch[i];
+        }
+      }
+    }
     if (decoyReps > 0) {
       if (dst.decoys.size() != decoyReps) {
         dst.decoys.resize(decoyReps, 0);
@@ -248,19 +326,31 @@ static PresenceDecision evaluate_presence_coverage_impl(
   uniqueMap.reserve(meta.entries.size());
   robin_hood::unordered_flat_map<std::string, double> densityMap;
   robin_hood::unordered_flat_map<std::string, double> expectedRefMap;
+  robin_hood::unordered_flat_map<std::string, uint64_t> totalMap;
+  robin_hood::unordered_flat_map<std::string, uint64_t> genomeMap;
   for (const auto &entry : meta.entries) {
     uniqueMap.emplace(entry.taxid, entry.unique_signatures);
     densityMap.emplace(entry.taxid, entry.unique_density);
     expectedRefMap.emplace(entry.taxid, entry.expected_unique_per_ref_read);
+    totalMap.emplace(entry.taxid, entry.total_signatures);
+    genomeMap.emplace(entry.taxid, entry.genome_length);
   }
 
   std::vector<uint64_t> uniqueCounts(tax.id2str.size(), 0);
+  std::vector<uint64_t> totalCounts(tax.id2str.size(), 0);
+  std::vector<uint64_t> genomeCounts(tax.id2str.size(), 0);
   std::vector<double> densityVec(tax.id2str.size(), 0.0);
   std::vector<double> expectedRefVec(tax.id2str.size(), 0.0);
   for (size_t i = 0; i < tax.id2str.size(); ++i) {
     auto it = uniqueMap.find(tax.id2str[i]);
     if (it != uniqueMap.end()) {
       uniqueCounts[i] = it->second;
+    }
+    if (auto tit = totalMap.find(tax.id2str[i]); tit != totalMap.end()) {
+      totalCounts[i] = tit->second;
+    }
+    if (auto git = genomeMap.find(tax.id2str[i]); git != genomeMap.end()) {
+      genomeCounts[i] = git->second;
     }
     if (auto dit = densityMap.find(tax.id2str[i]); dit != densityMap.end()) {
       densityVec[i] = dit->second;
@@ -289,6 +379,18 @@ static PresenceDecision evaluate_presence_coverage_impl(
     }
     return 0.0;
   };
+  auto resolve_total = [&](uint32_t tid) -> double {
+    if (tid < totalCounts.size()) {
+      return static_cast<double>(totalCounts[tid]);
+    }
+    return 0.0;
+  };
+  auto resolve_genome = [&](uint32_t tid) -> double {
+    if (tid < genomeCounts.size()) {
+      return static_cast<double>(genomeCounts[tid]);
+    }
+    return 0.0;
+  };
 
   const uint16_t span_used =
       (meta.effective_span > 0) ? meta.effective_span
@@ -311,6 +413,13 @@ static PresenceDecision evaluate_presence_coverage_impl(
       double expected_ref = resolve_expected_ref(tid);
       if (expected_ref > 0.0 && window_ref > 0.0) {
         expected_per_read = expected_ref * (window_current / window_ref);
+      } else {
+        double total = resolve_total(tid);
+        double genome = resolve_genome(tid);
+        if (total > 0.0 && genome > 0.0) {
+          double density_total = total / genome;
+          expected_per_read = density_total * window_current;
+        }
       }
     }
     double exposure = expected_per_read * static_cast<double>(totalReads);
@@ -342,6 +451,99 @@ static PresenceDecision evaluate_presence_coverage_impl(
   }
   double u_min_effective =
       std::max<double>(config.presence_u_min, derived_u_min);
+
+  auto percentile = [](std::vector<double> values, double q) -> double {
+    if (values.empty()) {
+      return 0.0;
+    }
+    if (q <= 0.0) {
+      return *std::min_element(values.begin(), values.end());
+    }
+    if (q >= 1.0) {
+      return *std::max_element(values.begin(), values.end());
+    }
+    std::sort(values.begin(), values.end());
+    size_t idx = static_cast<size_t>(
+        std::floor(q * static_cast<double>(values.size() - 1)));
+    if (idx >= values.size()) {
+      idx = values.size() - 1;
+    }
+    return values[idx];
+  };
+
+  std::vector<double> score_vals;
+  score_vals.reserve(summary.stats.size());
+  for (const auto &[tid, stats] : summary.stats) {
+    (void)tid;
+    score_vals.push_back(from_fixed(stats.score));
+  }
+  const double score_cut = percentile(score_vals, 0.30);
+  const double score_high = percentile(score_vals, 0.90);
+
+  std::vector<double> noise_unique;
+  std::vector<double> noise_breadth;
+  std::vector<double> noise_rate;
+  std::vector<double> noise_read_ratio;
+  noise_unique.reserve(summary.stats.size() / 3 + 1);
+  noise_breadth.reserve(summary.stats.size() / 3 + 1);
+  noise_rate.reserve(summary.stats.size() / 3 + 1);
+  noise_read_ratio.reserve(summary.stats.size() / 3 + 1);
+  for (const auto &[tid, stats] : summary.stats) {
+    (void)tid;
+    double score = from_fixed(stats.score);
+    if (score > score_cut) {
+      continue;
+    }
+    double unique_obs = 0.0;
+    double breadth_obs = 0.0;
+    if (!stats.uniqueSketch.empty()) {
+      unique_obs = static_cast<double>(popcount_vec(stats.uniqueSketch));
+      noise_unique.push_back(unique_obs);
+    } else {
+      noise_unique.push_back(0.0);
+    }
+    if (!stats.breadthSketch.empty()) {
+      breadth_obs = static_cast<double>(popcount_vec(stats.breadthSketch));
+      noise_breadth.push_back(breadth_obs);
+    } else {
+      noise_breadth.push_back(0.0);
+    }
+    double breadth_ratio = 0.0;
+    if (unique_obs > 0.0) {
+      if (breadth_obs > 0.0) {
+        breadth_ratio = std::min(1.0, breadth_obs / unique_obs);
+      } else {
+        breadth_ratio = 1.0;
+      }
+    }
+    double local_strength = unique_obs * breadth_ratio;
+    double rate = local_strength / std::max(1.0, score);
+    noise_rate.push_back(rate);
+    double read_ratio = 0.0;
+    if (stats.readHits > 0) {
+      read_ratio = static_cast<double>(stats.uniqueReads) /
+                   static_cast<double>(stats.readHits);
+    }
+    noise_read_ratio.push_back(read_ratio);
+  }
+  const double unique_cut = percentile(noise_unique, 0.95);
+  const double breadth_cut = percentile(noise_breadth, 0.95);
+  const double rate_cut = percentile(noise_rate, 0.95);
+  const double read_ratio_cut = percentile(noise_read_ratio, 0.95);
+
+  if (config.verbose) {
+    std::cout << "[presence][auto] local_unique_gate="
+              << ((unique_cut > 0.0 || breadth_cut > 0.0) ? "on" : "off")
+              << " score_q30=" << std::scientific << score_cut
+              << " score_q90=" << score_high
+              << " unique_q95=" << unique_cut
+              << " breadth_q95=" << breadth_cut
+              << " rate_q95=" << rate_cut
+              << " readratio_q95=" << read_ratio_cut
+              << " noise_n=" << noise_unique.size()
+              << " total=" << summary.stats.size() << std::defaultfloat
+              << std::endl;
+  }
 
   if (!(mu > 0.0)) {
     double muAccum = 0.0;
@@ -386,27 +588,93 @@ static PresenceDecision evaluate_presence_coverage_impl(
   double logPriorOdds = std::log(pi) - std::log1p(-pi);
 
   decision.tested = summary.stats.size();
-	  for (const auto &[tid, stats] : summary.stats) {
-	    double exposure = resolve_exposure(tid);
-	    if (exposure <= 0.0) {
-	      exposure = resolve_unique(tid);
-	    }
-	    if (exposure <= 0.0) {
-	      exposure = std::max(1.0, from_fixed(stats.hits));
-	    }
-	    double u_eff = std::max<double>(exposure, u_min_effective);
-	    const double unique_hits = from_fixed(stats.uniqueHits);
-	    const double unique_score = from_fixed(stats.uniqueScore);
-	    const double score = from_fixed(stats.score);
-	    double C = 0.0;
-	    if (unique_only) {
-	      C = (unique_hits > 0.0) ? unique_hits
-	                              : std::max(0.0, unique_score);
-	    } else {
-	      C = (unique_hits > 0.0)
-	              ? unique_hits
-	              : ((unique_score > 0.0) ? unique_score : score);
-	    }
+  for (const auto &[tid, stats] : summary.stats) {
+    double exposure = resolve_exposure(tid);
+    if (exposure <= 0.0) {
+      exposure = resolve_unique(tid);
+    }
+    if (exposure <= 0.0) {
+      exposure = std::max(1.0, from_fixed(stats.hits));
+    }
+    double u_eff = std::max<double>(exposure, u_min_effective);
+    double unique_hits = from_fixed(stats.uniqueHits);
+    const double unique_score = from_fixed(stats.uniqueScore);
+    const double score = from_fixed(stats.score);
+
+    double unique_obs = 0.0;
+    double breadth_obs = 0.0;
+    if (!stats.uniqueSketch.empty()) {
+      unique_obs = static_cast<double>(popcount_vec(stats.uniqueSketch));
+    }
+    if (!stats.breadthSketch.empty()) {
+      breadth_obs = static_cast<double>(popcount_vec(stats.breadthSketch));
+    }
+    double breadth_ratio = 0.0;
+    if (unique_obs > 0.0) {
+      if (breadth_obs > 0.0) {
+        breadth_ratio = std::min(1.0, breadth_obs / unique_obs);
+      } else {
+        breadth_ratio = 1.0;
+      }
+    }
+    double unique_effective = unique_obs * breadth_ratio;
+    if (unique_effective > 0.0) {
+      double unique_total = resolve_unique(tid);
+      double avg_mult = 1.0;
+      if (unique_total > 0.0) {
+        avg_mult = exposure / unique_total;
+        if (!(avg_mult > 1.0)) {
+          avg_mult = 1.0;
+        }
+      }
+      double unique_cap = unique_effective * avg_mult;
+      if (unique_cap > 0.0) {
+        if (unique_hits > 0.0) {
+          unique_hits = std::min(unique_hits, unique_cap);
+        } else {
+          unique_hits = unique_cap;
+        }
+      }
+    }
+
+    double C = 0.0;
+    if (unique_only) {
+      C = (unique_hits > 0.0) ? unique_hits
+                              : std::max(0.0, unique_score);
+    } else {
+      C = (unique_hits > 0.0)
+              ? unique_hits
+              : ((unique_score > 0.0) ? unique_score : score);
+    }
+    double local_factor = 1.0;
+    if (score_high > 0.0 && score < score_high) {
+      if (unique_cut > 0.0) {
+        local_factor =
+            std::min(local_factor, unique_obs / std::max(1e-9, unique_cut));
+      }
+      if (breadth_cut > 0.0) {
+        local_factor = std::min(
+            local_factor, breadth_obs / std::max(1e-9, breadth_cut));
+      }
+      if (rate_cut > 0.0) {
+        double rate = unique_effective / std::max(1.0, score);
+        local_factor = std::min(local_factor,
+                                rate / std::max(1e-12, rate_cut));
+      }
+      if (read_ratio_cut > 0.0) {
+        double read_ratio = 0.0;
+        if (stats.readHits > 0) {
+          read_ratio = static_cast<double>(stats.uniqueReads) /
+                       static_cast<double>(stats.readHits);
+        }
+        local_factor = std::min(
+            local_factor, read_ratio / std::max(1e-12, read_ratio_cut));
+      }
+      local_factor = std::clamp(local_factor, 0.0, 1.0);
+      if (local_factor < 1.0) {
+        C *= local_factor;
+      }
+    }
     double lambda_hat = std::max(0.0, (C / u_eff) - mu);
     double logBF = 0.0;
     if (mu > 0.0) {

@@ -35,10 +35,10 @@ MIN_REL_ABUNDANCE = 0.01
 # 最小 evidence：posterior_evidence 票数下限，过滤低支持的长尾假阳性
 MIN_EVIDENCE = 10
 # 低多样性样本（典型：MOCK）更激进的 species 截断：减少长尾假阳性。
-# 低多样性判定不应直接用全量 Shannon（长尾会抬高 Shannon），这里辅以 head mass 触发。
-LOW_DIVERSITY_SHANNON = 2.2
+# 低多样性判定使用 top1 物种分布：头部质量高且有效物种数小。
 LOW_DIVERSITY_TOP_K = 10
-LOW_DIVERSITY_TOP_MASS = 90.0
+LOW_DIVERSITY_TOP_MASS = 0.75
+LOW_DIVERSITY_EFF_SPECIES_MAX = 32.0
 LOW_DIVERSITY_SPECIES_MIN_REL_ABUNDANCE = 0.12
 # 高多样性样本：presence 对“非零长尾物种数”极敏感。
 # 用 head mass 约束输出物种集合规模（仅用于 species 层级）。
@@ -1542,13 +1542,7 @@ def process_file(
     is_low_diversity = False
     force_low_diversity = False
     force_low_diversity_shannon: Optional[float] = None
-    has_post_topk: Optional[bool] = None
-    if (
-        normalized_mode == "soft_seq"
-        and species_counter
-        and species_total > 0
-        and sum(species_counter.values()) > 0
-    ):
+    if species_counter and species_total > 0 and sum(species_counter.values()) > 0:
         # Use top1 distribution for low-diversity detection to avoid soft_seq tail inflation.
         detect_counter = species_counter
         detect_total = species_total
@@ -1579,31 +1573,33 @@ def process_file(
         uncls = detect_counter.get(UNCLASSIFIED, 0)
         eff_total = max(0, detect_total - uncls)
         rels = []
-        for taxon, count in detect_counter.items():
-            if taxon == UNCLASSIFIED:
-                continue
-            denom = eff_total if eff_total > 0 else detect_total
-            rels.append((count / denom) * 100.0)
+        shannon_index = 0.0
+        if eff_total > 0:
+            for taxon, count in detect_counter.items():
+                if taxon == UNCLASSIFIED:
+                    continue
+                p = count / eff_total
+                if p > 0:
+                    shannon_index -= p * math.log(p)
+                rels.append(p)
         rels.sort(reverse=True)
         top_mass = sum(rels[:LOW_DIVERSITY_TOP_K])
-        shannon_index = calculate_shannon_index(detect_counter)
-        is_low_diversity = (shannon_index < LOW_DIVERSITY_SHANNON) or (top_mass >= LOW_DIVERSITY_TOP_MASS)
+        eff_species = math.exp(shannon_index) if shannon_index > 0 else 0.0
+        is_low_diversity = (top_mass >= LOW_DIVERSITY_TOP_MASS) and (
+            eff_species <= LOW_DIVERSITY_EFF_SPECIES_MAX
+        )
         print(
-            f"[profile] low-div detect: shannon={shannon_index:.3f} top_mass={top_mass:.2f} "
+            f"[profile] low-div detect: shannon={shannon_index:.3f} "
+            f"eff_species={eff_species:.2f} top_mass={top_mass * 100.0:.2f} "
             f"species_total={detect_total} is_low_diversity={is_low_diversity}"
         )
 
         if is_low_diversity:
             force_low_diversity = True
             force_low_diversity_shannon = shannon_index
-            if has_post_topk is None:
-                has_post_topk = _has_post_topk_tokens(input_files)
-            if has_post_topk:
-                print("[profile] detected low-diversity: switching abundance_mode to post_topk")
-                abundance_mode = "post_topk"
-            else:
+            if normalized_mode != "top1":
                 print("[profile] detected low-diversity: switching abundance_mode to top1")
-                abundance_mode = "top1"
+            abundance_mode = "top1"
             taxid_counts, base_unclassified = _collect_taxids(
                 input_files, expect_numeric=expect_numeric, abundance_mode=abundance_mode
             )
@@ -1627,7 +1623,7 @@ def process_file(
         else:
             # High-diversity: switch to post_topk to preserve secondary evidence without
             # squaring/rounding it away, but limit to top-K to avoid long-tail explosion.
-            if HIGH_DIVERSITY_USE_POST_TOPK:
+            if normalized_mode == "soft_seq" and HIGH_DIVERSITY_USE_POST_TOPK:
                 print(
                     f"[profile] high-diversity: switching abundance_mode to post_topk "
                     f"(topk={POST_TOPK_ABUND_K})"
@@ -1782,19 +1778,23 @@ def process_file(
                 uncls_count = taxon_counter.get(UNCLASSIFIED, 0)
                 eff_total = max(0, total_count - uncls_count)
                 rels = []
-                for taxon, count in filtered_items:
-                    if taxon == UNCLASSIFIED:
-                        continue
-                    denom = eff_total if eff_total > 0 else total_count
-                    rel = (count / denom) * 100 if denom > 0 else 0.0
-                    rels.append(rel)
+                shannon_eff = 0.0
+                if eff_total > 0:
+                    for taxon, count in filtered_items:
+                        if taxon == UNCLASSIFIED:
+                            continue
+                        p = count / eff_total
+                        if p > 0:
+                            shannon_eff -= p * math.log(p)
+                        rels.append(p)
                 rels.sort(reverse=True)
                 top_mass = sum(rels[:LOW_DIVERSITY_TOP_K])
+                eff_species = math.exp(shannon_eff) if shannon_eff > 0 else 0.0
                 if force_low_diversity:
                     is_low_diversity = True
                 else:
-                    is_low_diversity = (shannon_index < LOW_DIVERSITY_SHANNON) or (
-                        top_mass >= LOW_DIVERSITY_TOP_MASS
+                    is_low_diversity = (top_mass >= LOW_DIVERSITY_TOP_MASS) and (
+                        eff_species <= LOW_DIVERSITY_EFF_SPECIES_MAX
                     )
 
                 if is_low_diversity:
@@ -1803,14 +1803,14 @@ def process_file(
                         if force_low_diversity_shannon is not None
                         else shannon_index
                     )
-                    cap_n = int(math.exp(low_div_shannon) * 4.0)
-                    cap_n = max(16, min(64, cap_n))
                     ranked = [
                         (taxon, count)
                         for taxon, count in filtered_items
                         if taxon != UNCLASSIFIED
                     ]
                     ranked.sort(key=lambda it: it[1], reverse=True)
+                    cap_n = int(math.exp(low_div_shannon) * 4.0)
+                    cap_n = max(16, min(64, cap_n))
                     topn = {taxon for taxon, _ in ranked[:cap_n]}
                     aggressive = []
                     for taxon, count in filtered_items:

@@ -69,3 +69,4 @@ tmp/
 .worktrees/
 packed/
 /docs/
+*.pyc

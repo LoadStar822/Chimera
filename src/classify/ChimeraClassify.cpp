@@ -258,31 +258,6 @@ void run(ClassifyConfig config) {
   }
   omp_set_num_threads(config.threads);
   auto TotalclassifyStart = std::chrono::high_resolution_clock::now();
-  auto readStart = std::chrono::high_resolution_clock::now();
-  std::cout << "Reading input files..." << std::endl;
-
-  FileInfo fileInfo;
-  seqan3::contrib::bgzf_thread_count = config.threads;
-  std::vector<moodycamel::ConcurrentQueue<batchReads>> readQueues(
-      static_cast<size_t>(std::max<uint16_t>(1, config.threads)));
-  std::vector<classifyResult> classifyResults;
-  std::unordered_map<std::string, double> classWeights;
-  bool posteriorModelUsed = false;
-  long long rebuildActiveMs = 0;
-
-  std::atomic<bool> producer_done{false};
-  auto readEnd = readStart;
-  std::thread producer([&]() {
-    parseReads(readQueues, config, fileInfo);
-    readEnd = std::chrono::high_resolution_clock::now();
-    if (config.verbose) {
-      auto readDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
-          readEnd - readStart);
-      std::cout << "\nRead time: ";
-      print_classify_time(readDuration.count());
-    }
-    producer_done.store(true, std::memory_order_release);
-  });
 
   std::vector<std::vector<std::string>> indexToTaxid;
   chimera::imcf::InterleavedMergedCuckooFilter imcf;
@@ -291,6 +266,7 @@ void run(ClassifyConfig config) {
   auto indexStatus =
       loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid, &coverageMeta);
   WeightingContext weightCtx;
+  long long rebuildActiveMs = 0;
   std::unique_ptr<CountMinSketch> freqSketch;
   std::unique_ptr<NcbiTaxdump> ncbiTaxdump;
   if (coverageMeta.freq_model.enabled()) {
@@ -306,21 +282,13 @@ void run(ClassifyConfig config) {
                 << std::endl;
     }
   }
-  if (config.verbose) {
-    std::cout << "DB presence meta: entries=" << coverageMeta.entries.size()
-              << ", ref_read_len=" << coverageMeta.ref_read_length
-              << ", span=" << coverageMeta.effective_span
-              << ", unique_deg=" << coverageMeta.unique_deg_threshold
-              << ", freq_model.enabled=" << coverageMeta.freq_model.enabled()
-              << ", freq_model.depth=" << coverageMeta.freq_model.depth
-              << ", freq_model.width=" << coverageMeta.freq_model.width
-              << ", counters=" << coverageMeta.freq_model.counters.size()
-              << std::endl;
-    size_t uniq_nonzero = 0;
-    uint64_t uniq_max = 0;
-    size_t density_nonzero = 0;
-    double density_max = 0.0;
-    size_t genome_nonzero = 0;
+  size_t uniq_nonzero = 0;
+  uint64_t uniq_max = 0;
+  size_t density_nonzero = 0;
+  double density_max = 0.0;
+  size_t genome_nonzero = 0;
+  size_t total_nonzero = 0;
+  if (!coverageMeta.entries.empty()) {
     for (const auto &entry : coverageMeta.entries) {
       if (entry.unique_signatures > 0) {
         ++uniq_nonzero;
@@ -334,10 +302,41 @@ void run(ClassifyConfig config) {
           density_max = entry.unique_density;
         }
       }
+      if (entry.total_signatures > 0) {
+        ++total_nonzero;
+      }
       if (entry.genome_length > 0) {
         ++genome_nonzero;
       }
     }
+  }
+
+  bool freq_trusted = true;
+  if (coverageMeta.freq_model.enabled() && !coverageMeta.entries.empty() &&
+      uniq_nonzero == 0) {
+    freq_trusted = false;
+    std::cout << "[presence][auto] unique_gate=off reason=unique_nonzero0 "
+              << "entries=" << coverageMeta.entries.size()
+              << " total_nonzero=" << total_nonzero
+              << " genome_nonzero=" << genome_nonzero << std::endl;
+    if (total_nonzero > 0 && genome_nonzero > 0) {
+      std::cout << "[presence][auto] exposure_fallback=total_density "
+                << "reason=unique_nonzero0 total_nonzero=" << total_nonzero
+                << " genome_nonzero=" << genome_nonzero << std::endl;
+    }
+  }
+  weightCtx.freq_trusted = freq_trusted;
+
+  if (config.verbose) {
+    std::cout << "DB presence meta: entries=" << coverageMeta.entries.size()
+              << ", ref_read_len=" << coverageMeta.ref_read_length
+              << ", span=" << coverageMeta.effective_span
+              << ", unique_deg=" << coverageMeta.unique_deg_threshold
+              << ", freq_model.enabled=" << coverageMeta.freq_model.enabled()
+              << ", freq_model.depth=" << coverageMeta.freq_model.depth
+              << ", freq_model.width=" << coverageMeta.freq_model.width
+              << ", counters=" << coverageMeta.freq_model.counters.size()
+              << std::endl;
     std::cout << "DB presence meta stats: unique_nonzero=" << uniq_nonzero
               << ", unique_max=" << uniq_max
               << ", density_nonzero=" << density_nonzero
@@ -664,7 +663,8 @@ void run(ClassifyConfig config) {
     std::cerr << "Warning: decoy_reps=0，覆盖模型的噪声将退回默认 μ=1e-4；建议 decoy_reps>=1"
               << std::endl;
   }
-  PresenceSummary presenceSummary(static_cast<size_t>(config.decoy_reps));
+  PresenceSummary presenceSummary(static_cast<size_t>(config.decoy_reps),
+                                  config.presence_breadth_bits);
   PresenceSummary *presencePtr = &presenceSummary;
   uint64_t presenceSeed = 0;
   std::hash<std::string> hasher;
@@ -678,6 +678,176 @@ void run(ClassifyConfig config) {
   }
   presenceSeed ^= (hasher(config.dbFile) << 2);
   presenceSeed ^= static_cast<uint64_t>(imcfConfig.fpSalt);
+
+  if (config.low_div_auto && config.low_div_probe_reads > 0) {
+    ClassifyConfig probe_config = config;
+    probe_config.max_reads = config.low_div_probe_reads;
+    probe_config.verbose = false;
+
+    FileInfo probeInfo;
+    std::vector<moodycamel::ConcurrentQueue<batchReads>> probeQueues(
+        static_cast<size_t>(std::max<uint16_t>(1, config.threads)));
+    std::vector<classifyResult> probeResults;
+    std::atomic<bool> probe_done{false};
+    std::thread probeProducer([&]() {
+      parseReads(probeQueues, probe_config, probeInfo);
+      probe_done.store(true, std::memory_order_release);
+    });
+
+    classify_streaming(imcfConfig, probeQueues, probe_config, imcf, indexToTaxid,
+                       tax, probeResults, probeInfo, probe_done, feature_params,
+                       feature_min_len, weightCtx, nullptr, presenceSeed);
+    probeProducer.join();
+
+    if (!probeResults.empty()) {
+      std::sort(probeResults.begin(), probeResults.end(),
+                [](const classifyResult &a, const classifyResult &b) {
+                  return a.id < b.id;
+                });
+    }
+
+    bool probe_em = false;
+    if (config.em && !probeResults.empty()) {
+      EMOptions options;
+      options.temp = 1.05;
+      options.prior_strength = config.em_prior_strength;
+      options.coexist_penalty = config.em_coexist_penalty;
+      options.prune_ratio = config.em_prune_ratio;
+      options.conf_power = config.em_conf_power;
+      auto [posterior, weights] = EMAlgorithm(
+          probeResults, config.emIter, config.emThreshold, options, nullptr);
+      probeResults = std::move(posterior);
+      probe_em = true;
+    }
+
+    std::unordered_map<std::string, double> species_counts;
+    species_counts.reserve(probeResults.size() / 4 + 8);
+    double unclassified_weight = 0.0;
+
+    auto parse_u32 = [](const std::string &s, uint32_t &out) -> bool {
+      if (s.empty()) {
+        return false;
+      }
+      for (unsigned char c : s) {
+        if (!std::isdigit(c)) {
+          return false;
+        }
+      }
+      try {
+        unsigned long v = std::stoul(s);
+        if (v > std::numeric_limits<uint32_t>::max()) {
+          return false;
+        }
+        out = static_cast<uint32_t>(v);
+        return true;
+      } catch (...) {
+        return false;
+      }
+    };
+
+    for (const auto &res : probeResults) {
+      double weight = (res.sample_weight > 0.0) ? res.sample_weight : 1.0;
+      std::string top;
+      if (probe_em && !res.posteriors.empty()) {
+        double best_prob = -1.0;
+        for (const auto &kv : res.posteriors) {
+          if (kv.second > best_prob) {
+            best_prob = kv.second;
+            top = kv.first;
+          }
+        }
+      } else {
+        top = res.best_taxid_hint;
+        if (top.empty()) {
+          double best_score = -1.0;
+          for (const auto &kv : res.taxidCount) {
+            if (kv.first == "unclassified") {
+              continue;
+            }
+            if (kv.second > best_score) {
+              best_score = kv.second;
+              top = kv.first;
+            }
+          }
+        }
+      }
+      if (top.empty() || top == "unclassified") {
+        unclassified_weight += weight;
+        continue;
+      }
+
+      std::string key = top;
+      if (weightCtx.ncbiTaxdump && weightCtx.ncbiTaxdump->enabled()) {
+        uint32_t tid = 0;
+        if (parse_u32(top, tid)) {
+          uint32_t sid = weightCtx.ncbiTaxdump->to_species(tid);
+          if (sid > 0) {
+            key = std::to_string(sid);
+          }
+        }
+      }
+      species_counts[key] += weight;
+    }
+
+    std::vector<double> counts;
+    counts.reserve(species_counts.size());
+    for (const auto &kv : species_counts) {
+      counts.push_back(kv.second);
+    }
+    constexpr std::size_t kLowDivTopK = 10;
+    constexpr double kLowDivTopMass = 0.75;
+    constexpr double kLowDivEffSpeciesMax = 32.0;
+    std::size_t unclassified_reads =
+        static_cast<std::size_t>(std::llround(unclassified_weight));
+    LowDivStats stats =
+        compute_low_div_stats(counts, unclassified_reads, kLowDivTopK);
+    bool low_div = is_low_diversity(stats, kLowDivTopMass, kLowDivEffSpeciesMax);
+
+    std::cout << "[classify][auto] lowdiv probe: reads=" << probeInfo.sequenceNum
+              << " eff_species=" << std::fixed << std::setprecision(2)
+              << stats.eff_species << " top_mass=" << (stats.top_mass * 100.0)
+              << " low_div=" << (low_div ? 1 : 0)
+              << " thresh_top_mass=" << (kLowDivTopMass * 100.0)
+              << " eff_species_max=" << kLowDivEffSpeciesMax << std::defaultfloat
+              << std::endl;
+
+    if (low_div) {
+      apply_low_div_overrides(config);
+      std::cout << "[classify][auto] lowdiv=1 overrides: preEmTopK="
+                << config.preEmTopK
+                << " exclusive_gamma=" << config.exclusive_gamma
+                << " em_conf_power=" << config.em_conf_power
+                << " em_coexist_penalty=" << config.em_coexist_penalty
+                << " dump_post_topk=" << config.dump_post_topk << std::endl;
+    } else {
+      std::cout << "[classify][auto] lowdiv=0 use default classify config"
+                << std::endl;
+    }
+  }
+
+  FileInfo fileInfo;
+  seqan3::contrib::bgzf_thread_count = config.threads;
+  std::vector<moodycamel::ConcurrentQueue<batchReads>> readQueues(
+      static_cast<size_t>(std::max<uint16_t>(1, config.threads)));
+  std::vector<classifyResult> classifyResults;
+  std::unordered_map<std::string, double> classWeights;
+  bool posteriorModelUsed = false;
+
+  auto readStart = std::chrono::high_resolution_clock::now();
+  std::cout << "Reading input files..." << std::endl;
+  std::atomic<bool> producer_done{false};
+  auto readEnd = readStart;
+  std::thread producer([&]() {
+    parseReads(readQueues, config, fileInfo);
+    readEnd = std::chrono::high_resolution_clock::now();
+    if (config.verbose) {
+      auto readDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+          readEnd - readStart);
+      std::cout << "\nRead time: ";
+      print_classify_time(readDuration.count());
+    }
+    producer_done.store(true, std::memory_order_release);
+  });
 
   auto classifyStart = std::chrono::high_resolution_clock::now();
   std::cout << "Classifying sequences by imcf (feature=" << config.feature
@@ -697,6 +867,23 @@ void run(ClassifyConfig config) {
             [](const classifyResult &a, const classifyResult &b) {
               return a.id < b.id;
             });
+  const char *dump_pre_em_path = std::getenv("CHIMERA_DUMP_PRE_EM");
+  if (dump_pre_em_path && *dump_pre_em_path) {
+    std::ofstream dump_pre(dump_pre_em_path);
+    if (dump_pre.good()) {
+      for (const auto &result : classifyResults) {
+        dump_pre << result.id;
+        if (result.taxidCount.empty()) {
+          dump_pre << "\tunclassified:1";
+        } else {
+          for (const auto &kv : result.taxidCount) {
+            dump_pre << '\t' << kv.first << ':' << kv.second;
+          }
+        }
+        dump_pre << '\n';
+      }
+    }
+  }
   if (config.verbose) {
     std::cout << "Classify time: ";
     print_classify_time(classifyDuration.count());
