@@ -64,7 +64,7 @@ int main() {
                config.exclusive_gamma == 0.0 &&
                config.em_conf_power == 1.0 &&
                config.em_coexist_penalty == 0.0 &&
-               config.dump_post_topk == 0);
+               config.dump_post_topk == 16);
     if (!expect_true("low_div_overrides", ok, message)) {
       ++failures;
       failure_messages.push_back(std::move(message));

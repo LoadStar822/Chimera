@@ -34,3 +34,10 @@ def test_taxid_for_name_with_synonym():
 
     taxid = eval_abundance.taxid_for_name("SpeciesX alt", name_to_taxid, syn_to_sci, sci_names)
     assert taxid == "3"
+
+
+def test_drop_unclassified_also_drops_unclassified_sequences():
+    pred = {"unclassified sequences": 50.0, "A": 50.0}
+    out = eval_abundance.drop_unclassified(pred)
+    assert "unclassified sequences" not in out
+    assert out["A"] == 100.0
