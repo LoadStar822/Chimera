@@ -321,6 +321,74 @@ def test_low_diversity_post_topk_rescue_skips_bacterium_names(repo_root: Path) -
         assert "Hyphomicrobiales bacterium" not in text
 
 
+def test_low_diversity_post_topk_peaky_rescue_requires_enough_mass(
+    repo_root: Path,
+) -> None:
+    """Low-div rescue should allow a peaky-but-low-support candidate only if
+    its posterior mass is large enough, and avoid rescuing tiny-mass noise.
+    """
+    profile = load_profile_module(repo_root)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        taxonomy_info = tmp_path / "taxonomy_info.tsv"
+        taxonomy_info.write_text(
+            "\n".join(
+                [
+                    "d1\t\t domain\t d__Bacteria",
+                    "g1\td1\t genus\t g__Alpha",
+                    "g2\td1\t genus\t g__Beta",
+                    "g3\td1\t genus\t g__Gamma",
+                    "s1\tg1\t species\t s__Alpha_1",
+                    "t1\tg2\t species\t s__Beta_1",
+                    "t2\tg3\t species\t s__Gamma_1",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        # Construct a low-div sample: top1 always Alpha_1.
+        # Candidate Beta_1: appears with p>=0.2 in only 20 reads (below support_min),
+        # but has large enough posterior mass to justify a conservative rescue.
+        # Candidate Gamma_1: also peaky (p>=0.2) but with too little total mass; should NOT be rescued.
+        classify_path = tmp_path / "ChimeraClassify.tsv"
+        with classify_path.open("w", encoding="utf-8") as fh:
+            for i in range(70):
+                fh.write(f"read{i}\ts1:1\tPOST_TOPK=s1:1.000000\n")
+            for i in range(70, 90):
+                fh.write(f"read{i}\ts1:1\tPOST_TOPK=s1:0.400000,t1:0.600000\n")
+            for i in range(90, 100):
+                fh.write(f"read{i}\ts1:1\tPOST_TOPK=s1:0.700000,t2:0.300000\n")
+
+        out_path = tmp_path / "ChimeraAbundance"
+        profile.process_file(
+            input_files=[str(classify_path)],
+            output_file=str(out_path),
+            taxonomy_kind="gtdb",
+            taxonomy_info=str(taxonomy_info),
+            abundance_mode="soft_seq",
+        )
+
+        out_file = out_path.with_suffix(".tsv")
+        lines = out_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+        species_lines = []
+        in_species = False
+        for line in lines:
+            if line.startswith("## Species Level ##"):
+                in_species = True
+                continue
+            if in_species and line.startswith("## ") and line.endswith(" ##"):
+                break
+            if in_species and line and not line.startswith("#") and not line.startswith("Taxon"):
+                species_lines.append(line)
+
+        by_name = {ln.split("\t", 1)[0]: ln for ln in species_lines}
+        assert "Beta_1" in by_name, "expected peaky low-support rescue to add Beta_1"
+        assert (
+            "Gamma_1" not in by_name
+        ), "expected peaky rescue to require enough mass and skip Gamma_1"
+
+
 if __name__ == "__main__":
     repo_root = Path(__file__).resolve().parents[2]
     try:
@@ -331,6 +399,7 @@ if __name__ == "__main__":
         test_low_diversity_post_topk_highprob_rescue_adds_new_genus_species(repo_root)
         test_low_diversity_headmass_prunes_tiny_tail(repo_root)
         test_low_diversity_post_topk_rescue_skips_bacterium_names(repo_root)
+        test_low_diversity_post_topk_peaky_rescue_requires_enough_mass(repo_root)
     except AssertionError as exc:
         print(f"TEST FAILED: {exc}")
         sys.exit(1)

@@ -716,6 +716,83 @@ def _collect_post_topk_species_support(
     return species_support
 
 
+def _collect_post_topk_species_stats(
+    *,
+    input_files: Iterable[str],
+    expect_numeric: bool,
+    resolved_kind: str,
+    tax: Optional[NCBITaxa],
+    gtdb_taxonomy: Optional[GtdbTaxonomy],
+    prob_hi: float,
+    topk: int,
+) -> Tuple[Counter[str], Counter[str], Dict[str, float]]:
+    """Collect POST_TOPK per-species stats in a single pass.
+
+    Returns (any_support, hi_support, prob_mass):
+    - any_support[species] += 1 if the species appears with prob>0 in POST_TOPK for a read
+    - hi_support[species]  += 1 if max prob for that species in the read >= prob_hi
+    - prob_mass[species]   += sum(probabilities for that species in the read)
+
+    Notes:
+    - per-read dedup is performed at species level (multiple strains map to one species)
+    - candidates with prob<=0 are ignored (consistent with _parse_post_topk_from_tokens)
+    """
+    any_support: Counter[str] = Counter()
+    hi_support: Counter[str] = Counter()
+    prob_mass: Dict[str, float] = {}
+
+    ncbi_cache: Dict[int, Optional[str]] = {}
+    gtdb_cache: Dict[str, Optional[str]] = {}
+
+    for input_file in input_files:
+        with open(input_file, "r", errors="ignore") as infile:
+            for raw in infile:
+                line = raw.rstrip("\n")
+                if not line:
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 2:
+                    continue
+                tokens = parts[1:]
+                cand = _parse_post_topk_from_tokens(
+                    [t.strip() for t in tokens if t.strip()],
+                    expect_numeric=expect_numeric,
+                    topk=int(topk),
+                )
+                if not cand:
+                    continue
+
+                # per-read aggregation at species level
+                read_mass: Dict[str, float] = {}
+                read_max: Dict[str, float] = {}
+                for tid, p in cand:
+                    sp: Optional[str] = None
+                    if resolved_kind == "gtdb":
+                        if gtdb_taxonomy is None:
+                            continue
+                        sp = _gtdb_node_to_species(gtdb_taxonomy, tid, gtdb_cache)
+                    else:
+                        if tax is None:
+                            continue
+                        if not tid.isdigit():
+                            continue
+                        sp = _ncbi_taxid_to_species(tax, int(tid), ncbi_cache)
+                    if not sp:
+                        continue
+                    read_mass[sp] = read_mass.get(sp, 0.0) + float(p)
+                    prev = read_max.get(sp, 0.0)
+                    if p > prev:
+                        read_max[sp] = float(p)
+
+                for sp, m in read_mass.items():
+                    any_support[sp] += 1
+                    prob_mass[sp] = prob_mass.get(sp, 0.0) + float(m)
+                    if float(read_max.get(sp, 0.0)) >= float(prob_hi):
+                        hi_support[sp] += 1
+
+    return any_support, hi_support, prob_mass
+
+
 def _intragenus_map_species_counter(
     *,
     input_files: Iterable[str],
@@ -1907,11 +1984,21 @@ def process_file(
                     # We only allow adding NEW genera (to avoid intragenus long-tail explosion),
                     # and we add only a tiny pseudo-count (>=MIN_EVIDENCE) so abundance stays stable.
                     has_post_topk = _has_post_topk_tokens(input_files)
-                    prob_min = 0.20
+                    prob_hi = 0.20
                     support_min = max(50, int(eff_total * 0.00002))
+                    # For ultra-low abundance taxa, absolute support may be too small even when
+                    # the evidence is "peaky" (a non-trivial fraction of occurrences are high-prob).
+                    # Use a second, conservative gate:
+                    # - needs at least K high-prob reads (>=prob_hi)
+                    # - high-prob fraction among occurrences must be >= f_min
+                    # - total posterior mass must be >= MIN_EVIDENCE (expected reads)
+                    peaky_hi_min = 10
+                    peaky_hi_frac_min = 0.001
+                    peaky_mass_min = float(MIN_EVIDENCE)
+
                     max_added = 4
-                    added: List[Tuple[str, int]] = []
-                    if has_post_topk and prob_min > 0 and support_min > 0:
+                    added: List[Tuple[str, int, int, float, str]] = []
+                    if has_post_topk and prob_hi > 0 and support_min > 0:
                         existing_species = {
                             taxon
                             for taxon, _ in filtered_items
@@ -1923,7 +2010,7 @@ def process_file(
                             if g:
                                 existing_genera.add(g)
 
-                        support = _collect_post_topk_species_support(
+                        any_support, hi_support, prob_mass = _collect_post_topk_species_stats(
                             input_files=input_files,
                             expect_numeric=expect_numeric,
                             resolved_kind=resolved_kind,
@@ -1931,24 +2018,48 @@ def process_file(
                             gtdb_taxonomy=(
                                 gtdb_taxonomy if resolved_kind == "gtdb" else None
                             ),
-                            prob_min=float(prob_min),
+                            prob_hi=float(prob_hi),
                             topk=16,
                         )
-                        candidates: List[Tuple[str, int]] = []
-                        for sp, c in support.items():
+                        candidates: List[Tuple[str, int, int, float, float, str]] = []
+                        for sp, hi in hi_support.items():
                             if not sp or sp == UNCLASSIFIED:
                                 continue
                             if not _is_lowdiv_rescue_species_name_ok(sp):
                                 continue
                             if sp in existing_species:
                                 continue
-                            if c < support_min:
+                            any_c = int(any_support.get(sp, 0))
+                            if any_c <= 0:
+                                continue
+                            mass = float(prob_mass.get(sp, 0.0))
+                            frac = (float(hi) / float(any_c)) if any_c > 0 else 0.0
+                            reason: Optional[str] = None
+                            if int(hi) >= int(support_min):
+                                reason = "support"
+                            else:
+                                if (
+                                    int(hi) >= int(peaky_hi_min)
+                                    and frac >= float(peaky_hi_frac_min)
+                                    and mass >= float(peaky_mass_min)
+                                ):
+                                    reason = "peaky"
+                            if reason is None:
                                 continue
                             g = _infer_genus(sp)
                             if g and g in existing_genera:
                                 continue
-                            candidates.append((sp, int(c)))
-                        candidates.sort(key=lambda it: it[1], reverse=True)
+                            candidates.append((sp, int(hi), any_c, mass, frac, reason))
+                        # Prefer stronger evidence: support-gated first, then higher posterior mass.
+                        candidates.sort(
+                            key=lambda it: (
+                                1 if it[5] == "support" else 0,
+                                it[3],
+                                it[1],
+                                it[4],
+                            ),
+                            reverse=True,
+                        )
 
                         if candidates:
                             pseudo = float(MIN_EVIDENCE)
@@ -1961,19 +2072,31 @@ def process_file(
                                 else:
                                     kept_items.append((taxon, float(count)))
                             # append rescued taxa (tiny counts; keep them at tail)
-                            for sp, c in keep:
+                            for sp, hi, any_c, mass, _, reason in keep:
                                 kept_items.append((sp, pseudo))
-                                added.append((sp, c))
+                                added.append((sp, int(hi), int(any_c), float(mass), str(reason)))
                             # re-sort non-unclassified part by count desc to keep output stable
                             kept_items.sort(key=lambda it: it[1], reverse=True)
                             filtered_items = kept_items + ([uncls_item] if uncls_item else [])
 
                     if has_post_topk:
-                        added_text = ",".join([f"{sp}:{c}" for sp, c in added]) if added else ""
+                        added_text = (
+                            ",".join(
+                                [
+                                    f"{sp}:hi={hi}/any={any_c}:mass={mass:.2f}:{reason}"
+                                    for sp, hi, any_c, mass, reason in added
+                                ]
+                            )
+                            if added
+                            else ""
+                        )
                         print(
                             "[profile][auto] lowdiv_posttopk_newgenus_rescue="
-                            f"enabled=1 prob_min={prob_min:.2f} "
-                            f"support_min={support_min} max_added={max_added} "
+                            f"enabled=1 prob_hi={prob_hi:.2f} "
+                            f"support_min={support_min} "
+                            f"peaky_hi_min={peaky_hi_min} peaky_hi_frac_min={peaky_hi_frac_min:.4f} "
+                            f"peaky_mass_min={peaky_mass_min:.2f} "
+                            f"max_added={max_added} "
                             f"added={len(added)} [{added_text}]"
                         )
                     else:
