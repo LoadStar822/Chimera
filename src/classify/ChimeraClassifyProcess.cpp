@@ -1311,6 +1311,111 @@ void processSequence(
     result.taxidCount.swap(collapsed);
   }
 
+  // High-div / EM: if the collapsed (species-level) candidate list is still a
+  // singleton, keep a tiny floor of additional *species* candidates alive using
+  // the same fixed per-read budget (no pad-to-32, no global expansion).
+  if (use_em && !config.low_div_active && weightCtx.ncbiTaxdump &&
+      weightCtx.ncbiTaxdump->enabled() && config.collapse_strain_candidates &&
+      !tidScore.empty()) {
+    constexpr size_t kFloorTrigger = 1;
+    constexpr size_t kFloorTarget = 4;
+
+    size_t nonUnclassified = 0;
+    bool hasUnclassified = false;
+    for (const auto &kv : result.taxidCount) {
+      if (kv.first == "unclassified") {
+        hasUnclassified = true;
+      } else {
+        nonUnclassified += 1;
+      }
+    }
+
+    const size_t floorTargetNonUncl =
+        std::min<size_t>(kFloorTarget, dynamicTopK);
+    const size_t floorTargetTotal = floorTargetNonUncl + (hasUnclassified ? 1 : 0);
+
+    if (floorTargetTotal > 0 && nonUnclassified == kFloorTrigger &&
+        result.taxidCount.size() < floorTargetTotal) {
+      fileInfo.preem_floor_checks += 1;
+      const size_t before = result.taxidCount.size();
+
+      robin_hood::unordered_flat_set<uint32_t> seenSpecies;
+      seenSpecies.reserve(result.taxidCount.size() + 4);
+      for (const auto &kv : result.taxidCount) {
+        const std::string &taxid = kv.first;
+        if (taxid == "unclassified") {
+          continue;
+        }
+        uint32_t tid = 0;
+        bool ok = !taxid.empty();
+        for (unsigned char c : taxid) {
+          if (!std::isdigit(c)) {
+            ok = false;
+            break;
+          }
+          tid = tid * 10 + static_cast<uint32_t>(c - '0');
+        }
+        if (!ok) {
+          continue;
+        }
+        seenSpecies.insert(weightCtx.ncbiTaxdump->to_species(tid));
+      }
+
+      robin_hood::unordered_flat_map<uint32_t, std::pair<std::string, double>>
+          bestBySpecies;
+      bestBySpecies.reserve(64);
+      for (const auto &kv : tidScore) {
+        const uint32_t tid_id = kv.first;
+        if (tid_id >= tax.id2str.size()) {
+          continue;
+        }
+        const uint32_t sid = weightCtx.ncbiTaxdump->to_species(tid_id);
+        if (seenSpecies.find(sid) != seenSpecies.end()) {
+          continue;
+        }
+        const double countVal = std::clamp(kv.second, 0.0, effCap);
+        if (!(countVal > 0.0)) {
+          continue;
+        }
+        auto it = bestBySpecies.find(sid);
+        if (it == bestBySpecies.end() || countVal > it->second.second) {
+          bestBySpecies[sid] = {tax.id2str[tid_id], countVal};
+        }
+      }
+
+      std::vector<std::pair<std::string, double>> ranked;
+      ranked.reserve(bestBySpecies.size());
+      for (const auto &kv : bestBySpecies) {
+        ranked.push_back(kv.second);
+      }
+      const size_t want =
+          std::min<size_t>(ranked.size(), floorTargetNonUncl * 8);
+      if (want > 0 && ranked.size() > want) {
+        std::nth_element(
+            ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(want),
+            ranked.end(), [](const auto &a, const auto &b) {
+              if (a.second != b.second) {
+                return a.second > b.second;
+              }
+              return a.first < b.first;
+            });
+        ranked.resize(want);
+      }
+      std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) {
+        if (a.second != b.second) {
+          return a.second > b.second;
+        }
+        return a.first < b.first;
+      });
+
+      ensure_preem_floor_candidates(result.taxidCount, ranked, floorTargetTotal);
+      if (result.taxidCount.size() > before) {
+        fileInfo.preem_floor_applied += 1;
+        fileInfo.preem_floor_added += (result.taxidCount.size() - before);
+      }
+    }
+  }
+
   if (!result.taxidCount.empty() && use_em) {
     normalize_preem_topk(result.taxidCount, dynamicTopK);
   }
@@ -1516,6 +1621,14 @@ void classify_streaming(
         fileInfo.maxLen = localFileInfo.maxLen;
       }
       fileInfo.bpLength += localFileInfo.bpLength;
+
+      fileInfo.preem_route_reads += localFileInfo.preem_route_reads;
+      fileInfo.preem_route_rare_reads += localFileInfo.preem_route_rare_reads;
+      fileInfo.preem_cap_checks += localFileInfo.preem_cap_checks;
+      fileInfo.preem_cap_expanded += localFileInfo.preem_cap_expanded;
+      fileInfo.preem_floor_checks += localFileInfo.preem_floor_checks;
+      fileInfo.preem_floor_applied += localFileInfo.preem_floor_applied;
+      fileInfo.preem_floor_added += localFileInfo.preem_floor_added;
       if (presenceSummary) {
         presenceSummary->merge(presenceLocal);
       }
@@ -1588,6 +1701,14 @@ void classify(
         fileInfo.maxLen = localFileInfo.maxLen;
       }
       fileInfo.bpLength += localFileInfo.bpLength;
+
+      fileInfo.preem_route_reads += localFileInfo.preem_route_reads;
+      fileInfo.preem_route_rare_reads += localFileInfo.preem_route_rare_reads;
+      fileInfo.preem_cap_checks += localFileInfo.preem_cap_checks;
+      fileInfo.preem_cap_expanded += localFileInfo.preem_cap_expanded;
+      fileInfo.preem_floor_checks += localFileInfo.preem_floor_checks;
+      fileInfo.preem_floor_applied += localFileInfo.preem_floor_applied;
+      fileInfo.preem_floor_added += localFileInfo.preem_floor_added;
     }
   }
 }

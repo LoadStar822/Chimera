@@ -99,6 +99,28 @@ int main() {
     }
   }
 
+  {
+    std::string message;
+    std::vector<std::pair<std::string, double>> items = {{"x", 9.0}};
+    std::vector<std::pair<std::string, double>> ranked = {
+        {"a", 10.0}, {"x", 9.0}, {"unclassified", 8.0}, {"b", 7.0}, {"c", 0.0}};
+
+    ChimeraClassify::ensure_preem_floor_candidates(items, ranked, 3);
+    ChimeraClassify::normalize_preem_topk(items, 3);
+
+    bool ok = (items.size() == 3);
+    if (!expect_true("ensure_floor_to_target", ok, message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+    ok = (items.size() >= 3 && items[0].first == "a" && items[1].first == "x" &&
+          items[2].first == "b");
+    if (!expect_true("ensure_floor_uses_ranked_and_keeps_existing", ok, message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+  }
+
   if (failures == 0) {
     std::cout << "All tests passed." << std::endl;
     return 0;

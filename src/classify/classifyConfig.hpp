@@ -190,6 +190,9 @@ namespace ChimeraClassify {
 		size_t preem_route_rare_reads{ 0 };
 		size_t preem_cap_checks{ 0 };
 		size_t preem_cap_expanded{ 0 };
+		size_t preem_floor_checks{ 0 };
+		size_t preem_floor_applied{ 0 };
+		size_t preem_floor_added{ 0 };
 	};
 
 	struct batchReads {

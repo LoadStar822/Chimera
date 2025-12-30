@@ -1287,7 +1287,8 @@ void run(ClassifyConfig config) {
     }
   };
   auto print_preem_stats = [&]() {
-    if (fileInfo.preem_route_reads == 0 && fileInfo.preem_cap_checks == 0) {
+    if (fileInfo.preem_route_reads == 0 && fileInfo.preem_cap_checks == 0 &&
+        fileInfo.preem_floor_checks == 0) {
       return;
     }
     double rare_frac = 0.0;
@@ -1300,12 +1301,20 @@ void run(ClassifyConfig config) {
       cap_frac = static_cast<double>(fileInfo.preem_cap_expanded) /
                  static_cast<double>(fileInfo.preem_cap_checks);
     }
+    double floor_frac = 0.0;
+    if (fileInfo.preem_floor_checks > 0) {
+      floor_frac = static_cast<double>(fileInfo.preem_floor_applied) /
+                   static_cast<double>(fileInfo.preem_floor_checks);
+    }
     std::cout << "[classify][auto] preem_route_rare="
               << fileInfo.preem_route_rare_reads << "/"
               << fileInfo.preem_route_reads << " (" << std::fixed
               << std::setprecision(3) << rare_frac << ")"
               << " cap_expand=" << fileInfo.preem_cap_expanded << "/"
               << fileInfo.preem_cap_checks << " (" << cap_frac << ")"
+              << " floor=" << fileInfo.preem_floor_applied << "/"
+              << fileInfo.preem_floor_checks << " (" << floor_frac << ")"
+              << " floor_added=" << fileInfo.preem_floor_added
               << " head_mass_thresh=0.5 base_cap=256 max_cap=512"
               << std::defaultfloat << std::endl;
   };

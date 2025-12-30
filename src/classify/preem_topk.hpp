@@ -61,4 +61,11 @@ inline void pad_preem_candidates(
   }
 }
 
+inline void ensure_preem_floor_candidates(
+    std::vector<std::pair<std::string, double>> &items,
+    const std::vector<std::pair<std::string, double>> &ranked,
+    size_t floor_k) {
+  pad_preem_candidates(items, ranked, floor_k);
+}
+
 } // namespace ChimeraClassify
