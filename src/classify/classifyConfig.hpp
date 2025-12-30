@@ -53,6 +53,13 @@ namespace ChimeraClassify {
 		double firstFilterBeta = 0.8;
 		bool firstFilterBeta_user = false; // set when user or auto-override explicitly chooses beta
 		size_t preEmTopK = 16;
+		// High-div / EM only: when pre-EM candidate list collapses to a singleton
+		// species (after strain collapse), keep a tiny floor of additional species
+		// candidates alive to avoid over-pruning sister species. This is NOT a
+		// pad-to-32 expansion.
+		uint32_t preem_floor_target = 4;           // target #non-unclassified species
+		double preem_floor_min_ratio = 0.20;       // trigger gate: top2/top1 >= ratio
+		double preem_floor_add_min_ratio = 0.10;   // add gate: cand_score >= top1*ratio
 		// NCBI-only experimental knobs for strain/assembly saturation:
 		// - collapse_strain_hits: collapse per-hash hit lists to 1 representative taxid per species
 		//   (affects scoring/deg on the hot path; can change behavior).
@@ -133,6 +140,9 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Adaptive shot:" << config.adaptive_shot << std::endl
 			<< std::setw(20) << "First filter beta:" << config.firstFilterBeta << std::endl
 			<< std::setw(20) << "Pre-EM topK:" << config.preEmTopK << std::endl
+			<< std::setw(20) << "Pre-EM floor:" << config.preem_floor_target << std::endl
+			<< std::setw(20) << "Pre-EM floor min ratio:" << config.preem_floor_min_ratio << std::endl
+			<< std::setw(20) << "Pre-EM floor add ratio:" << config.preem_floor_add_min_ratio << std::endl
 			<< std::setw(20) << "Collapse hits:" << config.collapse_strain_hits << std::endl
 			<< std::setw(20) << "Collapse cands:" << config.collapse_strain_candidates << std::endl
 			<< std::setw(20) << "Deg by species:" << config.deg_by_species << std::endl
@@ -193,6 +203,8 @@ namespace ChimeraClassify {
 		size_t preem_floor_checks{ 0 };
 		size_t preem_floor_applied{ 0 };
 		size_t preem_floor_added{ 0 };
+		size_t preem_floor_skipped_dominant{ 0 };
+		size_t preem_floor_filtered_weak{ 0 };
 	};
 
 	struct batchReads {

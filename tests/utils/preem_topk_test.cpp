@@ -121,6 +121,21 @@ int main() {
     }
   }
 
+  {
+    std::string message;
+    bool ok = !ChimeraClassify::should_apply_preem_floor(100.0, 10.0, 0.2);
+    if (!expect_true("floor_gate_blocks_dominant_read", ok, message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+
+    ok = ChimeraClassify::should_apply_preem_floor(100.0, 20.0, 0.2);
+    if (!expect_true("floor_gate_allows_competitive_read", ok, message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+  }
+
   if (failures == 0) {
     std::cout << "All tests passed." << std::endl;
     return 0;

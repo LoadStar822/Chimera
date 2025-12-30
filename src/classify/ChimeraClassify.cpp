@@ -1315,6 +1315,11 @@ void run(ClassifyConfig config) {
               << " floor=" << fileInfo.preem_floor_applied << "/"
               << fileInfo.preem_floor_checks << " (" << floor_frac << ")"
               << " floor_added=" << fileInfo.preem_floor_added
+              << " floor_skip_dominant=" << fileInfo.preem_floor_skipped_dominant
+              << " floor_filtered_weak=" << fileInfo.preem_floor_filtered_weak
+              << " floor_target=" << config.preem_floor_target
+              << " floor_min_ratio=" << config.preem_floor_min_ratio
+              << " floor_add_min_ratio=" << config.preem_floor_add_min_ratio
               << " head_mass_thresh=0.5 base_cap=256 max_cap=512"
               << std::defaultfloat << std::endl;
   };

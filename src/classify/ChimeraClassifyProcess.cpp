@@ -1318,24 +1318,26 @@ void processSequence(
       weightCtx.ncbiTaxdump->enabled() && config.collapse_strain_candidates &&
       !tidScore.empty()) {
     constexpr size_t kFloorTrigger = 1;
-    constexpr size_t kFloorTarget = 4;
 
     size_t nonUnclassified = 0;
     bool hasUnclassified = false;
+    double topScore = 0.0;
     for (const auto &kv : result.taxidCount) {
       if (kv.first == "unclassified") {
         hasUnclassified = true;
       } else {
         nonUnclassified += 1;
+        topScore = std::max(topScore, kv.second);
       }
     }
 
     const size_t floorTargetNonUncl =
-        std::min<size_t>(kFloorTarget, dynamicTopK);
+        std::min<size_t>(static_cast<size_t>(config.preem_floor_target),
+                         dynamicTopK);
     const size_t floorTargetTotal = floorTargetNonUncl + (hasUnclassified ? 1 : 0);
 
     if (floorTargetTotal > 0 && nonUnclassified == kFloorTrigger &&
-        result.taxidCount.size() < floorTargetTotal) {
+        result.taxidCount.size() < floorTargetTotal && topScore > 0.0) {
       fileInfo.preem_floor_checks += 1;
       const size_t before = result.taxidCount.size();
 
@@ -1364,6 +1366,7 @@ void processSequence(
       robin_hood::unordered_flat_map<uint32_t, std::pair<std::string, double>>
           bestBySpecies;
       bestBySpecies.reserve(64);
+      double bestOtherScore = 0.0;
       for (const auto &kv : tidScore) {
         const uint32_t tid_id = kv.first;
         if (tid_id >= tax.id2str.size()) {
@@ -1377,41 +1380,59 @@ void processSequence(
         if (!(countVal > 0.0)) {
           continue;
         }
+        bestOtherScore = std::max(bestOtherScore, countVal);
         auto it = bestBySpecies.find(sid);
         if (it == bestBySpecies.end() || countVal > it->second.second) {
           bestBySpecies[sid] = {tax.id2str[tid_id], countVal};
         }
       }
 
-      std::vector<std::pair<std::string, double>> ranked;
-      ranked.reserve(bestBySpecies.size());
-      for (const auto &kv : bestBySpecies) {
-        ranked.push_back(kv.second);
-      }
-      const size_t want =
-          std::min<size_t>(ranked.size(), floorTargetNonUncl * 8);
-      if (want > 0 && ranked.size() > want) {
-        std::nth_element(
-            ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(want),
-            ranked.end(), [](const auto &a, const auto &b) {
-              if (a.second != b.second) {
-                return a.second > b.second;
-              }
-              return a.first < b.first;
-            });
-        ranked.resize(want);
-      }
-      std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) {
-        if (a.second != b.second) {
-          return a.second > b.second;
-        }
-        return a.first < b.first;
-      });
+      if (!should_apply_preem_floor(topScore, bestOtherScore,
+                                   config.preem_floor_min_ratio)) {
+        fileInfo.preem_floor_skipped_dominant += 1;
+      } else {
+        const double addMinScore = topScore * config.preem_floor_add_min_ratio;
 
-      ensure_preem_floor_candidates(result.taxidCount, ranked, floorTargetTotal);
-      if (result.taxidCount.size() > before) {
-        fileInfo.preem_floor_applied += 1;
-        fileInfo.preem_floor_added += (result.taxidCount.size() - before);
+        std::vector<std::pair<std::string, double>> ranked;
+        ranked.reserve(bestBySpecies.size());
+        for (const auto &kv : bestBySpecies) {
+          const auto &cand = kv.second;
+          if (!(cand.second > 0.0)) {
+            continue;
+          }
+          if (cand.second < addMinScore) {
+            fileInfo.preem_floor_filtered_weak += 1;
+            continue;
+          }
+          ranked.push_back(cand);
+        }
+
+        const size_t want =
+            std::min<size_t>(ranked.size(), floorTargetNonUncl * 8);
+        if (want > 0 && ranked.size() > want) {
+          std::nth_element(
+              ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(want),
+              ranked.end(), [](const auto &a, const auto &b) {
+                if (a.second != b.second) {
+                  return a.second > b.second;
+                }
+                return a.first < b.first;
+              });
+          ranked.resize(want);
+        }
+        std::sort(ranked.begin(), ranked.end(),
+                  [](const auto &a, const auto &b) {
+                    if (a.second != b.second) {
+                      return a.second > b.second;
+                    }
+                    return a.first < b.first;
+                  });
+
+        ensure_preem_floor_candidates(result.taxidCount, ranked, floorTargetTotal);
+        if (result.taxidCount.size() > before) {
+          fileInfo.preem_floor_applied += 1;
+          fileInfo.preem_floor_added += (result.taxidCount.size() - before);
+        }
       }
     }
   }
@@ -1629,6 +1650,9 @@ void classify_streaming(
       fileInfo.preem_floor_checks += localFileInfo.preem_floor_checks;
       fileInfo.preem_floor_applied += localFileInfo.preem_floor_applied;
       fileInfo.preem_floor_added += localFileInfo.preem_floor_added;
+      fileInfo.preem_floor_skipped_dominant +=
+          localFileInfo.preem_floor_skipped_dominant;
+      fileInfo.preem_floor_filtered_weak += localFileInfo.preem_floor_filtered_weak;
       if (presenceSummary) {
         presenceSummary->merge(presenceLocal);
       }
@@ -1709,6 +1733,9 @@ void classify(
       fileInfo.preem_floor_checks += localFileInfo.preem_floor_checks;
       fileInfo.preem_floor_applied += localFileInfo.preem_floor_applied;
       fileInfo.preem_floor_added += localFileInfo.preem_floor_added;
+      fileInfo.preem_floor_skipped_dominant +=
+          localFileInfo.preem_floor_skipped_dominant;
+      fileInfo.preem_floor_filtered_weak += localFileInfo.preem_floor_filtered_weak;
     }
   }
 }

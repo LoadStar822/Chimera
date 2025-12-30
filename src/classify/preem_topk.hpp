@@ -68,4 +68,18 @@ inline void ensure_preem_floor_candidates(
   pad_preem_candidates(items, ranked, floor_k);
 }
 
+inline bool should_apply_preem_floor(double top1_score, double top2_score,
+                                     double min_ratio) {
+  if (!(top1_score > 0.0)) {
+    return false;
+  }
+  if (!(top2_score > 0.0)) {
+    return false;
+  }
+  if (!(min_ratio > 0.0)) {
+    return false;
+  }
+  return (top2_score / top1_score) >= min_ratio;
+}
+
 } // namespace ChimeraClassify
