@@ -1,4 +1,5 @@
 #include "ChimeraClassifyCommon.hpp"
+#include "preem_topk.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -1311,14 +1312,7 @@ void processSequence(
   }
 
   if (!result.taxidCount.empty() && use_em) {
-    size_t K = dynamicTopK;
-    if (K > 0 && result.taxidCount.size() > K) {
-      std::nth_element(
-          result.taxidCount.begin(), result.taxidCount.begin() + K,
-          result.taxidCount.end(),
-          [](const auto &a, const auto &b) { return a.second > b.second; });
-      result.taxidCount.resize(K);
-    }
+    normalize_preem_topk(result.taxidCount, dynamicTopK);
   }
 
   // Optional: dump pre-EM candidate list for P1/P2 analysis.
