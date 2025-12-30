@@ -1064,7 +1064,21 @@ void postEmDecision(
     //                    top_score >= 0.35 && second_score >= 0.25);
 	    // if (keep_multi) { ... }
 
+	    // High-diversity: allow a conservative fallback on reject to reduce
+	    // unclassified reads, but only when the posterior is clearly separated
+	    // (large top1-top2 gap). This avoids turning ambiguous reads into FP+FN.
 	    if (decisionConfig.allow_fallback_on_reject) {
+	      const double gap = top_score - second_score;
+	      const double gap_min =
+	          std::max(0.0, std::min(1.0, decisionConfig.fallback_gap_min));
+	      if (gap < gap_min) {
+	        // keep rejected
+	      } else {
+	        std::string fallback_taxid = top.first;
+	        if (!result.best_taxid_hint.empty() &&
+	            result.best_taxid_hint != kUnclassified) {
+	          fallback_taxid = result.best_taxid_hint;
+	        }
 	      double total_evidence =
 	          (result.sample_weight > 0.0) ? result.sample_weight : result.evaluated;
 	      if (!(total_evidence > 0.0)) {
@@ -1073,9 +1087,10 @@ void postEmDecision(
 	      double fallback =
 	          static_cast<double>(std::max<double>(1.0, std::llround(total_evidence)));
 	      result.taxidCount.clear();
-	      result.taxidCount.emplace_back(top.first, fallback);
+	        result.taxidCount.emplace_back(fallback_taxid, fallback);
 	      result.reject_reason.clear();
 	      continue;
+	      }
 	    }
 
 	    result.taxidCount.clear();

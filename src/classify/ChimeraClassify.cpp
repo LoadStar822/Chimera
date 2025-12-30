@@ -1172,7 +1172,7 @@ void run(ClassifyConfig config) {
 	    // postEmDecision tail controls:
 	    // - They govern how much posterior mass is allowed to fan out into multiple
 	    //   taxids for *taxidCount* (abundance/presence is very sensitive).
-	    // - POST_TOPK dump still uses the full posterior list.
+	    // - POST_TOPK dump uses the pruned+renormalized posterior view (same as decision).
 	    decisionConfig.posterior_min_fraction = config.post_min_fraction;
 	    decisionConfig.posterior_power = config.post_power;
 
@@ -1199,6 +1199,7 @@ void run(ClassifyConfig config) {
 		                << " max_taxa=" << decisionConfig.posterior_max_taxa
 		                << (config.post_max_taxa > 0 ? " (cli)" : " (auto)")
 		                << " fallback_on_reject=" << (decisionConfig.allow_fallback_on_reject ? 1 : 0)
+		                << " fallback_gap_min=" << decisionConfig.fallback_gap_min
 		                << std::endl;
 		    }
 

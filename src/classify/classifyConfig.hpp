@@ -217,6 +217,7 @@ namespace ChimeraClassify {
 				double posterior_head_mass = 0.95;   // 每条 read 只保留 posterior^alpha 的头部质量（抑制长尾）
 				uint32_t posterior_max_taxa = 8;     // 每条 read 最多输出的 taxon 数（抑制长尾）
 				bool allow_fallback_on_reject = false; // 高多样性：放宽拒绝，减少 unclassified
+				double fallback_gap_min = 0.10; // fallback 仅在 top1-top2 gap 足够大时触发（抑制 FP）
 			};
 		}
 	#endif // !CLASSIFYCONFIG_HPP
