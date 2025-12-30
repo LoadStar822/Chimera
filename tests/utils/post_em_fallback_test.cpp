@@ -35,6 +35,7 @@ int main() {
     dc.posterior_threshold = 0.95; // force reject by posterior
     dc.min_class_weight = 0.0;     // disable weight gate
     dc.allow_fallback_on_reject = true;
+    dc.fallback_gap_min = 0.10;
 
     ChimeraClassify::classifyResult r;
     r.id = "r1";
@@ -60,9 +61,72 @@ int main() {
   {
     std::string message;
     ChimeraClassify::DecisionConfig dc;
+    dc.posterior_threshold = 0.95; // reject by posterior
+    dc.min_class_weight = 0.0;
+    dc.allow_fallback_on_reject = true;
+    dc.fallback_gap_min = 0.10;
+
+    ChimeraClassify::classifyResult r;
+    r.id = "r_hint_not_in_topk";
+    r.evaluated = 100.0;
+    r.best_taxid_hint = "999";
+    r.posteriors.emplace_back("123", 0.8);
+    r.posteriors.emplace_back("456", 0.2);
+
+    std::vector<ChimeraClassify::classifyResult> results;
+    results.push_back(r);
+
+    std::unordered_map<std::string, double> classWeights;
+    ChimeraClassify::TaxDict tax;
+    ChimeraClassify::postEmDecision(results, dc, classWeights, tax, nullptr);
+
+    // New behavior: if we fallback to hint, require hint to appear in POST_TOPK.
+    bool ok = (!results[0].taxidCount.empty() &&
+               results[0].taxidCount.front().first == "unclassified");
+    if (!expect_true("fallback_blocks_hint_not_in_post_topk", ok, message)) {
+      ++failures;
+      failure_messages.push_back(std::move(message));
+    }
+  }
+
+  {
+    std::string message;
+    ChimeraClassify::DecisionConfig dc;
+    dc.posterior_threshold = 0.95; // reject by posterior -> em_post
+    dc.min_class_weight = 0.0;
+    dc.allow_fallback_on_reject = true;
+    dc.fallback_gap_min = 0.10;
+
+    ChimeraClassify::classifyResult r;
+    r.id = "r_em_post_gap_at_threshold";
+    r.evaluated = 100.0;
+    r.best_taxid_hint = "123"; // in topk
+    r.posteriors.emplace_back("123", 0.55);
+    r.posteriors.emplace_back("456", 0.45); // gap=0.10
+
+    std::vector<ChimeraClassify::classifyResult> results;
+    results.push_back(r);
+
+    std::unordered_map<std::string, double> classWeights;
+    ChimeraClassify::TaxDict tax;
+    ChimeraClassify::postEmDecision(results, dc, classWeights, tax, nullptr);
+
+    // Desired behavior: em_post uses the same fallback gap threshold.
+    bool ok = (!results[0].taxidCount.empty() &&
+               results[0].taxidCount.front().first == "123");
+    if (!expect_true("fallback_allows_em_post_at_gap_threshold", ok, message)) {
+      ++failures;
+      failure_messages.push_back(std::move(message));
+    }
+  }
+
+  {
+    std::string message;
+    ChimeraClassify::DecisionConfig dc;
     dc.posterior_threshold = 0.95;
     dc.min_class_weight = 0.0;
     dc.allow_fallback_on_reject = false;
+    dc.fallback_gap_min = 0.10;
 
     ChimeraClassify::classifyResult r;
     r.id = "r2";

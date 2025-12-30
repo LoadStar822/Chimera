@@ -771,7 +771,7 @@ void postEmDecision(
     }
   }
 
-  auto presence_level = [&](const std::string &taxid) -> PresenceLevel {
+	  auto presence_level = [&](const std::string &taxid) -> PresenceLevel {
     if (!presenceDecision) {
       return PresenceLevel::kUnknown;
     }
@@ -803,7 +803,23 @@ void postEmDecision(
 	      return PresenceLevel::kRejected;
 	    }
 	    return PresenceLevel::kUnknown;
-	  };
+		  };
+
+  struct FallbackGateStats {
+    size_t rejected_total{0};
+    size_t rejected_em_post{0};
+    size_t rejected_posterior_weight{0};
+    size_t fallback_applied{0};
+    size_t fallback_blocked_hint_not_in_topk{0};
+    size_t fallback_blocked_gap_em_post{0};
+    size_t fallback_blocked_gap_posterior_weight{0};
+    size_t fallback_used_hint{0};
+    std::vector<double> gaps_rejected_em_post;
+    std::vector<double> gaps_rejected_posterior_weight;
+  };
+
+  FallbackGateStats fb_stats;
+  constexpr size_t kFallbackHintTopK = 16;
 
   for (auto &result : results) {
     // Keep the full posterior list (sorted) for dumping/analysis (POST_TOPK),
@@ -1064,41 +1080,127 @@ void postEmDecision(
     //                    top_score >= 0.35 && second_score >= 0.25);
 	    // if (keep_multi) { ... }
 
-	    // High-diversity: allow a conservative fallback on reject to reduce
-	    // unclassified reads, but only when the posterior is clearly separated
-	    // (large top1-top2 gap). This avoids turning ambiguous reads into FP+FN.
-	    if (decisionConfig.allow_fallback_on_reject) {
-	      const double gap = top_score - second_score;
-	      const double gap_min =
-	          std::max(0.0, std::min(1.0, decisionConfig.fallback_gap_min));
-	      if (gap < gap_min) {
-	        // keep rejected
-	      } else {
-	        std::string fallback_taxid = top.first;
-	        if (!result.best_taxid_hint.empty() &&
-	            result.best_taxid_hint != kUnclassified) {
-	          fallback_taxid = result.best_taxid_hint;
-	        }
-	      double total_evidence =
-	          (result.sample_weight > 0.0) ? result.sample_weight : result.evaluated;
-	      if (!(total_evidence > 0.0)) {
-	        total_evidence = 1.0;
-	      }
-	      double fallback =
-	          static_cast<double>(std::max<double>(1.0, std::llround(total_evidence)));
-	      result.taxidCount.clear();
-	        result.taxidCount.emplace_back(fallback_taxid, fallback);
-	      result.reject_reason.clear();
-	      continue;
-	      }
-	    }
+		    // High-diversity: allow a conservative fallback on reject to reduce
+		    // unclassified reads, but only when the posterior is clearly separated
+		    // (large top1-top2 gap). This avoids turning ambiguous reads into FP+FN.
+		    if (decisionConfig.allow_fallback_on_reject) {
+			      const double gap = top_score - second_score;
+			      const double base_gap_min =
+			          std::max(0.0, std::min(1.0, decisionConfig.fallback_gap_min));
+			      const bool reject_by_weight = !weight_ok;
+			      const bool reject_is_em_post = !reject_by_weight;
+			      const double gap_min = base_gap_min;
 
-	    result.taxidCount.clear();
+		      fb_stats.rejected_total += 1;
+		      if (reject_is_em_post) {
+		        fb_stats.rejected_em_post += 1;
+		        fb_stats.gaps_rejected_em_post.push_back(gap);
+		      } else {
+		        fb_stats.rejected_posterior_weight += 1;
+		        fb_stats.gaps_rejected_posterior_weight.push_back(gap);
+		      }
+
+		      if (gap < gap_min) {
+		        if (reject_is_em_post) {
+		          fb_stats.fallback_blocked_gap_em_post += 1;
+		        } else {
+		          fb_stats.fallback_blocked_gap_posterior_weight += 1;
+		        }
+		        // keep rejected
+		      } else {
+		        std::string fallback_taxid = top.first;
+		        bool using_hint = false;
+		        if (!result.best_taxid_hint.empty() &&
+		            result.best_taxid_hint != kUnclassified) {
+		          fallback_taxid = result.best_taxid_hint;
+		          using_hint = true;
+		        }
+
+		        if (using_hint) {
+		          const size_t topk = std::min(
+		              kFallbackHintTopK, static_cast<size_t>(posterior.size()));
+		          bool hint_in_topk = false;
+		          for (size_t i = 0; i < topk; ++i) {
+		            if (posterior[i].first == fallback_taxid) {
+		              hint_in_topk = true;
+		              break;
+		            }
+		          }
+		          if (!hint_in_topk) {
+		            fb_stats.fallback_blocked_hint_not_in_topk += 1;
+		            // keep rejected
+		          } else {
+		            fb_stats.fallback_used_hint += 1;
+		            double total_evidence =
+		                (result.sample_weight > 0.0) ? result.sample_weight
+		                                            : result.evaluated;
+		            if (!(total_evidence > 0.0)) {
+		              total_evidence = 1.0;
+		            }
+		            double fallback = static_cast<double>(
+		                std::max<double>(1.0, std::llround(total_evidence)));
+		            result.taxidCount.clear();
+		            result.taxidCount.emplace_back(fallback_taxid, fallback);
+		            result.reject_reason.clear();
+		            fb_stats.fallback_applied += 1;
+		            continue;
+		          }
+		        } else {
+		          double total_evidence = (result.sample_weight > 0.0)
+		                                      ? result.sample_weight
+		                                      : result.evaluated;
+		          if (!(total_evidence > 0.0)) {
+		            total_evidence = 1.0;
+		          }
+		          double fallback = static_cast<double>(
+		              std::max<double>(1.0, std::llround(total_evidence)));
+		          result.taxidCount.clear();
+		          result.taxidCount.emplace_back(fallback_taxid, fallback);
+		          result.reject_reason.clear();
+		          fb_stats.fallback_applied += 1;
+		          continue;
+		        }
+		      }
+		    }
+
+		    result.taxidCount.clear();
 	    result.taxidCount.emplace_back(kUnclassified, 1.0);
-	    if (result.reject_reason.empty()) {
-	      result.reject_reason = weight_ok ? "em_post" : "posterior_weight";
-	    }
-	  }
-	}
+		    if (result.reject_reason.empty()) {
+		      result.reject_reason = weight_ok ? "em_post" : "posterior_weight";
+		    }
+			  }
+
+  if (decisionConfig.allow_fallback_on_reject && fb_stats.rejected_total > 0) {
+    auto q = [](std::vector<double> vals, double p) -> double {
+      if (vals.empty()) {
+        return 0.0;
+      }
+      p = std::max(0.0, std::min(1.0, p));
+      const size_t idx =
+          static_cast<size_t>(std::floor(p * static_cast<double>(vals.size() - 1)));
+      std::nth_element(vals.begin(),
+                       vals.begin() + static_cast<std::ptrdiff_t>(idx), vals.end());
+      return vals[idx];
+    };
+
+    std::cout << "PostEM fallback gate: rejected=" << fb_stats.rejected_total
+              << " (em_post=" << fb_stats.rejected_em_post
+              << ", posterior_weight=" << fb_stats.rejected_posterior_weight
+              << "), applied=" << fb_stats.fallback_applied
+              << ", used_hint=" << fb_stats.fallback_used_hint
+              << ", blocked_hint_not_in_topk="
+              << fb_stats.fallback_blocked_hint_not_in_topk
+              << ", blocked_gap_em_post=" << fb_stats.fallback_blocked_gap_em_post
+              << ", blocked_gap_posterior_weight="
+              << fb_stats.fallback_blocked_gap_posterior_weight
+              << ", gap_em_post(p50/p90)="
+              << q(fb_stats.gaps_rejected_em_post, 0.50) << '/'
+              << q(fb_stats.gaps_rejected_em_post, 0.90)
+              << ", gap_posterior_weight(p50/p90)="
+              << q(fb_stats.gaps_rejected_posterior_weight, 0.50) << '/'
+              << q(fb_stats.gaps_rejected_posterior_weight, 0.90) << std::endl;
+  }
+
+			}
 
 } // namespace ChimeraClassify
