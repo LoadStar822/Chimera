@@ -861,6 +861,11 @@ void postEmDecision(
       posterior = result.posteriors;
     }
 
+    // Ensure POST_TOPK uses the same (pruned/renormalized) posterior view as the
+    // final decision logic. This reduces long-tail noise in low-diversity
+    // profile aggregation (e.g., avoids peaky-rescue picking hitchhiking taxa).
+    result.posteriors = posterior;
+
     if (dump_post) {
       (*dump_post) << result.id;
       for (const auto &kv : posterior) {
@@ -1057,14 +1062,28 @@ void postEmDecision(
     // double gap = top_score - second_score;
     // bool keep_multi = (second_score > 0.0 && gap < 0.10 &&
     //                    top_score >= 0.35 && second_score >= 0.25);
-    // if (keep_multi) { ... }
+	    // if (keep_multi) { ... }
 
-    result.taxidCount.clear();
-    result.taxidCount.emplace_back(kUnclassified, 1.0);
-    if (result.reject_reason.empty()) {
-      result.reject_reason = weight_ok ? "em_post" : "posterior_weight";
-    }
-  }
-}
+	    if (decisionConfig.allow_fallback_on_reject) {
+	      double total_evidence =
+	          (result.sample_weight > 0.0) ? result.sample_weight : result.evaluated;
+	      if (!(total_evidence > 0.0)) {
+	        total_evidence = 1.0;
+	      }
+	      double fallback =
+	          static_cast<double>(std::max<double>(1.0, std::llround(total_evidence)));
+	      result.taxidCount.clear();
+	      result.taxidCount.emplace_back(top.first, fallback);
+	      result.reject_reason.clear();
+	      continue;
+	    }
+
+	    result.taxidCount.clear();
+	    result.taxidCount.emplace_back(kUnclassified, 1.0);
+	    if (result.reject_reason.empty()) {
+	      result.reject_reason = weight_ok ? "em_post" : "posterior_weight";
+	    }
+	  }
+	}
 
 } // namespace ChimeraClassify

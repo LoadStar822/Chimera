@@ -1986,6 +1986,12 @@ def process_file(
                     has_post_topk = _has_post_topk_tokens(input_files)
                     prob_hi = 0.20
                     support_min = max(50, int(eff_total * 0.00002))
+                    # Guard against "hitchhiker" taxa that show up in many POST_TOPK lists
+                    # with tiny probabilities (common in low-div samples, especially within
+                    # Enterobacteriaceae-like families). This prevents spurious taxa from
+                    # passing support_min and inflating presence FPs.
+                    support_hi_frac_min = 0.01
+                    support_mean_prob_min = 0.01
                     # For ultra-low abundance taxa, absolute support may be too small even when
                     # the evidence is "peaky" (a non-trivial fraction of occurrences are high-prob).
                     # Use a second, conservative gate:
@@ -1996,7 +2002,7 @@ def process_file(
                     peaky_hi_frac_min = 0.001
                     peaky_mass_min = float(MIN_EVIDENCE)
 
-                    max_added = 4
+                    max_added = 3
                     added: List[Tuple[str, int, int, float, str]] = []
                     if has_post_topk and prob_hi > 0 and support_min > 0:
                         existing_species = {
@@ -2034,9 +2040,14 @@ def process_file(
                                 continue
                             mass = float(prob_mass.get(sp, 0.0))
                             frac = (float(hi) / float(any_c)) if any_c > 0 else 0.0
+                            mean_prob = (mass / float(any_c)) if any_c > 0 else 0.0
                             reason: Optional[str] = None
                             if int(hi) >= int(support_min):
-                                reason = "support"
+                                if (
+                                    frac >= float(support_hi_frac_min)
+                                    or mean_prob >= float(support_mean_prob_min)
+                                ):
+                                    reason = "support"
                             else:
                                 if (
                                     int(hi) >= int(peaky_hi_min)
@@ -2094,6 +2105,8 @@ def process_file(
                             "[profile][auto] lowdiv_posttopk_newgenus_rescue="
                             f"enabled=1 prob_hi={prob_hi:.2f} "
                             f"support_min={support_min} "
+                            f"support_hi_frac_min={float(support_hi_frac_min):.4f} "
+                            f"support_mean_prob_min={float(support_mean_prob_min):.4f} "
                             f"peaky_hi_min={peaky_hi_min} peaky_hi_frac_min={peaky_hi_frac_min:.4f} "
                             f"peaky_mass_min={peaky_mass_min:.2f} "
                             f"max_added={max_added} "

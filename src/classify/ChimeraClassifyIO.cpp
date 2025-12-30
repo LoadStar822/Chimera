@@ -254,6 +254,12 @@ void saveResult(std::vector<classifyResult> classifyResults,
     if (!result.taxidCount.empty() &&
         result.taxidCount.front().first == "unclassified") {
       os << "unclassified";
+      if (!result.reject_reason.empty()) {
+        os << "\tREJECT=" << result.reject_reason;
+      }
+      if (!result.best_taxid_hint.empty()) {
+        os << "\tHINT=" << result.best_taxid_hint;
+      }
       handled = true;
     }
     if (!handled) {
@@ -265,7 +271,10 @@ void saveResult(std::vector<classifyResult> classifyResults,
         os << taxid << ':' << count << '\t';
       }
     }
-    if (config.dump_post_topk > 0 && !result.posteriors.empty() && !handled) {
+    if (config.dump_post_topk > 0 && !result.posteriors.empty()) {
+      if (handled) {
+        os << '\t';
+      }
       const size_t k =
           std::min<size_t>(static_cast<size_t>(config.dump_post_topk),
                            result.posteriors.size());

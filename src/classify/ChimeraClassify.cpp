@@ -1185,20 +1185,22 @@ void run(ClassifyConfig config) {
 	      auto_head_mass = 0.90;
 	      auto_max_taxa = 5;
 	    }
-	    decisionConfig.posterior_head_mass =
-	        (config.post_head_mass > 0.0) ? config.post_head_mass : auto_head_mass;
-	    decisionConfig.posterior_max_taxa =
-	        (config.post_max_taxa > 0) ? config.post_max_taxa : auto_max_taxa;
+		    decisionConfig.posterior_head_mass =
+		        (config.post_head_mass > 0.0) ? config.post_head_mass : auto_head_mass;
+		    decisionConfig.posterior_max_taxa =
+		        (config.post_max_taxa > 0) ? config.post_max_taxa : auto_max_taxa;
+		    decisionConfig.allow_fallback_on_reject = !config.low_div_active;
 
-	    if (config.verbose) {
-	      std::cout << "PostEM tail: min_fraction=" << decisionConfig.posterior_min_fraction
-	                << " power=" << decisionConfig.posterior_power
-	                << " head_mass=" << decisionConfig.posterior_head_mass
-	                << (config.post_head_mass > 0.0 ? " (cli)" : " (auto)")
-	                << " max_taxa=" << decisionConfig.posterior_max_taxa
-	                << (config.post_max_taxa > 0 ? " (cli)" : " (auto)")
-	                << std::endl;
-	    }
+		    if (config.verbose) {
+		      std::cout << "PostEM tail: min_fraction=" << decisionConfig.posterior_min_fraction
+		                << " power=" << decisionConfig.posterior_power
+		                << " head_mass=" << decisionConfig.posterior_head_mass
+		                << (config.post_head_mass > 0.0 ? " (cli)" : " (auto)")
+		                << " max_taxa=" << decisionConfig.posterior_max_taxa
+		                << (config.post_max_taxa > 0 ? " (cli)" : " (auto)")
+		                << " fallback_on_reject=" << (decisionConfig.allow_fallback_on_reject ? 1 : 0)
+		                << std::endl;
+		    }
 
     postEmDecision(classifyResults, decisionConfig, classWeights, tax,
                    &presenceDecision);

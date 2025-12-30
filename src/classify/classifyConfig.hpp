@@ -209,13 +209,14 @@ namespace ChimeraClassify {
 			bool presence_passed{ false }; // 是否通过 presence 层
 		};
 
-		struct DecisionConfig {
-			double posterior_threshold = 0.56;
-			double min_class_weight = 1e-4;
-			double posterior_min_fraction = 0.01; // 软分配时的最小 posterior 占比阈值
-			double posterior_power = 1.5;        // posterior^alpha 压尖，>1 越尖锐
-			double posterior_head_mass = 0.95;   // 每条 read 只保留 posterior^alpha 的头部质量（抑制长尾）
-			uint32_t posterior_max_taxa = 8;     // 每条 read 最多输出的 taxon 数（抑制长尾）
-		};
-	}
+			struct DecisionConfig {
+				double posterior_threshold = 0.56;
+				double min_class_weight = 1e-4;
+				double posterior_min_fraction = 0.01; // 软分配时的最小 posterior 占比阈值
+				double posterior_power = 1.5;        // posterior^alpha 压尖，>1 越尖锐
+				double posterior_head_mass = 0.95;   // 每条 read 只保留 posterior^alpha 的头部质量（抑制长尾）
+				uint32_t posterior_max_taxa = 8;     // 每条 read 最多输出的 taxon 数（抑制长尾）
+				bool allow_fallback_on_reject = false; // 高多样性：放宽拒绝，减少 unclassified
+			};
+		}
 	#endif // !CLASSIFYCONFIG_HPP
