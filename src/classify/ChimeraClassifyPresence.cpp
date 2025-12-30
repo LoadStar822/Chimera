@@ -724,7 +724,8 @@ PresenceDecision evaluate_presence_coverage_unique(
 void postEmDecision(
     std::vector<classifyResult> &results, const DecisionConfig &decisionConfig,
     const std::unordered_map<std::string, double> &classWeights,
-    const TaxDict &tax, const PresenceDecision *presenceDecision) {
+    const TaxDict &tax, const PresenceDecision *presenceDecision,
+    const NcbiTaxdump *ncbiTaxdump) {
   constexpr const char *kUnclassified = "unclassified";
   std::ostream *dump_post = nullptr;
   std::ofstream dump_file;
@@ -805,21 +806,44 @@ void postEmDecision(
 	    return PresenceLevel::kUnknown;
 		  };
 
-  struct FallbackGateStats {
-    size_t rejected_total{0};
-    size_t rejected_em_post{0};
-    size_t rejected_posterior_weight{0};
-    size_t fallback_applied{0};
-    size_t fallback_blocked_hint_not_in_topk{0};
-    size_t fallback_blocked_gap_em_post{0};
-    size_t fallback_blocked_gap_posterior_weight{0};
-    size_t fallback_used_hint{0};
-    std::vector<double> gaps_rejected_em_post;
-    std::vector<double> gaps_rejected_posterior_weight;
-  };
+	  struct FallbackGateStats {
+	    size_t rejected_total{0};
+	    size_t rejected_em_post{0};
+	    size_t rejected_posterior_weight{0};
+	    size_t fallback_applied{0};
+	    size_t fallback_blocked_hint_not_in_topk{0};
+	    size_t fallback_blocked_genus_conflict{0};
+	    size_t fallback_blocked_gap_em_post{0};
+	    size_t fallback_blocked_gap_posterior_weight{0};
+	    size_t fallback_used_hint{0};
+	    std::vector<double> gaps_rejected_em_post;
+	    std::vector<double> gaps_rejected_posterior_weight;
+	  };
 
-  FallbackGateStats fb_stats;
-  constexpr size_t kFallbackHintTopK = 16;
+	  FallbackGateStats fb_stats;
+	  constexpr size_t kFallbackHintTopK = 16;
+	  constexpr double kFallbackGenusConflictGapMax = 0.20;
+
+	  auto parse_u32 = [](const std::string &s, uint32_t &out) -> bool {
+	    if (s.empty()) {
+	      return false;
+	    }
+	    for (unsigned char c : s) {
+	      if (!std::isdigit(c)) {
+	        return false;
+	      }
+	    }
+	    try {
+	      unsigned long v = std::stoul(s);
+	      if (v > std::numeric_limits<uint32_t>::max()) {
+	        return false;
+	      }
+	      out = static_cast<uint32_t>(v);
+	      return true;
+	    } catch (...) {
+	      return false;
+	    }
+	  };
 
   for (auto &result : results) {
     // Keep the full posterior list (sorted) for dumping/analysis (POST_TOPK),
@@ -1100,68 +1124,86 @@ void postEmDecision(
 		        fb_stats.gaps_rejected_posterior_weight.push_back(gap);
 		      }
 
-		      if (gap < gap_min) {
-		        if (reject_is_em_post) {
-		          fb_stats.fallback_blocked_gap_em_post += 1;
-		        } else {
-		          fb_stats.fallback_blocked_gap_posterior_weight += 1;
-		        }
-		        // keep rejected
-		      } else {
-		        std::string fallback_taxid = top.first;
-		        bool using_hint = false;
-		        if (!result.best_taxid_hint.empty() &&
-		            result.best_taxid_hint != kUnclassified) {
-		          fallback_taxid = result.best_taxid_hint;
-		          using_hint = true;
-		        }
+			      if (gap < gap_min) {
+			        if (reject_is_em_post) {
+			          fb_stats.fallback_blocked_gap_em_post += 1;
+			        } else {
+			          fb_stats.fallback_blocked_gap_posterior_weight += 1;
+			        }
+			        // keep rejected
+			      } else {
+			        bool genus_conflict_block = false;
+			        if (ncbiTaxdump && ncbiTaxdump->enabled() &&
+			            posterior.size() > 1 && gap < kFallbackGenusConflictGapMax) {
+			          uint32_t tid1 = 0;
+			          uint32_t tid2 = 0;
+			          if (parse_u32(top.first, tid1) &&
+			              parse_u32(posterior[1].first, tid2)) {
+			            const uint32_t g1 = ncbiTaxdump->to_genus(tid1);
+			            const uint32_t g2 = ncbiTaxdump->to_genus(tid2);
+			            genus_conflict_block =
+			                (g1 != 0 && g2 != 0 && g1 != g2);
+			          }
+			        }
+			        if (genus_conflict_block) {
+			          fb_stats.fallback_blocked_genus_conflict += 1;
+			          // keep rejected
+			        } else {
+			          std::string fallback_taxid = top.first;
+			          bool using_hint = false;
+			          if (!result.best_taxid_hint.empty() &&
+			              result.best_taxid_hint != kUnclassified) {
+			            fallback_taxid = result.best_taxid_hint;
+			            using_hint = true;
+			          }
 
-		        if (using_hint) {
-		          const size_t topk = std::min(
-		              kFallbackHintTopK, static_cast<size_t>(posterior.size()));
-		          bool hint_in_topk = false;
-		          for (size_t i = 0; i < topk; ++i) {
-		            if (posterior[i].first == fallback_taxid) {
-		              hint_in_topk = true;
-		              break;
-		            }
-		          }
-		          if (!hint_in_topk) {
-		            fb_stats.fallback_blocked_hint_not_in_topk += 1;
-		            // keep rejected
-		          } else {
-		            fb_stats.fallback_used_hint += 1;
-		            double total_evidence =
-		                (result.sample_weight > 0.0) ? result.sample_weight
-		                                            : result.evaluated;
-		            if (!(total_evidence > 0.0)) {
-		              total_evidence = 1.0;
-		            }
-		            double fallback = static_cast<double>(
-		                std::max<double>(1.0, std::llround(total_evidence)));
-		            result.taxidCount.clear();
-		            result.taxidCount.emplace_back(fallback_taxid, fallback);
-		            result.reject_reason.clear();
-		            fb_stats.fallback_applied += 1;
-		            continue;
-		          }
-		        } else {
-		          double total_evidence = (result.sample_weight > 0.0)
-		                                      ? result.sample_weight
-		                                      : result.evaluated;
-		          if (!(total_evidence > 0.0)) {
-		            total_evidence = 1.0;
-		          }
-		          double fallback = static_cast<double>(
-		              std::max<double>(1.0, std::llround(total_evidence)));
-		          result.taxidCount.clear();
-		          result.taxidCount.emplace_back(fallback_taxid, fallback);
-		          result.reject_reason.clear();
-		          fb_stats.fallback_applied += 1;
-		          continue;
-		        }
-		      }
-		    }
+			          if (using_hint) {
+			            const size_t topk = std::min(
+			                kFallbackHintTopK, static_cast<size_t>(posterior.size()));
+			            bool hint_in_topk = false;
+			            for (size_t i = 0; i < topk; ++i) {
+			              if (posterior[i].first == fallback_taxid) {
+			                hint_in_topk = true;
+			                break;
+			              }
+			            }
+			            if (!hint_in_topk) {
+			              fb_stats.fallback_blocked_hint_not_in_topk += 1;
+			              // keep rejected
+			            } else {
+			              fb_stats.fallback_used_hint += 1;
+			              double total_evidence =
+			                  (result.sample_weight > 0.0) ? result.sample_weight
+			                                              : result.evaluated;
+			              if (!(total_evidence > 0.0)) {
+			                total_evidence = 1.0;
+			              }
+			              double fallback = static_cast<double>(
+			                  std::max<double>(1.0, std::llround(total_evidence)));
+			              result.taxidCount.clear();
+			              result.taxidCount.emplace_back(fallback_taxid, fallback);
+			              result.reject_reason.clear();
+			              fb_stats.fallback_applied += 1;
+			              continue;
+			            }
+			          } else {
+			            double total_evidence = (result.sample_weight > 0.0)
+			                                        ? result.sample_weight
+			                                        : result.evaluated;
+			            if (!(total_evidence > 0.0)) {
+			              total_evidence = 1.0;
+			            }
+			            double fallback = static_cast<double>(
+			                std::max<double>(1.0, std::llround(total_evidence)));
+			            result.taxidCount.clear();
+			            result.taxidCount.emplace_back(fallback_taxid, fallback);
+			            result.reject_reason.clear();
+			            fb_stats.fallback_applied += 1;
+			            continue;
+			          }
+			        }
+			      }
+			    }
 
 		    result.taxidCount.clear();
 	    result.taxidCount.emplace_back(kUnclassified, 1.0);
@@ -1187,13 +1229,15 @@ void postEmDecision(
               << " (em_post=" << fb_stats.rejected_em_post
               << ", posterior_weight=" << fb_stats.rejected_posterior_weight
               << "), applied=" << fb_stats.fallback_applied
-              << ", used_hint=" << fb_stats.fallback_used_hint
-              << ", blocked_hint_not_in_topk="
-              << fb_stats.fallback_blocked_hint_not_in_topk
-              << ", blocked_gap_em_post=" << fb_stats.fallback_blocked_gap_em_post
-              << ", blocked_gap_posterior_weight="
-              << fb_stats.fallback_blocked_gap_posterior_weight
-              << ", gap_em_post(p50/p90)="
+	              << ", used_hint=" << fb_stats.fallback_used_hint
+	              << ", blocked_hint_not_in_topk="
+	              << fb_stats.fallback_blocked_hint_not_in_topk
+	              << ", blocked_genus_conflict="
+	              << fb_stats.fallback_blocked_genus_conflict
+	              << ", blocked_gap_em_post=" << fb_stats.fallback_blocked_gap_em_post
+	              << ", blocked_gap_posterior_weight="
+	              << fb_stats.fallback_blocked_gap_posterior_weight
+	              << ", gap_em_post(p50/p90)="
               << q(fb_stats.gaps_rejected_em_post, 0.50) << '/'
               << q(fb_stats.gaps_rejected_em_post, 0.90)
               << ", gap_posterior_weight(p50/p90)="

@@ -45,9 +45,11 @@ MarginDecision decide_high_conf(size_t best, size_t second, double eff_eval);
 struct NcbiTaxdump {
   std::vector<uint32_t> parent;
   std::vector<uint8_t> is_species; // 1 if rank == species
+  std::vector<uint8_t> is_genus;   // 1 if rank == genus
 
   bool enabled() const {
-    return !parent.empty() && parent.size() == is_species.size();
+    return !parent.empty() && parent.size() == is_species.size() &&
+           parent.size() == is_genus.size();
   }
 
   uint32_t to_species(uint32_t tid) const {
@@ -73,6 +75,30 @@ struct NcbiTaxdump {
       }
     }
     return tid;
+  }
+
+  uint32_t to_genus(uint32_t tid) const {
+    if (!enabled() || tid == 0 || tid >= is_genus.size()) {
+      return 0;
+    }
+    if (is_genus[tid]) {
+      return tid;
+    }
+    uint32_t cur = tid;
+    for (int steps = 0; steps < 128; ++steps) {
+      if (cur == 0 || cur >= parent.size()) {
+        break;
+      }
+      uint32_t p = parent[cur];
+      if (p == 0 || p == cur) {
+        break;
+      }
+      cur = p;
+      if (cur < is_genus.size() && is_genus[cur]) {
+        return cur;
+      }
+    }
+    return 0;
   }
 };
 

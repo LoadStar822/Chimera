@@ -48,7 +48,8 @@ int main() {
 
     std::unordered_map<std::string, double> classWeights;
     ChimeraClassify::TaxDict tax;
-    ChimeraClassify::postEmDecision(results, dc, classWeights, tax, nullptr);
+    ChimeraClassify::postEmDecision(results, dc, classWeights, tax, nullptr,
+                                    nullptr);
 
     bool ok = (!results[0].taxidCount.empty() &&
                results[0].taxidCount.front().first == "123");
@@ -78,7 +79,8 @@ int main() {
 
     std::unordered_map<std::string, double> classWeights;
     ChimeraClassify::TaxDict tax;
-    ChimeraClassify::postEmDecision(results, dc, classWeights, tax, nullptr);
+    ChimeraClassify::postEmDecision(results, dc, classWeights, tax, nullptr,
+                                    nullptr);
 
     // New behavior: if we fallback to hint, require hint to appear in POST_TOPK.
     bool ok = (!results[0].taxidCount.empty() &&
@@ -109,12 +111,59 @@ int main() {
 
     std::unordered_map<std::string, double> classWeights;
     ChimeraClassify::TaxDict tax;
-    ChimeraClassify::postEmDecision(results, dc, classWeights, tax, nullptr);
+    ChimeraClassify::postEmDecision(results, dc, classWeights, tax, nullptr,
+                                    nullptr);
 
     // Desired behavior: em_post uses the same fallback gap threshold.
     bool ok = (!results[0].taxidCount.empty() &&
                results[0].taxidCount.front().first == "123");
     if (!expect_true("fallback_allows_em_post_at_gap_threshold", ok, message)) {
+      ++failures;
+      failure_messages.push_back(std::move(message));
+    }
+  }
+
+  {
+    std::string message;
+    ChimeraClassify::DecisionConfig dc;
+    dc.posterior_threshold = 0.95; // force reject
+    dc.min_class_weight = 0.0;
+    dc.allow_fallback_on_reject = true;
+    dc.fallback_gap_min = 0.10;
+
+    ChimeraClassify::NcbiTaxdump taxdump;
+    const uint32_t max_id = 300;
+    taxdump.parent.resize(static_cast<size_t>(max_id) + 1, 0);
+    taxdump.is_species.resize(static_cast<size_t>(max_id) + 1, 0);
+    taxdump.is_genus.resize(static_cast<size_t>(max_id) + 1, 0);
+    // Two genera: 10 and 20
+    taxdump.is_genus[10] = 1;
+    taxdump.is_genus[20] = 1;
+    // Two species (as candidates) under different genera.
+    taxdump.parent[100] = 10;
+    taxdump.parent[200] = 20;
+    taxdump.is_species[100] = 1;
+    taxdump.is_species[200] = 1;
+
+    ChimeraClassify::classifyResult r;
+    r.id = "r_genus_conflict_gap_small";
+    r.evaluated = 100.0;
+    r.posteriors.emplace_back("100", 0.59);
+    r.posteriors.emplace_back("200", 0.41); // gap=0.18 (<0.20)
+
+    std::vector<ChimeraClassify::classifyResult> results;
+    results.push_back(r);
+
+    std::unordered_map<std::string, double> classWeights;
+    ChimeraClassify::TaxDict tax;
+    ChimeraClassify::postEmDecision(results, dc, classWeights, tax, nullptr,
+                                    &taxdump);
+
+    // Desired behavior: for high-div fallback, block cross-genus ambiguous reads.
+    bool ok = (!results[0].taxidCount.empty() &&
+               results[0].taxidCount.front().first == "unclassified");
+    if (!expect_true("fallback_blocks_genus_conflict_when_gap_small", ok,
+                     message)) {
       ++failures;
       failure_messages.push_back(std::move(message));
     }
@@ -139,7 +188,8 @@ int main() {
 
     std::unordered_map<std::string, double> classWeights;
     ChimeraClassify::TaxDict tax;
-    ChimeraClassify::postEmDecision(results, dc, classWeights, tax, nullptr);
+    ChimeraClassify::postEmDecision(results, dc, classWeights, tax, nullptr,
+                                    nullptr);
 
     bool ok = (!results[0].taxidCount.empty() &&
                results[0].taxidCount.front().first == "unclassified");

@@ -175,6 +175,7 @@ maybe_load_ncbi_taxdump(const std::string &taxonomyKind, bool verbose) {
   std::string line;
   uint32_t max_id = 0;
   size_t species_nodes = 0;
+  size_t genus_nodes = 0;
   size_t parsed = 0;
   while (std::getline(is, line)) {
     if (line.empty()) {
@@ -211,12 +212,18 @@ maybe_load_ncbi_taxdump(const std::string &taxonomyKind, bool verbose) {
     if (tid >= tax->parent.size()) {
       tax->parent.resize(static_cast<size_t>(tid) + 1, 0);
       tax->is_species.resize(static_cast<size_t>(tid) + 1, 0);
+      tax->is_genus.resize(static_cast<size_t>(tid) + 1, 0);
     }
     tax->parent[tid] = parent;
     const bool is_sp = (rank == "species");
     tax->is_species[tid] = is_sp ? 1 : 0;
     if (is_sp) {
       ++species_nodes;
+    }
+    const bool is_g = (rank == "genus");
+    tax->is_genus[tid] = is_g ? 1 : 0;
+    if (is_g) {
+      ++genus_nodes;
     }
     if (tid > max_id) {
       max_id = tid;
@@ -230,7 +237,8 @@ maybe_load_ncbi_taxdump(const std::string &taxonomyKind, bool verbose) {
   if (verbose) {
     std::cout << "Loaded NCBI nodes.dmp for strain->species collapse: "
               << "nodes=" << parsed << ", max_id=" << max_id
-              << ", species_nodes=" << species_nodes << std::endl;
+              << ", species_nodes=" << species_nodes
+              << ", genus_nodes=" << genus_nodes << std::endl;
   }
   return tax;
 }
@@ -1204,7 +1212,7 @@ void run(ClassifyConfig config) {
 		    }
 
     postEmDecision(classifyResults, decisionConfig, classWeights, tax,
-                   &presenceDecision);
+                   &presenceDecision, weightCtx.ncbiTaxdump);
     fileInfo.classifiedNum = 0;
     fileInfo.unclassifiedNum = 0;
     for (const auto &result : classifyResults) {
