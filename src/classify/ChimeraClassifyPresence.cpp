@@ -1,8 +1,10 @@
 #include "ChimeraClassifyCommon.hpp"
+#include "post_em_debug_dump.hpp"
 #include "post_em_prune_audit.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -728,20 +730,64 @@ void postEmDecision(
     const TaxDict &tax, const PresenceDecision *presenceDecision,
     const NcbiTaxdump *ncbiTaxdump) {
   constexpr const char *kUnclassified = "unclassified";
-  std::ostream *dump_post = nullptr;
-  std::ofstream dump_file;
-  const char *dump_path = std::getenv("CHIMERA_DUMP_POSTERIOR");
-  if (dump_path && *dump_path) {
+	std::ostream *dump_post = nullptr;
+	std::ofstream dump_file;
+	const char *dump_path = std::getenv("CHIMERA_DUMP_POSTERIOR");
+	if (dump_path && *dump_path) {
     dump_file.open(dump_path);
     if (dump_file.good()) {
-      dump_post = &dump_file;
-    }
-  }
+			dump_post = &dump_file;
+		}
+	}
 
-  auto format_val = [](double value) {
-    std::ostringstream oss;
-    oss.setf(std::ios::fixed);
-    oss << std::setprecision(4) << value;
+	std::ostream *dump_top1_removed = nullptr;
+	std::ofstream dump_top1_removed_file;
+	const char *dump_top1_removed_path =
+	    std::getenv("CHIMERA_DUMP_POSTEM_TOP1_REMOVED");
+	if (dump_top1_removed_path && *dump_top1_removed_path) {
+		dump_top1_removed_file.open(dump_top1_removed_path);
+		if (dump_top1_removed_file.good()) {
+			dump_top1_removed = &dump_top1_removed_file;
+			(*dump_top1_removed)
+			    << "read_id\tfull_top1\tpruned_top1\tfull_p1\tfull_p2\tpruned_p1\t"
+			       "pruned_p2\tfull_gap\tw_top1\tlocal_pi_min_top1\tpres_top1\n";
+		}
+	}
+
+	std::ostream *dump_hint_blocked = nullptr;
+	std::ofstream dump_hint_blocked_file;
+	const char *dump_hint_blocked_path =
+	    std::getenv("CHIMERA_DUMP_POSTEM_HINT_BLOCKED");
+	if (dump_hint_blocked_path && *dump_hint_blocked_path) {
+		dump_hint_blocked_file.open(dump_hint_blocked_path);
+		if (dump_hint_blocked_file.good()) {
+			dump_hint_blocked = &dump_hint_blocked_file;
+			(*dump_hint_blocked)
+			    << "read_id\treject_reason\tpruned_top1\thint_taxid\tgap\t"
+			       "top_score\tsecond_score\thint_in_full_top16\t"
+			       "hint_rank_full\thint_prob_full\thint_w\thint_local_pi_min\t"
+			       "hint_pres\n";
+		}
+	}
+
+	std::ostream *dump_fallback_applied = nullptr;
+	std::ofstream dump_fallback_applied_file;
+	const char *dump_fallback_applied_path =
+	    std::getenv("CHIMERA_DUMP_POSTEM_FALLBACK_APPLIED");
+	if (dump_fallback_applied_path && *dump_fallback_applied_path) {
+		dump_fallback_applied_file.open(dump_fallback_applied_path);
+		if (dump_fallback_applied_file.good()) {
+			dump_fallback_applied = &dump_fallback_applied_file;
+			(*dump_fallback_applied)
+			    << "read_id\treject_reason\tusing_hint\tfallback_taxid\tpruned_top1\t"
+			       "gap\ttop_score\tsecond_score\n";
+		}
+	}
+
+	auto format_val = [](double value) {
+		std::ostringstream oss;
+		oss.setf(std::ios::fixed);
+		oss << std::setprecision(4) << value;
     return oss.str();
   };
 
@@ -877,6 +923,21 @@ void postEmDecision(
 	        presence_level, kPresencePiFloor, kRejectFactor);
 	    std::vector<std::pair<std::string, double>> posterior =
 	        std::move(pruned.posterior);
+
+	    if (dump_top1_removed && pruned.audit.top1_removed && !posterior.empty()) {
+	      const auto &full1 = posterior_full.front();
+	      const double full2 = (posterior_full.size() > 1) ? posterior_full[1].second : 0.0;
+	      const double pr1 = posterior.front().second;
+	      const double pr2 = (posterior.size() > 1) ? posterior[1].second : 0.0;
+	      const PresenceLevel pres1 = presence_level(full1.first);
+	      (*dump_top1_removed) << result.id << '\t' << full1.first << '\t'
+	                           << posterior.front().first << '\t' << full1.second
+	                           << '\t' << full2 << '\t' << pr1 << '\t' << pr2
+	                           << '\t' << (full1.second - full2) << '\t'
+	                           << pruned.audit.full_top1_weight << '\t'
+	                           << pruned.audit.full_top1_local_pi_min << '\t'
+	                           << static_cast<int>(pres1) << '\n';
+	    }
 
 	    if (pruned.audit.pruning_active) {
 	      prune_stats.pruning_active += 1;
@@ -1105,16 +1166,18 @@ void postEmDecision(
 		    // High-diversity: allow a conservative fallback on reject to reduce
 		    // unclassified reads, but only when the posterior is clearly separated
 		    // (large top1-top2 gap). This avoids turning ambiguous reads into FP+FN.
-		    if (decisionConfig.allow_fallback_on_reject) {
-			      const double gap = top_score - second_score;
-			      const double base_gap_min =
-			          std::max(0.0, std::min(1.0, decisionConfig.fallback_gap_min));
-			      const bool reject_by_weight = !weight_ok;
-			      const bool reject_is_em_post = !reject_by_weight;
-			      const double gap_min = base_gap_min;
+				    if (decisionConfig.allow_fallback_on_reject) {
+				      const double gap = top_score - second_score;
+				      const double base_gap_min =
+				          std::max(0.0, std::min(1.0, decisionConfig.fallback_gap_min));
+				      const bool reject_by_weight = !weight_ok;
+				      const bool reject_is_em_post = !reject_by_weight;
+				      const char *reject_reason_str =
+				          reject_is_em_post ? "em_post" : "posterior_weight";
+				      const double gap_min = base_gap_min;
 
-		      fb_stats.rejected_total += 1;
-		      if (reject_is_em_post) {
+			      fb_stats.rejected_total += 1;
+			      if (reject_is_em_post) {
 		        fb_stats.rejected_em_post += 1;
 		        fb_stats.gaps_rejected_em_post.push_back(gap);
 		      } else {
@@ -1155,36 +1218,79 @@ void postEmDecision(
 			            using_hint = true;
 			          }
 
-			          if (using_hint) {
-			            const size_t topk = std::min(
-			                kFallbackHintTopK, static_cast<size_t>(posterior.size()));
-			            bool hint_in_topk = false;
-			            for (size_t i = 0; i < topk; ++i) {
-			              if (posterior[i].first == fallback_taxid) {
-			                hint_in_topk = true;
-			                break;
-			              }
-			            }
-			            if (!hint_in_topk) {
-			              fb_stats.fallback_blocked_hint_not_in_topk += 1;
-			              // keep rejected
-			            } else {
-			              fb_stats.fallback_used_hint += 1;
-			              double total_evidence =
-			                  (result.sample_weight > 0.0) ? result.sample_weight
+				          if (using_hint) {
+				            const size_t topk = std::min(
+				                kFallbackHintTopK, static_cast<size_t>(posterior.size()));
+				            bool hint_in_topk = false;
+				            for (size_t i = 0; i < topk; ++i) {
+				              if (posterior[i].first == fallback_taxid) {
+				                hint_in_topk = true;
+				                break;
+				              }
+				            }
+				            if (!hint_in_topk) {
+				              fb_stats.fallback_blocked_hint_not_in_topk += 1;
+				              if (dump_hint_blocked) {
+				                const auto full_hit = lookup_taxid_in_topk(
+				                    posterior_full, fallback_taxid, kFallbackHintTopK);
+				                const double pi_prune =
+				                    std::min(decisionConfig.min_class_weight, 1e-4);
+				                const PresenceLevel hint_pres = presence_level(fallback_taxid);
+				                double hint_local_pi_min = pi_prune;
+				                if (hint_pres == PresenceLevel::kAccepted) {
+				                  hint_local_pi_min = std::min(pi_prune, kPresencePiFloor);
+				                } else if (hint_pres == PresenceLevel::kRejected) {
+				                  hint_local_pi_min = pi_prune * kRejectFactor;
+				                }
+				                double hint_w = 0.0;
+				                if (!classWeights.empty()) {
+				                  auto itw = classWeights.find(fallback_taxid);
+				                  if (itw != classWeights.end()) {
+				                    hint_w = itw->second;
+				                  }
+				                }
+				                (*dump_hint_blocked) << result.id << '\t'
+				                                     << reject_reason_str << '\t'
+				                                     << top.first << '\t'
+				                                     << fallback_taxid << '\t'
+				                                     << gap << '\t' << top_score
+				                                     << '\t' << second_score << '\t'
+				                                     << (full_hit.found ? 1 : 0)
+				                                     << '\t'
+				                                     << (full_hit.found
+				                                             ? static_cast<long long>(full_hit.rank)
+				                                             : -1LL)
+				                                     << '\t' << full_hit.prob
+				                                     << '\t' << hint_w << '\t'
+				                                     << hint_local_pi_min << '\t'
+				                                     << static_cast<int>(hint_pres)
+				                                     << '\n';
+				              }
+				              // keep rejected
+				            } else {
+				              fb_stats.fallback_used_hint += 1;
+				              double total_evidence =
+				                  (result.sample_weight > 0.0) ? result.sample_weight
 			                                              : result.evaluated;
 			              if (!(total_evidence > 0.0)) {
 			                total_evidence = 1.0;
 			              }
 			              double fallback = static_cast<double>(
 			                  std::max<double>(1.0, std::llround(total_evidence)));
-			              result.taxidCount.clear();
-			              result.taxidCount.emplace_back(fallback_taxid, fallback);
-			              result.reject_reason.clear();
-			              fb_stats.fallback_applied += 1;
-			              continue;
-			            }
-			          } else {
+				              result.taxidCount.clear();
+				              result.taxidCount.emplace_back(fallback_taxid, fallback);
+				              result.reject_reason.clear();
+				              fb_stats.fallback_applied += 1;
+				              if (dump_fallback_applied) {
+				                (*dump_fallback_applied)
+				                    << result.id << '\t' << reject_reason_str
+				                    << "\t1\t" << fallback_taxid << '\t' << top.first
+				                    << '\t' << gap << '\t' << top_score << '\t'
+				                    << second_score << '\n';
+				              }
+				              continue;
+				            }
+				          } else {
 			            double total_evidence = (result.sample_weight > 0.0)
 			                                        ? result.sample_weight
 			                                        : result.evaluated;
@@ -1193,15 +1299,22 @@ void postEmDecision(
 			            }
 			            double fallback = static_cast<double>(
 			                std::max<double>(1.0, std::llround(total_evidence)));
-			            result.taxidCount.clear();
-			            result.taxidCount.emplace_back(fallback_taxid, fallback);
-			            result.reject_reason.clear();
-			            fb_stats.fallback_applied += 1;
-			            continue;
-			          }
-			        }
-			      }
-			    }
+				            result.taxidCount.clear();
+				            result.taxidCount.emplace_back(fallback_taxid, fallback);
+				            result.reject_reason.clear();
+				            fb_stats.fallback_applied += 1;
+				            if (dump_fallback_applied) {
+				              (*dump_fallback_applied)
+				                  << result.id << '\t' << reject_reason_str
+				                  << "\t0\t" << fallback_taxid << '\t' << top.first
+				                  << '\t' << gap << '\t' << top_score << '\t'
+				                  << second_score << '\n';
+				            }
+				            continue;
+				          }
+				        }
+				      }
+				    }
 
 		    result.taxidCount.clear();
 	    result.taxidCount.emplace_back(kUnclassified, 1.0);
