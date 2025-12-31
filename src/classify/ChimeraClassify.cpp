@@ -1320,6 +1320,16 @@ void run(ClassifyConfig config) {
               << " floor_target=" << config.preem_floor_target
               << " floor_min_ratio=" << config.preem_floor_min_ratio
               << " floor_add_min_ratio=" << config.preem_floor_add_min_ratio
+              << " keepalive=" << fileInfo.preem_keepalive_applied << "/"
+              << fileInfo.preem_keepalive_attempt
+              << " keepalive_blk_ratio="
+              << fileInfo.preem_keepalive_blocked_low_ratio
+              << " keepalive_blk_gain="
+              << fileInfo.preem_keepalive_blocked_low_gain
+              << " keepalive_blk_abs=" << fileInfo.preem_keepalive_blocked_low_abs
+              << " keepalive_min_ratio=" << config.preem_keepalive_min_ratio
+              << " keepalive_replace_ratio=" << config.preem_keepalive_replace_ratio
+              << " keepalive_abs_min=" << config.preem_keepalive_abs_min
               << " head_mass_thresh=0.5 base_cap=256 max_cap=512"
               << std::defaultfloat << std::endl;
   };

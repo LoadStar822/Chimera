@@ -60,6 +60,12 @@ namespace ChimeraClassify {
 		uint32_t preem_floor_target = 4;           // target #non-unclassified species
 		double preem_floor_min_ratio = 0.20;       // trigger gate: top2/top1 >= ratio
 		double preem_floor_add_min_ratio = 0.10;   // add gate: cand_score >= top1*ratio
+		// High-div / EM only: fixed-budget keepalive (replace tail, no pad expansion).
+		// Protect a strong per-read hint candidate from being pruned out of the
+		// pre-EM topK, so the correct branch can enter EM/posterior lists.
+		double preem_keepalive_min_ratio = 0.20;      // require hint_score >= top1_score * ratio
+		double preem_keepalive_replace_ratio = 1.20;  // require hint_score >= tail_score * ratio
+		double preem_keepalive_abs_min = 2.0;         // absolute hint score floor
 		// NCBI-only experimental knobs for strain/assembly saturation:
 		// - collapse_strain_hits: collapse per-hash hit lists to 1 representative taxid per species
 		//   (affects scoring/deg on the hot path; can change behavior).
@@ -143,6 +149,9 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Pre-EM floor:" << config.preem_floor_target << std::endl
 			<< std::setw(20) << "Pre-EM floor min ratio:" << config.preem_floor_min_ratio << std::endl
 			<< std::setw(20) << "Pre-EM floor add ratio:" << config.preem_floor_add_min_ratio << std::endl
+			<< std::setw(20) << "Pre-EM keepalive min ratio:" << config.preem_keepalive_min_ratio << std::endl
+			<< std::setw(20) << "Pre-EM keepalive repl ratio:" << config.preem_keepalive_replace_ratio << std::endl
+			<< std::setw(20) << "Pre-EM keepalive abs min:" << config.preem_keepalive_abs_min << std::endl
 			<< std::setw(20) << "Collapse hits:" << config.collapse_strain_hits << std::endl
 			<< std::setw(20) << "Collapse cands:" << config.collapse_strain_candidates << std::endl
 			<< std::setw(20) << "Deg by species:" << config.deg_by_species << std::endl
@@ -205,6 +214,11 @@ namespace ChimeraClassify {
 		size_t preem_floor_added{ 0 };
 		size_t preem_floor_skipped_dominant{ 0 };
 		size_t preem_floor_filtered_weak{ 0 };
+		size_t preem_keepalive_attempt{ 0 };
+		size_t preem_keepalive_applied{ 0 };
+		size_t preem_keepalive_blocked_low_ratio{ 0 };
+		size_t preem_keepalive_blocked_low_gain{ 0 };
+		size_t preem_keepalive_blocked_low_abs{ 0 };
 	};
 
 	struct batchReads {

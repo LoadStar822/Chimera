@@ -1441,6 +1441,51 @@ void processSequence(
     normalize_preem_topk(result.taxidCount, dynamicTopK);
   }
 
+  // High-div / EM only: fixed-budget keepalive of a strong per-read hint
+  // candidate. Do NOT expand K; only replace the weakest tail candidate.
+  if (use_em && !config.low_div_active && !result.taxidCount.empty() &&
+      config.preem_keepalive_min_ratio > 0.0 &&
+      config.preem_keepalive_replace_ratio > 0.0 &&
+      config.preem_keepalive_abs_min > 0.0 &&
+      !result.best_taxid_hint.empty() &&
+      result.best_taxid_hint != "unclassified") {
+    bool hint_in_topk = false;
+    for (const auto &kv : result.taxidCount) {
+      if (kv.first == result.best_taxid_hint) {
+        hint_in_topk = true;
+        break;
+      }
+    }
+    if (!hint_in_topk) {
+      uint32_t hint_id = std::numeric_limits<uint32_t>::max();
+      if (auto it = tax.str2id.find(result.best_taxid_hint);
+          it != tax.str2id.end()) {
+        hint_id = it->second;
+      }
+      double hint_score = 0.0;
+      if (hint_id != std::numeric_limits<uint32_t>::max()) {
+        if (auto it = tidScore.find(hint_id); it != tidScore.end()) {
+          hint_score = std::clamp(it->second, 0.0, effCap);
+        }
+      }
+
+      fileInfo.preem_keepalive_attempt += 1;
+      auto res = preem_keepalive_replace_tail(
+          result.taxidCount, {result.best_taxid_hint, hint_score},
+          config.preem_keepalive_min_ratio, config.preem_keepalive_replace_ratio,
+          config.preem_keepalive_abs_min);
+      if (res == KeepaliveResult::kApplied) {
+        fileInfo.preem_keepalive_applied += 1;
+      } else if (res == KeepaliveResult::kBlockedLowRatio) {
+        fileInfo.preem_keepalive_blocked_low_ratio += 1;
+      } else if (res == KeepaliveResult::kBlockedLowGain) {
+        fileInfo.preem_keepalive_blocked_low_gain += 1;
+      } else if (res == KeepaliveResult::kBlockedLowAbs) {
+        fileInfo.preem_keepalive_blocked_low_abs += 1;
+      }
+    }
+  }
+
   // Optional: dump pre-EM candidate list for P1/P2 analysis.
   dump_preem_line(result.id, result.taxidCount, highConfPre);
 
@@ -1653,6 +1698,14 @@ void classify_streaming(
       fileInfo.preem_floor_skipped_dominant +=
           localFileInfo.preem_floor_skipped_dominant;
       fileInfo.preem_floor_filtered_weak += localFileInfo.preem_floor_filtered_weak;
+      fileInfo.preem_keepalive_attempt += localFileInfo.preem_keepalive_attempt;
+      fileInfo.preem_keepalive_applied += localFileInfo.preem_keepalive_applied;
+      fileInfo.preem_keepalive_blocked_low_ratio +=
+          localFileInfo.preem_keepalive_blocked_low_ratio;
+      fileInfo.preem_keepalive_blocked_low_gain +=
+          localFileInfo.preem_keepalive_blocked_low_gain;
+      fileInfo.preem_keepalive_blocked_low_abs +=
+          localFileInfo.preem_keepalive_blocked_low_abs;
       if (presenceSummary) {
         presenceSummary->merge(presenceLocal);
       }
@@ -1736,6 +1789,14 @@ void classify(
       fileInfo.preem_floor_skipped_dominant +=
           localFileInfo.preem_floor_skipped_dominant;
       fileInfo.preem_floor_filtered_weak += localFileInfo.preem_floor_filtered_weak;
+      fileInfo.preem_keepalive_attempt += localFileInfo.preem_keepalive_attempt;
+      fileInfo.preem_keepalive_applied += localFileInfo.preem_keepalive_applied;
+      fileInfo.preem_keepalive_blocked_low_ratio +=
+          localFileInfo.preem_keepalive_blocked_low_ratio;
+      fileInfo.preem_keepalive_blocked_low_gain +=
+          localFileInfo.preem_keepalive_blocked_low_gain;
+      fileInfo.preem_keepalive_blocked_low_abs +=
+          localFileInfo.preem_keepalive_blocked_low_abs;
     }
   }
 }

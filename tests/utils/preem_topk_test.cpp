@@ -136,6 +136,29 @@ int main() {
     }
   }
 
+  {
+    std::string message;
+    std::vector<std::pair<std::string, double>> items = {
+        {"a", 10.0}, {"b", 5.0}, {"c", 1.0}};
+
+    auto res = ChimeraClassify::preem_keepalive_replace_tail(
+        items, {"hint", 3.0}, /*min_ratio=*/0.2, /*replace_ratio=*/1.2,
+        /*abs_min=*/2.0);
+
+    bool ok = (res == ChimeraClassify::KeepaliveResult::kApplied);
+    if (!expect_true("keepalive_applies_when_strong_enough", ok, message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+
+    ok = (items.size() == 3 && items[0].first == "a" && items[1].first == "b" &&
+          items[2].first == "hint");
+    if (!expect_true("keepalive_replaces_tail_and_keeps_sort", ok, message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+  }
+
   if (failures == 0) {
     std::cout << "All tests passed." << std::endl;
     return 0;
