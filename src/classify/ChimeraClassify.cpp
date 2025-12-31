@@ -1306,6 +1306,17 @@ void run(ClassifyConfig config) {
       floor_frac = static_cast<double>(fileInfo.preem_floor_applied) /
                    static_cast<double>(fileInfo.preem_floor_checks);
     }
+    double relax_frac = 0.0;
+    if (fileInfo.preem_beta_relax_checks > 0) {
+      relax_frac = static_cast<double>(fileInfo.preem_beta_relax_applied) /
+                   static_cast<double>(fileInfo.preem_beta_relax_checks);
+    }
+    double relax_thr_drop_avg = 0.0;
+    if (fileInfo.preem_beta_relax_applied > 0) {
+      relax_thr_drop_avg =
+          static_cast<double>(fileInfo.preem_beta_relax_thr_drop_sum) /
+          static_cast<double>(fileInfo.preem_beta_relax_applied);
+    }
     std::cout << "[classify][auto] preem_route_rare="
               << fileInfo.preem_route_rare_reads << "/"
               << fileInfo.preem_route_reads << " (" << std::fixed
@@ -1330,6 +1341,11 @@ void run(ClassifyConfig config) {
               << " keepalive_min_ratio=" << config.preem_keepalive_min_ratio
               << " keepalive_replace_ratio=" << config.preem_keepalive_replace_ratio
               << " keepalive_abs_min=" << config.preem_keepalive_abs_min
+              << " beta_relax=" << fileInfo.preem_beta_relax_applied << "/"
+              << fileInfo.preem_beta_relax_checks << " (" << relax_frac << ")"
+              << " beta_relax_thr_drop_avg=" << relax_thr_drop_avg
+              << " beta_relax_suppress_overflow="
+              << fileInfo.preem_beta_relax_suppressed_overflow
               << " head_mass_thresh=0.5 base_cap=256 max_cap=512"
               << std::defaultfloat << std::endl;
   };

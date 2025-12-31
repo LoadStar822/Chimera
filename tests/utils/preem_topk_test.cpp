@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <string>
 #include <utility>
@@ -13,6 +14,26 @@ bool expect_true(const std::string &name, bool got, std::string &message) {
     return true;
   }
   message = name + " 期望 true, 实际 false";
+  return false;
+}
+
+bool expect_eq_size_t(const std::string &name, size_t got, size_t want,
+                      std::string &message) {
+  if (got == want) {
+    return true;
+  }
+  message = name + " 期望 " + std::to_string(want) + ", 实际 " +
+            std::to_string(got);
+  return false;
+}
+
+bool expect_near(const std::string &name, double got, double want, double eps,
+                 std::string &message) {
+  if (std::abs(got - want) <= eps) {
+    return true;
+  }
+  message = name + " 期望 " + std::to_string(want) + "±" + std::to_string(eps) +
+            ", 实际 " + std::to_string(got);
   return false;
 }
 
@@ -154,6 +175,70 @@ int main() {
     ok = (items.size() == 3 && items[0].first == "a" && items[1].first == "b" &&
           items[2].first == "hint");
     if (!expect_true("keepalive_replaces_tail_and_keeps_sort", ok, message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+  }
+
+  {
+    std::string message;
+    // beta relax: should apply when EM/high-div, thr_final dominated by thr_beta_eval,
+    // strict candidates are few, and evidence is not too weak.
+    auto decision = ChimeraClassify::decide_preem_beta_relax(
+        /*use_em=*/true, /*low_div_active=*/false, /*beta_user=*/false,
+        /*base_beta=*/0.45, /*maxEvidence=*/100.0, /*eff_eval=*/100.0,
+        /*best_ratio=*/1.0, /*unique_ratio=*/0.05,
+        /*base_topk=*/16, /*n_strict=*/3,
+        /*thr_beta=*/45, /*thr_eval=*/40, /*thr_min_eval=*/4,
+        /*thr_final_raw=*/40, /*delta=*/8, /*eff_eval_min=*/48.0);
+
+    bool ok = decision.applied;
+    if (!expect_true("beta_relax_applies", ok, message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+    ok = expect_eq_size_t("beta_relax_thr_final_used", decision.thr_final_used,
+                          33, message);
+    if (!ok) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+    ok = expect_near("beta_relax_beta_local", decision.beta_local, 0.3375,
+                     1e-6, message);
+    if (!ok) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+  }
+
+  {
+    std::string message;
+    // beta relax: should NOT apply in low-div branch.
+    auto decision = ChimeraClassify::decide_preem_beta_relax(
+        /*use_em=*/true, /*low_div_active=*/true, /*beta_user=*/false,
+        /*base_beta=*/0.45, /*maxEvidence=*/100.0, /*eff_eval=*/100.0,
+        /*best_ratio=*/1.0, /*unique_ratio=*/0.05,
+        /*base_topk=*/16, /*n_strict=*/3,
+        /*thr_beta=*/45, /*thr_eval=*/40, /*thr_min_eval=*/4,
+        /*thr_final_raw=*/40, /*delta=*/8, /*eff_eval_min=*/48.0);
+    bool ok = !decision.applied && decision.thr_final_used == 40;
+    if (!expect_true("beta_relax_skips_lowdiv", ok, message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+  }
+
+  {
+    std::string message;
+    // binOverflow size suppression: when preem_relax_applied, do not expand dynamicTopK due to size>baseTopK.
+    bool overflow_no_suppress = ChimeraClassify::preem_bin_overflow(
+        /*fallback_full=*/true, /*topBins_size=*/0, /*taxidCount_size=*/20,
+        /*baseTopK=*/16, /*suppress_size_overflow=*/false);
+    bool overflow_suppress = ChimeraClassify::preem_bin_overflow(
+        /*fallback_full=*/true, /*topBins_size=*/0, /*taxidCount_size=*/20,
+        /*baseTopK=*/16, /*suppress_size_overflow=*/true);
+    bool ok = overflow_no_suppress && !overflow_suppress;
+    if (!expect_true("preem_bin_overflow_suppression", ok, message)) {
       ++failures;
       failure_messages.push_back(message);
     }

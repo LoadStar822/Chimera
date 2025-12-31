@@ -1061,9 +1061,12 @@ void processSequence(
   size_t baseTopK =
       config.preEmTopK > 0 ? static_cast<size_t>(config.preEmTopK) : 32;
 
-  dump_preem_stats(id, highConfPre, use_em, eff_eval, best, second, best_ratio,
-                   gap, uniqueCount, uniqueRatio, thr_beta, thr_eval,
-                   thr_min_eval, thr_final);
+  const size_t thr_final_raw = thr_final;
+  size_t thr_final_used = thr_final_raw;
+  bool preem_beta_relax_applied = false;
+  double preem_beta_local = beta;
+  size_t preem_n_strict = 0;
+  size_t preem_n_used = 0;
 
   if (highConfPre && bestTid < tax.id2str.size()) {
     double bestEvidence = std::clamp(best, 0.0, effCap);
@@ -1148,13 +1151,60 @@ void processSequence(
     } else {
       for (const auto &[tid_id, rawScore] : tidScore) {
         double countVal = std::clamp(rawScore, 0.0, effCap);
-        if (countVal >= static_cast<double>(thr_final)) {
+        if (countVal >= static_cast<double>(thr_final_raw)) {
           const std::string &taxid = tax.id2str[tid_id];
           result.taxidCount.emplace_back(taxid, countVal);
           if (tid_id == bestTid) {
             maxCount = std::make_pair(taxid, countVal);
             maxCountValid = true;
           }
+        }
+      }
+
+      // High-div / EM only: read-level pre-EM gate relaxation (fixed budget).
+      // Motivation: wrong reads often contain truth branch in tidScore(topN) but
+      // are pruned by thr_beta_eval/thr_final, leaving no chance for EM/post.
+      // Guard rails: do NOT pad candidates; do NOT expand dynamicTopK due to
+      // size>baseTopK if this relaxation is applied (see binOverflow gate).
+      preem_n_strict = result.taxidCount.size();
+      preem_n_used = preem_n_strict;
+
+      constexpr size_t kPreemBetaRelaxDelta = 8;
+      constexpr double kPreemBetaRelaxEffEvalMin = 48.0;
+      if (use_em && !config.low_div_active && !beta_user &&
+          eff_eval >= kPreemBetaRelaxEffEvalMin && baseTopK > 0) {
+        fileInfo.preem_beta_relax_checks += 1;
+        auto decision = decide_preem_beta_relax(
+            /*use_em=*/use_em, /*low_div_active=*/config.low_div_active,
+            /*beta_user=*/beta_user, /*base_beta=*/beta,
+            /*maxEvidence=*/maxEvidence, /*eff_eval=*/eff_eval,
+            /*best_ratio=*/best_ratio, /*unique_ratio=*/uniqueRatio,
+            /*base_topk=*/baseTopK, /*n_strict=*/preem_n_strict,
+            /*thr_beta=*/thr_beta, /*thr_eval=*/thr_eval,
+            /*thr_min_eval=*/thr_min_eval, /*thr_final_raw=*/thr_final_raw,
+            /*delta=*/kPreemBetaRelaxDelta, /*eff_eval_min=*/kPreemBetaRelaxEffEvalMin);
+        if (decision.applied) {
+          preem_beta_relax_applied = true;
+          preem_beta_local = decision.beta_local;
+          thr_final_used = decision.thr_final_used;
+          fileInfo.preem_beta_relax_applied += 1;
+          fileInfo.preem_beta_relax_thr_drop_sum +=
+              (thr_final_raw - thr_final_used);
+
+          // Rebuild candidate list using relaxed threshold.
+          result.taxidCount.clear();
+          for (const auto &[tid_id, rawScore] : tidScore) {
+            double countVal = std::clamp(rawScore, 0.0, effCap);
+            if (countVal >= static_cast<double>(thr_final_used)) {
+              const std::string &taxid = tax.id2str[tid_id];
+              result.taxidCount.emplace_back(taxid, countVal);
+              if (tid_id == bestTid) {
+                maxCount = std::make_pair(taxid, countVal);
+                maxCountValid = true;
+              }
+            }
+          }
+          preem_n_used = result.taxidCount.size();
         }
       }
     }
@@ -1217,8 +1267,13 @@ void processSequence(
   size_t dynamicTopK = baseTopK;
   double tieGapNeed = std::max(2.0, eff_eval / 24.0);
   bool nearTie = (gap < tieGapNeed) || (best_ratio < 1.30);
-  bool binOverflow = (!fallback_full && topBins.size() > 40) ||
-                     (result.taxidCount.size() > baseTopK);
+  bool binOverflow = preem_bin_overflow(
+      /*fallback_full=*/fallback_full, /*topBins_size=*/topBins.size(),
+      /*taxidCount_size=*/result.taxidCount.size(), /*baseTopK=*/baseTopK,
+      /*suppress_size_overflow=*/preem_beta_relax_applied);
+  if (preem_beta_relax_applied && result.taxidCount.size() > baseTopK) {
+    fileInfo.preem_beta_relax_suppressed_overflow += 1;
+  }
   if (nearTie || binOverflow) {
     dynamicTopK = std::max<size_t>(96, dynamicTopK);
   } else if (best_ratio >= 2.5 &&
@@ -1440,6 +1495,10 @@ void processSequence(
   if (!result.taxidCount.empty() && use_em) {
     normalize_preem_topk(result.taxidCount, dynamicTopK);
   }
+
+  dump_preem_stats(id, highConfPre, use_em, eff_eval, best, second, best_ratio,
+                   gap, uniqueCount, uniqueRatio, thr_beta, thr_eval,
+                   thr_min_eval, thr_final_used);
 
   // High-div / EM only: fixed-budget keepalive of a strong per-read hint
   // candidate. Do NOT expand K; only replace the weakest tail candidate.
@@ -1797,6 +1856,12 @@ void classify(
           localFileInfo.preem_keepalive_blocked_low_gain;
       fileInfo.preem_keepalive_blocked_low_abs +=
           localFileInfo.preem_keepalive_blocked_low_abs;
+      fileInfo.preem_beta_relax_checks += localFileInfo.preem_beta_relax_checks;
+      fileInfo.preem_beta_relax_applied += localFileInfo.preem_beta_relax_applied;
+      fileInfo.preem_beta_relax_thr_drop_sum +=
+          localFileInfo.preem_beta_relax_thr_drop_sum;
+      fileInfo.preem_beta_relax_suppressed_overflow +=
+          localFileInfo.preem_beta_relax_suppressed_overflow;
     }
   }
 }

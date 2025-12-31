@@ -219,6 +219,10 @@ namespace ChimeraClassify {
 		size_t preem_keepalive_blocked_low_ratio{ 0 };
 		size_t preem_keepalive_blocked_low_gain{ 0 };
 		size_t preem_keepalive_blocked_low_abs{ 0 };
+		size_t preem_beta_relax_checks{ 0 };
+		size_t preem_beta_relax_applied{ 0 };
+		size_t preem_beta_relax_thr_drop_sum{ 0 };
+		size_t preem_beta_relax_suppressed_overflow{ 0 };
 	};
 
 	struct batchReads {
