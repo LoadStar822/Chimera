@@ -64,7 +64,7 @@ namespace ChimeraClassify {
 		// Protect a strong per-read hint candidate from being pruned out of the
 		// pre-EM topK, so the correct branch can enter EM/posterior lists.
 		double preem_keepalive_min_ratio = 0.20;      // require hint_score >= top1_score * ratio
-		double preem_keepalive_replace_ratio = 1.20;  // require hint_score >= tail_score * ratio
+			double preem_keepalive_replace_ratio = 1.00;  // require hint_score >= tail_score * ratio
 		double preem_keepalive_abs_min = 2.0;         // absolute hint score floor
 		// NCBI-only experimental knobs for strain/assembly saturation:
 		// - collapse_strain_hits: collapse per-hash hit lists to 1 representative taxid per species

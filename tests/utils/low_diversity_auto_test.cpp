@@ -71,6 +71,16 @@ int main() {
     }
   }
 
+  {
+    std::string message;
+    ChimeraClassify::ClassifyConfig config;
+    bool ok = std::abs(config.preem_keepalive_replace_ratio - 1.0) < 1e-12;
+    if (!expect_true("keepalive_replace_ratio_default", ok, message)) {
+      ++failures;
+      failure_messages.push_back(std::move(message));
+    }
+  }
+
   if (failures == 0) {
     std::cout << "All tests passed." << std::endl;
     return 0;
