@@ -1171,7 +1171,8 @@ void processSequence(
 
       constexpr size_t kPreemBetaRelaxDelta = 8;
       constexpr double kPreemBetaRelaxEffEvalMin = 48.0;
-      if (use_em && !config.low_div_active && !tidScore.empty()) {
+      if (config.preem_beta_relax && use_em && !config.low_div_active &&
+          !tidScore.empty()) {
         fileInfo.preem_beta_relax_seen += 1;
         if (beta_user) {
           fileInfo.preem_beta_relax_beta_user += 1;
@@ -1187,7 +1188,8 @@ void processSequence(
           fileInfo.preem_beta_relax_strict_le_halfk += 1;
         }
       }
-      if (use_em && !config.low_div_active && !beta_user &&
+      if (config.preem_beta_relax && use_em && !config.low_div_active &&
+          !beta_user &&
           eff_eval >= kPreemBetaRelaxEffEvalMin && baseTopK > 0) {
         fileInfo.preem_beta_relax_checks += 1;
         auto decision = decide_preem_beta_relax(
@@ -1282,11 +1284,27 @@ void processSequence(
 
   size_t dynamicTopK = baseTopK;
   double tieGapNeed = std::max(2.0, eff_eval / 24.0);
-  bool nearTie = (gap < tieGapNeed) || (best_ratio < 1.30);
-  bool binOverflow = preem_bin_overflow(
-      /*fallback_full=*/fallback_full, /*topBins_size=*/topBins.size(),
-      /*taxidCount_size=*/result.taxidCount.size(), /*baseTopK=*/baseTopK,
-      /*suppress_size_overflow=*/preem_beta_relax_applied);
+  const bool nearTie_gap = (gap < tieGapNeed);
+  const bool nearTie_ratio = (best_ratio < 1.30);
+  const bool nearTie = nearTie_gap || nearTie_ratio;
+  const bool overflow_topbins = (!fallback_full && topBins.size() > 40);
+  const bool overflow_size =
+      (!preem_beta_relax_applied && result.taxidCount.size() > baseTopK);
+  const bool binOverflow = overflow_topbins || overflow_size;
+  if (use_em && !config.low_div_active) {
+    if (nearTie_gap) {
+      fileInfo.preem_neartie_gap += 1;
+    }
+    if (nearTie_ratio) {
+      fileInfo.preem_neartie_ratio += 1;
+    }
+    if (overflow_topbins) {
+      fileInfo.preem_overflow_topbins += 1;
+    }
+    if (overflow_size) {
+      fileInfo.preem_overflow_size += 1;
+    }
+  }
   if (preem_beta_relax_applied && result.taxidCount.size() > baseTopK) {
     fileInfo.preem_beta_relax_suppressed_overflow += 1;
   }
@@ -1466,35 +1484,43 @@ void processSequence(
         fileInfo.preem_floor_skipped_dominant += 1;
       } else {
         const double addMinScore = topScore * config.preem_floor_add_min_ratio;
+        const double looseMinScore = static_cast<double>(thr_min_eval);
 
-        std::vector<std::pair<std::string, double>> ranked;
-        ranked.reserve(bestBySpecies.size());
+        std::vector<std::pair<std::string, double>> ranked_strict;
+        std::vector<std::pair<std::string, double>> ranked_loose;
+        ranked_strict.reserve(bestBySpecies.size());
+        ranked_loose.reserve(bestBySpecies.size());
         for (const auto &kv : bestBySpecies) {
           const auto &cand = kv.second;
           if (!(cand.second > 0.0)) {
             continue;
           }
-          if (cand.second < addMinScore) {
+          if (cand.second >= addMinScore) {
+            ranked_strict.push_back(cand);
+          } else {
             fileInfo.preem_floor_filtered_weak += 1;
-            continue;
+            if (cand.second >= looseMinScore) {
+              ranked_loose.push_back(cand);
+            }
           }
-          ranked.push_back(cand);
         }
 
-        const size_t want =
-            std::min<size_t>(ranked.size(), floorTargetNonUncl * 8);
-        if (want > 0 && ranked.size() > want) {
+        const size_t want_strict =
+            std::min<size_t>(ranked_strict.size(), baseTopK * 8);
+        if (want_strict > 0 && ranked_strict.size() > want_strict) {
           std::nth_element(
-              ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(want),
-              ranked.end(), [](const auto &a, const auto &b) {
+              ranked_strict.begin(),
+              ranked_strict.begin() +
+                  static_cast<std::ptrdiff_t>(want_strict),
+              ranked_strict.end(), [](const auto &a, const auto &b) {
                 if (a.second != b.second) {
                   return a.second > b.second;
                 }
                 return a.first < b.first;
               });
-          ranked.resize(want);
+          ranked_strict.resize(want_strict);
         }
-        std::sort(ranked.begin(), ranked.end(),
+        std::sort(ranked_strict.begin(), ranked_strict.end(),
                   [](const auto &a, const auto &b) {
                     if (a.second != b.second) {
                       return a.second > b.second;
@@ -1502,10 +1528,51 @@ void processSequence(
                     return a.first < b.first;
                   });
 
-        ensure_preem_floor_candidates(result.taxidCount, ranked, floorTargetTotal);
+        constexpr size_t kPreemUnderfullFillStage2Cap = 4;
+        const size_t want_loose =
+            std::min<size_t>(ranked_loose.size(), kPreemUnderfullFillStage2Cap * 8);
+        if (want_loose > 0 && ranked_loose.size() > want_loose) {
+          std::nth_element(
+              ranked_loose.begin(),
+              ranked_loose.begin() +
+                  static_cast<std::ptrdiff_t>(want_loose),
+              ranked_loose.end(), [](const auto &a, const auto &b) {
+                if (a.second != b.second) {
+                  return a.second > b.second;
+                }
+                return a.first < b.first;
+              });
+          ranked_loose.resize(want_loose);
+        }
+        std::sort(ranked_loose.begin(), ranked_loose.end(),
+                  [](const auto &a, const auto &b) {
+                    if (a.second != b.second) {
+                      return a.second > b.second;
+                    }
+                    return a.first < b.first;
+                  });
+
+        ensure_preem_floor_candidates(result.taxidCount, ranked_strict,
+                                     floorTargetTotal);
         if (result.taxidCount.size() > before) {
           fileInfo.preem_floor_applied += 1;
           fileInfo.preem_floor_added += (result.taxidCount.size() - before);
+        }
+
+        const size_t fillTargetTotal =
+            std::min(baseTopK + (hasUnclassified ? 1 : 0), dynamicTopK);
+        if (config.preem_underfull_fill && fillTargetTotal > floorTargetTotal &&
+            result.taxidCount.size() < fillTargetTotal) {
+          fileInfo.preem_underfull_fill_checks += 1;
+          auto fill_res = fill_preem_candidates_underfull(
+              result.taxidCount, ranked_strict, ranked_loose, fillTargetTotal,
+              kPreemUnderfullFillStage2Cap);
+          if (fill_res.applied) {
+            fileInfo.preem_underfull_fill_applied += 1;
+            fileInfo.preem_underfull_fill_added +=
+                (fill_res.stage1_added + fill_res.stage2_added);
+            fileInfo.preem_underfull_fill_stage2_added += fill_res.stage2_added;
+          }
         }
       }
     }
@@ -1513,6 +1580,21 @@ void processSequence(
 
   if (!result.taxidCount.empty() && use_em) {
     normalize_preem_topk(result.taxidCount, dynamicTopK);
+  }
+  if (use_em && !config.low_div_active) {
+    const size_t final_k = result.taxidCount.size();
+    if (final_k <= 16) {
+      fileInfo.preem_finalk_le16 += 1;
+    } else if (final_k <= 32) {
+      fileInfo.preem_finalk_17_32 += 1;
+    } else if (final_k <= 64) {
+      fileInfo.preem_finalk_33_64 += 1;
+    } else if (final_k <= 96) {
+      fileInfo.preem_finalk_65_96 += 1;
+    }
+    if (final_k == 96) {
+      fileInfo.preem_finalk_eq96 += 1;
+    }
   }
 
   dump_preem_stats(id, highConfPre, use_em, eff_eval, best, second, best_ratio,
@@ -1796,6 +1878,23 @@ void classify_streaming(
       fileInfo.preem_beta_relax_suppressed_overflow +=
           localFileInfo.preem_beta_relax_suppressed_overflow;
       fileInfo.preem_dynamic_topk_96 += localFileInfo.preem_dynamic_topk_96;
+      fileInfo.preem_underfull_fill_checks +=
+          localFileInfo.preem_underfull_fill_checks;
+      fileInfo.preem_underfull_fill_applied +=
+          localFileInfo.preem_underfull_fill_applied;
+      fileInfo.preem_underfull_fill_added +=
+          localFileInfo.preem_underfull_fill_added;
+      fileInfo.preem_underfull_fill_stage2_added +=
+          localFileInfo.preem_underfull_fill_stage2_added;
+      fileInfo.preem_neartie_gap += localFileInfo.preem_neartie_gap;
+      fileInfo.preem_neartie_ratio += localFileInfo.preem_neartie_ratio;
+      fileInfo.preem_overflow_topbins += localFileInfo.preem_overflow_topbins;
+      fileInfo.preem_overflow_size += localFileInfo.preem_overflow_size;
+      fileInfo.preem_finalk_le16 += localFileInfo.preem_finalk_le16;
+      fileInfo.preem_finalk_17_32 += localFileInfo.preem_finalk_17_32;
+      fileInfo.preem_finalk_33_64 += localFileInfo.preem_finalk_33_64;
+      fileInfo.preem_finalk_65_96 += localFileInfo.preem_finalk_65_96;
+      fileInfo.preem_finalk_eq96 += localFileInfo.preem_finalk_eq96;
       if (presenceSummary) {
         presenceSummary->merge(presenceLocal);
       }
@@ -1900,6 +1999,23 @@ void classify(
       fileInfo.preem_beta_relax_suppressed_overflow +=
           localFileInfo.preem_beta_relax_suppressed_overflow;
       fileInfo.preem_dynamic_topk_96 += localFileInfo.preem_dynamic_topk_96;
+      fileInfo.preem_underfull_fill_checks +=
+          localFileInfo.preem_underfull_fill_checks;
+      fileInfo.preem_underfull_fill_applied +=
+          localFileInfo.preem_underfull_fill_applied;
+      fileInfo.preem_underfull_fill_added +=
+          localFileInfo.preem_underfull_fill_added;
+      fileInfo.preem_underfull_fill_stage2_added +=
+          localFileInfo.preem_underfull_fill_stage2_added;
+      fileInfo.preem_neartie_gap += localFileInfo.preem_neartie_gap;
+      fileInfo.preem_neartie_ratio += localFileInfo.preem_neartie_ratio;
+      fileInfo.preem_overflow_topbins += localFileInfo.preem_overflow_topbins;
+      fileInfo.preem_overflow_size += localFileInfo.preem_overflow_size;
+      fileInfo.preem_finalk_le16 += localFileInfo.preem_finalk_le16;
+      fileInfo.preem_finalk_17_32 += localFileInfo.preem_finalk_17_32;
+      fileInfo.preem_finalk_33_64 += localFileInfo.preem_finalk_33_64;
+      fileInfo.preem_finalk_65_96 += localFileInfo.preem_finalk_65_96;
+      fileInfo.preem_finalk_eq96 += localFileInfo.preem_finalk_eq96;
     }
   }
 }

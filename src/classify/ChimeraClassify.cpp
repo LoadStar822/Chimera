@@ -27,7 +27,25 @@
 #include <sstream>
 #include <thread>
 
+#include <unistd.h>
+
 namespace {
+
+uint64_t current_rss_kb() {
+  std::ifstream in("/proc/self/statm");
+  uint64_t size_pages = 0;
+  uint64_t resident_pages = 0;
+  if (!(in >> size_pages >> resident_pages)) {
+    return 0;
+  }
+  long page_size = sysconf(_SC_PAGESIZE);
+  if (page_size <= 0) {
+    return 0;
+  }
+  return resident_pages * static_cast<uint64_t>(page_size / 1024);
+}
+
+double kb_to_gib(uint64_t kb) { return static_cast<double>(kb) / 1024.0 / 1024.0; }
 
 static std::vector<std::string> split_tab(const std::string &line) {
   std::vector<std::string> parts;
@@ -557,7 +575,30 @@ void run(ClassifyConfig config) {
     }
   }
 
+  auto stage_t0 = std::chrono::steady_clock::now();
+  auto stage_last = stage_t0;
+  auto log_stage = [&](const char *stage) {
+    auto now = std::chrono::steady_clock::now();
+    auto delta_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - stage_last)
+            .count();
+    auto total_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - stage_t0)
+            .count();
+    uint64_t rss_kb = current_rss_kb();
+    std::cout << "[classify] stage=" << stage
+              << " rss_gib=" << std::fixed << std::setprecision(2)
+              << kb_to_gib(rss_kb) << std::defaultfloat
+              << " delta_ms=" << delta_ms << " total_ms=" << total_ms
+              << std::endl;
+    stage_last = now;
+  };
+
+  log_stage("before_build_tax_dict");
   const TaxDict tax = build_tax_dict(indexToTaxid);
+  std::cout << "[classify] tax_dict tid_count=" << tax.id2str.size()
+            << " bins=" << tax.idx2id.size() << std::endl;
+  log_stage("after_build_tax_dict");
   std::vector<uint32_t> tid2speciesGroup;
   if (config.deg_by_species && weightCtx.ncbiTaxdump &&
       weightCtx.ncbiTaxdump->enabled()) {
@@ -1306,13 +1347,19 @@ void run(ClassifyConfig config) {
       floor_frac = static_cast<double>(fileInfo.preem_floor_applied) /
                    static_cast<double>(fileInfo.preem_floor_checks);
     }
+    double fill_frac = 0.0;
+    if (fileInfo.preem_underfull_fill_checks > 0) {
+      fill_frac =
+          static_cast<double>(fileInfo.preem_underfull_fill_applied) /
+          static_cast<double>(fileInfo.preem_underfull_fill_checks);
+    }
     double relax_frac = 0.0;
-    if (fileInfo.preem_beta_relax_checks > 0) {
+    if (config.preem_beta_relax && fileInfo.preem_beta_relax_checks > 0) {
       relax_frac = static_cast<double>(fileInfo.preem_beta_relax_applied) /
                    static_cast<double>(fileInfo.preem_beta_relax_checks);
     }
     double relax_thr_drop_avg = 0.0;
-    if (fileInfo.preem_beta_relax_applied > 0) {
+    if (config.preem_beta_relax && fileInfo.preem_beta_relax_applied > 0) {
       relax_thr_drop_avg =
           static_cast<double>(fileInfo.preem_beta_relax_thr_drop_sum) /
           static_cast<double>(fileInfo.preem_beta_relax_applied);
@@ -1341,17 +1388,68 @@ void run(ClassifyConfig config) {
               << " keepalive_min_ratio=" << config.preem_keepalive_min_ratio
               << " keepalive_replace_ratio=" << config.preem_keepalive_replace_ratio
               << " keepalive_abs_min=" << config.preem_keepalive_abs_min
-              << " beta_relax=" << fileInfo.preem_beta_relax_applied << "/"
-              << fileInfo.preem_beta_relax_checks << " (" << relax_frac << ")"
-              << " beta_relax_thr_drop_avg=" << relax_thr_drop_avg
-              << " beta_relax_suppress_overflow="
-              << fileInfo.preem_beta_relax_suppressed_overflow
-              << " beta_seen=" << fileInfo.preem_beta_relax_seen
-              << " beta_dom=" << fileInfo.preem_beta_relax_dom_beta
-              << " beta_le_halfk=" << fileInfo.preem_beta_relax_strict_le_halfk
-              << " beta_efflt=" << fileInfo.preem_beta_relax_eff_lt_min
-              << " beta_user=" << fileInfo.preem_beta_relax_beta_user
+              << " fill="
+              << (config.preem_underfull_fill ?
+                      (std::to_string(fileInfo.preem_underfull_fill_applied) +
+                       "/" +
+                       std::to_string(fileInfo.preem_underfull_fill_checks)) :
+                      std::string("off"))
+              << (config.preem_underfull_fill ?
+                      (" (" + std::to_string(fill_frac) + ")") :
+                      std::string(""))
+              << (config.preem_underfull_fill ?
+                      (" fill_added=" +
+                       std::to_string(fileInfo.preem_underfull_fill_added)) :
+                      std::string(""))
+              << (config.preem_underfull_fill ?
+                      (" fill_stage2_added=" +
+                       std::to_string(fileInfo.preem_underfull_fill_stage2_added)) :
+                      std::string(""))
+              << " beta_relax="
+              << (config.preem_beta_relax ?
+                      (std::to_string(fileInfo.preem_beta_relax_applied) + "/" +
+                       std::to_string(fileInfo.preem_beta_relax_checks)) :
+                      std::string("off"))
+              << (config.preem_beta_relax ? (" (" + std::to_string(relax_frac) +
+                                            ")") :
+                                           std::string(""))
+              << (config.preem_beta_relax ? (" beta_relax_thr_drop_avg=" +
+                                            std::to_string(relax_thr_drop_avg)) :
+                                           std::string(""))
+              << (config.preem_beta_relax ? (" beta_relax_suppress_overflow=" +
+                                            std::to_string(fileInfo
+                                                               .preem_beta_relax_suppressed_overflow)) :
+                                           std::string(""))
+              << (config.preem_beta_relax ? (" beta_seen=" +
+                                            std::to_string(fileInfo
+                                                               .preem_beta_relax_seen)) :
+                                           std::string(""))
+              << (config.preem_beta_relax ? (" beta_dom=" +
+                                            std::to_string(fileInfo
+                                                               .preem_beta_relax_dom_beta)) :
+                                           std::string(""))
+              << (config.preem_beta_relax ? (" beta_le_halfk=" +
+                                            std::to_string(fileInfo
+                                                               .preem_beta_relax_strict_le_halfk)) :
+                                           std::string(""))
+              << (config.preem_beta_relax ? (" beta_efflt=" +
+                                            std::to_string(fileInfo
+                                                               .preem_beta_relax_eff_lt_min)) :
+                                           std::string(""))
+              << (config.preem_beta_relax ? (" beta_user=" +
+                                            std::to_string(fileInfo
+                                                               .preem_beta_relax_beta_user)) :
+                                           std::string(""))
               << " dyn96=" << fileInfo.preem_dynamic_topk_96
+              << " near_gap=" << fileInfo.preem_neartie_gap
+              << " near_ratio=" << fileInfo.preem_neartie_ratio
+              << " ov_bins=" << fileInfo.preem_overflow_topbins
+              << " ov_size=" << fileInfo.preem_overflow_size
+              << " finalK<=16=" << fileInfo.preem_finalk_le16
+              << " finalK17_32=" << fileInfo.preem_finalk_17_32
+              << " finalK33_64=" << fileInfo.preem_finalk_33_64
+              << " finalK65_96=" << fileInfo.preem_finalk_65_96
+              << " finalKeq96=" << fileInfo.preem_finalk_eq96
               << " head_mass_thresh=0.5 base_cap=256 max_cap=512"
               << std::defaultfloat << std::endl;
   };

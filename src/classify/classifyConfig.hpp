@@ -66,6 +66,11 @@ namespace ChimeraClassify {
 		double preem_keepalive_min_ratio = 0.20;      // require hint_score >= top1_score * ratio
 			double preem_keepalive_replace_ratio = 1.00;  // require hint_score >= tail_score * ratio
 		double preem_keepalive_abs_min = 2.0;         // absolute hint score floor
+		// High-div / EM only: underfull fixed-budget fill (no pad expansion).
+		// Disabled by default (can be enabled for experiments).
+		bool preem_underfull_fill = false;
+		// High-div / EM only: experimental beta gate relaxation (disabled by default).
+		bool preem_beta_relax = false;
 		// NCBI-only experimental knobs for strain/assembly saturation:
 		// - collapse_strain_hits: collapse per-hash hit lists to 1 representative taxid per species
 		//   (affects scoring/deg on the hot path; can change behavior).
@@ -152,6 +157,8 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Pre-EM keepalive min ratio:" << config.preem_keepalive_min_ratio << std::endl
 			<< std::setw(20) << "Pre-EM keepalive repl ratio:" << config.preem_keepalive_replace_ratio << std::endl
 			<< std::setw(20) << "Pre-EM keepalive abs min:" << config.preem_keepalive_abs_min << std::endl
+			<< std::setw(20) << "Pre-EM underfull fill:" << config.preem_underfull_fill << std::endl
+			<< std::setw(20) << "Pre-EM beta relax:" << config.preem_beta_relax << std::endl
 			<< std::setw(20) << "Collapse hits:" << config.collapse_strain_hits << std::endl
 			<< std::setw(20) << "Collapse cands:" << config.collapse_strain_candidates << std::endl
 			<< std::setw(20) << "Deg by species:" << config.deg_by_species << std::endl
@@ -230,6 +237,21 @@ namespace ChimeraClassify {
 		size_t preem_beta_relax_thr_drop_sum{ 0 };
 		size_t preem_beta_relax_suppressed_overflow{ 0 };
 		size_t preem_dynamic_topk_96{ 0 };
+		// High-div / EM only: fixed-budget underfull fill (no pad expansion).
+		size_t preem_underfull_fill_checks{ 0 };
+		size_t preem_underfull_fill_applied{ 0 };
+		size_t preem_underfull_fill_added{ 0 };
+		size_t preem_underfull_fill_stage2_added{ 0 };
+		// High-div / EM only: nearTie/binOverflow breakdown and finalK histogram.
+		size_t preem_neartie_gap{ 0 };
+		size_t preem_neartie_ratio{ 0 };
+		size_t preem_overflow_topbins{ 0 };
+		size_t preem_overflow_size{ 0 };
+		size_t preem_finalk_le16{ 0 };
+		size_t preem_finalk_17_32{ 0 };
+		size_t preem_finalk_33_64{ 0 };
+		size_t preem_finalk_65_96{ 0 };
+		size_t preem_finalk_eq96{ 0 };
 	};
 
 	struct batchReads {

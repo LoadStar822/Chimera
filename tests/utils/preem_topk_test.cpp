@@ -244,6 +244,106 @@ int main() {
     }
   }
 
+  {
+    std::string message;
+    std::vector<std::pair<std::string, double>> items = {{"x", 9.0}};
+    std::vector<std::pair<std::string, double>> strict = {{"a", 10.0},
+                                                          {"b", 8.0}};
+    std::vector<std::pair<std::string, double>> loose = {{"c", 7.0},
+                                                         {"d", 6.0}};
+
+    auto res = ChimeraClassify::fill_preem_candidates_underfull(
+        items, strict, loose, /*target=*/3, /*stage2_cap=*/4);
+    ChimeraClassify::normalize_preem_topk(items, 16);
+
+    bool ok = res.applied && res.stage1_added == 2 && res.stage2_added == 0;
+    if (!expect_true("underfull_fill_stage1_only", ok, message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+    ok = (items.size() == 3 && items[0].first == "a" && items[1].first == "x" &&
+          items[2].first == "b");
+    if (!expect_true("underfull_fill_stage1_contents", ok, message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+  }
+
+  {
+    std::string message;
+    std::vector<std::pair<std::string, double>> items = {{"x", 9.0}};
+    std::vector<std::pair<std::string, double>> strict = {{"a", 10.0}};
+    std::vector<std::pair<std::string, double>> loose = {{"b", 8.0},
+                                                         {"c", 7.0}};
+
+    auto res = ChimeraClassify::fill_preem_candidates_underfull(
+        items, strict, loose, /*target=*/4, /*stage2_cap=*/4);
+    ChimeraClassify::normalize_preem_topk(items, 16);
+
+    bool ok = res.applied && res.stage1_added == 1 && res.stage2_added == 2;
+    if (!expect_true("underfull_fill_uses_stage2", ok, message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+    ok = (items.size() == 4 && items[0].first == "a" && items[1].first == "x" &&
+          items[2].first == "b" && items[3].first == "c");
+    if (!expect_true("underfull_fill_stage2_contents", ok, message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+  }
+
+  {
+    std::string message;
+    std::vector<std::pair<std::string, double>> items = {{"x", 9.0}};
+    std::vector<std::pair<std::string, double>> strict;
+    std::vector<std::pair<std::string, double>> loose = {{"a", 10.0},
+                                                         {"b", 8.0},
+                                                         {"c", 7.0}};
+
+    auto res = ChimeraClassify::fill_preem_candidates_underfull(
+        items, strict, loose, /*target=*/4, /*stage2_cap=*/1);
+    ChimeraClassify::normalize_preem_topk(items, 16);
+
+    bool ok = res.applied && res.stage1_added == 0 && res.stage2_added == 1;
+    if (!expect_true("underfull_fill_stage2_cap", ok, message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+    ok = (items.size() == 2 && items[0].first == "a" && items[1].first == "x");
+    if (!expect_true("underfull_fill_stage2_cap_contents", ok, message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+  }
+
+  {
+    std::string message;
+    std::vector<std::pair<std::string, double>> items = {{"x", 9.0}};
+    std::vector<std::pair<std::string, double>> strict = {{"x", 10.0},
+                                                          {"unclassified", 8.0},
+                                                          {"a", 7.0}};
+    std::vector<std::pair<std::string, double>> loose = {{"a", 6.0},
+                                                         {"b", 5.0}};
+
+    auto res = ChimeraClassify::fill_preem_candidates_underfull(
+        items, strict, loose, /*target=*/3, /*stage2_cap=*/4);
+    ChimeraClassify::normalize_preem_topk(items, 16);
+
+    bool ok = res.applied && res.stage1_added == 1 && res.stage2_added == 1;
+    if (!expect_true("underfull_fill_skips_dupes_and_unclassified", ok, message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+    ok = (items.size() == 3 && items[0].first == "x" && items[1].first == "a" &&
+          items[2].first == "b");
+    if (!expect_true("underfull_fill_skips_dupes_and_unclassified_contents", ok,
+                     message)) {
+      ++failures;
+      failure_messages.push_back(message);
+    }
+  }
+
   if (failures == 0) {
     std::cout << "All tests passed." << std::endl;
     return 0;
