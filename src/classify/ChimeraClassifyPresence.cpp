@@ -1,4 +1,5 @@
 #include "ChimeraClassifyCommon.hpp"
+#include "post_em_prune_audit.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -744,11 +745,7 @@ void postEmDecision(
     return oss.str();
   };
 
-  enum class PresenceLevel {
-    kUnknown = 0,
-    kAccepted = 1,
-    kRejected = 2,
-  };
+  using PresenceLevel = PostEmPresenceLevel;
 
   constexpr double kPresencePiFloor = 1e-6;
   constexpr double kRejectFactor = 2.0;
@@ -820,9 +817,24 @@ void postEmDecision(
 	    std::vector<double> gaps_rejected_posterior_weight;
 	  };
 
-	  FallbackGateStats fb_stats;
-	  constexpr size_t kFallbackHintTopK = 16;
-	  constexpr double kFallbackGenusConflictGapMax = 0.20;
+		  FallbackGateStats fb_stats;
+		  constexpr size_t kFallbackHintTopK = 16;
+		  constexpr double kFallbackGenusConflictGapMax = 0.20;
+
+		  struct PruneAuditStats {
+		    size_t reads_total{0};
+		    size_t reads_empty_posterior{0};
+		    size_t pruning_active{0};
+		    size_t pruned_any{0};
+		    size_t top1_removed{0};
+		    size_t pruned_all_fallback_full{0};
+		    size_t top1_removed_w_lt_1e_5{0};
+		    std::vector<double> dropped_mass_vals;
+		    std::vector<double> top1_removed_fullpost_vals;
+		    std::vector<double> top1_removed_gap_vals;
+		    double dropped_mass_sum{0.0};
+		  };
+		  PruneAuditStats prune_stats;
 
 	  auto parse_u32 = [](const std::string &s, uint32_t &out) -> bool {
 	    if (s.empty()) {
@@ -845,65 +857,51 @@ void postEmDecision(
 	    }
 	  };
 
-  for (auto &result : results) {
-    // Keep the full posterior list (sorted) for dumping/analysis (POST_TOPK),
-    // but use a pruned+renormalized view for final decisions and taxidCount
-    // to avoid exploding long-tail allocations.
-    auto posterior_full = std::move(result.posteriors);
-    if (posterior_full.empty()) {
-      result.taxidCount.clear();
-      result.taxidCount.emplace_back(kUnclassified, 1.0);
-      continue;
-    }
-    std::sort(posterior_full.begin(), posterior_full.end(),
-              [](const auto &a, const auto &b) { return a.second > b.second; });
-    result.posteriors = std::move(posterior_full);
+	  for (auto &result : results) {
+	    prune_stats.reads_total += 1;
+	    // Keep the full posterior list (sorted) for dumping/analysis (POST_TOPK),
+	    // but use a pruned+renormalized view for final decisions and taxidCount
+	    // to avoid exploding long-tail allocations.
+	    auto posterior_full = std::move(result.posteriors);
+	    if (posterior_full.empty()) {
+	      prune_stats.reads_empty_posterior += 1;
+	      result.taxidCount.clear();
+	      result.taxidCount.emplace_back(kUnclassified, 1.0);
+	      continue;
+	    }
+	    std::sort(posterior_full.begin(), posterior_full.end(),
+	              [](const auto &a, const auto &b) { return a.second > b.second; });
 
-    std::vector<std::pair<std::string, double>> posterior;
-    posterior.reserve(result.posteriors.size());
+	    auto pruned = prune_post_em_posterior(
+	        posterior_full, decisionConfig.min_class_weight, classWeights,
+	        presence_level, kPresencePiFloor, kRejectFactor);
+	    std::vector<std::pair<std::string, double>> posterior =
+	        std::move(pruned.posterior);
 
-    if (decisionConfig.min_class_weight > 0.0) {
-      // Decouple posterior pruning from the final read-level gate:
-      // pruning too hard can erase low-abundance true taxa from the posterior list,
-      // while gating should remain conservative to control long-tail FPs.
-      const double pi_prune =
-          std::min(decisionConfig.min_class_weight, 1e-4);
-      if (pi_prune > 0.0 && !classWeights.empty()) {
-        double sum = 0.0;
-        for (const auto &kv : result.posteriors) {
-          PresenceLevel pres = presence_level(kv.first);
-          auto weight_it = classWeights.find(kv.first);
-          double w =
-              (weight_it != classWeights.end()) ? weight_it->second : 0.0;
-          double local_pi_min = pi_prune;
-          if (pres == PresenceLevel::kAccepted) {
-            local_pi_min = std::min(pi_prune, kPresencePiFloor);
-          } else if (pres == PresenceLevel::kRejected) {
-            local_pi_min = pi_prune * kRejectFactor;
-          }
-          if (w >= local_pi_min) {
-            posterior.push_back(kv);
-            sum += kv.second;
-          }
-        }
-        // Soft behavior: if nothing survives, keep the original (full) posterior.
-        if (posterior.empty()) {
-          posterior = result.posteriors;
-        } else if (sum > 0.0) {
-          for (auto &kv : posterior) {
-            kv.second /= sum;
-          }
-        }
-      } else {
-        posterior = result.posteriors;
-      }
-    } else {
-      posterior = result.posteriors;
-    }
+	    if (pruned.audit.pruning_active) {
+	      prune_stats.pruning_active += 1;
+	      if (pruned.audit.fallback_full) {
+	        prune_stats.pruned_all_fallback_full += 1;
+	      }
+	      if (pruned.audit.pruned_any) {
+	        prune_stats.pruned_any += 1;
+	        prune_stats.dropped_mass_sum += pruned.audit.dropped_mass;
+	        prune_stats.dropped_mass_vals.push_back(pruned.audit.dropped_mass);
+	      }
+	      if (pruned.audit.top1_removed) {
+	        prune_stats.top1_removed += 1;
+	        prune_stats.top1_removed_fullpost_vals.push_back(
+	            pruned.audit.full_top1_post);
+	        prune_stats.top1_removed_gap_vals.push_back(pruned.audit.full_gap);
+	        if (pruned.audit.full_top1_weight < 1e-5) {
+	          prune_stats.top1_removed_w_lt_1e_5 += 1;
+	        }
+	      }
+	    }
 
-    // Ensure POST_TOPK uses the same (pruned/renormalized) posterior view as the
-    // final decision logic. This reduces long-tail noise in low-diversity
-    // profile aggregation (e.g., avoids peaky-rescue picking hitchhiking taxa).
+	    // Ensure POST_TOPK uses the same (pruned/renormalized) posterior view as the
+	    // final decision logic. This reduces long-tail noise in low-diversity
+	    // profile aggregation (e.g., avoids peaky-rescue picking hitchhiking taxa).
     result.posteriors = posterior;
 
     if (dump_post) {
@@ -1212,7 +1210,7 @@ void postEmDecision(
 		    }
 			  }
 
-  if (decisionConfig.allow_fallback_on_reject && fb_stats.rejected_total > 0) {
+	  if (decisionConfig.allow_fallback_on_reject && fb_stats.rejected_total > 0) {
     auto q = [](std::vector<double> vals, double p) -> double {
       if (vals.empty()) {
         return 0.0;
@@ -1243,8 +1241,49 @@ void postEmDecision(
               << ", gap_posterior_weight(p50/p90)="
               << q(fb_stats.gaps_rejected_posterior_weight, 0.50) << '/'
               << q(fb_stats.gaps_rejected_posterior_weight, 0.90) << std::endl;
-  }
+	  }
 
-			}
+	  const bool prune_active_sample =
+	      (decisionConfig.min_class_weight > 0.0 && !classWeights.empty());
+	  if (prune_active_sample && prune_stats.reads_total > 0) {
+	    auto q = [](std::vector<double> vals, double p) -> double {
+	      if (vals.empty()) {
+	        return 0.0;
+	      }
+	      p = std::max(0.0, std::min(1.0, p));
+	      const size_t idx = static_cast<size_t>(
+	          std::floor(p * static_cast<double>(vals.size() - 1)));
+	      std::nth_element(vals.begin(),
+	                       vals.begin() + static_cast<std::ptrdiff_t>(idx),
+	                       vals.end());
+	      return vals[idx];
+	    };
+
+	    double dropped_mean = 0.0;
+	    if (prune_stats.pruned_any > 0) {
+	      dropped_mean =
+	          prune_stats.dropped_mass_sum / static_cast<double>(prune_stats.pruned_any);
+	    }
+
+	    std::cout << "PostEM prune audit: reads=" << prune_stats.reads_total
+	              << ", empty=" << prune_stats.reads_empty_posterior
+	              << ", pruned_any=" << prune_stats.pruned_any
+	              << ", top1_removed=" << prune_stats.top1_removed
+	              << ", pruned_all_fallback_full="
+	              << prune_stats.pruned_all_fallback_full
+	              << ", dropped_mass(mean/p50/p90)=" << format_val(dropped_mean)
+	              << '/' << format_val(q(prune_stats.dropped_mass_vals, 0.50))
+	              << '/' << format_val(q(prune_stats.dropped_mass_vals, 0.90))
+	              << ", top1_removed_fullpost(p50/p90)="
+	              << format_val(q(prune_stats.top1_removed_fullpost_vals, 0.50))
+	              << '/' << format_val(q(prune_stats.top1_removed_fullpost_vals, 0.90))
+	              << ", top1_removed_gap(p50/p90)="
+	              << format_val(q(prune_stats.top1_removed_gap_vals, 0.50)) << '/'
+	              << format_val(q(prune_stats.top1_removed_gap_vals, 0.90))
+	              << ", top1_removed_w<1e-5=" << prune_stats.top1_removed_w_lt_1e_5
+	              << std::endl;
+	  }
+
+				}
 
 } // namespace ChimeraClassify
