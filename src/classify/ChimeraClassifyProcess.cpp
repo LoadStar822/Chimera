@@ -1171,6 +1171,22 @@ void processSequence(
 
       constexpr size_t kPreemBetaRelaxDelta = 8;
       constexpr double kPreemBetaRelaxEffEvalMin = 48.0;
+      if (use_em && !config.low_div_active && !tidScore.empty()) {
+        fileInfo.preem_beta_relax_seen += 1;
+        if (beta_user) {
+          fileInfo.preem_beta_relax_beta_user += 1;
+        }
+        if (eff_eval < kPreemBetaRelaxEffEvalMin) {
+          fileInfo.preem_beta_relax_eff_lt_min += 1;
+        }
+        const size_t thr_beta_eval_raw = std::min(thr_beta, thr_eval);
+        if (thr_final_raw == thr_beta_eval_raw) {
+          fileInfo.preem_beta_relax_dom_beta += 1;
+        }
+        if (baseTopK > 0 && preem_n_strict <= (baseTopK / 2)) {
+          fileInfo.preem_beta_relax_strict_le_halfk += 1;
+        }
+      }
       if (use_em && !config.low_div_active && !beta_user &&
           eff_eval >= kPreemBetaRelaxEffEvalMin && baseTopK > 0) {
         fileInfo.preem_beta_relax_checks += 1;
@@ -1285,6 +1301,9 @@ void processSequence(
              // from entering EM/posterior lists.
              config.preEmTopK <= 16) {
     dynamicTopK = 16;
+  }
+  if (use_em && !config.low_div_active && dynamicTopK >= 96) {
+    fileInfo.preem_dynamic_topk_96 += 1;
   }
 
   // NCBI-only (optional): collapse strain/subspecies taxids to ONE representative
@@ -1765,6 +1784,18 @@ void classify_streaming(
           localFileInfo.preem_keepalive_blocked_low_gain;
       fileInfo.preem_keepalive_blocked_low_abs +=
           localFileInfo.preem_keepalive_blocked_low_abs;
+      fileInfo.preem_beta_relax_seen += localFileInfo.preem_beta_relax_seen;
+      fileInfo.preem_beta_relax_dom_beta += localFileInfo.preem_beta_relax_dom_beta;
+      fileInfo.preem_beta_relax_strict_le_halfk +=
+          localFileInfo.preem_beta_relax_strict_le_halfk;
+      fileInfo.preem_beta_relax_eff_lt_min += localFileInfo.preem_beta_relax_eff_lt_min;
+      fileInfo.preem_beta_relax_beta_user += localFileInfo.preem_beta_relax_beta_user;
+      fileInfo.preem_beta_relax_checks += localFileInfo.preem_beta_relax_checks;
+      fileInfo.preem_beta_relax_applied += localFileInfo.preem_beta_relax_applied;
+      fileInfo.preem_beta_relax_thr_drop_sum += localFileInfo.preem_beta_relax_thr_drop_sum;
+      fileInfo.preem_beta_relax_suppressed_overflow +=
+          localFileInfo.preem_beta_relax_suppressed_overflow;
+      fileInfo.preem_dynamic_topk_96 += localFileInfo.preem_dynamic_topk_96;
       if (presenceSummary) {
         presenceSummary->merge(presenceLocal);
       }
@@ -1856,12 +1887,19 @@ void classify(
           localFileInfo.preem_keepalive_blocked_low_gain;
       fileInfo.preem_keepalive_blocked_low_abs +=
           localFileInfo.preem_keepalive_blocked_low_abs;
+      fileInfo.preem_beta_relax_seen += localFileInfo.preem_beta_relax_seen;
+      fileInfo.preem_beta_relax_dom_beta += localFileInfo.preem_beta_relax_dom_beta;
+      fileInfo.preem_beta_relax_strict_le_halfk +=
+          localFileInfo.preem_beta_relax_strict_le_halfk;
+      fileInfo.preem_beta_relax_eff_lt_min += localFileInfo.preem_beta_relax_eff_lt_min;
+      fileInfo.preem_beta_relax_beta_user += localFileInfo.preem_beta_relax_beta_user;
       fileInfo.preem_beta_relax_checks += localFileInfo.preem_beta_relax_checks;
       fileInfo.preem_beta_relax_applied += localFileInfo.preem_beta_relax_applied;
       fileInfo.preem_beta_relax_thr_drop_sum +=
           localFileInfo.preem_beta_relax_thr_drop_sum;
       fileInfo.preem_beta_relax_suppressed_overflow +=
           localFileInfo.preem_beta_relax_suppressed_overflow;
+      fileInfo.preem_dynamic_topk_96 += localFileInfo.preem_dynamic_topk_96;
     }
   }
 }

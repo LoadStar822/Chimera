@@ -219,10 +219,17 @@ namespace ChimeraClassify {
 		size_t preem_keepalive_blocked_low_ratio{ 0 };
 		size_t preem_keepalive_blocked_low_gain{ 0 };
 		size_t preem_keepalive_blocked_low_abs{ 0 };
+		// Pre-EM beta relax / debugging counters (high-div only).
+		size_t preem_beta_relax_seen{ 0 };
+		size_t preem_beta_relax_dom_beta{ 0 };
+		size_t preem_beta_relax_strict_le_halfk{ 0 };
+		size_t preem_beta_relax_eff_lt_min{ 0 };
+		size_t preem_beta_relax_beta_user{ 0 };
 		size_t preem_beta_relax_checks{ 0 };
 		size_t preem_beta_relax_applied{ 0 };
 		size_t preem_beta_relax_thr_drop_sum{ 0 };
 		size_t preem_beta_relax_suppressed_overflow{ 0 };
+		size_t preem_dynamic_topk_96{ 0 };
 	};
 
 	struct batchReads {

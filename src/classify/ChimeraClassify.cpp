@@ -1346,6 +1346,12 @@ void run(ClassifyConfig config) {
               << " beta_relax_thr_drop_avg=" << relax_thr_drop_avg
               << " beta_relax_suppress_overflow="
               << fileInfo.preem_beta_relax_suppressed_overflow
+              << " beta_seen=" << fileInfo.preem_beta_relax_seen
+              << " beta_dom=" << fileInfo.preem_beta_relax_dom_beta
+              << " beta_le_halfk=" << fileInfo.preem_beta_relax_strict_le_halfk
+              << " beta_efflt=" << fileInfo.preem_beta_relax_eff_lt_min
+              << " beta_user=" << fileInfo.preem_beta_relax_beta_user
+              << " dyn96=" << fileInfo.preem_dynamic_topk_96
               << " head_mass_thresh=0.5 base_cap=256 max_cap=512"
               << std::defaultfloat << std::endl;
   };
