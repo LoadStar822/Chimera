@@ -799,6 +799,7 @@ void postEmDecision(
   constexpr double kRejectOverrideP1Min = 0.80;
   constexpr double kRejectOverrideGapMin = 0.25;
   constexpr double kRejectOverridePiFloor = 1e-5;
+  constexpr double kRejectOverrideTier2P1Min = 0.72;
   constexpr size_t kRejectOverrideCap = 256;
   constexpr double kHintUnblockMinProbFull = 1e-3;
   constexpr size_t kHintUnblockMaxRankFull = 8;
@@ -1031,7 +1032,7 @@ void postEmDecision(
 	        const bool tier1 =
 	            (full_p1 >= kRejectOverrideP1Min && full_gap >= kRejectOverrideGapMin);
 	        const bool tier2 =
-	            (!tier1 && full_p1 >= 0.75 && full_gap >= 0.20 &&
+	            (!tier1 && full_p1 >= kRejectOverrideTier2P1Min && full_gap >= 0.20 &&
 	             full_top1_weight >= pi_prune && pruned1_prob_full <= 0.05 &&
 	             (full_p1 - pruned1_prob_full) >= 0.50);
 
@@ -1044,7 +1045,7 @@ void postEmDecision(
 	          reject_override_floor = pi_prune; // 1e-4
 	          reject_override_tier = 2;
 	        } else {
-	          if (full_p1 < 0.75 || full_gap < 0.20) {
+	          if (full_p1 < kRejectOverrideTier2P1Min || full_gap < 0.20) {
 	            rej_stats.tier2_blocked_p1_gap += 1;
 	          } else if (full_top1_weight < pi_prune) {
 	            rej_stats.tier2_blocked_w_lt_pi_prune += 1;

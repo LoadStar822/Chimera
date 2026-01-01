@@ -110,6 +110,50 @@ int main() {
     }
   }
 
+  {
+    std::string message;
+    ChimeraClassify::DecisionConfig dc;
+    dc.posterior_threshold = 0.56;
+    dc.min_class_weight = 2e-4; // pi_prune=min(2e-4,1e-4)=1e-4
+    dc.allow_fallback_on_reject = true;
+    dc.fallback_gap_min = 0.10;
+
+    ChimeraClassify::classifyResult r;
+    r.id = "r_reject_override_tier2_p1_relaxed";
+    r.evaluated = 100.0;
+    r.best_taxid_hint = "456"; // typical high-div fallback uses hint
+    // Tier2 should be able to trigger below p1=0.75 when evidence is still strong
+    // and the pruned-top1 is very weak in full posterior.
+    r.posteriors.emplace_back("123", 0.74);
+    r.posteriors.emplace_back("789", 0.23); // no weight -> pruned out
+    r.posteriors.emplace_back("456", 0.03);
+
+    std::vector<ChimeraClassify::classifyResult> results;
+    results.push_back(r);
+
+    std::unordered_map<std::string, double> classWeights;
+    classWeights["123"] = 1.5e-4; // < 2e-4, pruned when rejected, but near threshold
+    classWeights["456"] = 1e-3;
+
+    ChimeraClassify::TaxDict tax;
+    tax.str2id["123"] = 123;
+    tax.str2id["456"] = 456;
+    tax.str2id["789"] = 789;
+
+    ChimeraClassify::PresenceDecision pd;
+    pd.threshold = 4.6;
+    pd.logPosteriors[123] = -5.0; // rejected: lp <= -tau
+
+    ChimeraClassify::postEmDecision(results, dc, classWeights, tax, &pd, nullptr);
+
+    bool ok = (!results[0].taxidCount.empty() &&
+               results[0].taxidCount.front().first == "123");
+    if (!expect_true("tier2_relaxed_p1_still_outputs_full_top1", ok, message)) {
+      ++failures;
+      failure_messages.push_back(std::move(message));
+    }
+  }
+
   if (failures == 0) {
     std::cout << "All tests passed." << std::endl;
     return 0;
