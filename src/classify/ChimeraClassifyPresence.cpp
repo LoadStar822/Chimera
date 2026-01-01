@@ -798,7 +798,7 @@ void postEmDecision(
   constexpr double kRejectDynPostBoost = 0.04;
   // Unified post-EM prior clipping via an evidence margin M(t) >= tau.
   // All clipping is high-div only (allow_fallback_on_reject) and capped.
-  constexpr double kPriorClippingTau = 0.0;
+  constexpr double kPriorClippingTau = 0.6931471805599453; // ln(2)
   constexpr size_t kPriorClippingCap = 256;
 
   double presence_tau = std::numeric_limits<double>::infinity();
@@ -1051,10 +1051,10 @@ void postEmDecision(
 	
 		        if (!(full_top1_weight > 0.0)) {
 		          rej_stats.blocked_low_weight += 1;
-		        } else if (prior_clipping_applied_total >= kPriorClippingCap) {
-		          rej_stats.blocked_cap += 1;
 		        } else if (margin < kPriorClippingTau) {
 		          rej_stats.blocked_low_margin += 1;
+		        } else if (prior_clipping_applied_total >= kPriorClippingCap) {
+		          rej_stats.blocked_cap += 1;
 		        } else {
 		          // Prior clipping: lower the per-read reject thresholds just enough
 		          // to let this (strong-evidence) rejected top1 survive both prune
@@ -1352,8 +1352,7 @@ void postEmDecision(
 				              }
 					            }
 					            bool hint_unblocked = false;
-					            if (!hint_in_topk && reject_by_weight &&
-					                prior_clipping_applied_total < kPriorClippingCap) {
+					            if (!hint_in_topk && reject_by_weight) {
 					              fb_stats.hint_unblock_checks += 1;
 					              const auto full_hit = lookup_taxid_in_topk(
 					                  posterior_full, fallback_taxid, kFallbackHintTopK);
@@ -1365,7 +1364,8 @@ void postEmDecision(
 					                    presence_level(fallback_taxid);
 					                double hint_local_pi_min = pi_prune;
 					                if (hint_pres == PresenceLevel::kAccepted) {
-					                  hint_local_pi_min = std::min(pi_prune, kPresencePiFloor);
+					                  hint_local_pi_min =
+					                      std::min(pi_prune, kPresencePiFloor);
 					                } else if (hint_pres == PresenceLevel::kRejected) {
 					                  hint_local_pi_min = pi_prune * kRejectFactor;
 					                }
@@ -1384,20 +1384,20 @@ void postEmDecision(
 					                                   hint_local_pi_min, hint_w, pi_prune);
 					                if (margin >= kPriorClippingTau) {
 					                  fb_stats.hint_unblock_margin_ok += 1;
-					                  hint_unblocked = true;
-					                  hint_in_topk = true;
-					                  fb_stats.hint_unblock_applied += 1;
-					                  prior_clipping_applied_total += 1;
-					                  fb_stats.hint_unblock_prob_full_vals.push_back(
-					                      full_hit.prob);
-					                  fb_stats.hint_unblock_margin_vals.push_back(margin);
+					                  if (prior_clipping_applied_total >= kPriorClippingCap) {
+					                    fb_stats.hint_unblock_cap_hit += 1;
+					                  } else {
+					                    hint_unblocked = true;
+					                    hint_in_topk = true;
+					                    fb_stats.hint_unblock_applied += 1;
+					                    prior_clipping_applied_total += 1;
+					                    fb_stats.hint_unblock_prob_full_vals.push_back(
+					                        full_hit.prob);
+					                    fb_stats.hint_unblock_margin_vals.push_back(
+					                        margin);
+					                  }
 					                }
 					              }
-					            } else if (!hint_in_topk && reject_by_weight &&
-					                       prior_clipping_applied_total >=
-					                           kPriorClippingCap) {
-					              fb_stats.hint_unblock_checks += 1;
-					              fb_stats.hint_unblock_cap_hit += 1;
 					            }
 
 				            if (!hint_in_topk) {

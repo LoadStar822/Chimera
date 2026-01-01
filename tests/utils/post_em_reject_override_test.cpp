@@ -146,9 +146,12 @@ int main() {
 
     ChimeraClassify::postEmDecision(results, dc, classWeights, tax, &pd, nullptr);
 
-    bool ok = (!results[0].taxidCount.empty() &&
-               results[0].taxidCount.front().first == "123");
-    if (!expect_true("tier2_relaxed_p1_still_outputs_full_top1", ok, message)) {
+    // With a more conservative default tau (ln2), this borderline case should
+    // no longer override a rejected full_top1.
+    bool ok =
+        (!results[0].taxidCount.empty() && results[0].taxidCount.front().first == "456");
+    if (!expect_true("margin_tau_ln2_blocks_borderline_reject_override", ok,
+                     message)) {
       ++failures;
       failure_messages.push_back(std::move(message));
     }
