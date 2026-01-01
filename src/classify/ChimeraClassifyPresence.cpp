@@ -800,6 +800,9 @@ void postEmDecision(
   constexpr double kRejectOverrideGapMin = 0.25;
   constexpr double kRejectOverridePiFloor = 1e-5;
   constexpr size_t kRejectOverrideCap = 256;
+  constexpr double kHintUnblockMinProbFull = 1e-3;
+  constexpr size_t kHintUnblockMaxRankFull = 8;
+  constexpr size_t kHintUnblockCap = 256;
 
   double presence_tau = std::numeric_limits<double>::infinity();
   double presence_strict_tau = std::numeric_limits<double>::infinity();
@@ -863,6 +866,14 @@ void postEmDecision(
 	    size_t fallback_blocked_gap_em_post{0};
 	    size_t fallback_blocked_gap_posterior_weight{0};
 	    size_t fallback_used_hint{0};
+	    size_t hint_unblock_checks{0};
+	    size_t hint_unblock_in_full_topk{0};
+	    size_t hint_unblock_prob_ge_thresh{0};
+	    size_t hint_unblock_rank_le{0};
+	    size_t hint_unblock_applied{0};
+	    size_t hint_unblock_cap_hit{0};
+	    std::vector<double> hint_unblock_prob_full_vals;
+	    std::vector<double> hint_unblock_rank_full_vals;
 	    std::vector<double> gaps_rejected_em_post;
 	    std::vector<double> gaps_rejected_posterior_weight;
 	  };
@@ -888,14 +899,21 @@ void postEmDecision(
 
 		  struct RejectOverrideStats {
 		    size_t checks{0};
-		    size_t strong{0};
-		    size_t applied_prune{0};
-		    size_t applied_gate{0};
+		    size_t tier1{0};
+		    size_t tier2{0};
+		    size_t applied_prune_tier1{0};
+		    size_t applied_prune_tier2{0};
+		    size_t applied_gate_tier1{0};
+		    size_t applied_gate_tier2{0};
 		    size_t blocked_low_weight{0};
 		    size_t blocked_cap{0};
-		    std::vector<double> fullpost_vals;
-		    std::vector<double> gap_vals;
-		    std::vector<double> w_over_pi_prune_vals;
+		    size_t tier2_blocked_p1_gap{0};
+		    size_t tier2_blocked_w_lt_pi_prune{0};
+		    size_t tier2_blocked_pruned_prob_high{0};
+		    std::vector<double> fullpost_applied;
+		    std::vector<double> gap_applied;
+		    std::vector<double> pruned1_prob_full_applied;
+		    std::vector<double> w_over_pi_prune_applied;
 		  };
 		  RejectOverrideStats rej_stats;
 
@@ -994,34 +1012,77 @@ void postEmDecision(
 	      }
 	    }
 
-	    bool strong_reject_override = false;
+	    double reject_override_floor = 0.0;
+	    int reject_override_tier = 0;
 	    if (prune_active_sample && decisionConfig.allow_fallback_on_reject &&
 	        pruned.audit.top1_removed && full_top1_presence == PresenceLevel::kRejected) {
 	      rej_stats.checks += 1;
-	      if (full_p1 >= kRejectOverrideP1Min && full_gap >= kRejectOverrideGapMin) {
-	        rej_stats.strong += 1;
-	        rej_stats.fullpost_vals.push_back(full_p1);
-	        rej_stats.gap_vals.push_back(full_gap);
-	        const double pi_prune = std::min(decisionConfig.min_class_weight, 1e-4);
-	        if (pi_prune > 0.0) {
-	          rej_stats.w_over_pi_prune_vals.push_back(full_top1_weight / pi_prune);
+	      const double pi_prune = std::min(decisionConfig.min_class_weight, 1e-4);
+	      if (pi_prune > 0.0) {
+	        const std::string &pruned_top1_taxid = posterior.front().first;
+	        double pruned1_prob_full = 0.0;
+	        for (const auto &kv : posterior_full) {
+	          if (kv.first == pruned_top1_taxid) {
+	            pruned1_prob_full = kv.second;
+	            break;
+	          }
 	        }
-	        if (full_top1_weight < kRejectOverridePiFloor) {
-	          rej_stats.blocked_low_weight += 1;
-	        } else if (rej_stats.applied_prune >= kRejectOverrideCap) {
-	          rej_stats.blocked_cap += 1;
+
+	        const bool tier1 =
+	            (full_p1 >= kRejectOverrideP1Min && full_gap >= kRejectOverrideGapMin);
+	        const bool tier2 =
+	            (!tier1 && full_p1 >= 0.75 && full_gap >= 0.20 &&
+	             full_top1_weight >= pi_prune && pruned1_prob_full <= 0.05 &&
+	             (full_p1 - pruned1_prob_full) >= 0.50);
+
+	        if (tier1) {
+	          rej_stats.tier1 += 1;
+	          reject_override_floor = kRejectOverridePiFloor; // 1e-5
+	          reject_override_tier = 1;
+	        } else if (tier2) {
+	          rej_stats.tier2 += 1;
+	          reject_override_floor = pi_prune; // 1e-4
+	          reject_override_tier = 2;
 	        } else {
-	          PostEmPruneTop1Override top1_override;
-	          top1_override.taxid = full_top1_taxid;
-	          top1_override.local_pi_min_floor = kRejectOverridePiFloor;
-	          top1_override.active = true;
-	          auto pruned_override = prune_post_em_posterior(
-	              posterior_full, decisionConfig.min_class_weight, classWeights,
-	              presence_level, kPresencePiFloor, kRejectFactor,
-	              &top1_override);
-	          posterior = std::move(pruned_override.posterior);
-	          strong_reject_override = true;
-	          rej_stats.applied_prune += 1;
+	          if (full_p1 < 0.75 || full_gap < 0.20) {
+	            rej_stats.tier2_blocked_p1_gap += 1;
+	          } else if (full_top1_weight < pi_prune) {
+	            rej_stats.tier2_blocked_w_lt_pi_prune += 1;
+	          } else {
+	            rej_stats.tier2_blocked_pruned_prob_high += 1;
+	          }
+	        }
+
+	        if (reject_override_tier != 0) {
+	          const size_t applied_total =
+	              rej_stats.applied_prune_tier1 + rej_stats.applied_prune_tier2;
+	          if (full_top1_weight < reject_override_floor) {
+	            rej_stats.blocked_low_weight += 1;
+	            reject_override_tier = 0;
+	            reject_override_floor = 0.0;
+	          } else if (applied_total >= kRejectOverrideCap) {
+	            rej_stats.blocked_cap += 1;
+	            reject_override_tier = 0;
+	            reject_override_floor = 0.0;
+	          } else {
+	            PostEmPruneTop1Override top1_override;
+	            top1_override.taxid = full_top1_taxid;
+	            top1_override.local_pi_min_floor = reject_override_floor;
+	            top1_override.active = true;
+	            auto pruned_override = prune_post_em_posterior(
+	                posterior_full, decisionConfig.min_class_weight, classWeights,
+	                presence_level, kPresencePiFloor, kRejectFactor, &top1_override);
+	            posterior = std::move(pruned_override.posterior);
+	            if (reject_override_tier == 1) {
+	              rej_stats.applied_prune_tier1 += 1;
+	            } else {
+	              rej_stats.applied_prune_tier2 += 1;
+	              rej_stats.pruned1_prob_full_applied.push_back(pruned1_prob_full);
+	            }
+	            rej_stats.fullpost_applied.push_back(full_p1);
+	            rej_stats.gap_applied.push_back(full_gap);
+	            rej_stats.w_over_pi_prune_applied.push_back(full_top1_weight / pi_prune);
+	          }
 	        }
 	      }
 	    }
@@ -1077,10 +1138,14 @@ void postEmDecision(
           pi_min = std::min(pi_min, kPresencePiFloor);
         } else if (top_presence == PresenceLevel::kRejected) {
           pi_min = std::min(1.0, pi_min * kRejectFactor);
-          if (strong_reject_override && top.first == full_top1_taxid &&
-              class_weight >= kRejectOverridePiFloor) {
-            pi_min = std::min(pi_min, kRejectOverridePiFloor);
-            rej_stats.applied_gate += 1;
+          if (reject_override_tier != 0 && top.first == full_top1_taxid &&
+              reject_override_floor > 0.0 && class_weight >= reject_override_floor) {
+            pi_min = std::min(pi_min, reject_override_floor);
+            if (reject_override_tier == 1) {
+              rej_stats.applied_gate_tier1 += 1;
+            } else {
+              rej_stats.applied_gate_tier2 += 1;
+            }
           }
         }
         // Soft gate: when the read-level posterior is very confident and well-separated,
@@ -1299,6 +1364,35 @@ void postEmDecision(
 				                break;
 				              }
 				            }
+				            bool hint_unblocked = false;
+				            if (!hint_in_topk && reject_by_weight &&
+				                fb_stats.hint_unblock_applied < kHintUnblockCap) {
+				              fb_stats.hint_unblock_checks += 1;
+				              const auto full_hit = lookup_taxid_in_topk(
+				                  posterior_full, fallback_taxid, kFallbackHintTopK);
+				              if (full_hit.found) {
+				                fb_stats.hint_unblock_in_full_topk += 1;
+				                if (full_hit.prob >= kHintUnblockMinProbFull) {
+				                  fb_stats.hint_unblock_prob_ge_thresh += 1;
+				                  if (full_hit.rank < kHintUnblockMaxRankFull) {
+				                    fb_stats.hint_unblock_rank_le += 1;
+				                    hint_unblocked = true;
+				                    hint_in_topk = true;
+				                    fb_stats.hint_unblock_applied += 1;
+				                    fb_stats.hint_unblock_prob_full_vals.push_back(
+				                        full_hit.prob);
+				                    fb_stats.hint_unblock_rank_full_vals.push_back(
+				                        static_cast<double>(full_hit.rank));
+				                  }
+				                }
+				              }
+				            } else if (!hint_in_topk && reject_by_weight &&
+				                       fb_stats.hint_unblock_applied >=
+				                           kHintUnblockCap) {
+				              fb_stats.hint_unblock_checks += 1;
+				              fb_stats.hint_unblock_cap_hit += 1;
+				            }
+
 				            if (!hint_in_topk) {
 				              fb_stats.fallback_blocked_hint_not_in_topk += 1;
 				              if (dump_hint_blocked) {
@@ -1339,6 +1433,7 @@ void postEmDecision(
 				              }
 				              // keep rejected
 				            } else {
+				              (void)hint_unblocked;
 				              fb_stats.fallback_used_hint += 1;
 				              double total_evidence =
 				                  (result.sample_weight > 0.0) ? result.sample_weight
@@ -1412,6 +1507,12 @@ void postEmDecision(
               << ", posterior_weight=" << fb_stats.rejected_posterior_weight
               << "), applied=" << fb_stats.fallback_applied
 	              << ", used_hint=" << fb_stats.fallback_used_hint
+	              << ", hint_unblock=" << fb_stats.hint_unblock_applied << '/'
+	              << fb_stats.hint_unblock_checks
+	              << " (in_full=" << fb_stats.hint_unblock_in_full_topk
+	              << ", ge_thresh=" << fb_stats.hint_unblock_prob_ge_thresh
+	              << ", rank_ok=" << fb_stats.hint_unblock_rank_le
+	              << ", cap_hit=" << fb_stats.hint_unblock_cap_hit << ')'
 	              << ", blocked_hint_not_in_topk="
 	              << fb_stats.fallback_blocked_hint_not_in_topk
 	              << ", blocked_genus_conflict="
@@ -1480,19 +1581,29 @@ void postEmDecision(
 	    };
 
 	    std::cout << "PostEM reject override: checks=" << rej_stats.checks
-	              << ", strong=" << rej_stats.strong
-	              << ", applied_prune=" << rej_stats.applied_prune
-	              << ", applied_gate=" << rej_stats.applied_gate
+	              << ", tier1=" << rej_stats.applied_prune_tier1
+	              << ", tier2=" << rej_stats.applied_prune_tier2
+	              << ", applied_gate="
+	              << (rej_stats.applied_gate_tier1 + rej_stats.applied_gate_tier2)
 	              << ", blocked_low_weight=" << rej_stats.blocked_low_weight
 	              << ", blocked_cap=" << rej_stats.blocked_cap
+	              << ", tier2_blocked_p1gap=" << rej_stats.tier2_blocked_p1_gap
+	              << ", tier2_blocked_w_lt_pi_prune="
+	              << rej_stats.tier2_blocked_w_lt_pi_prune
+	              << ", tier2_blocked_pruned_prob_high="
+	              << rej_stats.tier2_blocked_pruned_prob_high
 	              << ", fullpost(p50/p90)="
-	              << format_val(q(rej_stats.fullpost_vals, 0.50)) << '/'
-	              << format_val(q(rej_stats.fullpost_vals, 0.90))
-	              << ", gap(p50/p90)=" << format_val(q(rej_stats.gap_vals, 0.50))
-	              << '/' << format_val(q(rej_stats.gap_vals, 0.90))
+	              << format_val(q(rej_stats.fullpost_applied, 0.50)) << '/'
+	              << format_val(q(rej_stats.fullpost_applied, 0.90))
+	              << ", gap(p50/p90)=" << format_val(q(rej_stats.gap_applied, 0.50))
+	              << '/' << format_val(q(rej_stats.gap_applied, 0.90))
+	              << ", pruned1_prob_full(p50/p90)="
+	              << format_val(q(rej_stats.pruned1_prob_full_applied, 0.50))
+	              << '/'
+	              << format_val(q(rej_stats.pruned1_prob_full_applied, 0.90))
 	              << ", w_over_pi_prune(p50/p90)="
-	              << format_val(q(rej_stats.w_over_pi_prune_vals, 0.50)) << '/'
-	              << format_val(q(rej_stats.w_over_pi_prune_vals, 0.90))
+	              << format_val(q(rej_stats.w_over_pi_prune_applied, 0.50)) << '/'
+	              << format_val(q(rej_stats.w_over_pi_prune_applied, 0.90))
 	              << std::endl;
 	  }
 

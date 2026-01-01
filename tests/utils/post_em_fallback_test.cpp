@@ -94,6 +94,53 @@ int main() {
   {
     std::string message;
     ChimeraClassify::DecisionConfig dc;
+    dc.posterior_threshold = 0.56;
+    dc.min_class_weight = 2e-4; // pi_prune=min(2e-4,1e-4)=1e-4
+    dc.allow_fallback_on_reject = true;
+    dc.fallback_gap_min = 0.10;
+
+    ChimeraClassify::classifyResult r;
+    r.id = "r_hint_unblock_full_topk";
+    r.evaluated = 100.0;
+    r.best_taxid_hint = "999";
+    // Design the pruned posterior (after dropping 999) to be only slightly above
+    // dyn_post so the soft weight gate does not relax pi_min enough to pass.
+    // (0.4,0.3)->renorm=(0.571,0.429), gap=0.142
+    r.posteriors.emplace_back("123", 0.4);
+    r.posteriors.emplace_back("999", 0.3);
+    r.posteriors.emplace_back("456", 0.3);
+
+    std::vector<ChimeraClassify::classifyResult> results;
+    results.push_back(r);
+
+    // Force reject_by_weight: let top survive prune (w>=pi_prune) but fail weight gate
+    // (w<min_class_weight). Hint is present in full posterior topK but pruned away
+    // (w<pi_prune), so it is not in pruned POST_TOPK.
+    std::unordered_map<std::string, double> classWeights;
+    classWeights["123"] = 1.5e-4; // >=pi_prune but <2e-4
+    classWeights["456"] = 1e-3;
+    classWeights["999"] = 0.0; // pruned away from POST_TOPK
+
+    ChimeraClassify::TaxDict tax;
+    tax.str2id["123"] = 123;
+    tax.str2id["456"] = 456;
+    tax.str2id["999"] = 999;
+
+    ChimeraClassify::postEmDecision(results, dc, classWeights, tax, nullptr,
+                                    nullptr);
+
+    bool ok = (!results[0].taxidCount.empty() &&
+               results[0].taxidCount.front().first == "999");
+    if (!expect_true("fallback_allows_hint_in_full_post_topk_when_strong", ok,
+                     message)) {
+      ++failures;
+      failure_messages.push_back(std::move(message));
+    }
+  }
+
+  {
+    std::string message;
+    ChimeraClassify::DecisionConfig dc;
     dc.posterior_threshold = 0.95; // reject by posterior -> em_post
     dc.min_class_weight = 0.0;
     dc.allow_fallback_on_reject = true;
