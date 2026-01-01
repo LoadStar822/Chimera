@@ -201,6 +201,52 @@ int main() {
     }
   }
 
+  {
+    std::string message;
+    ChimeraClassify::DecisionConfig dc;
+    dc.posterior_threshold = 0.56;
+    dc.min_class_weight = 2e-4; // pi_prune=min(2e-4,1e-4)=1e-4
+    dc.allow_fallback_on_reject = true;
+    dc.fallback_gap_min = 0.10;
+
+    ChimeraClassify::classifyResult r;
+    r.id = "r_reject_override_binding_pi_allows_borderline";
+    r.evaluated = 100.0;
+    r.best_taxid_hint = "456";
+    // This case is designed so that the evidence margin is <0 when using
+    // pi_min=max(prune, gate), but becomes >=0 when using the binding (prune)
+    // constraint only. This should trigger a reject override for rejected top1.
+    r.posteriors.emplace_back("123", 0.62);
+    r.posteriors.emplace_back("456", 0.37);
+    r.posteriors.emplace_back("789", 0.01);
+
+    std::vector<ChimeraClassify::classifyResult> results;
+    results.push_back(r);
+
+    std::unordered_map<std::string, double> classWeights;
+    classWeights["123"] = 1.5e-4; // < rejected prune threshold, but near pi_prune
+    classWeights["456"] = 1e-3;
+    classWeights["789"] = 1e-3;
+
+    ChimeraClassify::TaxDict tax;
+    tax.str2id["123"] = 123;
+    tax.str2id["456"] = 456;
+    tax.str2id["789"] = 789;
+
+    ChimeraClassify::PresenceDecision pd;
+    pd.threshold = 4.6;
+    pd.logPosteriors[123] = -5.0; // rejected: lp <= -tau
+
+    ChimeraClassify::postEmDecision(results, dc, classWeights, tax, &pd, nullptr);
+
+    bool ok = (!results[0].taxidCount.empty() &&
+               results[0].taxidCount.front().first == "123");
+    if (!expect_true("binding_pi_allows_borderline_reject_override", ok, message)) {
+      ++failures;
+      failure_messages.push_back(std::move(message));
+    }
+  }
+
   if (failures == 0) {
     std::cout << "All tests passed." << std::endl;
     return 0;

@@ -1050,11 +1050,11 @@ void postEmDecision(
 		        }
 	
 		        const double alt_prob = std::max({pruned1_prob_full, full_p2, pi_prune});
-		        // Need to overcome both prune and weight-gate thresholds for top1.
-		        const double prune_pi_min = pi_prune * kRejectFactor;
-		        const double gate_pi_min =
-		            std::min(1.0, decisionConfig.min_class_weight * kRejectFactor);
-		        const double pi_min = std::max(prune_pi_min, gate_pi_min);
+			        // Evidence margin should be computed against the binding constraint.
+			        // In this top1_removed + rejected-top1 path, the binding constraint is
+			        // the prune threshold; the weight-gate penalty is handled by clipping
+			        // thresholds down to w(t) when applying the override.
+			        const double pi_min = pi_prune * kRejectFactor;
 	
 		        const double margin =
 		            (full_top1_weight > 0.0)
