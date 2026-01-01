@@ -351,6 +351,33 @@ add_executable(post_em_prune_audit_tests
     tests/utils/post_em_prune_audit_test.cpp
 )
 
+add_executable(idf_clamp_tests
+    tests/utils/idf_clamp_test.cpp
+)
+
+target_link_libraries(idf_clamp_tests
+    PRIVATE
+    strobemers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    pthread
+    BZip2::BZip2
+    ZLIB::ZLIB
+    seqan3::seqan3
+    Threads::Threads
+)
+
+target_include_directories(idf_clamp_tests
+    PUBLIC
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/src/classify
+    ${PROJECT_SOURCE_DIR}/libs
+    ${PROJECT_SOURCE_DIR}/libs/minions-master/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/cereal/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/sdsl-lite/include
+)
+
 target_link_libraries(post_em_prune_audit_tests
     PRIVATE
     strobemers

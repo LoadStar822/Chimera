@@ -22,6 +22,7 @@
 #define CLASSIFYCONFIG_HPP
 #include <iostream>
 #include <vector>
+#include <array>
 #include <unordered_set>
 #include <string>
 #include <cmath>
@@ -252,6 +253,12 @@ namespace ChimeraClassify {
 		size_t preem_finalk_33_64{ 0 };
 		size_t preem_finalk_65_96{ 0 };
 		size_t preem_finalk_eq96{ 0 };
+		// Hit-level IDF clamp audit (minimizer scoring).
+		size_t hit_idf_total{ 0 };
+		size_t hit_idf_raw_lt0p5{ 0 };
+		double hit_idf_contrib_sum_old{ 0.0 };
+		double hit_idf_contrib_sum_new{ 0.0 };
+		std::array<uint64_t, 64> hit_idf_raw_hist{};
 	};
 
 	struct batchReads {

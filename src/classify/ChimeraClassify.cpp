@@ -1453,9 +1453,72 @@ void run(ClassifyConfig config) {
               << " head_mass_thresh=0.5 base_cap=256 max_cap=512"
               << std::defaultfloat << std::endl;
   };
+  auto print_hit_idf_audit = [&]() {
+    if (fileInfo.hit_idf_total == 0) {
+      return;
+    }
+    const double idf_max = std::max(0.0, config.idf_max);
+    const double idf_min_new = config.low_div_active ? 0.5 : 0.0;
+    constexpr size_t kBins = 64;
+    auto quantile_from_hist = [&](double q) -> double {
+      if (q <= 0.0) {
+        return 0.0;
+      }
+      if (q >= 1.0) {
+        return idf_max;
+      }
+      uint64_t total = 0;
+      for (size_t i = 0; i < fileInfo.hit_idf_raw_hist.size(); ++i) {
+        total += fileInfo.hit_idf_raw_hist[i];
+      }
+      if (total == 0) {
+        return 0.0;
+      }
+      uint64_t target = static_cast<uint64_t>(std::ceil(q * total));
+      uint64_t acc = 0;
+      size_t idx = fileInfo.hit_idf_raw_hist.size() - 1;
+      for (size_t i = 0; i < fileInfo.hit_idf_raw_hist.size(); ++i) {
+        acc += fileInfo.hit_idf_raw_hist[i];
+        if (acc >= target) {
+          idx = i;
+          break;
+        }
+      }
+      if (idf_max <= 0.0) {
+        return 0.0;
+      }
+      double pos = static_cast<double>(idx) / static_cast<double>(kBins - 1);
+      return std::clamp(pos * idf_max, 0.0, idf_max);
+    };
+
+    const double p10 = quantile_from_hist(0.10);
+    const double p50 = quantile_from_hist(0.50);
+    const double p90 = quantile_from_hist(0.90);
+
+    double frac_lt0p5 = 0.0;
+    if (fileInfo.hit_idf_total > 0) {
+      frac_lt0p5 = static_cast<double>(fileInfo.hit_idf_raw_lt0p5) /
+                   static_cast<double>(fileInfo.hit_idf_total);
+    }
+    double contrib_ratio = 1.0;
+    if (fileInfo.hit_idf_contrib_sum_old > 0.0) {
+      contrib_ratio = fileInfo.hit_idf_contrib_sum_new /
+                      fileInfo.hit_idf_contrib_sum_old;
+    }
+    std::cout << "HitIDF clamp audit: low_div_active="
+              << (config.low_div_active ? 1 : 0) << " idf_min_new="
+              << idf_min_new << " idf_max=" << idf_max
+              << " idf_raw(p10/p50/p90)=" << std::fixed << std::setprecision(3)
+              << p10 << "/" << p50 << "/" << p90 << " raw_lt0.5="
+              << fileInfo.hit_idf_raw_lt0p5 << "/" << fileInfo.hit_idf_total
+              << " (" << std::setprecision(3) << frac_lt0p5
+              << ") contrib_new/old=" << std::setprecision(6) << contrib_ratio
+              << std::defaultfloat << std::endl;
+  };
   if (config.verbose) {
     print_rejects();
     print_preem_stats();
+    print_hit_idf_audit();
   }
 
   auto saveStart = std::chrono::high_resolution_clock::now();

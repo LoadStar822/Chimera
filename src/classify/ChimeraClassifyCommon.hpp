@@ -151,6 +151,11 @@ inline bool allow_low_df_boost(std::size_t df_bins, bool has_freq,
   return df_est <= df_gate;
 }
 
+inline double clamp_idf(double idf_raw, bool low_div_active, double idf_max) {
+  const double idf_min = low_div_active ? 0.5 : 0.0;
+  return std::clamp(idf_raw, idf_min, idf_max);
+}
+
 inline std::vector<uint64_t> select_rare_route_values(
     const std::vector<std::pair<uint32_t, uint64_t>> &scored,
     std::size_t budget) {

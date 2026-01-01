@@ -661,9 +661,30 @@ void processSequence(
       totalBins = static_cast<double>(binNumAll);
     }
 
-    double idf = std::log2((totalBins + 1.0) /
-                           (static_cast<double>(df_bins) + 1.0));
-    idf = std::clamp(idf, 0.5, config.idf_max);
+    double idf_raw = std::log2((totalBins + 1.0) /
+                               (static_cast<double>(df_bins) + 1.0));
+    double idf = clamp_idf(idf_raw, config.low_div_active, config.idf_max);
+    double idf_old = std::clamp(idf_raw, 0.5, config.idf_max);
+    fileInfo.hit_idf_total += 1;
+    if (idf_raw < 0.5) {
+      fileInfo.hit_idf_raw_lt0p5 += 1;
+    }
+    {
+      const double idf_max = std::max(0.0, config.idf_max);
+      const double bucket_value = (idf_max > 0.0)
+                                      ? std::clamp(idf_raw, 0.0, idf_max)
+                                      : 0.0;
+      constexpr double kBuckets = 64.0;
+      size_t bucket = 0;
+      if (idf_max > 0.0) {
+        bucket = static_cast<size_t>(std::floor(bucket_value / idf_max *
+                                                (kBuckets - 1.0)));
+      }
+      if (bucket >= fileInfo.hit_idf_raw_hist.size()) {
+        bucket = fileInfo.hit_idf_raw_hist.size() - 1;
+      }
+      fileInfo.hit_idf_raw_hist[bucket] += 1;
+    }
 
     double freqFactor = 1.0;
     const bool has_freq = weightCtx.enabled();
@@ -702,12 +723,17 @@ void processSequence(
     const bool localUniqueEdge = (deg_effective == 1 && df_bins == 1);
     double denom = std::log2(2.0 + static_cast<double>(deg_effective));
     double weight = denom > 0.0 ? 1.0 / denom : 1.0;
-    double contrib = idf * weight * freqFactor * exclusivityWeight;
+    double base = weight * freqFactor * exclusivityWeight;
+    double bonus = 1.0;
     if (uniqueEdge) {
-      contrib *= kUniqueEdgeBonus;
+      bonus = kUniqueEdgeBonus;
     } else if (low_df_boost) {
-      contrib *= 1.5;
+      bonus = 1.5;
     }
+    double contrib = idf * base * bonus;
+    double contrib_old = idf_old * base * bonus;
+    fileInfo.hit_idf_contrib_sum_old += contrib_old;
+    fileInfo.hit_idf_contrib_sum_new += contrib;
     for (uint32_t tid : minimizerTids) {
       tidScore[tid] += contrib;
       ++consistencyHits[tid];
@@ -1895,6 +1921,13 @@ void classify_streaming(
       fileInfo.preem_finalk_33_64 += localFileInfo.preem_finalk_33_64;
       fileInfo.preem_finalk_65_96 += localFileInfo.preem_finalk_65_96;
       fileInfo.preem_finalk_eq96 += localFileInfo.preem_finalk_eq96;
+      fileInfo.hit_idf_total += localFileInfo.hit_idf_total;
+      fileInfo.hit_idf_raw_lt0p5 += localFileInfo.hit_idf_raw_lt0p5;
+      fileInfo.hit_idf_contrib_sum_old += localFileInfo.hit_idf_contrib_sum_old;
+      fileInfo.hit_idf_contrib_sum_new += localFileInfo.hit_idf_contrib_sum_new;
+      for (size_t i = 0; i < fileInfo.hit_idf_raw_hist.size(); ++i) {
+        fileInfo.hit_idf_raw_hist[i] += localFileInfo.hit_idf_raw_hist[i];
+      }
       if (presenceSummary) {
         presenceSummary->merge(presenceLocal);
       }
@@ -2016,6 +2049,13 @@ void classify(
       fileInfo.preem_finalk_33_64 += localFileInfo.preem_finalk_33_64;
       fileInfo.preem_finalk_65_96 += localFileInfo.preem_finalk_65_96;
       fileInfo.preem_finalk_eq96 += localFileInfo.preem_finalk_eq96;
+      fileInfo.hit_idf_total += localFileInfo.hit_idf_total;
+      fileInfo.hit_idf_raw_lt0p5 += localFileInfo.hit_idf_raw_lt0p5;
+      fileInfo.hit_idf_contrib_sum_old += localFileInfo.hit_idf_contrib_sum_old;
+      fileInfo.hit_idf_contrib_sum_new += localFileInfo.hit_idf_contrib_sum_new;
+      for (size_t i = 0; i < fileInfo.hit_idf_raw_hist.size(); ++i) {
+        fileInfo.hit_idf_raw_hist[i] += localFileInfo.hit_idf_raw_hist[i];
+      }
     }
   }
 }

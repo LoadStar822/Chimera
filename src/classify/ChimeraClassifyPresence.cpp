@@ -935,6 +935,8 @@ void postEmDecision(
 			    std::vector<double> gap_applied;
 			    std::vector<double> pruned1_prob_full_applied;
 			    std::vector<double> w_over_pi_prune_applied;
+			    std::vector<double> log_odds_vals;
+			    std::vector<double> log_penalty_vals;
 			    std::vector<double> margin_vals;
 			  };
 			  RejectOverrideStats rej_stats;
@@ -1063,6 +1065,11 @@ void postEmDecision(
 		            (full_top1_weight > 0.0)
 		                ? compute_margin(full_p1, alt_prob, pi_min, full_top1_weight, 0.0)
 		                : -std::numeric_limits<double>::infinity();
+		        if (full_top1_weight > 0.0) {
+		          rej_stats.log_odds_vals.push_back(safe_log(full_p1 / alt_prob));
+		          rej_stats.log_penalty_vals.push_back(
+		              safe_log(pi_min / full_top1_weight));
+		        }
 		        rej_stats.margin_vals.push_back(margin);
 		        if (!(margin >= 0.0)) {
 		          rej_stats.margin_lt_0 += 1;
@@ -1688,6 +1695,12 @@ void postEmDecision(
 		              << ", w_over_pi_prune(p50/p90)="
 		              << format_val(q(rej_stats.w_over_pi_prune_applied, 0.50)) << '/'
 		              << format_val(q(rej_stats.w_over_pi_prune_applied, 0.90))
+		              << ", log_odds(p50/p90)="
+		              << format_val(q(rej_stats.log_odds_vals, 0.50)) << '/'
+		              << format_val(q(rej_stats.log_odds_vals, 0.90))
+		              << ", log_penalty(p50/p90)="
+		              << format_val(q(rej_stats.log_penalty_vals, 0.50)) << '/'
+		              << format_val(q(rej_stats.log_penalty_vals, 0.90))
 		              << ", margin(p50/p90)="
 		              << format_val(q(rej_stats.margin_vals, 0.50)) << '/'
 		              << format_val(q(rej_stats.margin_vals, 0.90))
