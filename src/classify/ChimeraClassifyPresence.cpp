@@ -870,32 +870,35 @@ void postEmDecision(
 		    return safe_log(pp / aa) - safe_log(pii / ww);
 		  };
 
-	  struct FallbackGateStats {
-	    size_t rejected_total{0};
-	    size_t rejected_em_post{0};
-	    size_t rejected_posterior_weight{0};
-	    size_t fallback_applied{0};
-	    size_t fallback_blocked_hint_not_in_topk{0};
-	    size_t fallback_blocked_genus_conflict{0};
-	    size_t fallback_blocked_gap_em_post{0};
-	    size_t fallback_blocked_gap_posterior_weight{0};
-		    size_t fallback_used_hint{0};
-		    size_t hint_unblock_checks{0};
-		    size_t hint_unblock_in_full_topk{0};
-		    size_t hint_unblock_margin_ok{0};
-		    size_t hint_unblock_margin_lt_0{0};
-		    size_t hint_unblock_margin_0_to_ln2{0};
-		    size_t hint_unblock_margin_ge_ln2{0};
-		    size_t hint_unblock_applied{0};
-		    size_t hint_unblock_applied_margin_lt_0{0};
-		    size_t hint_unblock_applied_margin_0_to_ln2{0};
-		    size_t hint_unblock_applied_margin_ge_ln2{0};
-		    size_t hint_unblock_cap_hit{0};
-		    std::vector<double> hint_unblock_prob_full_vals;
-		    std::vector<double> hint_unblock_margin_vals;
-		    std::vector<double> gaps_rejected_em_post;
-		    std::vector<double> gaps_rejected_posterior_weight;
-		  };
+		  struct FallbackGateStats {
+		    size_t rejected_total{0};
+		    size_t rejected_em_post{0};
+		    size_t rejected_posterior_weight{0};
+		    size_t fallback_applied{0};
+		    size_t fallback_blocked_hint_not_in_topk{0};
+		    size_t fallback_blocked_genus_conflict{0};
+		    size_t fallback_blocked_gap_em_post{0};
+		    size_t fallback_blocked_gap_posterior_weight{0};
+			    size_t fallback_used_hint{0};
+			    size_t hint_unblock_checks{0};
+			    size_t hint_unblock_in_full_topk{0};
+			    size_t hint_unblock_margin_ok{0};
+			    size_t hint_unblock_margin_lt_0{0};
+			    size_t hint_unblock_margin_0_to_ln2{0};
+			    size_t hint_unblock_margin_ge_ln2{0};
+			    size_t hint_unblock_applied{0};
+			    size_t hint_unblock_applied_margin_lt_0{0};
+			    size_t hint_unblock_applied_margin_0_to_ln2{0};
+			    size_t hint_unblock_applied_margin_ge_ln2{0};
+			    size_t hint_unblock_cap_hit{0};
+			    std::vector<double> hint_unblock_log_odds_vals;
+			    std::vector<double> hint_unblock_log_penalty_vals;
+			    std::vector<double> hint_unblock_margin_check_vals;
+			    std::vector<double> hint_unblock_prob_full_vals;
+			    std::vector<double> hint_unblock_margin_vals;
+			    std::vector<double> gaps_rejected_em_post;
+			    std::vector<double> gaps_rejected_posterior_weight;
+			  };
 
 		  FallbackGateStats fb_stats;
 		  constexpr size_t kFallbackHintTopK = 16;
@@ -1383,13 +1386,14 @@ void postEmDecision(
 					              fb_stats.hint_unblock_checks += 1;
 					              const auto full_hit = lookup_taxid_in_topk(
 					                  posterior_full, fallback_taxid, kFallbackHintTopK);
-					              if (full_hit.found) {
-					                fb_stats.hint_unblock_in_full_topk += 1;
-					                const double pi_prune =
-					                    std::min(decisionConfig.min_class_weight, 1e-4);
-					                const PresenceLevel hint_pres =
-					                    presence_level(fallback_taxid);
-					                double hint_local_pi_min = pi_prune;
+						              if (full_hit.found) {
+						                fb_stats.hint_unblock_in_full_topk += 1;
+						                constexpr size_t kHintAuditCap = 4096;
+						                const double pi_prune =
+						                    std::min(decisionConfig.min_class_weight, 1e-4);
+						                const PresenceLevel hint_pres =
+						                    presence_level(fallback_taxid);
+						                double hint_local_pi_min = pi_prune;
 					                if (hint_pres == PresenceLevel::kAccepted) {
 					                  hint_local_pi_min =
 					                      std::min(pi_prune, kPresencePiFloor);
@@ -1402,17 +1406,27 @@ void postEmDecision(
 					                  if (itw != classWeights.end()) {
 					                    hint_w = itw->second;
 					                  }
-					                }
-					                // For hint: compare against a fixed baseline (pi_prune)
-					                // and softly clip missing weights to pi_prune so that
-					                // strong-evidence hints are not impossible to recover.
-					                const double margin =
-					                    compute_margin(full_hit.prob, pi_prune,
-					                                   hint_local_pi_min, hint_w, pi_prune);
-					                if (!(margin >= 0.0)) {
-					                  fb_stats.hint_unblock_margin_lt_0 += 1;
-					                } else if (margin < kPriorClippingLn2) {
-					                  fb_stats.hint_unblock_margin_0_to_ln2 += 1;
+						                }
+						                // For hint: compare against a fixed baseline (pi_prune)
+						                // and softly clip missing weights to pi_prune so that
+						                // strong-evidence hints are not impossible to recover.
+						                const double w_safe =
+						                    std::max(std::max(hint_w, pi_prune), 1e-300);
+						                const double log_odds = safe_log(full_hit.prob / pi_prune);
+						                const double log_penalty =
+						                    safe_log(hint_local_pi_min / w_safe);
+						                const double margin = log_odds - log_penalty;
+						                if (fb_stats.hint_unblock_margin_check_vals.size() <
+						                    kHintAuditCap) {
+						                  fb_stats.hint_unblock_log_odds_vals.push_back(log_odds);
+						                  fb_stats.hint_unblock_log_penalty_vals.push_back(
+						                      log_penalty);
+						                  fb_stats.hint_unblock_margin_check_vals.push_back(margin);
+						                }
+						                if (!(margin >= 0.0)) {
+						                  fb_stats.hint_unblock_margin_lt_0 += 1;
+						                } else if (margin < kPriorClippingLn2) {
+						                  fb_stats.hint_unblock_margin_0_to_ln2 += 1;
 					                } else {
 					                  fb_stats.hint_unblock_margin_ge_ln2 += 1;
 					                }
@@ -1564,13 +1578,25 @@ void postEmDecision(
 		              << fb_stats.hint_unblock_margin_0_to_ln2 << '/'
 		              << fb_stats.hint_unblock_margin_ge_ln2
 		              << ", applied_M_bins(<0/0_ln2/>=ln2)="
-		              << fb_stats.hint_unblock_applied_margin_lt_0 << '/'
-		              << fb_stats.hint_unblock_applied_margin_0_to_ln2 << '/'
-		              << fb_stats.hint_unblock_applied_margin_ge_ln2
-		              << ", tau=" << format_val(kPriorClippingTau)
-		              << ", cap_hit=" << fb_stats.hint_unblock_cap_hit << ')'
-		              << ", blocked_hint_not_in_topk="
-		              << fb_stats.fallback_blocked_hint_not_in_topk
+			              << fb_stats.hint_unblock_applied_margin_lt_0 << '/'
+			              << fb_stats.hint_unblock_applied_margin_0_to_ln2 << '/'
+			              << fb_stats.hint_unblock_applied_margin_ge_ln2
+			              << ", M(p50/p90)="
+			              << format_val(q(fb_stats.hint_unblock_margin_check_vals, 0.50))
+			              << '/'
+			              << format_val(q(fb_stats.hint_unblock_margin_check_vals, 0.90))
+			              << ", log_odds(p50/p90)="
+			              << format_val(q(fb_stats.hint_unblock_log_odds_vals, 0.50))
+			              << '/'
+			              << format_val(q(fb_stats.hint_unblock_log_odds_vals, 0.90))
+			              << ", log_penalty(p50/p90)="
+			              << format_val(q(fb_stats.hint_unblock_log_penalty_vals, 0.50))
+			              << '/'
+			              << format_val(q(fb_stats.hint_unblock_log_penalty_vals, 0.90))
+			              << ", tau=" << format_val(kPriorClippingTau)
+			              << ", cap_hit=" << fb_stats.hint_unblock_cap_hit << ')'
+			              << ", blocked_hint_not_in_topk="
+			              << fb_stats.fallback_blocked_hint_not_in_topk
 	              << ", blocked_genus_conflict="
 	              << fb_stats.fallback_blocked_genus_conflict
 	              << ", blocked_gap_em_post=" << fb_stats.fallback_blocked_gap_em_post

@@ -1,4 +1,5 @@
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -132,6 +133,52 @@ int main() {
     bool ok = (!results[0].taxidCount.empty() &&
                results[0].taxidCount.front().first == "999");
     if (!expect_true("fallback_allows_hint_in_full_post_topk_when_strong", ok,
+                     message)) {
+      ++failures;
+      failure_messages.push_back(std::move(message));
+    }
+  }
+
+  {
+    std::string message;
+    ChimeraClassify::DecisionConfig dc;
+    dc.posterior_threshold = 0.56;
+    dc.min_class_weight = 2e-4; // pi_prune=min(2e-4,1e-4)=1e-4
+    dc.allow_fallback_on_reject = true;
+    dc.fallback_gap_min = 0.10;
+
+    ChimeraClassify::classifyResult r;
+    r.id = "r_hint_unblock_audit_fields";
+    r.evaluated = 100.0;
+    r.best_taxid_hint = "999";
+    r.posteriors.emplace_back("123", 0.4);
+    r.posteriors.emplace_back("999", 0.3);
+    r.posteriors.emplace_back("456", 0.3);
+
+    std::vector<ChimeraClassify::classifyResult> results;
+    results.push_back(r);
+
+    std::unordered_map<std::string, double> classWeights;
+    classWeights["123"] = 1.5e-4; // >=pi_prune but <2e-4
+    classWeights["456"] = 1e-3;
+    classWeights["999"] = 0.0; // pruned away from POST_TOPK
+
+    ChimeraClassify::TaxDict tax;
+    tax.str2id["123"] = 123;
+    tax.str2id["456"] = 456;
+    tax.str2id["999"] = 999;
+
+    std::ostringstream captured;
+    auto *old_buf = std::cout.rdbuf(captured.rdbuf());
+    ChimeraClassify::postEmDecision(results, dc, classWeights, tax, nullptr,
+                                    nullptr);
+    std::cout.rdbuf(old_buf);
+
+    const std::string out = captured.str();
+    bool ok = (out.find("PostEM fallback gate:") != std::string::npos) &&
+              (out.find("log_odds(p50/p90)=") != std::string::npos) &&
+              (out.find("log_penalty(p50/p90)=") != std::string::npos);
+    if (!expect_true("fallback_gate_prints_margin_breakdown_audit", ok,
                      message)) {
       ++failures;
       failure_messages.push_back(std::move(message));
