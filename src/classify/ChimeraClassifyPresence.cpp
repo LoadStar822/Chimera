@@ -796,6 +796,10 @@ void postEmDecision(
   constexpr double kPresencePiFloor = 1e-6;
   constexpr double kRejectFactor = 2.0;
   constexpr double kRejectDynPostBoost = 0.04;
+  constexpr double kRejectOverrideP1Min = 0.80;
+  constexpr double kRejectOverrideGapMin = 0.25;
+  constexpr double kRejectOverridePiFloor = 1e-5;
+  constexpr size_t kRejectOverrideCap = 256;
 
   double presence_tau = std::numeric_limits<double>::infinity();
   double presence_strict_tau = std::numeric_limits<double>::infinity();
@@ -882,6 +886,19 @@ void postEmDecision(
 		  };
 		  PruneAuditStats prune_stats;
 
+		  struct RejectOverrideStats {
+		    size_t checks{0};
+		    size_t strong{0};
+		    size_t applied_prune{0};
+		    size_t applied_gate{0};
+		    size_t blocked_low_weight{0};
+		    size_t blocked_cap{0};
+		    std::vector<double> fullpost_vals;
+		    std::vector<double> gap_vals;
+		    std::vector<double> w_over_pi_prune_vals;
+		  };
+		  RejectOverrideStats rej_stats;
+
 	  auto parse_u32 = [](const std::string &s, uint32_t &out) -> bool {
 	    if (s.empty()) {
 	      return false;
@@ -903,6 +920,9 @@ void postEmDecision(
 	    }
 	  };
 
+	  const bool prune_active_sample =
+	      (decisionConfig.min_class_weight > 0.0 && !classWeights.empty());
+
 	  for (auto &result : results) {
 	    prune_stats.reads_total += 1;
 	    // Keep the full posterior list (sorted) for dumping/analysis (POST_TOPK),
@@ -917,6 +937,20 @@ void postEmDecision(
 	    }
 	    std::sort(posterior_full.begin(), posterior_full.end(),
 	              [](const auto &a, const auto &b) { return a.second > b.second; });
+
+	    const std::string &full_top1_taxid = posterior_full.front().first;
+	    const double full_p1 = posterior_full.front().second;
+	    const double full_p2 =
+	        (posterior_full.size() > 1) ? posterior_full[1].second : 0.0;
+	    const double full_gap = full_p1 - full_p2;
+	    const PresenceLevel full_top1_presence = presence_level(full_top1_taxid);
+	    double full_top1_weight = 0.0;
+	    if (!classWeights.empty()) {
+	      auto itw = classWeights.find(full_top1_taxid);
+	      if (itw != classWeights.end()) {
+	        full_top1_weight = itw->second;
+	      }
+	    }
 
 	    auto pruned = prune_post_em_posterior(
 	        posterior_full, decisionConfig.min_class_weight, classWeights,
@@ -956,6 +990,38 @@ void postEmDecision(
 	        prune_stats.top1_removed_gap_vals.push_back(pruned.audit.full_gap);
 	        if (pruned.audit.full_top1_weight < 1e-5) {
 	          prune_stats.top1_removed_w_lt_1e_5 += 1;
+	        }
+	      }
+	    }
+
+	    bool strong_reject_override = false;
+	    if (prune_active_sample && decisionConfig.allow_fallback_on_reject &&
+	        pruned.audit.top1_removed && full_top1_presence == PresenceLevel::kRejected) {
+	      rej_stats.checks += 1;
+	      if (full_p1 >= kRejectOverrideP1Min && full_gap >= kRejectOverrideGapMin) {
+	        rej_stats.strong += 1;
+	        rej_stats.fullpost_vals.push_back(full_p1);
+	        rej_stats.gap_vals.push_back(full_gap);
+	        const double pi_prune = std::min(decisionConfig.min_class_weight, 1e-4);
+	        if (pi_prune > 0.0) {
+	          rej_stats.w_over_pi_prune_vals.push_back(full_top1_weight / pi_prune);
+	        }
+	        if (full_top1_weight < kRejectOverridePiFloor) {
+	          rej_stats.blocked_low_weight += 1;
+	        } else if (rej_stats.applied_prune >= kRejectOverrideCap) {
+	          rej_stats.blocked_cap += 1;
+	        } else {
+	          PostEmPruneTop1Override top1_override;
+	          top1_override.taxid = full_top1_taxid;
+	          top1_override.local_pi_min_floor = kRejectOverridePiFloor;
+	          top1_override.active = true;
+	          auto pruned_override = prune_post_em_posterior(
+	              posterior_full, decisionConfig.min_class_weight, classWeights,
+	              presence_level, kPresencePiFloor, kRejectFactor,
+	              &top1_override);
+	          posterior = std::move(pruned_override.posterior);
+	          strong_reject_override = true;
+	          rej_stats.applied_prune += 1;
 	        }
 	      }
 	    }
@@ -1011,6 +1077,11 @@ void postEmDecision(
           pi_min = std::min(pi_min, kPresencePiFloor);
         } else if (top_presence == PresenceLevel::kRejected) {
           pi_min = std::min(1.0, pi_min * kRejectFactor);
+          if (strong_reject_override && top.first == full_top1_taxid &&
+              class_weight >= kRejectOverridePiFloor) {
+            pi_min = std::min(pi_min, kRejectOverridePiFloor);
+            rej_stats.applied_gate += 1;
+          }
         }
         // Soft gate: when the read-level posterior is very confident and well-separated,
         // allow a lower global pi threshold to avoid rejecting low-abundance true taxa.
@@ -1355,9 +1426,6 @@ void postEmDecision(
               << q(fb_stats.gaps_rejected_posterior_weight, 0.50) << '/'
               << q(fb_stats.gaps_rejected_posterior_weight, 0.90) << std::endl;
 	  }
-
-	  const bool prune_active_sample =
-	      (decisionConfig.min_class_weight > 0.0 && !classWeights.empty());
 	  if (prune_active_sample && prune_stats.reads_total > 0) {
 	    auto q = [](std::vector<double> vals, double p) -> double {
 	      if (vals.empty()) {
@@ -1394,6 +1462,37 @@ void postEmDecision(
 	              << format_val(q(prune_stats.top1_removed_gap_vals, 0.50)) << '/'
 	              << format_val(q(prune_stats.top1_removed_gap_vals, 0.90))
 	              << ", top1_removed_w<1e-5=" << prune_stats.top1_removed_w_lt_1e_5
+	              << std::endl;
+	  }
+
+	  if (prune_active_sample && prune_stats.reads_total > 0) {
+	    auto q = [](std::vector<double> vals, double p) -> double {
+	      if (vals.empty()) {
+	        return 0.0;
+	      }
+	      p = std::max(0.0, std::min(1.0, p));
+	      const size_t idx = static_cast<size_t>(
+	          std::floor(p * static_cast<double>(vals.size() - 1)));
+	      std::nth_element(vals.begin(),
+	                       vals.begin() + static_cast<std::ptrdiff_t>(idx),
+	                       vals.end());
+	      return vals[idx];
+	    };
+
+	    std::cout << "PostEM reject override: checks=" << rej_stats.checks
+	              << ", strong=" << rej_stats.strong
+	              << ", applied_prune=" << rej_stats.applied_prune
+	              << ", applied_gate=" << rej_stats.applied_gate
+	              << ", blocked_low_weight=" << rej_stats.blocked_low_weight
+	              << ", blocked_cap=" << rej_stats.blocked_cap
+	              << ", fullpost(p50/p90)="
+	              << format_val(q(rej_stats.fullpost_vals, 0.50)) << '/'
+	              << format_val(q(rej_stats.fullpost_vals, 0.90))
+	              << ", gap(p50/p90)=" << format_val(q(rej_stats.gap_vals, 0.50))
+	              << '/' << format_val(q(rej_stats.gap_vals, 0.90))
+	              << ", w_over_pi_prune(p50/p90)="
+	              << format_val(q(rej_stats.w_over_pi_prune_vals, 0.50)) << '/'
+	              << format_val(q(rej_stats.w_over_pi_prune_vals, 0.90))
 	              << std::endl;
 	  }
 

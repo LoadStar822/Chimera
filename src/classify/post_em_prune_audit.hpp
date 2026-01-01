@@ -32,13 +32,19 @@ struct PostEmPruneResult {
   PostEmPruneAudit audit;
 };
 
+struct PostEmPruneTop1Override {
+  std::string taxid;
+  double local_pi_min_floor{0.0};
+  bool active{false};
+};
+
 template <class PresenceLevelFn>
 inline PostEmPruneResult prune_post_em_posterior(
     const std::vector<std::pair<std::string, double>> &posterior_full_sorted,
     double min_class_weight,
     const std::unordered_map<std::string, double> &classWeights,
     PresenceLevelFn presence_level, double presence_pi_floor,
-    double reject_factor) {
+    double reject_factor, const PostEmPruneTop1Override *top1_override = nullptr) {
   PostEmPruneResult out;
   out.posterior = posterior_full_sorted;
 
@@ -68,6 +74,11 @@ inline PostEmPruneResult prune_post_em_posterior(
     } else if (pres == PostEmPresenceLevel::kRejected) {
       local_pi_min = pi_prune * reject_factor;
     }
+    if (top1_override && top1_override->active && !top1_override->taxid.empty() &&
+        top.first == top1_override->taxid && pres == PostEmPresenceLevel::kRejected &&
+        top1_override->local_pi_min_floor > 0.0) {
+      local_pi_min = std::min(local_pi_min, top1_override->local_pi_min_floor);
+    }
     out.audit.full_top1_local_pi_min = local_pi_min;
     auto it = classWeights.find(top.first);
     out.audit.full_top1_weight = (it != classWeights.end()) ? it->second : 0.0;
@@ -85,6 +96,11 @@ inline PostEmPruneResult prune_post_em_posterior(
       local_pi_min = std::min(pi_prune, presence_pi_floor);
     } else if (pres == PostEmPresenceLevel::kRejected) {
       local_pi_min = pi_prune * reject_factor;
+    }
+    if (top1_override && top1_override->active && !top1_override->taxid.empty() &&
+        kv.first == top1_override->taxid && pres == PostEmPresenceLevel::kRejected &&
+        top1_override->local_pi_min_floor > 0.0) {
+      local_pi_min = std::min(local_pi_min, top1_override->local_pi_min_floor);
     }
     auto it = classWeights.find(kv.first);
     const double w = (it != classWeights.end()) ? it->second : 0.0;

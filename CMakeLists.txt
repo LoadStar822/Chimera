@@ -401,6 +401,34 @@ target_include_directories(post_em_debug_dump_tests
     ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/sdsl-lite/include
 )
 
+add_executable(post_em_reject_override_tests
+    tests/utils/post_em_reject_override_test.cpp
+    src/classify/ChimeraClassifyPresence.cpp
+)
+
+target_link_libraries(post_em_reject_override_tests
+    PRIVATE
+    strobemers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    pthread
+    BZip2::BZip2
+    ZLIB::ZLIB
+    seqan3::seqan3
+    Threads::Threads
+)
+
+target_include_directories(post_em_reject_override_tests
+    PUBLIC
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/src/classify
+    ${PROJECT_SOURCE_DIR}/libs
+    ${PROJECT_SOURCE_DIR}/libs/minions-master/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/cereal/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/sdsl-lite/include
+)
+
 add_executable(preem_topk_tests
     tests/utils/preem_topk_test.cpp
 )
