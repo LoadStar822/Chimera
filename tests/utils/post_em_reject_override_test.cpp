@@ -146,11 +146,11 @@ int main() {
 
     ChimeraClassify::postEmDecision(results, dc, classWeights, tax, &pd, nullptr);
 
-    // With a more conservative default tau (ln2), this borderline case should
-    // no longer override a rejected full_top1.
+    // With default tau=0, this borderline case should still override a rejected
+    // full_top1 (evidence margin strong enough to overcome the penalty).
     bool ok =
-        (!results[0].taxidCount.empty() && results[0].taxidCount.front().first == "456");
-    if (!expect_true("margin_tau_ln2_blocks_borderline_reject_override", ok,
+        (!results[0].taxidCount.empty() && results[0].taxidCount.front().first == "123");
+    if (!expect_true("margin_tau0_allows_borderline_reject_override", ok,
                      message)) {
       ++failures;
       failure_messages.push_back(std::move(message));

@@ -798,7 +798,8 @@ void postEmDecision(
   constexpr double kRejectDynPostBoost = 0.04;
   // Unified post-EM prior clipping via an evidence margin M(t) >= tau.
   // All clipping is high-div only (allow_fallback_on_reject) and capped.
-  constexpr double kPriorClippingTau = 0.6931471805599453; // ln(2)
+  constexpr double kPriorClippingLn2 = 0.6931471805599453; // ln(2)
+  constexpr double kPriorClippingTau = 0.0;
   constexpr size_t kPriorClippingCap = 256;
 
   double presence_tau = std::numeric_limits<double>::infinity();
@@ -882,7 +883,13 @@ void postEmDecision(
 		    size_t hint_unblock_checks{0};
 		    size_t hint_unblock_in_full_topk{0};
 		    size_t hint_unblock_margin_ok{0};
+		    size_t hint_unblock_margin_lt_0{0};
+		    size_t hint_unblock_margin_0_to_ln2{0};
+		    size_t hint_unblock_margin_ge_ln2{0};
 		    size_t hint_unblock_applied{0};
+		    size_t hint_unblock_applied_margin_lt_0{0};
+		    size_t hint_unblock_applied_margin_0_to_ln2{0};
+		    size_t hint_unblock_applied_margin_ge_ln2{0};
 		    size_t hint_unblock_cap_hit{0};
 		    std::vector<double> hint_unblock_prob_full_vals;
 		    std::vector<double> hint_unblock_margin_vals;
@@ -915,6 +922,12 @@ void postEmDecision(
 			    size_t blocked_low_weight{0};
 			    size_t blocked_cap{0};
 			    size_t blocked_low_margin{0};
+			    size_t margin_lt_0{0};
+			    size_t margin_0_to_ln2{0};
+			    size_t margin_ge_ln2{0};
+			    size_t applied_margin_lt_0{0};
+			    size_t applied_margin_0_to_ln2{0};
+			    size_t applied_margin_ge_ln2{0};
 			    std::vector<double> fullpost_applied;
 			    std::vector<double> gap_applied;
 			    std::vector<double> pruned1_prob_full_applied;
@@ -1048,6 +1061,13 @@ void postEmDecision(
 		                ? compute_margin(full_p1, alt_prob, pi_min, full_top1_weight, 0.0)
 		                : -std::numeric_limits<double>::infinity();
 		        rej_stats.margin_vals.push_back(margin);
+		        if (!(margin >= 0.0)) {
+		          rej_stats.margin_lt_0 += 1;
+		        } else if (margin < kPriorClippingLn2) {
+		          rej_stats.margin_0_to_ln2 += 1;
+		        } else {
+		          rej_stats.margin_ge_ln2 += 1;
+		        }
 	
 		        if (!(full_top1_weight > 0.0)) {
 		          rej_stats.blocked_low_weight += 1;
@@ -1074,6 +1094,13 @@ void postEmDecision(
 		          rej_stats.gap_applied.push_back(full_gap);
 		          rej_stats.pruned1_prob_full_applied.push_back(pruned1_prob_full);
 		          rej_stats.w_over_pi_prune_applied.push_back(full_top1_weight / pi_prune);
+		          if (!(margin >= 0.0)) {
+		            rej_stats.applied_margin_lt_0 += 1;
+		          } else if (margin < kPriorClippingLn2) {
+		            rej_stats.applied_margin_0_to_ln2 += 1;
+		          } else {
+		            rej_stats.applied_margin_ge_ln2 += 1;
+		          }
 		        }
 		      }
 		    }
@@ -1382,6 +1409,13 @@ void postEmDecision(
 					                const double margin =
 					                    compute_margin(full_hit.prob, pi_prune,
 					                                   hint_local_pi_min, hint_w, pi_prune);
+					                if (!(margin >= 0.0)) {
+					                  fb_stats.hint_unblock_margin_lt_0 += 1;
+					                } else if (margin < kPriorClippingLn2) {
+					                  fb_stats.hint_unblock_margin_0_to_ln2 += 1;
+					                } else {
+					                  fb_stats.hint_unblock_margin_ge_ln2 += 1;
+					                }
 					                if (margin >= kPriorClippingTau) {
 					                  fb_stats.hint_unblock_margin_ok += 1;
 					                  if (prior_clipping_applied_total >= kPriorClippingCap) {
@@ -1395,6 +1429,13 @@ void postEmDecision(
 					                        full_hit.prob);
 					                    fb_stats.hint_unblock_margin_vals.push_back(
 					                        margin);
+					                    if (!(margin >= 0.0)) {
+					                      fb_stats.hint_unblock_applied_margin_lt_0 += 1;
+					                    } else if (margin < kPriorClippingLn2) {
+					                      fb_stats.hint_unblock_applied_margin_0_to_ln2 += 1;
+					                    } else {
+					                      fb_stats.hint_unblock_applied_margin_ge_ln2 += 1;
+					                    }
 					                  }
 					                }
 					              }
@@ -1518,6 +1559,14 @@ void postEmDecision(
 		              << fb_stats.hint_unblock_checks
 		              << " (in_full=" << fb_stats.hint_unblock_in_full_topk
 		              << ", margin_ok=" << fb_stats.hint_unblock_margin_ok
+		              << ", M_bins(<0/0_ln2/>=ln2)="
+		              << fb_stats.hint_unblock_margin_lt_0 << '/'
+		              << fb_stats.hint_unblock_margin_0_to_ln2 << '/'
+		              << fb_stats.hint_unblock_margin_ge_ln2
+		              << ", applied_M_bins(<0/0_ln2/>=ln2)="
+		              << fb_stats.hint_unblock_applied_margin_lt_0 << '/'
+		              << fb_stats.hint_unblock_applied_margin_0_to_ln2 << '/'
+		              << fb_stats.hint_unblock_applied_margin_ge_ln2
 		              << ", tau=" << format_val(kPriorClippingTau)
 		              << ", cap_hit=" << fb_stats.hint_unblock_cap_hit << ')'
 		              << ", blocked_hint_not_in_topk="
@@ -1592,6 +1641,12 @@ void postEmDecision(
 		              << ", applied_gate=" << rej_stats.applied_gate
 		              << ", tau=" << format_val(kPriorClippingTau)
 		              << ", cap=" << kPriorClippingCap
+		              << ", M_bins(<0/0_ln2/>=ln2)=" << rej_stats.margin_lt_0 << '/'
+		              << rej_stats.margin_0_to_ln2 << '/' << rej_stats.margin_ge_ln2
+		              << ", applied_M_bins(<0/0_ln2/>=ln2)="
+		              << rej_stats.applied_margin_lt_0 << '/'
+		              << rej_stats.applied_margin_0_to_ln2 << '/'
+		              << rej_stats.applied_margin_ge_ln2
 		              << ", blocked_low_weight=" << rej_stats.blocked_low_weight
 		              << ", blocked_cap=" << rej_stats.blocked_cap
 		              << ", blocked_low_margin=" << rej_stats.blocked_low_margin
