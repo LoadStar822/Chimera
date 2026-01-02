@@ -1453,62 +1453,83 @@ void run(ClassifyConfig config) {
               << " head_mass_thresh=0.5 base_cap=256 max_cap=512"
               << std::defaultfloat << std::endl;
   };
-  auto print_hit_idf_audit = [&]() {
-    if (fileInfo.hit_idf_total == 0) {
-      return;
-    }
-    const double idf_min_new = config.low_div_active ? 0.5 : 0.0;
-    const double idf_max = std::max(idf_min_new, std::max(0.0, config.idf_max));
-    constexpr size_t kBins = 64;
-    auto quantile_from_hist = [&](double q) -> double {
-      if (q <= 0.0) {
-        return 0.0;
-      }
-      if (q >= 1.0) {
-        return idf_max;
-      }
-      uint64_t total = 0;
-      for (size_t i = 0; i < fileInfo.hit_idf_raw_hist.size(); ++i) {
-        total += fileInfo.hit_idf_raw_hist[i];
-      }
-      if (total == 0) {
-        return 0.0;
-      }
-      uint64_t target = static_cast<uint64_t>(std::ceil(q * total));
-      uint64_t acc = 0;
-      size_t idx = fileInfo.hit_idf_raw_hist.size() - 1;
-      for (size_t i = 0; i < fileInfo.hit_idf_raw_hist.size(); ++i) {
-        acc += fileInfo.hit_idf_raw_hist[i];
-        if (acc >= target) {
-          idx = i;
-          break;
-        }
-      }
-      if (idf_max <= 0.0) {
-        return 0.0;
-      }
-      double pos = static_cast<double>(idx) / static_cast<double>(kBins - 1);
-      return std::clamp(pos * idf_max, 0.0, idf_max);
-    };
+	  auto print_hit_idf_audit = [&]() {
+	    if (fileInfo.hit_idf_total == 0) {
+	      return;
+	    }
+	    const double idf_min_new = config.low_div_active ? 0.5 : 0.0;
+	    const double idf_max = std::max(idf_min_new, std::max(0.0, config.idf_max));
+	    constexpr size_t kBins = 64;
+	    auto quantile_from_hist = [&](const std::array<uint64_t, kBins> &hist,
+	                                  double q) -> double {
+	      if (q <= 0.0) {
+	        return 0.0;
+	      }
+	      if (q >= 1.0) {
+	        return idf_max;
+	      }
+	      uint64_t total = 0;
+	      for (size_t i = 0; i < hist.size(); ++i) {
+	        total += hist[i];
+	      }
+	      if (total == 0) {
+	        return 0.0;
+	      }
+	      uint64_t target = static_cast<uint64_t>(std::ceil(q * total));
+	      uint64_t acc = 0;
+	      size_t idx = hist.size() - 1;
+	      for (size_t i = 0; i < hist.size(); ++i) {
+	        acc += hist[i];
+	        if (acc >= target) {
+	          idx = i;
+	          break;
+	        }
+	      }
+	      if (idf_max <= 0.0) {
+	        return 0.0;
+	      }
+	      double pos = static_cast<double>(idx) / static_cast<double>(kBins - 1);
+	      return std::clamp(pos * idf_max, 0.0, idf_max);
+	    };
 
-    const double p50 = quantile_from_hist(0.50);
-    const double p90 = quantile_from_hist(0.90);
+	    const double p50 = quantile_from_hist(fileInfo.hit_idf_raw_hist, 0.50);
+	    const double p90 = quantile_from_hist(fileInfo.hit_idf_raw_hist, 0.90);
+	    const double eff_p50 = quantile_from_hist(fileInfo.hit_idf_eff_hist, 0.50);
+	    const double eff_p90 = quantile_from_hist(fileInfo.hit_idf_eff_hist, 0.90);
 
-    double eff_p50 = p50;
-    double eff_p90 = p90;
-    if (!config.low_div_active) {
-      if (idf_max > 0.0) {
-        eff_p50 = (p50 * p50) / idf_max;
-        eff_p90 = (p90 * p90) / idf_max;
-      } else {
-        eff_p50 = 0.0;
-        eff_p90 = 0.0;
-      }
-    }
+	    auto quantile_power = [&](double q) -> double {
+	      if (q <= 0.0) {
+	        return 1.0;
+	      }
+	      if (q >= 1.0) {
+	        return 2.0;
+	      }
+	      uint64_t total = 0;
+	      for (size_t i = 0; i < fileInfo.hit_idf_power_hist.size(); ++i) {
+	        total += fileInfo.hit_idf_power_hist[i];
+	      }
+	      if (total == 0) {
+	        return 1.0;
+	      }
+	      uint64_t target = static_cast<uint64_t>(std::ceil(q * total));
+	      uint64_t acc = 0;
+	      size_t idx = fileInfo.hit_idf_power_hist.size() - 1;
+	      for (size_t i = 0; i < fileInfo.hit_idf_power_hist.size(); ++i) {
+	        acc += fileInfo.hit_idf_power_hist[i];
+	        if (acc >= target) {
+	          idx = i;
+	          break;
+	        }
+	      }
+	      double pos = static_cast<double>(idx) / static_cast<double>(kBins - 1);
+	      return std::clamp(1.0 + pos, 1.0, 2.0);
+	    };
+	    const double pow_p50 = quantile_power(0.50);
+	    const double pow_p90 = quantile_power(0.90);
 
-    double frac_lt0p5 = 0.0;
-    if (fileInfo.hit_idf_total > 0) {
-      frac_lt0p5 = static_cast<double>(fileInfo.hit_idf_raw_lt0p5) /
+	    double frac_lt0p5 = 0.0;
+	    if (fileInfo.hit_idf_total > 0) {
+	      frac_lt0p5 = static_cast<double>(fileInfo.hit_idf_raw_lt0p5) /
                    static_cast<double>(fileInfo.hit_idf_total);
     }
     const auto &bins = fileInfo.hit_idf_raw_bins;
@@ -1518,15 +1539,16 @@ void run(ClassifyConfig config) {
       contrib_ratio = fileInfo.hit_idf_contrib_sum_new /
                       fileInfo.hit_idf_contrib_sum_old;
     }
-    std::cout << "HitIDF clamp audit: low_div_active="
-              << (config.low_div_active ? 1 : 0) << " idf_min_new="
-              << idf_min_new << " idf_max=" << idf_max << " idf_linear(p50/p90)="
-              << std::fixed << std::setprecision(3) << p50 << "/" << p90
-              << " idf_eff(p50/p90)=" << eff_p50 << "/" << eff_p90
-              << " idf_raw_bins(<0.25/<0.5/<1.0/>=1.0)="
-              << bins[0] << "/" << bins[1] << "/" << bins[2] << "/" << bins[3]
-              << " raw_lt0.5="
-              << fileInfo.hit_idf_raw_lt0p5 << "/" << fileInfo.hit_idf_total
+	    std::cout << "HitIDF clamp audit: low_div_active="
+	              << (config.low_div_active ? 1 : 0) << " idf_min_new="
+	              << idf_min_new << " idf_max=" << idf_max << " idf_linear(p50/p90)="
+	              << std::fixed << std::setprecision(3) << p50 << "/" << p90
+	              << " idf_eff(p50/p90)=" << eff_p50 << "/" << eff_p90
+	              << " idf_power(p50/p90)=" << pow_p50 << "/" << pow_p90
+	              << " idf_raw_bins(<0.25/<0.5/<1.0/>=1.0)="
+	              << bins[0] << "/" << bins[1] << "/" << bins[2] << "/" << bins[3]
+	              << " raw_lt0.5="
+	              << fileInfo.hit_idf_raw_lt0p5 << "/" << fileInfo.hit_idf_total
               << " (" << std::setprecision(3) << frac_lt0p5
               << ") bins_total=" << bins_total << " contrib_new/old="
               << std::setprecision(6) << contrib_ratio

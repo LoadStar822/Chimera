@@ -552,6 +552,28 @@ void processSequence(
   const std::vector<uint32_t> *activeSubset =
       (fallback_full || topBins.size() == binNumAll) ? nullptr : &topBins;
 
+  // High-div: adapt IDF downweighting strength to read evidence to avoid
+  // over-suppressing signal in shorter/low-evidence reads.
+  double idf_power = 1.0;
+  if (!config.low_div_active) {
+    const double scale = std::max<double>(
+        1.0, static_cast<double>(config.hash_sample_min) *
+                 static_cast<double>(config.hash_sample_max));
+    const double lambda =
+        std::clamp(static_cast<double>(readLen) / scale, 0.0, 1.0);
+    idf_power = 1.0 + lambda;
+  }
+  {
+    constexpr double kBuckets = 64.0;
+    const double pos = std::clamp(idf_power - 1.0, 0.0, 1.0);
+    size_t bucket =
+        static_cast<size_t>(std::floor(pos * (kBuckets - 1.0)));
+    if (bucket >= fileInfo.hit_idf_power_hist.size()) {
+      bucket = fileInfo.hit_idf_power_hist.size() - 1;
+    }
+    fileInfo.hit_idf_power_hist[bucket] += 1;
+  }
+
   auto bucket_degree = [](size_t d) -> size_t {
     if (d <= 1) {
       return 0;
@@ -666,7 +688,8 @@ void processSequence(
     const double idf_min_linear = config.low_div_active ? 0.5 : 0.0;
     const double idf_max_eff = std::max(idf_min_linear, config.idf_max);
     const double idf_linear = std::clamp(idf_raw, idf_min_linear, idf_max_eff);
-    double idf = clamp_idf(idf_raw, config.low_div_active, config.idf_max);
+    double idf =
+        clamp_idf(idf_raw, config.low_div_active, config.idf_max, idf_power);
     double idf_old = idf_linear;
     fileInfo.hit_idf_total += 1;
     if (idf_raw < 0.5) {
@@ -693,6 +716,19 @@ void processSequence(
         bucket = fileInfo.hit_idf_raw_hist.size() - 1;
       }
       fileInfo.hit_idf_raw_hist[bucket] += 1;
+    }
+    {
+      const double bucket_value = (idf_max_eff > 0.0) ? idf : 0.0;
+      constexpr double kBuckets = 64.0;
+      size_t bucket = 0;
+      if (idf_max_eff > 0.0) {
+        bucket = static_cast<size_t>(std::floor(bucket_value / idf_max_eff *
+                                                (kBuckets - 1.0)));
+      }
+      if (bucket >= fileInfo.hit_idf_eff_hist.size()) {
+        bucket = fileInfo.hit_idf_eff_hist.size() - 1;
+      }
+      fileInfo.hit_idf_eff_hist[bucket] += 1;
     }
 
     double freqFactor = 1.0;
@@ -1940,6 +1976,12 @@ void classify_streaming(
       for (size_t i = 0; i < fileInfo.hit_idf_raw_hist.size(); ++i) {
         fileInfo.hit_idf_raw_hist[i] += localFileInfo.hit_idf_raw_hist[i];
       }
+      for (size_t i = 0; i < fileInfo.hit_idf_eff_hist.size(); ++i) {
+        fileInfo.hit_idf_eff_hist[i] += localFileInfo.hit_idf_eff_hist[i];
+      }
+      for (size_t i = 0; i < fileInfo.hit_idf_power_hist.size(); ++i) {
+        fileInfo.hit_idf_power_hist[i] += localFileInfo.hit_idf_power_hist[i];
+      }
       if (presenceSummary) {
         presenceSummary->merge(presenceLocal);
       }
@@ -2070,6 +2112,12 @@ void classify(
       fileInfo.hit_idf_contrib_sum_new += localFileInfo.hit_idf_contrib_sum_new;
       for (size_t i = 0; i < fileInfo.hit_idf_raw_hist.size(); ++i) {
         fileInfo.hit_idf_raw_hist[i] += localFileInfo.hit_idf_raw_hist[i];
+      }
+      for (size_t i = 0; i < fileInfo.hit_idf_eff_hist.size(); ++i) {
+        fileInfo.hit_idf_eff_hist[i] += localFileInfo.hit_idf_eff_hist[i];
+      }
+      for (size_t i = 0; i < fileInfo.hit_idf_power_hist.size(); ++i) {
+        fileInfo.hit_idf_power_hist[i] += localFileInfo.hit_idf_power_hist[i];
       }
     }
   }

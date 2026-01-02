@@ -25,8 +25,10 @@ int main() {
   {
     std::string message;
     double got = ChimeraClassify::clamp_idf(0.10, /*low_div_active=*/false,
-                                           /*idf_max=*/1.0);
-    if (!expect_near("idf_highdiv_squares_idf_raw", got, 0.01, 1e-12, message)) {
+                                           /*idf_max=*/1.0,
+                                           /*idf_power=*/2.0);
+    if (!expect_near("idf_highdiv_squares_idf_raw", got, 0.01, 1e-12,
+                     message)) {
       ++failures;
       failure_messages.push_back(std::move(message));
     }
@@ -35,7 +37,8 @@ int main() {
   {
     std::string message;
     double got = ChimeraClassify::clamp_idf(0.10, /*low_div_active=*/false,
-                                           /*idf_max=*/8.0);
+                                           /*idf_max=*/8.0,
+                                           /*idf_power=*/2.0);
     if (!expect_near("idf_highdiv_scales_by_idf_max", got, 0.00125, 1e-12,
                      message)) {
       ++failures;
@@ -46,7 +49,8 @@ int main() {
   {
     std::string message;
     double got = ChimeraClassify::clamp_idf(0.10, /*low_div_active=*/true,
-                                           /*idf_max=*/8.0);
+                                           /*idf_max=*/8.0,
+                                           /*idf_power=*/2.0);
     if (!expect_near("idf_lowdiv_keeps_floor_0p5", got, 0.50, 1e-12, message)) {
       ++failures;
       failure_messages.push_back(std::move(message));
@@ -55,8 +59,33 @@ int main() {
 
   {
     std::string message;
+    double got = ChimeraClassify::clamp_idf(0.10, /*low_div_active=*/false,
+                                           /*idf_max=*/8.0,
+                                           /*idf_power=*/1.0);
+    if (!expect_near("idf_highdiv_p1_is_linear", got, 0.10, 1e-12, message)) {
+      ++failures;
+      failure_messages.push_back(std::move(message));
+    }
+  }
+
+  {
+    std::string message;
+    const double expected = 8.0 * std::pow(0.10 / 8.0, 1.5);
+    double got = ChimeraClassify::clamp_idf(0.10, /*low_div_active=*/false,
+                                           /*idf_max=*/8.0,
+                                           /*idf_power=*/1.5);
+    if (!expect_near("idf_highdiv_interpolates_with_power", got, expected,
+                     1e-12, message)) {
+      ++failures;
+      failure_messages.push_back(std::move(message));
+    }
+  }
+
+  {
+    std::string message;
     double got = ChimeraClassify::clamp_idf(100.0, /*low_div_active=*/false,
-                                           /*idf_max=*/8.0);
+                                           /*idf_max=*/8.0,
+                                           /*idf_power=*/2.0);
     if (!expect_near("idf_clamps_to_max", got, 8.00, 1e-12, message)) {
       ++failures;
       failure_messages.push_back(std::move(message));

@@ -254,13 +254,15 @@ namespace ChimeraClassify {
 		size_t preem_finalk_65_96{ 0 };
 		size_t preem_finalk_eq96{ 0 };
 		// Hit-level IDF clamp audit (minimizer scoring).
-		size_t hit_idf_total{ 0 };
-		size_t hit_idf_raw_lt0p5{ 0 };
-		std::array<uint64_t, 4> hit_idf_raw_bins{};
-		double hit_idf_contrib_sum_old{ 0.0 };
-		double hit_idf_contrib_sum_new{ 0.0 };
-		std::array<uint64_t, 64> hit_idf_raw_hist{};
-	};
+			size_t hit_idf_total{ 0 };
+			size_t hit_idf_raw_lt0p5{ 0 };
+			std::array<uint64_t, 4> hit_idf_raw_bins{};
+			double hit_idf_contrib_sum_old{ 0.0 };
+			double hit_idf_contrib_sum_new{ 0.0 };
+			std::array<uint64_t, 64> hit_idf_raw_hist{};
+			std::array<uint64_t, 64> hit_idf_eff_hist{};
+			std::array<uint64_t, 64> hit_idf_power_hist{};
+		};
 
 	struct batchReads {
 		std::vector< std::string >                 ids;
