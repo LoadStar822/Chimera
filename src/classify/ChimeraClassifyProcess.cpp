@@ -663,21 +663,30 @@ void processSequence(
 
     double idf_raw = std::log2((totalBins + 1.0) /
                                (static_cast<double>(df_bins) + 1.0));
+    const double idf_min_linear = config.low_div_active ? 0.5 : 0.0;
+    const double idf_max_eff = std::max(idf_min_linear, config.idf_max);
+    const double idf_linear = std::clamp(idf_raw, idf_min_linear, idf_max_eff);
     double idf = clamp_idf(idf_raw, config.low_div_active, config.idf_max);
-    double idf_old = std::clamp(idf_raw, 0.5, config.idf_max);
+    double idf_old = idf_linear;
     fileInfo.hit_idf_total += 1;
     if (idf_raw < 0.5) {
       fileInfo.hit_idf_raw_lt0p5 += 1;
     }
+    if (idf_raw < 0.25) {
+      fileInfo.hit_idf_raw_bins[0] += 1;
+    } else if (idf_raw < 0.5) {
+      fileInfo.hit_idf_raw_bins[1] += 1;
+    } else if (idf_raw < 1.0) {
+      fileInfo.hit_idf_raw_bins[2] += 1;
+    } else {
+      fileInfo.hit_idf_raw_bins[3] += 1;
+    }
     {
-      const double idf_max = std::max(0.0, config.idf_max);
-      const double bucket_value = (idf_max > 0.0)
-                                      ? std::clamp(idf_raw, 0.0, idf_max)
-                                      : 0.0;
+      const double bucket_value = (idf_max_eff > 0.0) ? idf_linear : 0.0;
       constexpr double kBuckets = 64.0;
       size_t bucket = 0;
-      if (idf_max > 0.0) {
-        bucket = static_cast<size_t>(std::floor(bucket_value / idf_max *
+      if (idf_max_eff > 0.0) {
+        bucket = static_cast<size_t>(std::floor(bucket_value / idf_max_eff *
                                                 (kBuckets - 1.0)));
       }
       if (bucket >= fileInfo.hit_idf_raw_hist.size()) {
@@ -1923,6 +1932,9 @@ void classify_streaming(
       fileInfo.preem_finalk_eq96 += localFileInfo.preem_finalk_eq96;
       fileInfo.hit_idf_total += localFileInfo.hit_idf_total;
       fileInfo.hit_idf_raw_lt0p5 += localFileInfo.hit_idf_raw_lt0p5;
+      for (size_t i = 0; i < fileInfo.hit_idf_raw_bins.size(); ++i) {
+        fileInfo.hit_idf_raw_bins[i] += localFileInfo.hit_idf_raw_bins[i];
+      }
       fileInfo.hit_idf_contrib_sum_old += localFileInfo.hit_idf_contrib_sum_old;
       fileInfo.hit_idf_contrib_sum_new += localFileInfo.hit_idf_contrib_sum_new;
       for (size_t i = 0; i < fileInfo.hit_idf_raw_hist.size(); ++i) {
@@ -2051,6 +2063,9 @@ void classify(
       fileInfo.preem_finalk_eq96 += localFileInfo.preem_finalk_eq96;
       fileInfo.hit_idf_total += localFileInfo.hit_idf_total;
       fileInfo.hit_idf_raw_lt0p5 += localFileInfo.hit_idf_raw_lt0p5;
+      for (size_t i = 0; i < fileInfo.hit_idf_raw_bins.size(); ++i) {
+        fileInfo.hit_idf_raw_bins[i] += localFileInfo.hit_idf_raw_bins[i];
+      }
       fileInfo.hit_idf_contrib_sum_old += localFileInfo.hit_idf_contrib_sum_old;
       fileInfo.hit_idf_contrib_sum_new += localFileInfo.hit_idf_contrib_sum_new;
       for (size_t i = 0; i < fileInfo.hit_idf_raw_hist.size(); ++i) {

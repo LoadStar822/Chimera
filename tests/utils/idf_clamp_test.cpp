@@ -25,8 +25,18 @@ int main() {
   {
     std::string message;
     double got = ChimeraClassify::clamp_idf(0.10, /*low_div_active=*/false,
+                                           /*idf_max=*/1.0);
+    if (!expect_near("idf_highdiv_squares_idf_raw", got, 0.01, 1e-12, message)) {
+      ++failures;
+      failure_messages.push_back(std::move(message));
+    }
+  }
+
+  {
+    std::string message;
+    double got = ChimeraClassify::clamp_idf(0.10, /*low_div_active=*/false,
                                            /*idf_max=*/8.0);
-    if (!expect_near("idf_highdiv_allows_below_floor", got, 0.10, 1e-12,
+    if (!expect_near("idf_highdiv_scales_by_idf_max", got, 0.00125, 1e-12,
                      message)) {
       ++failures;
       failure_messages.push_back(std::move(message));
@@ -61,4 +71,3 @@ int main() {
   }
   return 0;
 }
-

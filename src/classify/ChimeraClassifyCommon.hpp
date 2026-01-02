@@ -153,7 +153,18 @@ inline bool allow_low_df_boost(std::size_t df_bins, bool has_freq,
 
 inline double clamp_idf(double idf_raw, bool low_div_active, double idf_max) {
   const double idf_min = low_div_active ? 0.5 : 0.0;
-  return std::clamp(idf_raw, idf_min, idf_max);
+  const double idf_max_eff = std::max(idf_min, idf_max);
+  const double idf0 = std::clamp(idf_raw, idf_min, idf_max_eff);
+  if (low_div_active) {
+    return idf0;
+  }
+  if (idf_max_eff <= 0.0) {
+    return 0.0;
+  }
+  // Strengthen downweighting for high-DF (low-IDF) minimizers while keeping the
+  // same upper bound. We square on the normalized [0,1] scale:
+  // idf_eff = idf_max * (idf0/idf_max)^2 = idf0^2 / idf_max.
+  return (idf0 * idf0) / idf_max_eff;
 }
 
 inline std::vector<uint64_t> select_rare_route_values(

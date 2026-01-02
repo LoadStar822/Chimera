@@ -256,6 +256,7 @@ namespace ChimeraClassify {
 		// Hit-level IDF clamp audit (minimizer scoring).
 		size_t hit_idf_total{ 0 };
 		size_t hit_idf_raw_lt0p5{ 0 };
+		std::array<uint64_t, 4> hit_idf_raw_bins{};
 		double hit_idf_contrib_sum_old{ 0.0 };
 		double hit_idf_contrib_sum_new{ 0.0 };
 		std::array<uint64_t, 64> hit_idf_raw_hist{};
