@@ -1267,7 +1267,14 @@ void processSequence(
             }
 
             const double base_mass = contrib * static_cast<double>(k);
-            const double delta_total = config.local_contrast_gamma * base_mass;
+            if (k < fileInfo.lc_zs_k_hist.size()) {
+              fileInfo.lc_zs_k_hist[k] += 1;
+            }
+
+            const double k_d = static_cast<double>(k);
+            const double M_d = static_cast<double>(M);
+            const double delta_total =
+                config.local_contrast_gamma * contrib * (M_d - k_d) / M_d;
             if (!(delta_total > 0.0)) {
               continue;
             }
@@ -1293,6 +1300,48 @@ void processSequence(
 
           if (applied_any) {
             fileInfo.lc_zs_enabled_reads += 1;
+            {
+              const double margin_before = best - second;
+              double margin_after = 0.0;
+              if (auto it = tidScore.find(before_best); it != tidScore.end()) {
+                margin_after += it->second;
+              }
+              if (auto it = tidScore.find(before_second); it != tidScore.end()) {
+                margin_after -= it->second;
+              }
+              constexpr double kGapEps = 1e-6;
+              const double denom = std::max(std::abs(margin_before), kGapEps);
+              const double frac = std::abs(margin_after - margin_before) / denom;
+              fileInfo.lc_zs_margin_frac_count += 1;
+              fileInfo.lc_zs_margin_frac_sum += frac;
+              fileInfo.lc_zs_margin_frac_max =
+                  std::max(fileInfo.lc_zs_margin_frac_max, frac);
+              auto bucket = [](double x) -> size_t {
+                if (x < 0.05) {
+                  return 0;
+                }
+                if (x < 0.10) {
+                  return 1;
+                }
+                if (x < 0.20) {
+                  return 2;
+                }
+                if (x < 0.50) {
+                  return 3;
+                }
+                if (x < 1.00) {
+                  return 4;
+                }
+                if (x < 2.00) {
+                  return 5;
+                }
+                return 6;
+              };
+              const size_t b = bucket(frac);
+              if (b < fileInfo.lc_zs_margin_frac_hist.size()) {
+                fileInfo.lc_zs_margin_frac_hist[b] += 1;
+              }
+            }
             stats = collect_stats();
             if (stats.bestTid == before_second &&
                 stats.secondTid == before_best) {
@@ -2296,6 +2345,16 @@ void classify_streaming(
       fileInfo.lc_zs_flip_top12 += localFileInfo.lc_zs_flip_top12;
       fileInfo.lc_zs_base_sum += localFileInfo.lc_zs_base_sum;
       fileInfo.lc_zs_l1_sum += localFileInfo.lc_zs_l1_sum;
+      for (size_t i = 0; i < fileInfo.lc_zs_k_hist.size(); ++i) {
+        fileInfo.lc_zs_k_hist[i] += localFileInfo.lc_zs_k_hist[i];
+      }
+      fileInfo.lc_zs_margin_frac_count += localFileInfo.lc_zs_margin_frac_count;
+      fileInfo.lc_zs_margin_frac_sum += localFileInfo.lc_zs_margin_frac_sum;
+      fileInfo.lc_zs_margin_frac_max =
+          std::max(fileInfo.lc_zs_margin_frac_max, localFileInfo.lc_zs_margin_frac_max);
+      for (size_t i = 0; i < fileInfo.lc_zs_margin_frac_hist.size(); ++i) {
+        fileInfo.lc_zs_margin_frac_hist[i] += localFileInfo.lc_zs_margin_frac_hist[i];
+      }
       if (presenceSummary) {
         presenceSummary->merge(presenceLocal);
       }
@@ -2444,6 +2503,16 @@ void classify(
       fileInfo.lc_zs_flip_top12 += localFileInfo.lc_zs_flip_top12;
       fileInfo.lc_zs_base_sum += localFileInfo.lc_zs_base_sum;
       fileInfo.lc_zs_l1_sum += localFileInfo.lc_zs_l1_sum;
+      for (size_t i = 0; i < fileInfo.lc_zs_k_hist.size(); ++i) {
+        fileInfo.lc_zs_k_hist[i] += localFileInfo.lc_zs_k_hist[i];
+      }
+      fileInfo.lc_zs_margin_frac_count += localFileInfo.lc_zs_margin_frac_count;
+      fileInfo.lc_zs_margin_frac_sum += localFileInfo.lc_zs_margin_frac_sum;
+      fileInfo.lc_zs_margin_frac_max =
+          std::max(fileInfo.lc_zs_margin_frac_max, localFileInfo.lc_zs_margin_frac_max);
+      for (size_t i = 0; i < fileInfo.lc_zs_margin_frac_hist.size(); ++i) {
+        fileInfo.lc_zs_margin_frac_hist[i] += localFileInfo.lc_zs_margin_frac_hist[i];
+      }
     }
   }
 }

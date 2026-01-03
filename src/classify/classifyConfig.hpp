@@ -273,13 +273,18 @@ namespace ChimeraClassify {
 					size_t tf_sat_damped_hits{ 0 };
 					double tf_sat_base_sum{ 0.0 };
 					double tf_sat_drop_sum{ 0.0 };
-					// Local contrast (zero-sum) audit (within-genus near ties).
-					size_t lc_zs_enabled_reads{ 0 };
-					size_t lc_zs_shared_hits{ 0 };
-					size_t lc_zs_flip_top12{ 0 };
-					double lc_zs_base_sum{ 0.0 };
-					double lc_zs_l1_sum{ 0.0 };
-				};
+						// Local contrast (zero-sum) audit (within-genus near ties).
+						size_t lc_zs_enabled_reads{ 0 };
+						size_t lc_zs_shared_hits{ 0 };
+						size_t lc_zs_flip_top12{ 0 };
+						double lc_zs_base_sum{ 0.0 };
+						double lc_zs_l1_sum{ 0.0 };
+						std::array<uint64_t, 9> lc_zs_k_hist{};
+						size_t lc_zs_margin_frac_count{ 0 };
+						double lc_zs_margin_frac_sum{ 0.0 };
+						double lc_zs_margin_frac_max{ 0.0 };
+						std::array<uint64_t, 7> lc_zs_margin_frac_hist{};
+					};
 
 	struct batchReads {
 		std::vector< std::string >                 ids;

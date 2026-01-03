@@ -1655,29 +1655,101 @@ void run(ClassifyConfig config) {
 		              << damp_frac << " drop_frac=" << drop_frac
 		              << std::defaultfloat << std::endl;
 		  };
-		  auto print_local_contrast_audit = [&]() {
-		    if (fileInfo.lc_zs_enabled_reads == 0 && fileInfo.lc_zs_shared_hits == 0) {
-		      return;
-		    }
-		    double l1_frac = 0.0;
-		    if (fileInfo.lc_zs_base_sum > 0.0) {
-		      l1_frac = fileInfo.lc_zs_l1_sum / fileInfo.lc_zs_base_sum;
-		    }
-		    double flip_frac = 0.0;
-		    if (fileInfo.lc_zs_enabled_reads > 0) {
-		      flip_frac = static_cast<double>(fileInfo.lc_zs_flip_top12) /
-		                  static_cast<double>(fileInfo.lc_zs_enabled_reads);
-		    }
-		    std::cout << "Local contrast zs audit: avgLen=" << fileInfo.avgLen
-		              << " gamma=" << config.local_contrast_gamma
-		              << " enabled_reads=" << fileInfo.lc_zs_enabled_reads
-		              << " shared_hits=" << fileInfo.lc_zs_shared_hits
-		              << " l1_frac=" << std::fixed << std::setprecision(3)
-		              << l1_frac << " flip_top12=" << fileInfo.lc_zs_flip_top12
-		              << "/" << fileInfo.lc_zs_enabled_reads << " ("
-		              << std::setprecision(3) << flip_frac << ")"
-		              << std::defaultfloat << std::endl;
-		  };
+			  auto print_local_contrast_audit = [&]() {
+			    if (fileInfo.lc_zs_enabled_reads == 0 && fileInfo.lc_zs_shared_hits == 0) {
+			      return;
+			    }
+			    double l1_frac = 0.0;
+			    if (fileInfo.lc_zs_base_sum > 0.0) {
+			      l1_frac = fileInfo.lc_zs_l1_sum / fileInfo.lc_zs_base_sum;
+			    }
+			    double flip_frac = 0.0;
+			    if (fileInfo.lc_zs_enabled_reads > 0) {
+			      flip_frac = static_cast<double>(fileInfo.lc_zs_flip_top12) /
+			                  static_cast<double>(fileInfo.lc_zs_enabled_reads);
+			    }
+			    auto k_quantile = [&](double q) -> size_t {
+			      uint64_t total = 0;
+			      for (uint64_t c : fileInfo.lc_zs_k_hist) {
+			        total += c;
+			      }
+			      if (total == 0) {
+			        return 0;
+			      }
+			      const double target =
+			          std::clamp(q, 0.0, 1.0) * static_cast<double>(total);
+			      uint64_t cum = 0;
+			      for (size_t k = 0; k < fileInfo.lc_zs_k_hist.size(); ++k) {
+			        cum += fileInfo.lc_zs_k_hist[k];
+			        if (static_cast<double>(cum) >= target) {
+			          return k;
+			        }
+			      }
+			      return fileInfo.lc_zs_k_hist.size() - 1;
+			    };
+			    const size_t k_p50 = k_quantile(0.50);
+			    const size_t k_p90 = k_quantile(0.90);
+
+			    const double margin_mean =
+			        (fileInfo.lc_zs_margin_frac_count > 0)
+			            ? (fileInfo.lc_zs_margin_frac_sum /
+			               static_cast<double>(fileInfo.lc_zs_margin_frac_count))
+			            : 0.0;
+			    auto margin_bin_quantile = [&](double q) -> size_t {
+			      uint64_t total = 0;
+			      for (uint64_t c : fileInfo.lc_zs_margin_frac_hist) {
+			        total += c;
+			      }
+			      if (total == 0) {
+			        return 0;
+			      }
+			      const double target =
+			          std::clamp(q, 0.0, 1.0) * static_cast<double>(total);
+			      uint64_t cum = 0;
+			      for (size_t b = 0; b < fileInfo.lc_zs_margin_frac_hist.size(); ++b) {
+			        cum += fileInfo.lc_zs_margin_frac_hist[b];
+			        if (static_cast<double>(cum) >= target) {
+			          return b;
+			        }
+			      }
+			      return fileInfo.lc_zs_margin_frac_hist.size() - 1;
+			    };
+			    const size_t m_p50 = margin_bin_quantile(0.50);
+			    const size_t m_p90 = margin_bin_quantile(0.90);
+			    auto format_margin_bin = [](size_t b) -> const char * {
+			      switch (b) {
+			      case 0:
+			        return "<0.05";
+			      case 1:
+			        return "<0.10";
+			      case 2:
+			        return "<0.20";
+			      case 3:
+			        return "<0.50";
+			      case 4:
+			        return "<1.00";
+			      case 5:
+			        return "<2.00";
+			      default:
+			        return ">=2.00";
+			      }
+			    };
+			    std::cout << "Local contrast zs audit: avgLen=" << fileInfo.avgLen
+			              << " gamma=" << config.local_contrast_gamma
+			              << " enabled_reads=" << fileInfo.lc_zs_enabled_reads
+			              << " shared_hits=" << fileInfo.lc_zs_shared_hits
+			              << " l1_frac=" << std::fixed << std::setprecision(3)
+			              << l1_frac << " flip_top12=" << fileInfo.lc_zs_flip_top12
+			              << "/" << fileInfo.lc_zs_enabled_reads << " ("
+			              << std::setprecision(3) << flip_frac << ")"
+			              << " k(p50/p90)=" << k_p50 << "/" << k_p90
+			              << " margin_mean=" << std::setprecision(3) << margin_mean
+			              << " margin_max=" << std::setprecision(3)
+			              << fileInfo.lc_zs_margin_frac_max
+			              << " margin(p50/p90)=" << format_margin_bin(m_p50) << "/"
+			              << format_margin_bin(m_p90)
+			              << std::defaultfloat << std::endl;
+			  };
 	  if (config.verbose) {
 	    print_rejects();
 	    print_preem_stats();
