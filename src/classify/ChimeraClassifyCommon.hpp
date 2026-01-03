@@ -222,6 +222,31 @@ inline bool is_local_unique_edge(std::size_t deg_effective,
   return deg_effective == 1 && df_bins == 1;
 }
 
+// Term-frequency saturation: suppress repeated occurrences of the same
+// (typically shared/high-DF) minimizer so "pile-up" evidence does not grow
+// linearly with repeats.
+//
+// We use a smooth, bounded curve:
+//   tf = 1 / (1 + (count-1)^alpha)
+// where count>=1 and alpha>=0. Default alpha=1 gives a simple 1/count decay.
+inline double tf_saturation_factor(uint32_t count, double alpha = 1.0) {
+  if (count <= 1) {
+    return 1.0;
+  }
+  const double a = std::max(0.0, alpha);
+  const double x = static_cast<double>(count - 1u);
+  double denom = 1.0;
+  if (a <= 1.0) {
+    denom += x;
+  } else {
+    denom += std::pow(x, a);
+  }
+  if (!(denom > 0.0)) {
+    return 1.0;
+  }
+  return std::clamp(1.0 / denom, 0.0, 1.0);
+}
+
 // Continuous "stopword" suppression for very common minimizers (high df_est).
 //
 // For df_est <= df_ref: no suppression (factor=1).

@@ -574,6 +574,26 @@ void processSequence(
     fileInfo.hit_idf_power_hist[bucket] += 1;
   }
 
+  // High-div only: suppress repeated shared minimizers on long reads/contigs.
+  // Guard rails:
+  // - low-div branch: off (ATCC safety line)
+  // - short datasets (avgLen small): off (cami-short safety line)
+  // - short reads within long datasets: off (avoid overhead)
+  constexpr size_t kTfSaturationMinAvgLen = 1200;
+  constexpr size_t kTfSaturationMinReadLen = 2048;
+  constexpr uint32_t kTfSaturationBuckets = 1u << 15; // 32768
+  constexpr uint32_t kTfSaturationMask = kTfSaturationBuckets - 1u;
+  constexpr uint8_t kTfSaturationCap = 16;
+  constexpr double kTfSaturationAlpha = 1.0;
+  const bool tf_saturation_enabled =
+      (!config.low_div_active && fileInfo.avgLen >= kTfSaturationMinAvgLen &&
+       readLen >= kTfSaturationMinReadLen);
+  std::vector<uint8_t> tf_saturation_counts;
+  if (tf_saturation_enabled) {
+    tf_saturation_counts.assign(kTfSaturationBuckets, 0);
+    fileInfo.tf_sat_enabled_reads += 1;
+  }
+
   auto bucket_degree = [](size_t d) -> size_t {
     if (d <= 1) {
       return 0;
@@ -801,6 +821,45 @@ void processSequence(
     }
     double contrib = idf * base * bonus;
     double contrib_old = idf_old * base * bonus;
+
+    // TF saturation: apply to shared/common minimizers to suppress pile-up.
+    // Under topBins/subset routing, a globally common minimizer can degenerate
+    // to deg_effective==1, so we also gate by df_est (freqSketch) when
+    // available.
+    bool tf_shared = false;
+    if (tf_saturation_enabled) {
+      tf_shared = (deg_effective > 1);
+      if (!tf_shared && has_freq &&
+          weightCtx.freqStats.df_high_threshold !=
+              std::numeric_limits<uint32_t>::max()) {
+        const uint32_t gate = std::max<uint32_t>(
+            1u, weightCtx.freqStats.df_high_threshold / 2u);
+        tf_shared = (df_est >= gate);
+      }
+    }
+
+    if (tf_shared) {
+      const uint32_t idx =
+          static_cast<uint32_t>(splitmix64(value)) & kTfSaturationMask;
+      uint8_t c = tf_saturation_counts[idx];
+      if (c < kTfSaturationCap) {
+        ++c;
+        tf_saturation_counts[idx] = c;
+      } else {
+        c = kTfSaturationCap;
+      }
+      const double tf =
+          tf_saturation_factor(static_cast<uint32_t>(c), kTfSaturationAlpha);
+      fileInfo.tf_sat_shared_hits += 1;
+      fileInfo.tf_sat_base_sum += contrib;
+      fileInfo.tf_sat_drop_sum += contrib * (1.0 - tf);
+      if (tf < 0.999999) {
+        fileInfo.tf_sat_damped_hits += 1;
+      }
+      contrib *= tf;
+      contrib_old *= tf;
+    }
+
     fileInfo.hit_idf_contrib_sum_old += contrib_old;
     fileInfo.hit_idf_contrib_sum_new += contrib;
     for (uint32_t tid : minimizerTids) {
@@ -1019,6 +1078,9 @@ void processSequence(
     binHitCount.clear();
     uniqueHits.clear();
     consistencyHits.clear();
+    if (tf_saturation_enabled) {
+      std::fill(tf_saturation_counts.begin(), tf_saturation_counts.end(), 0);
+    }
     eff_eval = 0.0;
     n_eval = 0;
     for (auto value : hashs1) {
@@ -1888,6 +1950,7 @@ void classify_streaming(
     batchReads batch;
     std::vector<classifyResult> localClassifyResults;
     FileInfo localFileInfo;
+    localFileInfo.avgLen = fileInfo.avgLen;
     localFileInfo.minLen = kInvalidLength;
     localFileInfo.maxLen = 0;
     localFileInfo.bpLength = 0;
@@ -2006,6 +2069,11 @@ void classify_streaming(
       for (size_t i = 0; i < fileInfo.hit_idf_power_hist.size(); ++i) {
         fileInfo.hit_idf_power_hist[i] += localFileInfo.hit_idf_power_hist[i];
       }
+      fileInfo.tf_sat_enabled_reads += localFileInfo.tf_sat_enabled_reads;
+      fileInfo.tf_sat_shared_hits += localFileInfo.tf_sat_shared_hits;
+      fileInfo.tf_sat_damped_hits += localFileInfo.tf_sat_damped_hits;
+      fileInfo.tf_sat_base_sum += localFileInfo.tf_sat_base_sum;
+      fileInfo.tf_sat_drop_sum += localFileInfo.tf_sat_drop_sum;
       if (presenceSummary) {
         presenceSummary->merge(presenceLocal);
       }
@@ -2038,6 +2106,7 @@ void classify(
     batchReads batch;
     std::vector<classifyResult> localClassifyResults;
     FileInfo localFileInfo;
+    localFileInfo.avgLen = fileInfo.avgLen;
     localFileInfo.minLen = kInvalidLength;
     localFileInfo.maxLen = 0;
     localFileInfo.bpLength = 0;
@@ -2143,6 +2212,11 @@ void classify(
       for (size_t i = 0; i < fileInfo.hit_idf_power_hist.size(); ++i) {
         fileInfo.hit_idf_power_hist[i] += localFileInfo.hit_idf_power_hist[i];
       }
+      fileInfo.tf_sat_enabled_reads += localFileInfo.tf_sat_enabled_reads;
+      fileInfo.tf_sat_shared_hits += localFileInfo.tf_sat_shared_hits;
+      fileInfo.tf_sat_damped_hits += localFileInfo.tf_sat_damped_hits;
+      fileInfo.tf_sat_base_sum += localFileInfo.tf_sat_base_sum;
+      fileInfo.tf_sat_drop_sum += localFileInfo.tf_sat_drop_sum;
     }
   }
 }

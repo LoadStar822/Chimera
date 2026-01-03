@@ -258,11 +258,17 @@ namespace ChimeraClassify {
 			size_t hit_idf_raw_lt0p5{ 0 };
 			std::array<uint64_t, 4> hit_idf_raw_bins{};
 			double hit_idf_contrib_sum_old{ 0.0 };
-			double hit_idf_contrib_sum_new{ 0.0 };
-			std::array<uint64_t, 64> hit_idf_raw_hist{};
-			std::array<uint64_t, 64> hit_idf_eff_hist{};
-			std::array<uint64_t, 64> hit_idf_power_hist{};
-		};
+				double hit_idf_contrib_sum_new{ 0.0 };
+					std::array<uint64_t, 64> hit_idf_raw_hist{};
+					std::array<uint64_t, 64> hit_idf_eff_hist{};
+					std::array<uint64_t, 64> hit_idf_power_hist{};
+					// TF saturation audit (shared minimizer de-dup / pile-up suppression).
+					size_t tf_sat_enabled_reads{ 0 };
+					size_t tf_sat_shared_hits{ 0 };
+					size_t tf_sat_damped_hits{ 0 };
+					double tf_sat_base_sum{ 0.0 };
+					double tf_sat_drop_sum{ 0.0 };
+				};
 
 	struct batchReads {
 		std::vector< std::string >                 ids;

@@ -353,19 +353,23 @@ void run(ClassifyConfig config) {
   }
   weightCtx.freq_trusted = freq_trusted;
 
-  if (config.verbose) {
-    std::cout << "DB presence meta: entries=" << coverageMeta.entries.size()
-              << ", ref_read_len=" << coverageMeta.ref_read_length
-              << ", span=" << coverageMeta.effective_span
-              << ", unique_deg=" << coverageMeta.unique_deg_threshold
-              << ", freq_model.enabled=" << coverageMeta.freq_model.enabled()
-              << ", freq_model.depth=" << coverageMeta.freq_model.depth
-              << ", freq_model.width=" << coverageMeta.freq_model.width
-              << ", counters=" << coverageMeta.freq_model.counters.size()
-              << std::endl;
-    std::cout << "DB presence meta stats: unique_nonzero=" << uniq_nonzero
-              << ", unique_max=" << uniq_max
-              << ", density_nonzero=" << density_nonzero
+		  if (config.verbose) {
+		    std::cout << "DB presence meta: entries=" << coverageMeta.entries.size()
+		              << ", ref_read_len=" << coverageMeta.ref_read_length
+		              << ", span=" << coverageMeta.effective_span
+		              << ", unique_deg=" << coverageMeta.unique_deg_threshold
+		              << ", freq_model.enabled=" << coverageMeta.freq_model.enabled()
+		              << ", freq_model.depth=" << coverageMeta.freq_model.depth
+		              << ", freq_model.width=" << coverageMeta.freq_model.width
+		              << ", freq_model.quantile=" << coverageMeta.freq_model.quantile
+		              << ", freq.df_high_threshold=" << weightCtx.freqStats.df_high_threshold
+		              << ", freq.df_max_observed=" << weightCtx.freqStats.df_max_observed
+		              << ", freq.nonzero_counters=" << weightCtx.freqStats.nonzero_counters
+		              << ", counters=" << coverageMeta.freq_model.counters.size()
+		              << std::endl;
+		    std::cout << "DB presence meta stats: unique_nonzero=" << uniq_nonzero
+		              << ", unique_max=" << uniq_max
+		              << ", density_nonzero=" << density_nonzero
               << ", density_max=" << std::scientific << density_max
               << std::defaultfloat << ", genome_nonzero=" << genome_nonzero
               << std::endl;
@@ -728,6 +732,7 @@ void run(ClassifyConfig config) {
   presenceSeed ^= (hasher(config.dbFile) << 2);
   presenceSeed ^= static_cast<uint64_t>(imcfConfig.fpSalt);
 
+  size_t avg_len_hint = 0;
   if (config.low_div_auto && config.low_div_probe_reads > 0) {
     ClassifyConfig probe_config = config;
     probe_config.max_reads = config.low_div_probe_reads;
@@ -747,6 +752,10 @@ void run(ClassifyConfig config) {
                        tax, probeResults, probeInfo, probe_done, feature_params,
                        feature_min_len, weightCtx, nullptr, presenceSeed);
     probeProducer.join();
+
+    if (probeInfo.sequenceNum > 0) {
+      avg_len_hint = probeInfo.bpLength / probeInfo.sequenceNum;
+    }
 
     if (!probeResults.empty()) {
       std::sort(probeResults.begin(), probeResults.end(),
@@ -875,6 +884,9 @@ void run(ClassifyConfig config) {
   }
 
   FileInfo fileInfo;
+  if (avg_len_hint > 0) {
+    fileInfo.avgLen = avg_len_hint;
+  }
   seqan3::contrib::bgzf_thread_count = config.threads;
   std::vector<moodycamel::ConcurrentQueue<batchReads>> readQueues(
       static_cast<size_t>(std::max<uint16_t>(1, config.threads)));
@@ -1621,12 +1633,34 @@ void run(ClassifyConfig config) {
               << ") bins_total=" << bins_total << " contrib_new/old="
               << std::setprecision(6) << contrib_ratio
               << std::defaultfloat << std::endl;
-  };
-  if (config.verbose) {
-    print_rejects();
-    print_preem_stats();
-    print_hit_idf_audit();
-  }
+		  };
+		  auto print_tf_saturation_audit = [&]() {
+		    if (fileInfo.tf_sat_enabled_reads == 0 && fileInfo.tf_sat_shared_hits == 0) {
+		      return;
+		    }
+		    double drop_frac = 0.0;
+		    if (fileInfo.tf_sat_base_sum > 0.0) {
+		      drop_frac = fileInfo.tf_sat_drop_sum / fileInfo.tf_sat_base_sum;
+	    }
+	    double damp_frac = 0.0;
+		    if (fileInfo.tf_sat_shared_hits > 0) {
+		      damp_frac = static_cast<double>(fileInfo.tf_sat_damped_hits) /
+		                  static_cast<double>(fileInfo.tf_sat_shared_hits);
+		    }
+		    std::cout << "TF saturation audit: avgLen=" << fileInfo.avgLen
+		              << " enabled_reads=" << fileInfo.tf_sat_enabled_reads
+		              << " shared_hits=" << fileInfo.tf_sat_shared_hits
+		              << " damped_hits=" << fileInfo.tf_sat_damped_hits
+		              << " damp_frac=" << std::fixed << std::setprecision(3)
+		              << damp_frac << " drop_frac=" << drop_frac
+		              << std::defaultfloat << std::endl;
+		  };
+	  if (config.verbose) {
+	    print_rejects();
+	    print_preem_stats();
+	    print_hit_idf_audit();
+	    print_tf_saturation_audit();
+	  }
 
   auto saveStart = std::chrono::high_resolution_clock::now();
   std::cout << "Saving classification results..." << std::endl;
