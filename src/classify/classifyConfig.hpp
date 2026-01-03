@@ -84,6 +84,10 @@ namespace ChimeraClassify {
 		// over-penalizing within-genus shared evidence, while keeping output taxids
 		// unchanged (still DB taxids).
 	bool deg_by_species = false;
+		// High-div only: local contrast (zero-sum redistribution) inside per-read
+		// topM to sharpen within-genus near-ties without dropping evidence.
+		// 0 disables.
+		double local_contrast_gamma = 0.0;
 		std::string decoy_mode{ "imcf-edge-shuffle" };
 		uint32_t decoy_reps = 3;
 		double exclusive_gamma = 1.2;
@@ -163,6 +167,7 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Collapse hits:" << config.collapse_strain_hits << std::endl
 			<< std::setw(20) << "Collapse cands:" << config.collapse_strain_candidates << std::endl
 			<< std::setw(20) << "Deg by species:" << config.deg_by_species << std::endl
+			<< std::setw(20) << "Local contrast g:" << config.local_contrast_gamma << std::endl
 			<< std::setw(20) << "Presence pi:" << config.presence_pi << std::endl
 				<< std::setw(20) << "Presence tau:" << config.presence_tau << std::endl
 				<< std::setw(20) << "Presence noise:" << config.presence_noise << std::endl
@@ -268,6 +273,12 @@ namespace ChimeraClassify {
 					size_t tf_sat_damped_hits{ 0 };
 					double tf_sat_base_sum{ 0.0 };
 					double tf_sat_drop_sum{ 0.0 };
+					// Local contrast (zero-sum) audit (within-genus near ties).
+					size_t lc_zs_enabled_reads{ 0 };
+					size_t lc_zs_shared_hits{ 0 };
+					size_t lc_zs_flip_top12{ 0 };
+					double lc_zs_base_sum{ 0.0 };
+					double lc_zs_l1_sum{ 0.0 };
 				};
 
 	struct batchReads {

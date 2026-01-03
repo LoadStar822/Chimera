@@ -1655,11 +1655,35 @@ void run(ClassifyConfig config) {
 		              << damp_frac << " drop_frac=" << drop_frac
 		              << std::defaultfloat << std::endl;
 		  };
+		  auto print_local_contrast_audit = [&]() {
+		    if (fileInfo.lc_zs_enabled_reads == 0 && fileInfo.lc_zs_shared_hits == 0) {
+		      return;
+		    }
+		    double l1_frac = 0.0;
+		    if (fileInfo.lc_zs_base_sum > 0.0) {
+		      l1_frac = fileInfo.lc_zs_l1_sum / fileInfo.lc_zs_base_sum;
+		    }
+		    double flip_frac = 0.0;
+		    if (fileInfo.lc_zs_enabled_reads > 0) {
+		      flip_frac = static_cast<double>(fileInfo.lc_zs_flip_top12) /
+		                  static_cast<double>(fileInfo.lc_zs_enabled_reads);
+		    }
+		    std::cout << "Local contrast zs audit: avgLen=" << fileInfo.avgLen
+		              << " gamma=" << config.local_contrast_gamma
+		              << " enabled_reads=" << fileInfo.lc_zs_enabled_reads
+		              << " shared_hits=" << fileInfo.lc_zs_shared_hits
+		              << " l1_frac=" << std::fixed << std::setprecision(3)
+		              << l1_frac << " flip_top12=" << fileInfo.lc_zs_flip_top12
+		              << "/" << fileInfo.lc_zs_enabled_reads << " ("
+		              << std::setprecision(3) << flip_frac << ")"
+		              << std::defaultfloat << std::endl;
+		  };
 	  if (config.verbose) {
 	    print_rejects();
 	    print_preem_stats();
 	    print_hit_idf_audit();
 	    print_tf_saturation_audit();
+	    print_local_contrast_audit();
 	  }
 
   auto saveStart = std::chrono::high_resolution_clock::now();

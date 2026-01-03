@@ -378,7 +378,7 @@ void processSequence(
   robin_hood::unordered_flat_map<uint32_t, uint32_t> sampleBinScore;
   uint64_t coarseTotal = 0;
   uint64_t sampleCovered = 0;
-  std::vector<uint64_t> deferredEval;
+  std::vector<size_t> deferredEval;
   if (hashs1.size() > 64) {
     deferredEval.reserve(hashs1.size() - 64);
   }
@@ -592,6 +592,22 @@ void processSequence(
   if (tf_saturation_enabled) {
     tf_saturation_counts.assign(kTfSaturationBuckets, 0);
     fileInfo.tf_sat_enabled_reads += 1;
+  }
+
+  // Local contrast (zero-sum redistribution) is only meaningful on long reads in
+  // high-div, and requires an NCBI taxdump to detect within-genus near ties.
+  // Track per-minimizer contrib so the contrast term is scaled consistently with
+  // the primary scoring (without recomputing IDF/freq/bonus in a second pass).
+  constexpr size_t kLocalContrastMinAvgLen = 2000;
+  constexpr size_t kLocalContrastMinReadLen = 2048;
+  const bool local_contrast_track_contrib =
+      (config.local_contrast_gamma > 0.0 && config.em &&
+       !config.low_div_active && fileInfo.avgLen >= kLocalContrastMinAvgLen &&
+       readLen >= kLocalContrastMinReadLen && weightCtx.ncbiTaxdump &&
+       weightCtx.ncbiTaxdump->enabled());
+  std::vector<double> local_contrast_contrib;
+  if (local_contrast_track_contrib && !hashs1.empty()) {
+    local_contrast_contrib.assign(hashs1.size(), 0.0);
   }
 
   auto bucket_degree = [](size_t d) -> size_t {
@@ -989,7 +1005,11 @@ void processSequence(
 
   size_t n0 = std::min<size_t>(64, hashs1.size());
   for (size_t i = 0; i < n0; ++i) {
-    eff_eval += evaluate_minimizer(hashs1[i], activeSubset);
+    const double c = evaluate_minimizer(hashs1[i], activeSubset);
+    eff_eval += c;
+    if (local_contrast_track_contrib && i < local_contrast_contrib.size()) {
+      local_contrast_contrib[i] = c;
+    }
   }
   n_eval = n0;
 
@@ -1020,18 +1040,29 @@ void processSequence(
     size_t mask = (static_cast<size_t>(1) << 3) - 1;
     for (size_t i = n0; i < hashs1.size(); ++i) {
       if ((hashs1[i] & mask) != 0) {
-        deferredEval.push_back(hashs1[i]);
+        deferredEval.push_back(i);
         continue;
       }
-      eff_eval += evaluate_minimizer(hashs1[i], activeSubset);
+      const double c = evaluate_minimizer(hashs1[i], activeSubset);
+      eff_eval += c;
+      if (local_contrast_track_contrib && i < local_contrast_contrib.size()) {
+        local_contrast_contrib[i] = c;
+      }
       ++n_eval;
     }
     stats = collect_stats();
     highConfPre = meets_quick(stats);
 
     if (!highConfPre && !deferredEval.empty()) {
-      for (auto value : deferredEval) {
-        eff_eval += evaluate_minimizer(value, activeSubset);
+      for (size_t idx : deferredEval) {
+        if (idx >= hashs1.size()) {
+          continue;
+        }
+        const double c = evaluate_minimizer(hashs1[idx], activeSubset);
+        eff_eval += c;
+        if (local_contrast_track_contrib && idx < local_contrast_contrib.size()) {
+          local_contrast_contrib[idx] = c;
+        }
         ++n_eval;
       }
       deferredEval.clear();
@@ -1044,6 +1075,7 @@ void processSequence(
   double gap_need = std::max(0.5, eff_eval / 24.0);
 
   uint32_t bestTid = stats.bestTid;
+  uint32_t secondTid = stats.secondTid;
   double best = stats.best;
   double second = stats.second;
   double best_ratio = stats.ratio;
@@ -1083,8 +1115,15 @@ void processSequence(
     }
     eff_eval = 0.0;
     n_eval = 0;
-    for (auto value : hashs1) {
-      eff_eval += evaluate_minimizer(value, activeSubset);
+    if (local_contrast_track_contrib) {
+      std::fill(local_contrast_contrib.begin(), local_contrast_contrib.end(), 0.0);
+    }
+    for (size_t i = 0; i < hashs1.size(); ++i) {
+      const double c = evaluate_minimizer(hashs1[i], activeSubset);
+      eff_eval += c;
+      if (local_contrast_track_contrib && i < local_contrast_contrib.size()) {
+        local_contrast_contrib[i] = c;
+      }
       ++n_eval;
     }
     stats = collect_stats();
@@ -1092,12 +1131,190 @@ void processSequence(
     thr_conf = std::ceil(config.shotThreshold * eff_eval);
     gap_need = std::max(0.5, eff_eval / 24.0);
     bestTid = stats.bestTid;
+    secondTid = stats.secondTid;
     best = stats.best;
     second = stats.second;
     best_ratio = stats.ratio;
     gap = stats.gap;
     uniqueCount = stats.uniqueCount;
     uniqueRatio = stats.uniqueRatio;
+  }
+
+  // High-div local contrast: zero-sum redistribution within topM on
+  // within-genus near ties.
+  //
+  // Motivation: local-contrast with w(k)=1/k^tau can "drop" too much evidence.
+  // Here we keep evidence mass (sum delta=0) while sharpening relative support.
+  if (local_contrast_track_contrib && !tidScore.empty() &&
+      bestTid != std::numeric_limits<uint32_t>::max() &&
+      secondTid != std::numeric_limits<uint32_t>::max() &&
+      best_ratio < 2.0) {
+    auto parse_u32 = [](const std::string &s, uint32_t &out) -> bool {
+      if (s.empty()) {
+        return false;
+      }
+      for (unsigned char c : s) {
+        if (!std::isdigit(c)) {
+          return false;
+        }
+      }
+      try {
+        unsigned long v = std::stoul(s);
+        if (v > std::numeric_limits<uint32_t>::max()) {
+          return false;
+        }
+        out = static_cast<uint32_t>(v);
+        return true;
+      } catch (const std::exception &) {
+        return false;
+      }
+    };
+
+    uint32_t tid1 = 0;
+    uint32_t tid2 = 0;
+    if (bestTid < tax.id2str.size() && secondTid < tax.id2str.size() &&
+        parse_u32(tax.id2str[bestTid], tid1) &&
+        parse_u32(tax.id2str[secondTid], tid2)) {
+      const uint32_t g1 = weightCtx.ncbiTaxdump->to_genus(tid1);
+      const uint32_t g2 = weightCtx.ncbiTaxdump->to_genus(tid2);
+      if (g1 != 0 && g1 == g2) {
+        constexpr size_t kLocalContrastTopM = 8;
+        std::vector<std::pair<uint32_t, double>> ranked;
+        ranked.reserve(tidScore.size());
+        for (const auto &kv : tidScore) {
+          ranked.emplace_back(kv.first, kv.second);
+        }
+        const size_t want = std::min(kLocalContrastTopM, ranked.size());
+        if (want >= 2) {
+          std::partial_sort(
+              ranked.begin(),
+              ranked.begin() + static_cast<std::ptrdiff_t>(want), ranked.end(),
+              [](const auto &a, const auto &b) { return a.second > b.second; });
+          ranked.resize(want);
+
+          std::vector<uint32_t> topM;
+          topM.reserve(want);
+          for (const auto &kv : ranked) {
+            topM.push_back(kv.first);
+          }
+          robin_hood::unordered_flat_set<uint32_t> topM_set;
+          topM_set.reserve(topM.size() * 2);
+          for (uint32_t tid : topM) {
+            topM_set.insert(tid);
+          }
+
+          const size_t M = topM.size();
+          std::vector<uint32_t> support;
+          support.reserve(M);
+
+          const uint32_t before_best = bestTid;
+          const uint32_t before_second = secondTid;
+          bool applied_any = false;
+          for (size_t i = 0; i < hashs1.size(); ++i) {
+            if (i >= local_contrast_contrib.size()) {
+              break;
+            }
+            const double contrib = local_contrast_contrib[i];
+            if (!(contrib > 0.0)) {
+              continue;
+            }
+
+            minimizerTids.clear();
+            auto emit = [&](uint32_t bin, uint16_t sp) {
+              if (bin >= tax.idx2id.size()) {
+                return;
+              }
+              const auto &speciesVec = tax.idx2id[bin];
+              if (sp >= speciesVec.size()) {
+                return;
+              }
+              uint32_t tid = speciesVec[sp];
+              if (tid >= tax.id2str.size()) {
+                return;
+              }
+              if (weightCtx.tid2speciesRep &&
+                  tid < weightCtx.tid2speciesRep->size()) {
+                tid = (*weightCtx.tid2speciesRep)[tid];
+              }
+              minimizerTids.push_back(tid);
+            };
+
+            if (!activeSubset) {
+              imcf.bulkContain_events(hashs1[i], emit);
+            } else {
+              imcf.bulkContain_events_subset(hashs1[i], *activeSubset, emit);
+            }
+            if (minimizerTids.empty()) {
+              continue;
+            }
+            std::sort(minimizerTids.begin(), minimizerTids.end());
+            minimizerTids.erase(
+                std::unique(minimizerTids.begin(), minimizerTids.end()),
+                minimizerTids.end());
+            if (minimizerTids.empty()) {
+              continue;
+            }
+
+            support.clear();
+            for (uint32_t tid : minimizerTids) {
+              if (topM_set.find(tid) != topM_set.end()) {
+                support.push_back(tid);
+              }
+            }
+            const size_t k = support.size();
+            if (k == 0 || k >= M) {
+              continue;
+            }
+
+            const double base_mass = contrib * static_cast<double>(k);
+            const double delta_total = config.local_contrast_gamma * base_mass;
+            if (!(delta_total > 0.0)) {
+              continue;
+            }
+            const auto zs = local_contrast_zero_sum_stats(M, k, delta_total);
+            if (!(zs.l1_sum > 0.0)) {
+              continue;
+            }
+
+            const double sub = delta_total / static_cast<double>(M);
+            for (uint32_t tid : topM) {
+              tidScore[tid] -= sub;
+            }
+            const double add = delta_total / static_cast<double>(k);
+            for (uint32_t tid : support) {
+              tidScore[tid] += add;
+            }
+
+            applied_any = true;
+            fileInfo.lc_zs_shared_hits += 1;
+            fileInfo.lc_zs_base_sum += base_mass;
+            fileInfo.lc_zs_l1_sum += zs.l1_sum;
+          }
+
+          if (applied_any) {
+            fileInfo.lc_zs_enabled_reads += 1;
+            stats = collect_stats();
+            if (stats.bestTid == before_second &&
+                stats.secondTid == before_best) {
+              fileInfo.lc_zs_flip_top12 += 1;
+            }
+            bestTid = stats.bestTid;
+            secondTid = stats.secondTid;
+            best = stats.best;
+            second = stats.second;
+            best_ratio = stats.ratio;
+            gap = stats.gap;
+            uniqueCount = stats.uniqueCount;
+            uniqueRatio = stats.uniqueRatio;
+            bestTaxidStr.clear();
+            if (bestTid != std::numeric_limits<uint32_t>::max() &&
+                bestTid < tax.id2str.size()) {
+              bestTaxidStr = tax.id2str[bestTid];
+            }
+          }
+        }
+      }
+    }
   }
 
   // Optional: dump raw tidScore (pre-EM candidates before thresholds).
@@ -2074,6 +2291,11 @@ void classify_streaming(
       fileInfo.tf_sat_damped_hits += localFileInfo.tf_sat_damped_hits;
       fileInfo.tf_sat_base_sum += localFileInfo.tf_sat_base_sum;
       fileInfo.tf_sat_drop_sum += localFileInfo.tf_sat_drop_sum;
+      fileInfo.lc_zs_enabled_reads += localFileInfo.lc_zs_enabled_reads;
+      fileInfo.lc_zs_shared_hits += localFileInfo.lc_zs_shared_hits;
+      fileInfo.lc_zs_flip_top12 += localFileInfo.lc_zs_flip_top12;
+      fileInfo.lc_zs_base_sum += localFileInfo.lc_zs_base_sum;
+      fileInfo.lc_zs_l1_sum += localFileInfo.lc_zs_l1_sum;
       if (presenceSummary) {
         presenceSummary->merge(presenceLocal);
       }
@@ -2217,6 +2439,11 @@ void classify(
       fileInfo.tf_sat_damped_hits += localFileInfo.tf_sat_damped_hits;
       fileInfo.tf_sat_base_sum += localFileInfo.tf_sat_base_sum;
       fileInfo.tf_sat_drop_sum += localFileInfo.tf_sat_drop_sum;
+      fileInfo.lc_zs_enabled_reads += localFileInfo.lc_zs_enabled_reads;
+      fileInfo.lc_zs_shared_hits += localFileInfo.lc_zs_shared_hits;
+      fileInfo.lc_zs_flip_top12 += localFileInfo.lc_zs_flip_top12;
+      fileInfo.lc_zs_base_sum += localFileInfo.lc_zs_base_sum;
+      fileInfo.lc_zs_l1_sum += localFileInfo.lc_zs_l1_sum;
     }
   }
 }

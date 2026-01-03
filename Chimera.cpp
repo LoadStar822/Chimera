@@ -456,6 +456,11 @@ int main(int argc, char **argv) {
       "--deg-by-species", classifyConfig.deg_by_species,
       "[NCBI-only] Compute deg/exclusivity by species groups (mitigates strain saturation) while keeping output taxids unchanged.");
   classify
+      ->add_option("--local-contrast-gamma", classifyConfig.local_contrast_gamma,
+                   "[High-div] Local contrast zero-sum strength inside topM (0 disables)")
+      ->check(CLI::Range(0.0, 1.0))
+      ->default_val(0.0);
+  classify
       ->add_option("--presence-pi", classifyConfig.presence_pi,
                    "Presence prior P(z=1) for coverage模型 (0-1)")
       ->check(CLI::Range(1e-6, 0.5))

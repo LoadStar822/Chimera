@@ -247,6 +247,52 @@ inline double tf_saturation_factor(uint32_t count, double alpha = 1.0) {
   return std::clamp(1.0 / denom, 0.0, 1.0);
 }
 
+struct LocalContrastZeroSumStats {
+  double net_supported{0.0};
+  double net_unsupported{0.0};
+  double l1_sum{0.0};
+};
+
+// Local-contrast (topM) zero-sum redistribution helper.
+//
+// For a minimizer that supports k candidates inside a local top-M set, we add
+// a contrast delta with total mass `delta_total` that is redistributed within
+// topM but sums to 0 (so we do not "drop evidence"):
+// - subtract delta_total/M from every candidate in topM
+// - add      delta_total/k to each supported candidate
+//
+// This yields:
+// - supported candidates:  +delta_total*(1/k - 1/M)
+// - unsupported candidates: -delta_total/M
+//
+// Returns the per-candidate net deltas and the L1 magnitude of the
+// redistribution over topM (useful for auditing "how hard we push").
+inline LocalContrastZeroSumStats local_contrast_zero_sum_stats(std::size_t M,
+                                                               std::size_t k,
+                                                               double delta_total) {
+  LocalContrastZeroSumStats out;
+  if (M == 0 || k == 0 || k > M) {
+    return out;
+  }
+  if (!(delta_total > 0.0)) {
+    return out;
+  }
+  if (k == M) {
+    return out;
+  }
+
+  const double Md = static_cast<double>(M);
+  const double kd = static_cast<double>(k);
+
+  out.net_unsupported = -delta_total / Md;
+  out.net_supported = out.net_unsupported + delta_total / kd;
+  out.l1_sum = 2.0 * delta_total * (1.0 - kd / Md);
+  if (!(out.l1_sum > 0.0)) {
+    out.l1_sum = 0.0;
+  }
+  return out;
+}
+
 // Continuous "stopword" suppression for very common minimizers (high df_est).
 //
 // For df_est <= df_ref: no suppression (factor=1).
