@@ -151,6 +151,136 @@ inline bool allow_low_df_boost(std::size_t df_bins, bool has_freq,
   return df_est <= df_gate;
 }
 
+// Treat a minimizer hit as "species-unique" even when the underlying species
+// spans multiple bins (df_bins>1). This corrects bin-level fragmentation that
+// would otherwise downweight IDF and disable unique-edge boosts.
+//
+// This is strictly a high-div behavior: low-div branch keeps the original
+// df_bins to avoid destabilizing low-div scoring.
+inline std::size_t effective_df_bins(std::size_t deg_effective,
+                                     std::size_t df_bins,
+                                     bool low_div_active) {
+  if (low_div_active) {
+    return df_bins;
+  }
+  if (deg_effective == 1 && df_bins > 1) {
+    return 1;
+  }
+  return df_bins;
+}
+
+// Choose which DF to use for IDF computation.
+//
+// Empirically, using df_eff for IDF helps high-div "short contigs" avoid
+// posterior_weight rejects, while using df_bins for long reads reduces FP
+// sensitivity (especially under subset/topBins).
+//
+// Policy:
+// - low-div branch: always df_bins (keep ATCC-like behavior stable)
+// - high-div: if (df_eff < df_bins) and readLen <= max_len, use df_eff;
+//             otherwise use df_bins
+inline std::size_t df_for_idf(std::size_t df_bins, std::size_t df_eff,
+                              bool low_div_active, std::size_t readLen,
+                              std::size_t max_len = 4096) {
+  if (low_div_active) {
+    return df_bins;
+  }
+  if (df_eff < df_bins && readLen <= max_len) {
+    return df_eff;
+  }
+  return df_bins;
+}
+
+// Scale down the unique-edge bonus when the "uniqueness" comes from a
+// fragmented (multi-bin) species, to avoid over-boosting.
+// - df_bins==1  => keep full base_bonus (e.g. 3.0)
+// - df_bins>1   => smoothly decay towards 1.0 as df_bins grows
+inline double unique_edge_bonus(double base_bonus, std::size_t df_bins) {
+  if (df_bins <= 1 || !(base_bonus > 1.0)) {
+    return base_bonus;
+  }
+  const double denom = 1.0 + std::log2(static_cast<double>(df_bins));
+  if (!(denom > 0.0)) {
+    return base_bonus;
+  }
+  const double scaled = 1.0 + (base_bonus - 1.0) / denom;
+  return std::clamp(scaled, 1.0, base_bonus);
+}
+
+// Compute raw IDF from a DF count. Callers typically pass df_bins, but may
+// choose df_eff under conservative guards (see df_for_idf()).
+inline double idf_raw_from_df_bins(double totalBins, std::size_t df_bins) {
+  const double denom = static_cast<double>(df_bins) + 1.0;
+  return std::log2((totalBins + 1.0) / denom);
+}
+
+// Local-unique edge is defined strictly at the bin level (df_bins==1). We do
+// NOT treat fragmented species (df_bins>1 but df_eff==1) as locally unique,
+// because this would change presence sketch semantics.
+inline bool is_local_unique_edge(std::size_t deg_effective,
+                                 std::size_t df_bins) {
+  return deg_effective == 1 && df_bins == 1;
+}
+
+// Continuous "stopword" suppression for very common minimizers (high df_est).
+//
+// For df_est <= df_ref: no suppression (factor=1).
+// For df_est  > df_ref: factor decays as ((df_est+1)/(df_ref+1))^-eta, then is
+// clamped to [min_factor, 1].
+inline double stopword_tail_factor(uint32_t df_est, uint32_t df_ref, double eta,
+                                   double min_factor) {
+  if (!(eta > 0.0) || df_ref == 0) {
+    return 1.0;
+  }
+  const double stop = (static_cast<double>(df_est) + 1.0) /
+                      (static_cast<double>(df_ref) + 1.0);
+  if (!(stop > 1.0)) {
+    return 1.0;
+  }
+  const double lo = std::clamp(min_factor, 0.0, 1.0);
+  double factor = std::pow(stop, -eta);
+  if (!(factor > 0.0)) {
+    factor = lo;
+  }
+  return std::clamp(factor, lo, 1.0);
+}
+
+// Compute the per-read stopword suppression strength (eta in [0,1]) with
+// conservative guards:
+// - low-div branch: off (eta=0) to avoid destabilizing ATCC-like datasets.
+// - missing df_high_threshold: off (eta=0).
+// - short reads: off until readLen exceeds start_len.
+inline double stopword_tail_eta_for_read(bool low_div_active,
+                                         uint32_t df_high_threshold,
+                                         std::size_t readLen,
+                                         std::size_t start_len = 2048,
+                                         double span = 4096.0) {
+  if (low_div_active ||
+      df_high_threshold == std::numeric_limits<uint32_t>::max()) {
+    return 0.0;
+  }
+  if (!(span > 0.0) || readLen <= start_len) {
+    return 0.0;
+  }
+  const double eta = (static_cast<double>(readLen) -
+                      static_cast<double>(start_len)) /
+                     span;
+  return std::clamp(eta, 0.0, 1.0);
+}
+
+// Derive a reference DF for the continuous stopword tail curve. Using a value
+// smaller than df_high_threshold starts suppression earlier (before the hard
+// damp kicks in), which helps reduce "shared hit pile-up" in high-div.
+inline uint32_t stopword_tail_df_ref(uint32_t df_high_threshold,
+                                     uint32_t divisor = 2) {
+  if (df_high_threshold == std::numeric_limits<uint32_t>::max()) {
+    return df_high_threshold;
+  }
+  const uint32_t div = std::max<uint32_t>(1u, divisor);
+  const uint32_t base = std::max<uint32_t>(1u, df_high_threshold);
+  return std::max<uint32_t>(1u, base / div);
+}
+
 inline double clamp_idf(double idf_raw, bool low_div_active, double idf_max,
                         double idf_power) {
   const double idf_min = low_div_active ? 0.5 : 0.0;
@@ -175,6 +305,65 @@ inline double clamp_idf(double idf_raw, bool low_div_active, double idf_max,
   //   idf_eff = idf_max * (idf0/idf_max)^p
   const double x = (idf_max_eff > 0.0) ? (idf0 / idf_max_eff) : 0.0;
   return idf_max_eff * std::pow(x, p);
+}
+
+struct AutoPostPiMinTune {
+  double tuned{0.0};
+  double pi_hi{0.0};
+  double pi_lo{0.0};
+  double t{0.0}; // interpolation factor in [0,1]
+  bool applied{false};
+};
+
+// High-div only: choose a more permissive (smaller) post_pi_min when the sample
+// has short average read length (weak evidence), which helps reduce
+// posterior_weight/em_post rejects without touching posterior thresholds.
+//
+// We use a smooth log-space interpolation to avoid hard length boundaries:
+//   avgLen >= L0  => pi=pi_hi
+//   avgLen <= L1  => pi=pi_lo
+//   else          => log10(pi) = (1-t)log10(pi_hi) + tlog10(pi_lo)
+inline AutoPostPiMinTune tune_post_pi_min_by_avg_len(
+    double pi_hi, double pi_lo, std::size_t avgLen, bool low_div_active,
+    std::size_t L0 = 2000, std::size_t L1 = 800) {
+  AutoPostPiMinTune out;
+  out.pi_hi = pi_hi;
+  out.pi_lo = pi_lo;
+
+  if (low_div_active || !(pi_hi > 0.0) || !(pi_lo > 0.0) || avgLen == 0 ||
+      L0 <= L1 || pi_lo >= pi_hi) {
+    out.tuned = pi_hi;
+    return out;
+  }
+
+  if (avgLen >= L0) {
+    out.tuned = pi_hi;
+    return out;
+  }
+
+  if (avgLen <= L1) {
+    out.tuned = pi_lo;
+    out.t = 1.0;
+    out.applied = true;
+    return out;
+  }
+
+  const double denom =
+      static_cast<double>(L0) - static_cast<double>(L1);
+  double t = (static_cast<double>(L0) - static_cast<double>(avgLen)) / denom;
+  t = std::clamp(t, 0.0, 1.0);
+  out.t = t;
+
+  const double log_hi = std::log10(pi_hi);
+  const double log_lo = std::log10(pi_lo);
+  const double log_pi = (1.0 - t) * log_hi + t * log_lo;
+  double tuned = std::pow(10.0, log_pi);
+  if (!(tuned > 0.0)) {
+    tuned = pi_lo;
+  }
+  out.tuned = std::clamp(tuned, pi_lo, pi_hi);
+  out.applied = (out.tuned < pi_hi);
+  return out;
 }
 
 inline std::vector<uint64_t> select_rare_route_values(

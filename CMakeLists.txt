@@ -84,6 +84,7 @@ list(FILTER SOURCES EXCLUDE REGEX "CMakeFiles/")
 list(FILTER SOURCES EXCLUDE REGEX "/tests/")
 list(FILTER SOURCES EXCLUDE REGEX "/bench/")
 list(FILTER SOURCES EXCLUDE REGEX "/packed/")
+list(FILTER SOURCES EXCLUDE REGEX "/tmp/")
 list(FILTER SOURCES EXCLUDE REGEX "/\\.worktrees/")
 list(FILTER SOURCES EXCLUDE REGEX "/libs/minions-master/")
 list(FILTER SOURCES EXCLUDE REGEX "/src/legacy/")
@@ -264,6 +265,87 @@ target_include_directories(unique_edge_guard_tests
     ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/sdsl-lite/include
 )
 
+add_executable(df_bins_effective_tests
+    tests/utils/df_bins_effective_test.cpp
+)
+
+target_link_libraries(df_bins_effective_tests
+    PRIVATE
+    strobemers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    pthread
+    BZip2::BZip2
+    ZLIB::ZLIB
+    seqan3::seqan3
+    Threads::Threads
+)
+
+target_include_directories(df_bins_effective_tests
+    PUBLIC
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/src/classify
+    ${PROJECT_SOURCE_DIR}/libs
+    ${PROJECT_SOURCE_DIR}/libs/minions-master/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/cereal/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/sdsl-lite/include
+)
+
+add_executable(df_idf_bonus_split_tests
+    tests/utils/df_idf_bonus_split_test.cpp
+)
+
+target_link_libraries(df_idf_bonus_split_tests
+    PRIVATE
+    strobemers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    pthread
+    BZip2::BZip2
+    ZLIB::ZLIB
+    seqan3::seqan3
+    Threads::Threads
+)
+
+target_include_directories(df_idf_bonus_split_tests
+    PUBLIC
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/src/classify
+    ${PROJECT_SOURCE_DIR}/libs
+    ${PROJECT_SOURCE_DIR}/libs/minions-master/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/cereal/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/sdsl-lite/include
+)
+
+add_executable(stopword_tail_factor_tests
+    tests/utils/stopword_tail_factor_test.cpp
+)
+
+target_link_libraries(stopword_tail_factor_tests
+    PRIVATE
+    strobemers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    pthread
+    BZip2::BZip2
+    ZLIB::ZLIB
+    seqan3::seqan3
+    Threads::Threads
+)
+
+target_include_directories(stopword_tail_factor_tests
+    PUBLIC
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/src/classify
+    ${PROJECT_SOURCE_DIR}/libs
+    ${PROJECT_SOURCE_DIR}/libs/minions-master/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/cereal/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/sdsl-lite/include
+)
+
 add_executable(low_diversity_auto_tests
     tests/utils/low_diversity_auto_test.cpp
 )
@@ -355,6 +437,10 @@ add_executable(idf_clamp_tests
     tests/utils/idf_clamp_test.cpp
 )
 
+add_executable(auto_post_pi_min_curve_tests
+    tests/utils/auto_post_pi_min_curve_test.cpp
+)
+
 target_link_libraries(idf_clamp_tests
     PRIVATE
     strobemers
@@ -367,7 +453,30 @@ target_link_libraries(idf_clamp_tests
     Threads::Threads
 )
 
+target_link_libraries(auto_post_pi_min_curve_tests
+    PRIVATE
+    strobemers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    pthread
+    BZip2::BZip2
+    ZLIB::ZLIB
+    seqan3::seqan3
+    Threads::Threads
+)
+
 target_include_directories(idf_clamp_tests
+    PUBLIC
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/src/classify
+    ${PROJECT_SOURCE_DIR}/libs
+    ${PROJECT_SOURCE_DIR}/libs/minions-master/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/cereal/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/sdsl-lite/include
+)
+
+target_include_directories(auto_post_pi_min_curve_tests
     PUBLIC
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/src/classify

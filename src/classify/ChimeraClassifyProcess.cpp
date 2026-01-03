@@ -670,6 +670,8 @@ void processSequence(
     if (df_bins == 0) {
       df_bins = deg_subset;
     }
+    const size_t df_eff = effective_df_bins(
+        deg_effective, df_bins, /*low_div_active=*/config.low_div_active);
 
     double exclusivityWeight = 1.0;
     if (exclusiveGamma > 0.0 && deg_effective > 0) {
@@ -683,8 +685,13 @@ void processSequence(
       totalBins = static_cast<double>(binNumAll);
     }
 
-    double idf_raw = std::log2((totalBins + 1.0) /
-                               (static_cast<double>(df_bins) + 1.0));
+    // Hybrid IDF DF selection:
+    // - short reads/contigs: allow df_eff (species-fragmentation correction)
+    // - long reads: keep df_bins to avoid FP sensitivity under subset/topBins
+    constexpr size_t kDfEffIdfMaxLen = 4096;
+    const size_t df_idf = df_for_idf(df_bins, df_eff, config.low_div_active,
+                                     readLen, kDfEffIdfMaxLen);
+    double idf_raw = idf_raw_from_df_bins(totalBins, df_idf);
     const double idf_min_linear = config.low_div_active ? 0.5 : 0.0;
     const double idf_max_eff = std::max(idf_min_linear, config.idf_max);
     const double idf_linear = std::clamp(idf_raw, idf_min_linear, idf_max_eff);
@@ -756,22 +763,39 @@ void processSequence(
         }
       }
       freqFactor *= bg_idf;
+      constexpr size_t kStopwordStartLen = 2048;
+      constexpr double kStopwordSpan = 4096.0;
+      const double eta = stopword_tail_eta_for_read(
+          config.low_div_active, weightCtx.freqStats.df_high_threshold, readLen,
+          kStopwordStartLen, kStopwordSpan);
+      if (eta > 0.0) {
+        const uint32_t df_ref = stopword_tail_df_ref(
+            weightCtx.freqStats.df_high_threshold, /*divisor=*/1);
+        constexpr double kStopwordMinFactor = 0.25;
+        freqFactor *=
+            stopword_tail_factor(df_est, df_ref, eta, kStopwordMinFactor);
+      }
       freqFactor = std::clamp(freqFactor, 0.05, 8.0);
     }
 
     const bool uniqueEdge = allow_unique_edge(
-        deg_effective, df_bins, has_freq, weightCtx.freq_trusted, df_est,
+        deg_effective, df_eff, has_freq, weightCtx.freq_trusted, df_est,
         imcfConfig.presenceUniqueDeg);
     const bool low_df_boost = allow_low_df_boost(
-        df_bins, has_freq, weightCtx.freq_trusted, df_est,
+        df_eff, has_freq, weightCtx.freq_trusted, df_est,
         imcfConfig.presenceUniqueDeg);
-    const bool localUniqueEdge = (deg_effective == 1 && df_bins == 1);
+    const bool localUniqueEdge = is_local_unique_edge(deg_effective, df_bins);
     double denom = std::log2(2.0 + static_cast<double>(deg_effective));
     double weight = denom > 0.0 ? 1.0 / denom : 1.0;
     double base = weight * freqFactor * exclusivityWeight;
     double bonus = 1.0;
     if (uniqueEdge) {
-      bonus = kUniqueEdgeBonus;
+      if (!config.low_div_active && deg_effective == 1 && df_eff == 1 &&
+          df_bins > 1) {
+        bonus = unique_edge_bonus(kUniqueEdgeBonus, df_bins);
+      } else {
+        bonus = kUniqueEdgeBonus;
+      }
     } else if (low_df_boost) {
       bonus = 1.5;
     }

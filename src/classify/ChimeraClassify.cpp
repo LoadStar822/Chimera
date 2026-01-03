@@ -1131,98 +1131,166 @@ void run(ClassifyConfig config) {
       std::cout << "EM time: ";
       print_classify_time(EMduration.count());
     }
-  }
-	  if (posteriorModelUsed) {
-	    DecisionConfig decisionConfig;
-	    decisionConfig.posterior_threshold = config.post_thres;
-	    // Auto-tune post_pi_min for high-diversity samples:
-	    // a fixed global pi cut (e.g., 5e-4) can hard-kill low-abundance true taxa,
-	    // causing massive unclassified reads on datasets like CAMI-long.
-	    // We only relax the threshold when the EM weight distribution shows a
-	    // heavy tail AND the head is not dominating (to avoid low-diversity mocks).
-	    double tuned_post_pi_min = config.post_pi_min;
-	    if (tuned_post_pi_min > 0.0 && !classWeights.empty()) {
-	      std::vector<double> weights;
-	      weights.reserve(classWeights.size());
-	      double total_mass = 0.0;
-	      for (const auto &kv : classWeights) {
-	        double w = kv.second;
-	        if (w > 0.0) {
-	          weights.push_back(w);
-	          total_mass += w;
-	        }
-	      }
-	      if (total_mass > 0.0 && weights.size() > 1) {
-	        std::sort(weights.begin(), weights.end(),
-	                  [](double a, double b) { return a > b; });
-	        double top10_mass = 0.0;
-	        const size_t topK = std::min<size_t>(10, weights.size());
-	        for (size_t i = 0; i < topK; ++i) {
-	          top10_mass += weights[i];
-	        }
-	        top10_mass /= total_mass;
-	        double top50_mass = 0.0;
-	        const size_t topK50 = std::min<size_t>(50, weights.size());
-	        for (size_t i = 0; i < topK50; ++i) {
-	          top50_mass += weights[i];
-	        }
-	        top50_mass /= total_mass;
-	
-	        auto tail_mass = [&](double pi_min) -> double {
-	          if (!(pi_min > 0.0)) {
-	            return 0.0;
-	          }
-	          double tail = 0.0;
-	          // weights are sorted desc, so scan from the end.
-	          for (size_t i = weights.size(); i-- > 0;) {
-	            double w = weights[i];
-	            if (w >= pi_min) {
-	              break;
-	            }
-	            tail += w;
-	          }
-	          return tail / total_mass;
-	        };
-	
-	        const double base = tuned_post_pi_min;
-	        const double tail_base = tail_mass(base);
-	        const double tail_trigger = 0.02;     // only relax when base kills >2% mass
-	        // Low-diversity guard: avoid relaxing global pi in head-heavy samples,
-	        // otherwise many ambiguous reads get forced into random taxa, exploding FPs.
-	        const double head_guard10 = 0.65;
-	        const double head_guard50 = 0.90;
-	        const bool head_heavy =
-	            (top10_mass >= head_guard10) || (top50_mass >= head_guard50);
-	        if (tail_base > tail_trigger && !head_heavy) {
-	          const double target_tail = 0.01;    // aim to kill <=1% mass by global pi cut
-	          const std::array<double, 4> candidates = {5e-4, 2e-4, 1e-4, 5e-5};
-	          double tuned = base;
-	          for (double c : candidates) {
-	            if (c > base) {
-	              continue;
-	            }
-	            tuned = c;
-	            if (tail_mass(c) <= target_tail) {
-	              break;
-	            }
-	          }
-	          tuned_post_pi_min = tuned;
-	        }
-	        if (config.verbose) {
-	          std::cout << "Auto post_pi_min: base=" << config.post_pi_min
-	                    << " tuned=" << tuned_post_pi_min
-	                    << " top10_mass=" << top10_mass
-	                    << " top50_mass=" << top50_mass
-	                    << " tail_mass=" << tail_base << std::endl;
-	        }
-	      }
-	    }
-	    decisionConfig.min_class_weight = tuned_post_pi_min;
-	    // postEmDecision tail controls:
-	    // - They govern how much posterior mass is allowed to fan out into multiple
-	    //   taxids for *taxidCount* (abundance/presence is very sensitive).
-	    // - POST_TOPK dump uses the pruned+renormalized posterior view (same as decision).
-	    decisionConfig.posterior_min_fraction = config.post_min_fraction;
+	  }
+		  if (posteriorModelUsed) {
+		    DecisionConfig decisionConfig;
+		    decisionConfig.posterior_threshold = config.post_thres;
+		    // Auto-tune post_pi_min for high-diversity samples:
+		    // a fixed global pi cut (e.g., 5e-4) can hard-kill low-abundance true taxa,
+		    // causing massive unclassified reads on datasets like CAMI-long/short.
+		    // We only relax the threshold under conservative guards (low-div stays
+		    // untouched), and further apply an avgLen-driven smooth curve for short
+		    // samples to reduce posterior_weight/em_post rejects.
+		    double tuned_post_pi_min = config.post_pi_min;
+		    double tuned_post_pi_min_weights = tuned_post_pi_min;
+		    double top10_mass = 0.0;
+		    double top50_mass = 0.0;
+		    double tail_base = 0.0;
+		    bool weight_stats_ok = false;
+		    bool head_heavy = false;
+		    if (!config.low_div_active && tuned_post_pi_min > 0.0 &&
+		        !classWeights.empty()) {
+		      std::vector<double> weights;
+		      weights.reserve(classWeights.size());
+		      double total_mass = 0.0;
+		      for (const auto &kv : classWeights) {
+		        double w = kv.second;
+		        if (w > 0.0) {
+		          weights.push_back(w);
+		          total_mass += w;
+		        }
+		      }
+		      if (total_mass > 0.0 && weights.size() > 1) {
+		        weight_stats_ok = true;
+		        std::sort(weights.begin(), weights.end(),
+		                  [](double a, double b) { return a > b; });
+		        const size_t topK = std::min<size_t>(10, weights.size());
+		        for (size_t i = 0; i < topK; ++i) {
+		          top10_mass += weights[i];
+		        }
+		        top10_mass /= total_mass;
+		        const size_t topK50 = std::min<size_t>(50, weights.size());
+		        for (size_t i = 0; i < topK50; ++i) {
+		          top50_mass += weights[i];
+		        }
+		        top50_mass /= total_mass;
+		
+		        auto tail_mass = [&](double pi_min) -> double {
+		          if (!(pi_min > 0.0)) {
+		            return 0.0;
+		          }
+		          double tail = 0.0;
+		          // weights are sorted desc, so scan from the end.
+		          for (size_t i = weights.size(); i-- > 0;) {
+		            double w = weights[i];
+		            if (w >= pi_min) {
+		              break;
+		            }
+		            tail += w;
+		          }
+		          return tail / total_mass;
+		        };
+		
+		        const double base = tuned_post_pi_min;
+		        tail_base = tail_mass(base);
+		        const double tail_trigger = 0.02; // relax only when base kills >2% mass
+		        // Extra low-div guard: avoid relaxing global pi in head-heavy samples,
+		        // otherwise ambiguous reads can get forced into random taxa, exploding FPs.
+		        const double head_guard10 = 0.65;
+		        const double head_guard50 = 0.90;
+		        head_heavy =
+		            (top10_mass >= head_guard10) || (top50_mass >= head_guard50);
+		        if (tail_base > tail_trigger && !head_heavy) {
+		          const double target_tail = 0.01; // aim to kill <=1% mass by global pi cut
+		          const std::array<double, 4> candidates = {5e-4, 2e-4, 1e-4, 5e-5};
+		          double tuned = base;
+		          for (double c : candidates) {
+		            if (c > base) {
+		              continue;
+		            }
+		            tuned = c;
+		            if (tail_mass(c) <= target_tail) {
+		              break;
+		            }
+		          }
+		          tuned_post_pi_min = tuned;
+		        }
+		      }
+		    }
+		    tuned_post_pi_min_weights = tuned_post_pi_min;
+		
+		    constexpr double kAutoPostPiMinLoDefault = 1e-4;
+		    constexpr size_t kAutoPostPiMinL0 = 2000;
+		    constexpr size_t kAutoPostPiMinL1 = 800;
+		    double auto_pi_lo = kAutoPostPiMinLoDefault;
+		    if (const char *env = std::getenv("CHIMERA_AUTO_POST_PI_MIN_LO");
+		        env && *env) {
+		      try {
+		        double v = std::stod(env);
+		        if (v > 0.0) {
+		          auto_pi_lo = v;
+		        }
+		      } catch (...) {
+		      }
+		    }
+		
+		    auto len_tune = ChimeraClassify::tune_post_pi_min_by_avg_len(
+		        tuned_post_pi_min_weights, auto_pi_lo, fileInfo.avgLen,
+		        config.low_div_active || head_heavy, kAutoPostPiMinL0,
+		        kAutoPostPiMinL1);
+		    tuned_post_pi_min = len_tune.tuned;
+		
+		    std::string reason = "base";
+		    if (!(config.post_pi_min > 0.0)) {
+		      reason = "disabled";
+		    } else if (config.low_div_active) {
+		      reason = "lowdiv";
+		    } else {
+		      const bool weights_tuned =
+		          (tuned_post_pi_min_weights > 0.0 &&
+		           tuned_post_pi_min_weights < config.post_pi_min);
+		      if (weights_tuned && len_tune.applied) {
+		        reason = "weights+avgLen";
+		      } else if (len_tune.applied) {
+		        reason = "avgLen";
+		      } else if (weights_tuned) {
+		        reason = "weights";
+		      }
+		    }
+		
+		    {
+		      auto oldFlags = std::cout.flags();
+		      auto oldPrecision = std::cout.precision();
+		      std::cout.setf(std::ios::scientific);
+		      std::cout << std::setprecision(6);
+		      std::cout << "[em][auto] post_pi_min=" << tuned_post_pi_min
+		                << " reason=" << reason
+		                << " low_div=" << (config.low_div_active ? 1 : 0)
+		                << " avgLen=" << fileInfo.avgLen
+		                << " base=" << config.post_pi_min
+		                << " tuned_w=" << tuned_post_pi_min_weights
+		                << " pi_lo=" << auto_pi_lo;
+		      if (len_tune.applied) {
+		        std::cout << " t=" << std::fixed << std::setprecision(3) << len_tune.t;
+		      }
+		      if (weight_stats_ok) {
+		        std::cout << std::defaultfloat
+		                  << " top10_mass=" << top10_mass
+		                  << " top50_mass=" << top50_mass
+		                  << " tail_mass=" << tail_base
+		                  << " head_heavy=" << (head_heavy ? 1 : 0);
+		      }
+		      std::cout << std::endl;
+		      std::cout.flags(oldFlags);
+		      std::cout.precision(oldPrecision);
+		    }
+		
+		    decisionConfig.min_class_weight = tuned_post_pi_min;
+		    // postEmDecision tail controls:
+		    // - They govern how much posterior mass is allowed to fan out into multiple
+		    //   taxids for *taxidCount* (abundance/presence is very sensitive).
+		    // - POST_TOPK dump uses the pruned+renormalized posterior view (same as decision).
+		    decisionConfig.posterior_min_fraction = config.post_min_fraction;
 	    decisionConfig.posterior_power = config.post_power;
 
 	    // Default/auto behavior: when we relax global pi to recover recall in
