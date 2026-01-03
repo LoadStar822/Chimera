@@ -1270,6 +1270,22 @@ void processSequence(
             if (k < fileInfo.lc_zs_k_hist.size()) {
               fileInfo.lc_zs_k_hist[k] += 1;
             }
+            fileInfo.lc_zs_cand_hits += 1;
+
+            bool s1 = false;
+            bool s2 = false;
+            for (uint32_t tid : support) {
+              if (tid == before_best) {
+                s1 = true;
+              }
+              if (tid == before_second) {
+                s2 = true;
+              }
+            }
+            if (!local_contrast_xor_gate(s1, s2)) {
+              continue;
+            }
+            fileInfo.lc_zs_xor_hits += 1;
 
             const double k_d = static_cast<double>(k);
             const double M_d = static_cast<double>(M);
@@ -2348,6 +2364,8 @@ void classify_streaming(
       for (size_t i = 0; i < fileInfo.lc_zs_k_hist.size(); ++i) {
         fileInfo.lc_zs_k_hist[i] += localFileInfo.lc_zs_k_hist[i];
       }
+      fileInfo.lc_zs_cand_hits += localFileInfo.lc_zs_cand_hits;
+      fileInfo.lc_zs_xor_hits += localFileInfo.lc_zs_xor_hits;
       fileInfo.lc_zs_margin_frac_count += localFileInfo.lc_zs_margin_frac_count;
       fileInfo.lc_zs_margin_frac_sum += localFileInfo.lc_zs_margin_frac_sum;
       fileInfo.lc_zs_margin_frac_max =
@@ -2506,6 +2524,8 @@ void classify(
       for (size_t i = 0; i < fileInfo.lc_zs_k_hist.size(); ++i) {
         fileInfo.lc_zs_k_hist[i] += localFileInfo.lc_zs_k_hist[i];
       }
+      fileInfo.lc_zs_cand_hits += localFileInfo.lc_zs_cand_hits;
+      fileInfo.lc_zs_xor_hits += localFileInfo.lc_zs_xor_hits;
       fileInfo.lc_zs_margin_frac_count += localFileInfo.lc_zs_margin_frac_count;
       fileInfo.lc_zs_margin_frac_sum += localFileInfo.lc_zs_margin_frac_sum;
       fileInfo.lc_zs_margin_frac_max =

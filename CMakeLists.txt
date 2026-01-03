@@ -331,6 +331,10 @@ add_executable(local_contrast_zero_sum_tests
     tests/utils/local_contrast_zero_sum_test.cpp
 )
 
+add_executable(local_contrast_xor_gate_tests
+    tests/utils/local_contrast_xor_gate_test.cpp
+)
+
 target_link_libraries(stopword_tail_factor_tests
     PRIVATE
     strobemers
@@ -367,6 +371,18 @@ target_link_libraries(local_contrast_zero_sum_tests
     Threads::Threads
 )
 
+target_link_libraries(local_contrast_xor_gate_tests
+    PRIVATE
+    strobemers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    pthread
+    BZip2::BZip2
+    ZLIB::ZLIB
+    seqan3::seqan3
+    Threads::Threads
+)
+
 target_include_directories(stopword_tail_factor_tests
     PUBLIC
     ${PROJECT_SOURCE_DIR}/src
@@ -390,6 +406,17 @@ target_include_directories(tf_saturation_tests
 )
 
 target_include_directories(local_contrast_zero_sum_tests
+    PUBLIC
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/src/classify
+    ${PROJECT_SOURCE_DIR}/libs
+    ${PROJECT_SOURCE_DIR}/libs/minions-master/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/cereal/include
+    ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/sdsl-lite/include
+)
+
+target_include_directories(local_contrast_xor_gate_tests
     PUBLIC
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/src/classify

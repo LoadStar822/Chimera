@@ -280,6 +280,8 @@ namespace ChimeraClassify {
 						double lc_zs_base_sum{ 0.0 };
 						double lc_zs_l1_sum{ 0.0 };
 						std::array<uint64_t, 9> lc_zs_k_hist{};
+						size_t lc_zs_cand_hits{ 0 };
+						size_t lc_zs_xor_hits{ 0 };
 						size_t lc_zs_margin_frac_count{ 0 };
 						double lc_zs_margin_frac_sum{ 0.0 };
 						double lc_zs_margin_frac_max{ 0.0 };

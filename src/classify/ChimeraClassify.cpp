@@ -1668,6 +1668,11 @@ void run(ClassifyConfig config) {
 			      flip_frac = static_cast<double>(fileInfo.lc_zs_flip_top12) /
 			                  static_cast<double>(fileInfo.lc_zs_enabled_reads);
 			    }
+			    double xor_frac = 0.0;
+			    if (fileInfo.lc_zs_cand_hits > 0) {
+			      xor_frac = static_cast<double>(fileInfo.lc_zs_xor_hits) /
+			                 static_cast<double>(fileInfo.lc_zs_cand_hits);
+			    }
 			    auto k_quantile = [&](double q) -> size_t {
 			      uint64_t total = 0;
 			      for (uint64_t c : fileInfo.lc_zs_k_hist) {
@@ -1742,6 +1747,9 @@ void run(ClassifyConfig config) {
 			              << l1_frac << " flip_top12=" << fileInfo.lc_zs_flip_top12
 			              << "/" << fileInfo.lc_zs_enabled_reads << " ("
 			              << std::setprecision(3) << flip_frac << ")"
+			              << " cand_hits=" << fileInfo.lc_zs_cand_hits
+			              << " xor_hits=" << fileInfo.lc_zs_xor_hits
+			              << " xor_frac=" << std::setprecision(3) << xor_frac
 			              << " k(p50/p90)=" << k_p50 << "/" << k_p90
 			              << " margin_mean=" << std::setprecision(3) << margin_mean
 			              << " margin_max=" << std::setprecision(3)

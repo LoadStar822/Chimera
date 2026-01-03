@@ -293,6 +293,12 @@ inline LocalContrastZeroSumStats local_contrast_zero_sum_stats(std::size_t M,
   return out;
 }
 
+// Local-contrast XOR gating: only apply contrast deltas when a minimizer
+// supports exactly one of (top1, top2). This concentrates the redistribution on
+// margin-relevant evidence and avoids large L1 moves that don't change top1/top2
+// separation.
+inline bool local_contrast_xor_gate(bool s1, bool s2) { return s1 != s2; }
+
 // Continuous "stopword" suppression for very common minimizers (high df_est).
 //
 // For df_est <= df_ref: no suppression (factor=1).
