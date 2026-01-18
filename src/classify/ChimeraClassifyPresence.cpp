@@ -802,16 +802,27 @@ void postEmDecision(
 	  constexpr double kPriorClippingTau = 0.0;
 	  constexpr size_t kPriorClippingCap = 256;
 
-	  struct SelectiveRejectFullnStats {
-	    size_t checks{0};
-	    size_t small_n{0};
-	    size_t applied{0};
-	  };
-	  SelectiveRejectFullnStats selrej_fulln_stats;
-	  constexpr size_t kSelectiveRejectFullnMin = 10;
-	  constexpr size_t kSelectiveRejectFullnPrunedMax = 6;
-	  const bool selective_reject_fulln_enabled =
-	      decisionConfig.allow_fallback_on_reject && meanReadLen >= 1000;
+		  struct SelectiveRejectFullnStats {
+		    size_t checks{0};
+		    size_t small_n{0};
+		    size_t applied{0};
+		  };
+		  SelectiveRejectFullnStats selrej_fulln_stats;
+		  struct SelectiveCertHintRescueStats {
+		    size_t eligible{0};
+		    size_t hint_missing{0};
+		    size_t hint_not_in_topk{0};
+		    size_t hint_rank0{0};
+		    size_t hint_rank1{0};
+		    size_t hint_rank2{0};
+		    size_t rescued_rank1{0};
+		    size_t candidate_rank2{0};
+		  };
+		  SelectiveCertHintRescueStats selcert_hint_stats;
+		  constexpr size_t kSelectiveRejectFullnMin = 10;
+		  constexpr size_t kSelectiveRejectFullnPrunedMax = 6;
+		  const bool selective_reject_fulln_enabled =
+		      decisionConfig.allow_fallback_on_reject && meanReadLen >= 1000;
 
   double presence_tau = std::numeric_limits<double>::infinity();
   double presence_strict_tau = std::numeric_limits<double>::infinity();
@@ -1240,15 +1251,59 @@ void postEmDecision(
 	      if (pruned_n <= kSelectiveRejectFullnPrunedMax) {
 	        selrej_fulln_stats.small_n += 1;
 	      }
-	      if (selective_reject_fulln_enabled && pruned.audit.pruned_any &&
-	          full_n >= kSelectiveRejectFullnMin &&
-	          pruned_n <= kSelectiveRejectFullnPrunedMax) {
-	        selrej_fulln_stats.applied += 1;
-	        result.taxidCount.clear();
-	        result.taxidCount.emplace_back(kUnclassified, 1.0);
-	        result.reject_reason = "selective_cert";
-	        continue;
-	      }
+		      if (selective_reject_fulln_enabled && pruned.audit.pruned_any &&
+		          full_n >= kSelectiveRejectFullnMin &&
+		          pruned_n <= kSelectiveRejectFullnPrunedMax) {
+		        selrej_fulln_stats.applied += 1;
+		        selcert_hint_stats.eligible += 1;
+		        bool rescued = false;
+		        if (!result.best_taxid_hint.empty() &&
+		            result.best_taxid_hint != kUnclassified) {
+		          const auto hint_hit = lookup_taxid_in_topk(
+		              posterior, result.best_taxid_hint, posterior.size());
+		          if (!hint_hit.found) {
+		            selcert_hint_stats.hint_not_in_topk += 1;
+		          } else {
+		            if (hint_hit.rank == 0) {
+		              selcert_hint_stats.hint_rank0 += 1;
+		            } else if (hint_hit.rank == 1) {
+		              selcert_hint_stats.hint_rank1 += 1;
+		            } else if (hint_hit.rank == 2) {
+		              selcert_hint_stats.hint_rank2 += 1;
+		            }
+
+		            // Only rescue when the hint is the pruned POST_TOPK rank-1 (top2).
+		            // Empirically this bucket has much higher precision than "hint==top1"
+		            // and avoids leaking high-confidence wrong reads back into output.
+		            if (hint_hit.rank == 1) {
+		              selcert_hint_stats.rescued_rank1 += 1;
+		              double total_evidence =
+		                  (result.sample_weight > 0.0) ? result.sample_weight
+		                                              : result.evaluated;
+		              if (!(total_evidence > 0.0)) {
+		                total_evidence = 1.0;
+		              }
+		              double fallback = static_cast<double>(
+		                  std::max<double>(1.0, std::llround(total_evidence)));
+		              result.taxidCount.clear();
+		              result.taxidCount.emplace_back(result.best_taxid_hint, fallback);
+		              result.reject_reason.clear();
+		              rescued = true;
+		            } else if (hint_hit.rank == 2) {
+		              selcert_hint_stats.candidate_rank2 += 1;
+		            }
+		          }
+		        } else {
+		          selcert_hint_stats.hint_missing += 1;
+		        }
+		        if (rescued) {
+		          continue;
+		        }
+		        result.taxidCount.clear();
+		        result.taxidCount.emplace_back(kUnclassified, 1.0);
+		        result.reject_reason = "selective_cert";
+		        continue;
+		      }
 
 	      result.taxidCount.clear();
 
@@ -1669,16 +1724,26 @@ void postEmDecision(
 	              << q(fb_stats.gaps_rejected_posterior_weight, 0.90) << std::endl;
 		  }
 
-	  if (decisionConfig.allow_fallback_on_reject && selrej_fulln_stats.checks > 0) {
-	    std::cout << "[classify][auto] selective_reject_fulln: enabled="
-	              << (selective_reject_fulln_enabled ? 1 : 0)
-	              << " full_n_min=" << kSelectiveRejectFullnMin
-	              << " pruned_n_max=" << kSelectiveRejectFullnPrunedMax
-	              << " meanReadLen=" << meanReadLen
-	              << " checks=" << selrej_fulln_stats.checks
-	              << " small_n=" << selrej_fulln_stats.small_n
-	              << " applied=" << selrej_fulln_stats.applied << std::endl;
-	  }
+		  if (decisionConfig.allow_fallback_on_reject && selrej_fulln_stats.checks > 0) {
+		    std::cout << "[classify][auto] selective_reject_fulln: enabled="
+		              << (selective_reject_fulln_enabled ? 1 : 0)
+		              << " full_n_min=" << kSelectiveRejectFullnMin
+		              << " pruned_n_max=" << kSelectiveRejectFullnPrunedMax
+		              << " meanReadLen=" << meanReadLen
+		              << " checks=" << selrej_fulln_stats.checks
+		              << " small_n=" << selrej_fulln_stats.small_n
+		              << " applied=" << selrej_fulln_stats.applied
+		              << " selcert_hint(eligible/missing/not_in_topk/r0/r1/r2)="
+		              << selcert_hint_stats.eligible << '/'
+		              << selcert_hint_stats.hint_missing << '/'
+		              << selcert_hint_stats.hint_not_in_topk << '/'
+		              << selcert_hint_stats.hint_rank0 << '/'
+		              << selcert_hint_stats.hint_rank1 << '/'
+		              << selcert_hint_stats.hint_rank2
+		              << " selcert_rescue(r1)=" << selcert_hint_stats.rescued_rank1
+		              << " selcert_candidate(r2)=" << selcert_hint_stats.candidate_rank2
+		              << std::endl;
+		  }
 
 		  if (prune_active_sample && prune_stats.reads_total > 0) {
 	    auto q = [](std::vector<double> vals, double p) -> double {
