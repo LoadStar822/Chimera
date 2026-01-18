@@ -1121,6 +1121,123 @@ void run(ClassifyConfig config) {
     }
   }
 
+  // Optional: saturate per-read sample weights to avoid extreme long tails
+  // dominating EM in high-diversity datasets (e.g., CAMI-long).
+  //
+  // Default: auto (enabled only when weights are present and highly skewed).
+  {
+    enum class WSatRequest {
+      kAuto = 0,
+      kOff = 1,
+      kLog1p = 2,
+    };
+    WSatRequest request = WSatRequest::kAuto;
+    const char *env = std::getenv("CHIMERA_WSAT");
+    if (env && *env) {
+      std::string v(env);
+      std::transform(v.begin(), v.end(), v.begin(),
+                     [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+      if (v == "0" || v == "off" || v == "false" || v == "disabled") {
+        request = WSatRequest::kOff;
+      } else if (v == "log1p" || v == "1" || v == "on" || v == "true" ||
+                 v == "enabled") {
+        request = WSatRequest::kLog1p;
+      } else {
+        request = WSatRequest::kAuto;
+      }
+    }
+    const bool low_div = config.low_div_active;
+    bool applied = false;
+    double scale = 1.0;
+    std::string reason = "disabled";
+
+    std::vector<double> raw;
+    raw.reserve(classifyResults.size());
+    for (const auto &res : classifyResults) {
+      if (res.sample_weight > 0.0) {
+        raw.push_back(res.sample_weight);
+      }
+    }
+    if (request == WSatRequest::kOff) {
+      reason = "disabled_by_env";
+    } else if (low_div) {
+      reason = "low_div";
+    } else if (raw.empty()) {
+      reason = "no_weights";
+    } else {
+      std::sort(raw.begin(), raw.end());
+      auto pick = [&](double q) -> double {
+        if (raw.empty()) {
+          return 0.0;
+        }
+        q = std::clamp(q, 0.0, 1.0);
+        size_t idx = static_cast<size_t>(
+            std::floor(q * static_cast<double>(raw.size() - 1)));
+        if (idx >= raw.size()) {
+          idx = raw.size() - 1;
+        }
+        return raw[idx];
+      };
+      const double med = pick(0.50);
+      const double p90 = pick(0.90);
+      const double p99 = pick(0.99);
+      const double mx = raw.back();
+      const double denom = std::max(1e-12, med);
+      const double ratio_max = mx / denom;
+      const double ratio_p99 = p99 / denom;
+      // Auto guard: only apply when the tail is clearly extreme.
+      const bool skewed =
+          (ratio_p99 >= 16.0) || (ratio_max >= 256.0) || (mx >= 1e5);
+      const bool want = (request == WSatRequest::kLog1p) ||
+                        (request == WSatRequest::kAuto && skewed);
+      if (!want) {
+        reason = "not_skewed";
+      } else if (!(med > 0.0) || !(std::log1p(med) > 0.0)) {
+        reason = "bad_median";
+      } else {
+        scale = med / std::log1p(med);
+        for (auto &res : classifyResults) {
+          if (res.sample_weight > 0.0) {
+            res.sample_weight = scale * std::log1p(res.sample_weight);
+          }
+        }
+        applied = true;
+        reason = "ok";
+
+        if (config.verbose) {
+          const double eff_p50 = scale * std::log1p(med);
+          const double eff_p90 = scale * std::log1p(p90);
+          const double eff_p99 = scale * std::log1p(p99);
+          const double eff_max = scale * std::log1p(mx);
+
+          auto oldFlags = std::cout.flags();
+          auto oldPrecision = std::cout.precision();
+          std::cout.setf(std::ios::fixed);
+          std::cout << std::setprecision(4);
+          std::cout << "[em][wsat] requested="
+                    << ((request == WSatRequest::kAuto) ? "auto" : "on")
+                    << " mode=log1p"
+                    << " applied=" << (applied ? 1 : 0)
+                    << " low_div=" << (low_div ? 1 : 0)
+                    << " avgLen=" << fileInfo.avgLen
+                    << " raw(p50/p90/p99/max)=" << med << '/' << p90 << '/'
+                    << p99 << '/' << mx
+                    << " raw_ratio(max/med)=" << (mx / denom)
+                    << " raw_ratio(p99/med)=" << (p99 / denom)
+                    << " eff(p50/p90/p99/max)=" << eff_p50 << '/' << eff_p90
+                    << '/' << eff_p99 << '/' << eff_max
+                    << " scale=" << scale << " reason=" << reason
+                    << std::endl;
+          std::cout.flags(oldFlags);
+          std::cout.precision(oldPrecision);
+        }
+      }
+    }
+    (void)applied;
+    (void)scale;
+    (void)reason;
+  }
+
   if (config.em) {
     auto EMstart = std::chrono::high_resolution_clock::now();
     std::cout << "Running EM algorithm..." << std::endl;
@@ -1210,14 +1327,19 @@ void run(ClassifyConfig config) {
 		        // otherwise ambiguous reads can get forced into random taxa, exploding FPs.
 		        const double head_guard10 = 0.65;
 		        const double head_guard50 = 0.90;
-		        head_heavy =
-		            (top10_mass >= head_guard10) || (top50_mass >= head_guard50);
-		        if (tail_base > tail_trigger && !head_heavy) {
-		          const double target_tail = 0.01; // aim to kill <=1% mass by global pi cut
-		          const std::array<double, 4> candidates = {5e-4, 2e-4, 1e-4, 5e-5};
-		          double tuned = base;
-		          for (double c : candidates) {
-		            if (c > base) {
+			        head_heavy =
+			            (top10_mass >= head_guard10) || (top50_mass >= head_guard50);
+			        if (tail_base > tail_trigger && !head_heavy) {
+			          double target_tail = 0.01; // aim to kill <=1% mass by global pi cut
+			          // For long-read, high-diversity samples we can be slightly more
+			          // permissive to avoid pruning true low-abundance taxa.
+			          if (fileInfo.avgLen >= 2000) {
+			            target_tail = 0.005; // kill <=0.5% mass
+			          }
+			          const std::array<double, 4> candidates = {5e-4, 2e-4, 1e-4, 5e-5};
+			          double tuned = base;
+			          for (double c : candidates) {
+			            if (c > base) {
 		              continue;
 		            }
 		            tuned = c;
@@ -1333,7 +1455,7 @@ void run(ClassifyConfig config) {
 		    }
 
     postEmDecision(classifyResults, decisionConfig, classWeights, tax,
-                   &presenceDecision, weightCtx.ncbiTaxdump);
+                   &presenceDecision, weightCtx.ncbiTaxdump, fileInfo.avgLen);
     fileInfo.classifiedNum = 0;
     fileInfo.unclassifiedNum = 0;
     for (const auto &result : classifyResults) {

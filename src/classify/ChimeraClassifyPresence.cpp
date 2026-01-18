@@ -728,7 +728,7 @@ void postEmDecision(
     std::vector<classifyResult> &results, const DecisionConfig &decisionConfig,
     const std::unordered_map<std::string, double> &classWeights,
     const TaxDict &tax, const PresenceDecision *presenceDecision,
-    const NcbiTaxdump *ncbiTaxdump) {
+    const NcbiTaxdump *ncbiTaxdump, size_t meanReadLen) {
   constexpr const char *kUnclassified = "unclassified";
 	std::ostream *dump_post = nullptr;
 	std::ofstream dump_file;
@@ -791,7 +791,7 @@ void postEmDecision(
     return oss.str();
   };
 
-  using PresenceLevel = PostEmPresenceLevel;
+	  using PresenceLevel = PostEmPresenceLevel;
 
   constexpr double kPresencePiFloor = 1e-6;
   constexpr double kRejectFactor = 2.0;
@@ -799,8 +799,19 @@ void postEmDecision(
   // Unified post-EM prior clipping via an evidence margin M(t) >= tau.
   // All clipping is high-div only (allow_fallback_on_reject) and capped.
   constexpr double kPriorClippingLn2 = 0.6931471805599453; // ln(2)
-  constexpr double kPriorClippingTau = 0.0;
-  constexpr size_t kPriorClippingCap = 256;
+	  constexpr double kPriorClippingTau = 0.0;
+	  constexpr size_t kPriorClippingCap = 256;
+
+	  struct SelectiveRejectFullnStats {
+	    size_t checks{0};
+	    size_t small_n{0};
+	    size_t applied{0};
+	  };
+	  SelectiveRejectFullnStats selrej_fulln_stats;
+	  constexpr size_t kSelectiveRejectFullnMin = 10;
+	  constexpr size_t kSelectiveRejectFullnPrunedMax = 6;
+	  const bool selective_reject_fulln_enabled =
+	      decisionConfig.allow_fallback_on_reject && meanReadLen >= 1000;
 
   double presence_tau = std::numeric_limits<double>::infinity();
   double presence_strict_tau = std::numeric_limits<double>::infinity();
@@ -1128,14 +1139,39 @@ void postEmDecision(
       (*dump_post) << '\n';
     }
 
-    const auto &top = posterior.front();
-    double top_score = top.second;
-    double second_score = (posterior.size() > 1) ? posterior[1].second : 0.0;
+	    const auto &top = posterior.front();
+	    double top_score = top.second;
+	    double second_score = (posterior.size() > 1) ? posterior[1].second : 0.0;
+	    // Use the *full* (pre-prune) posterior probabilities for thresholding when
+	    // possible. The post-EM prune step can renormalize the distribution and
+	    // inflate top1/top2 scores (especially when low-weight taxa are dropped),
+	    // which may cause overconfident wrong calls. We keep pruning for output
+	    // stability, but gate using the unpruned probabilities to stay conservative.
+	    auto find_full_prob = [&](const std::string &taxid,
+	                              double fallback) -> double {
+	      if (taxid.empty()) {
+	        return fallback;
+	      }
+	      // posterior_full is already sorted by prob desc.
+	      for (const auto &kv : posterior_full) {
+	        if (kv.first == taxid) {
+	          return kv.second;
+	        }
+	      }
+	      return fallback;
+	    };
+	    const double full_top_score = find_full_prob(top.first, top_score);
+	    const double full_second_score =
+	        (posterior.size() > 1)
+	            ? find_full_prob(posterior[1].first, second_score)
+	            : 0.0;
+	    const double gate_top_score = std::min(top_score, full_top_score);
+	    const double gate_second_score = std::min(second_score, full_second_score);
 
-    PresenceLevel top_presence = presence_level(top.first);
-    if (top_presence == PresenceLevel::kAccepted) {
-      result.presence_passed = true;
-    }
+	    PresenceLevel top_presence = presence_level(top.first);
+	    if (top_presence == PresenceLevel::kAccepted) {
+	      result.presence_passed = true;
+	    }
 
     double dyn_post = decisionConfig.posterior_threshold;
     double evalWeight = result.evaluated;
@@ -1172,33 +1208,49 @@ void postEmDecision(
 	            rej_stats.applied_gate += 1;
 	          }
 	        }
-        // Soft gate: when the read-level posterior is very confident and well-separated,
-        // allow a lower global pi threshold to avoid rejecting low-abundance true taxa.
-        // This is intentionally conservative (needs both high posterior and a clear gap).
-        if (top_presence != PresenceLevel::kRejected && pi_min > 0.0 &&
-            top_score > dyn_post && dyn_post < 0.999) {
-          auto clamp01 = [](double x) {
-            return std::max(0.0, std::min(1.0, x));
-          };
-          double soft =
-              clamp01((top_score - dyn_post) / (1.0 - dyn_post));
-          double gap = top_score - second_score;
-          double gap_factor = clamp01(gap / 0.20);
-          soft *= gap_factor;
-          // emphasize only very confident cases
-          soft *= soft;
+	        // Soft gate: when the read-level posterior is very confident and well-separated,
+	        // allow a lower global pi threshold to avoid rejecting low-abundance true taxa.
+	        // This is intentionally conservative (needs both high posterior and a clear gap).
+	        if (result.presence_passed && top_presence != PresenceLevel::kRejected &&
+	            pi_min > 0.0 && gate_top_score > dyn_post && dyn_post < 0.999) {
+	          auto clamp01 = [](double x) {
+	            return std::max(0.0, std::min(1.0, x));
+	          };
+	          double soft =
+	              clamp01((gate_top_score - dyn_post) / (1.0 - dyn_post));
+	          double gap = gate_top_score - gate_second_score;
+	          double gap_factor = clamp01(gap / 0.20);
+	          soft *= gap_factor;
+	          // emphasize only very confident cases
+	          soft *= soft;
           // do not relax all the way down to presence floor unless presence already passed
           constexpr double kSoftPiFloor = 1e-5;
           const double floor = std::max(kPresencePiFloor, kSoftPiFloor);
           pi_min = (1.0 - soft) * pi_min + soft * floor;
         }
-        weight_ok = (class_weight >= pi_min);
-      }
-    }
-    bool pass = weight_ok && (top_score >= dyn_post);
+	        weight_ok = (class_weight >= pi_min);
+	      }
+	    }
+		    bool pass = weight_ok && (gate_top_score >= dyn_post);
 
-    if (pass) {
-      result.taxidCount.clear();
+		    if (pass) {
+		      selrej_fulln_stats.checks += 1;
+		      const size_t full_n = posterior_full.size();
+		      const size_t pruned_n = posterior.size();
+	      if (pruned_n <= kSelectiveRejectFullnPrunedMax) {
+	        selrej_fulln_stats.small_n += 1;
+	      }
+	      if (selective_reject_fulln_enabled && pruned.audit.pruned_any &&
+	          full_n >= kSelectiveRejectFullnMin &&
+	          pruned_n <= kSelectiveRejectFullnPrunedMax) {
+	        selrej_fulln_stats.applied += 1;
+	        result.taxidCount.clear();
+	        result.taxidCount.emplace_back(kUnclassified, 1.0);
+	        result.reject_reason = "selective_cert";
+	        continue;
+	      }
+
+	      result.taxidCount.clear();
 
       double total_evidence =
           (result.sample_weight > 0.0) ? result.sample_weight : result.evaluated;
@@ -1216,12 +1268,12 @@ void postEmDecision(
 	        max_taxa = 1;
 	      }
 
-	      // Winner-take-all for high-confidence reads to suppress long-tail spillover.
-	      constexpr double kPosteriorGapWTA = 0.15;
-	      if ((top_score - second_score) >= kPosteriorGapWTA) {
-	        head_mass = 1.0;
-	        max_taxa = 1;
-	      }
+		      // Winner-take-all for high-confidence reads to suppress long-tail spillover.
+		      constexpr double kPosteriorGapWTA = 0.15;
+		      if ((gate_top_score - gate_second_score) >= kPosteriorGapWTA) {
+		        head_mass = 1.0;
+		        max_taxa = 1;
+		      }
 	
 	      auto eligible = [&](const std::string &taxid, double post) -> bool {
 	        if (!(post > 0.0)) {
@@ -1558,7 +1610,7 @@ void postEmDecision(
 		    }
 			  }
 
-	  if (decisionConfig.allow_fallback_on_reject && fb_stats.rejected_total > 0) {
+		  if (decisionConfig.allow_fallback_on_reject && fb_stats.rejected_total > 0) {
     auto q = [](std::vector<double> vals, double p) -> double {
       if (vals.empty()) {
         return 0.0;
@@ -1613,10 +1665,22 @@ void postEmDecision(
               << q(fb_stats.gaps_rejected_em_post, 0.50) << '/'
               << q(fb_stats.gaps_rejected_em_post, 0.90)
               << ", gap_posterior_weight(p50/p90)="
-              << q(fb_stats.gaps_rejected_posterior_weight, 0.50) << '/'
-              << q(fb_stats.gaps_rejected_posterior_weight, 0.90) << std::endl;
+	              << q(fb_stats.gaps_rejected_posterior_weight, 0.50) << '/'
+	              << q(fb_stats.gaps_rejected_posterior_weight, 0.90) << std::endl;
+		  }
+
+	  if (decisionConfig.allow_fallback_on_reject && selrej_fulln_stats.checks > 0) {
+	    std::cout << "[classify][auto] selective_reject_fulln: enabled="
+	              << (selective_reject_fulln_enabled ? 1 : 0)
+	              << " full_n_min=" << kSelectiveRejectFullnMin
+	              << " pruned_n_max=" << kSelectiveRejectFullnPrunedMax
+	              << " meanReadLen=" << meanReadLen
+	              << " checks=" << selrej_fulln_stats.checks
+	              << " small_n=" << selrej_fulln_stats.small_n
+	              << " applied=" << selrej_fulln_stats.applied << std::endl;
 	  }
-	  if (prune_active_sample && prune_stats.reads_total > 0) {
+
+		  if (prune_active_sample && prune_stats.reads_total > 0) {
 	    auto q = [](std::vector<double> vals, double p) -> double {
 	      if (vals.empty()) {
 	        return 0.0;

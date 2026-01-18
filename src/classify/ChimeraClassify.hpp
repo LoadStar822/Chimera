@@ -54,9 +54,9 @@
 		struct NcbiTaxdump;
 		struct PresenceDecision;
 		void run(ClassifyConfig config);
-		void postEmDecision(
-		    std::vector<classifyResult> &results, const DecisionConfig &decisionConfig,
-		    const std::unordered_map<std::string, double> &classWeights,
-		    const TaxDict &tax, const PresenceDecision *presenceDecision,
-		    const NcbiTaxdump *ncbiTaxdump);
-	} // namespace ChimeraClassify
+			void postEmDecision(
+			    std::vector<classifyResult> &results, const DecisionConfig &decisionConfig,
+			    const std::unordered_map<std::string, double> &classWeights,
+			    const TaxDict &tax, const PresenceDecision *presenceDecision,
+			    const NcbiTaxdump *ncbiTaxdump, size_t meanReadLen);
+		} // namespace ChimeraClassify
