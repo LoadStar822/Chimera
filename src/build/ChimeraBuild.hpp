@@ -30,7 +30,6 @@
 #include <robin_hood.h>
 #include <filesystem>
 #include <seqan3/alphabet/nucleotide/dna4.hpp>
-#include <seqan3/core/debug_stream.hpp>
 #include <dna4_traits.hpp>
 #include <thread>
 #include <vector>

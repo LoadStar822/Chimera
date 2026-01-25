@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -730,59 +729,6 @@ void postEmDecision(
     const TaxDict &tax, const PresenceDecision *presenceDecision,
     const NcbiTaxdump *ncbiTaxdump, size_t meanReadLen) {
   constexpr const char *kUnclassified = "unclassified";
-	std::ostream *dump_post = nullptr;
-	std::ofstream dump_file;
-	const char *dump_path = std::getenv("CHIMERA_DUMP_POSTERIOR");
-	if (dump_path && *dump_path) {
-    dump_file.open(dump_path);
-    if (dump_file.good()) {
-			dump_post = &dump_file;
-		}
-	}
-
-	std::ostream *dump_top1_removed = nullptr;
-	std::ofstream dump_top1_removed_file;
-	const char *dump_top1_removed_path =
-	    std::getenv("CHIMERA_DUMP_POSTEM_TOP1_REMOVED");
-	if (dump_top1_removed_path && *dump_top1_removed_path) {
-		dump_top1_removed_file.open(dump_top1_removed_path);
-		if (dump_top1_removed_file.good()) {
-			dump_top1_removed = &dump_top1_removed_file;
-			(*dump_top1_removed)
-			    << "read_id\tfull_top1\tpruned_top1\tfull_p1\tfull_p2\tpruned_p1\t"
-			       "pruned_p2\tfull_gap\tw_top1\tlocal_pi_min_top1\tpres_top1\n";
-		}
-	}
-
-	std::ostream *dump_hint_blocked = nullptr;
-	std::ofstream dump_hint_blocked_file;
-	const char *dump_hint_blocked_path =
-	    std::getenv("CHIMERA_DUMP_POSTEM_HINT_BLOCKED");
-	if (dump_hint_blocked_path && *dump_hint_blocked_path) {
-		dump_hint_blocked_file.open(dump_hint_blocked_path);
-		if (dump_hint_blocked_file.good()) {
-			dump_hint_blocked = &dump_hint_blocked_file;
-			(*dump_hint_blocked)
-			    << "read_id\treject_reason\tpruned_top1\thint_taxid\tgap\t"
-			       "top_score\tsecond_score\thint_in_full_top16\t"
-			       "hint_rank_full\thint_prob_full\thint_w\thint_local_pi_min\t"
-			       "hint_pres\n";
-		}
-	}
-
-	std::ostream *dump_fallback_applied = nullptr;
-	std::ofstream dump_fallback_applied_file;
-	const char *dump_fallback_applied_path =
-	    std::getenv("CHIMERA_DUMP_POSTEM_FALLBACK_APPLIED");
-	if (dump_fallback_applied_path && *dump_fallback_applied_path) {
-		dump_fallback_applied_file.open(dump_fallback_applied_path);
-		if (dump_fallback_applied_file.good()) {
-			dump_fallback_applied = &dump_fallback_applied_file;
-			(*dump_fallback_applied)
-			    << "read_id\treject_reason\tusing_hint\tfallback_taxid\tpruned_top1\t"
-			       "gap\ttop_score\tsecond_score\n";
-		}
-	}
 
 	auto format_val = [](double value) {
 		std::ostringstream oss;
@@ -1023,21 +969,6 @@ void postEmDecision(
 	    std::vector<std::pair<std::string, double>> posterior =
 	        std::move(pruned.posterior);
 
-	    if (dump_top1_removed && pruned.audit.top1_removed && !posterior.empty()) {
-	      const auto &full1 = posterior_full.front();
-	      const double full2 = (posterior_full.size() > 1) ? posterior_full[1].second : 0.0;
-	      const double pr1 = posterior.front().second;
-	      const double pr2 = (posterior.size() > 1) ? posterior[1].second : 0.0;
-	      const PresenceLevel pres1 = presence_level(full1.first);
-	      (*dump_top1_removed) << result.id << '\t' << full1.first << '\t'
-	                           << posterior.front().first << '\t' << full1.second
-	                           << '\t' << full2 << '\t' << pr1 << '\t' << pr2
-	                           << '\t' << (full1.second - full2) << '\t'
-	                           << pruned.audit.full_top1_weight << '\t'
-	                           << pruned.audit.full_top1_local_pi_min << '\t'
-	                           << static_cast<int>(pres1) << '\n';
-	    }
-
 	    if (pruned.audit.pruning_active) {
 	      prune_stats.pruning_active += 1;
 	      if (pruned.audit.fallback_full) {
@@ -1141,14 +1072,6 @@ void postEmDecision(
 	    // final decision logic. This reduces long-tail noise in low-diversity
 	    // profile aggregation (e.g., avoids peaky-rescue picking hitchhiking taxa).
     result.posteriors = posterior;
-
-    if (dump_post) {
-      (*dump_post) << result.id;
-      for (const auto &kv : posterior) {
-        (*dump_post) << '\t' << kv.first << ':' << kv.second;
-      }
-      (*dump_post) << '\n';
-    }
 
 	    const auto &top = posterior.front();
 	    double top_score = top.second;
@@ -1571,42 +1494,6 @@ void postEmDecision(
 
 				            if (!hint_in_topk) {
 				              fb_stats.fallback_blocked_hint_not_in_topk += 1;
-				              if (dump_hint_blocked) {
-				                const auto full_hit = lookup_taxid_in_topk(
-				                    posterior_full, fallback_taxid, kFallbackHintTopK);
-				                const double pi_prune =
-				                    std::min(decisionConfig.min_class_weight, 1e-4);
-				                const PresenceLevel hint_pres = presence_level(fallback_taxid);
-				                double hint_local_pi_min = pi_prune;
-				                if (hint_pres == PresenceLevel::kAccepted) {
-				                  hint_local_pi_min = std::min(pi_prune, kPresencePiFloor);
-				                } else if (hint_pres == PresenceLevel::kRejected) {
-				                  hint_local_pi_min = pi_prune * kRejectFactor;
-				                }
-				                double hint_w = 0.0;
-				                if (!classWeights.empty()) {
-				                  auto itw = classWeights.find(fallback_taxid);
-				                  if (itw != classWeights.end()) {
-				                    hint_w = itw->second;
-				                  }
-				                }
-				                (*dump_hint_blocked) << result.id << '\t'
-				                                     << reject_reason_str << '\t'
-				                                     << top.first << '\t'
-				                                     << fallback_taxid << '\t'
-				                                     << gap << '\t' << top_score
-				                                     << '\t' << second_score << '\t'
-				                                     << (full_hit.found ? 1 : 0)
-				                                     << '\t'
-				                                     << (full_hit.found
-				                                             ? static_cast<long long>(full_hit.rank)
-				                                             : -1LL)
-				                                     << '\t' << full_hit.prob
-				                                     << '\t' << hint_w << '\t'
-				                                     << hint_local_pi_min << '\t'
-				                                     << static_cast<int>(hint_pres)
-				                                     << '\n';
-				              }
 				              // keep rejected
 				            } else {
 				              (void)hint_unblocked;
@@ -1623,13 +1510,6 @@ void postEmDecision(
 				              result.taxidCount.emplace_back(fallback_taxid, fallback);
 				              result.reject_reason.clear();
 				              fb_stats.fallback_applied += 1;
-				              if (dump_fallback_applied) {
-				                (*dump_fallback_applied)
-				                    << result.id << '\t' << reject_reason_str
-				                    << "\t1\t" << fallback_taxid << '\t' << top.first
-				                    << '\t' << gap << '\t' << top_score << '\t'
-				                    << second_score << '\n';
-				              }
 				              continue;
 				            }
 				          } else {
@@ -1645,13 +1525,6 @@ void postEmDecision(
 				            result.taxidCount.emplace_back(fallback_taxid, fallback);
 				            result.reject_reason.clear();
 				            fb_stats.fallback_applied += 1;
-				            if (dump_fallback_applied) {
-				              (*dump_fallback_applied)
-				                  << result.id << '\t' << reject_reason_str
-				                  << "\t0\t" << fallback_taxid << '\t' << top.first
-				                  << '\t' << gap << '\t' << top_score << '\t'
-				                  << second_score << '\n';
-				            }
 				            continue;
 				          }
 				        }

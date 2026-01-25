@@ -5,174 +5,10 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
-#include <fstream>
 #include <limits>
-#include <mutex>
 #include <numeric>
 #include <thread>
 #include <utility>
-
-namespace {
-
-std::ostream *preem_dump_stream() {
-  static std::once_flag once;
-  static std::mutex mu;
-  static std::ofstream ofs;
-  static bool enabled = false;
-  const char *path = std::getenv("CHIMERA_DUMP_PREEM");
-  if (!path || !*path) {
-    return nullptr;
-  }
-  std::string path_copy = path;
-  std::call_once(once, [&]() {
-    ofs.open(path_copy);
-    enabled = ofs.good();
-  });
-  if (!enabled) {
-    return nullptr;
-  }
-  return &ofs;
-}
-
-void dump_preem_line(const std::string &id,
-                     const std::vector<std::pair<std::string, double>> &items,
-                     bool high_conf_pre) {
-  auto *os = preem_dump_stream();
-  if (!os) {
-    return;
-  }
-  static std::mutex mu;
-  std::lock_guard<std::mutex> lock(mu);
-  (*os) << id;
-  (*os) << '\t' << "highconf=" << (high_conf_pre ? 1 : 0);
-  for (const auto &kv : items) {
-    (*os) << '\t' << kv.first << ':' << kv.second;
-  }
-  (*os) << '\n';
-}
-
-std::ostream *preem_stats_stream() {
-  static std::once_flag once;
-  static std::mutex mu;
-  static std::ofstream ofs;
-  static bool enabled = false;
-  const char *path = std::getenv("CHIMERA_DUMP_PREEM_STATS");
-  if (!path || !*path) {
-    return nullptr;
-  }
-  std::string path_copy = path;
-  std::call_once(once, [&]() {
-    ofs.open(path_copy);
-    enabled = ofs.good();
-  });
-  if (!enabled) {
-    return nullptr;
-  }
-  return &ofs;
-}
-
-void dump_preem_stats(const std::string &id, bool high_conf_pre, bool use_em,
-                      double eff_eval, double best, double second,
-                      double best_ratio, double gap, size_t uniqueCount,
-                      double uniqueRatio, size_t thr_beta, size_t thr_eval,
-                      size_t thr_min_eval, size_t thr_final) {
-  auto *os = preem_stats_stream();
-  if (!os) {
-    return;
-  }
-  static std::mutex mu;
-  std::lock_guard<std::mutex> lock(mu);
-  (*os) << id
-        << "\thighconf=" << (high_conf_pre ? 1 : 0)
-        << "\tuse_em=" << (use_em ? 1 : 0)
-        << "\teff_eval=" << eff_eval
-        << "\tbest=" << best
-        << "\tsecond=" << second
-        << "\tbest_ratio=" << best_ratio
-        << "\tgap=" << gap
-        << "\tuniq_cnt=" << uniqueCount
-        << "\tuniq_ratio=" << uniqueRatio
-        << "\tthr_beta=" << thr_beta
-        << "\tthr_eval=" << thr_eval
-        << "\tthr_min_eval=" << thr_min_eval
-        << "\tthr_final=" << thr_final
-        << '\n';
-}
-
-std::ostream *tidscore_dump_stream() {
-  static std::once_flag once;
-  static std::mutex mu;
-  static std::ofstream ofs;
-  static bool enabled = false;
-  const char *path = std::getenv("CHIMERA_DUMP_TIDSCORE");
-  if (!path || !*path) {
-    return nullptr;
-  }
-  std::string path_copy = path;
-  std::call_once(once, [&]() {
-    ofs.open(path_copy);
-    enabled = ofs.good();
-  });
-  if (!enabled) {
-    return nullptr;
-  }
-  return &ofs;
-}
-
-size_t tidscore_dump_topn() {
-  const char *val = std::getenv("CHIMERA_DUMP_TIDSCORE_TOPN");
-  if (!val || !*val) {
-    return 128;
-  }
-  try {
-    long long v = std::stoll(val);
-    if (v <= 0) {
-      return 0;
-    }
-    return static_cast<size_t>(v);
-  } catch (...) {
-    return 128;
-  }
-}
-
-void dump_tidscore_line(const std::string &id,
-                        const ChimeraClassify::TaxDict &tax,
-                        const robin_hood::unordered_flat_map<uint32_t, double> &tidScore) {
-  auto *os = tidscore_dump_stream();
-  if (!os || tidScore.empty()) {
-    return;
-  }
-  const size_t topn = tidscore_dump_topn();
-  if (topn == 0) {
-    return;
-  }
-  std::vector<std::pair<uint32_t, double>> items;
-  items.reserve(tidScore.size());
-  for (const auto &kv : tidScore) {
-    items.emplace_back(kv.first, kv.second);
-  }
-  if (items.size() > topn) {
-    std::nth_element(items.begin(), items.begin() + topn, items.end(),
-                     [](const auto &a, const auto &b) { return a.second > b.second; });
-    items.resize(topn);
-  }
-  std::sort(items.begin(), items.end(),
-            [](const auto &a, const auto &b) { return a.second > b.second; });
-
-  static std::mutex mu;
-  std::lock_guard<std::mutex> lock(mu);
-  (*os) << id;
-  for (const auto &kv : items) {
-    uint32_t tid_id = kv.first;
-    if (tid_id >= tax.id2str.size()) {
-      continue;
-    }
-    (*os) << '\t' << tax.id2str[tid_id] << ':' << kv.second;
-  }
-  (*os) << '\n';
-}
-
-} // namespace
 
 namespace ChimeraClassify {
 
@@ -365,12 +201,6 @@ void processSequence(
     }
     used_rare_route = (routeVals.size() < sampleVals.size());
   }
-  if (sampleBudget > 0) {
-    fileInfo.preem_route_reads += 1;
-    if (used_rare_route) {
-      fileInfo.preem_route_rare_reads += 1;
-    }
-  }
 
   std::vector<std::vector<uint32_t>> sampleCount;
   std::vector<std::pair<uint32_t, uint16_t>> touchedS;
@@ -446,10 +276,6 @@ void processSequence(
     candidateCap = compute_candidate_cap(baseCandidateCap, maxCandidateCap,
                                          head_mass, kHeadMassThresh,
                                          ranked.size());
-    fileInfo.preem_cap_checks += 1;
-    if (candidateCap > baseCandidateCap) {
-      fileInfo.preem_cap_expanded += 1;
-    }
 
     uint64_t goal = static_cast<uint64_t>(
         std::ceil(static_cast<double>(coarseTotal) * coverageTarget));
@@ -563,16 +389,6 @@ void processSequence(
         std::clamp(static_cast<double>(readLen) / scale, 0.0, 1.0);
     idf_power = 1.0 + lambda;
   }
-  {
-    constexpr double kBuckets = 64.0;
-    const double pos = std::clamp(idf_power - 1.0, 0.0, 1.0);
-    size_t bucket =
-        static_cast<size_t>(std::floor(pos * (kBuckets - 1.0)));
-    if (bucket >= fileInfo.hit_idf_power_hist.size()) {
-      bucket = fileInfo.hit_idf_power_hist.size() - 1;
-    }
-    fileInfo.hit_idf_power_hist[bucket] += 1;
-  }
 
   // High-div only: suppress repeated shared minimizers on long reads/contigs.
   // Guard rails:
@@ -591,7 +407,6 @@ void processSequence(
   std::vector<uint8_t> tf_saturation_counts;
   if (tf_saturation_enabled) {
     tf_saturation_counts.assign(kTfSaturationBuckets, 0);
-    fileInfo.tf_sat_enabled_reads += 1;
   }
 
   // Local contrast (zero-sum redistribution) is only meaningful on long reads in
@@ -734,45 +549,6 @@ void processSequence(
     double idf =
         clamp_idf(idf_raw, config.low_div_active, config.idf_max, idf_power);
     double idf_old = idf_linear;
-    fileInfo.hit_idf_total += 1;
-    if (idf_raw < 0.5) {
-      fileInfo.hit_idf_raw_lt0p5 += 1;
-    }
-    if (idf_raw < 0.25) {
-      fileInfo.hit_idf_raw_bins[0] += 1;
-    } else if (idf_raw < 0.5) {
-      fileInfo.hit_idf_raw_bins[1] += 1;
-    } else if (idf_raw < 1.0) {
-      fileInfo.hit_idf_raw_bins[2] += 1;
-    } else {
-      fileInfo.hit_idf_raw_bins[3] += 1;
-    }
-    {
-      const double bucket_value = (idf_max_eff > 0.0) ? idf_linear : 0.0;
-      constexpr double kBuckets = 64.0;
-      size_t bucket = 0;
-      if (idf_max_eff > 0.0) {
-        bucket = static_cast<size_t>(std::floor(bucket_value / idf_max_eff *
-                                                (kBuckets - 1.0)));
-      }
-      if (bucket >= fileInfo.hit_idf_raw_hist.size()) {
-        bucket = fileInfo.hit_idf_raw_hist.size() - 1;
-      }
-      fileInfo.hit_idf_raw_hist[bucket] += 1;
-    }
-    {
-      const double bucket_value = (idf_max_eff > 0.0) ? idf : 0.0;
-      constexpr double kBuckets = 64.0;
-      size_t bucket = 0;
-      if (idf_max_eff > 0.0) {
-        bucket = static_cast<size_t>(std::floor(bucket_value / idf_max_eff *
-                                                (kBuckets - 1.0)));
-      }
-      if (bucket >= fileInfo.hit_idf_eff_hist.size()) {
-        bucket = fileInfo.hit_idf_eff_hist.size() - 1;
-      }
-      fileInfo.hit_idf_eff_hist[bucket] += 1;
-    }
 
     double freqFactor = 1.0;
     const bool has_freq = weightCtx.enabled();
@@ -866,18 +642,10 @@ void processSequence(
       }
       const double tf =
           tf_saturation_factor(static_cast<uint32_t>(c), kTfSaturationAlpha);
-      fileInfo.tf_sat_shared_hits += 1;
-      fileInfo.tf_sat_base_sum += contrib;
-      fileInfo.tf_sat_drop_sum += contrib * (1.0 - tf);
-      if (tf < 0.999999) {
-        fileInfo.tf_sat_damped_hits += 1;
-      }
       contrib *= tf;
       contrib_old *= tf;
     }
 
-    fileInfo.hit_idf_contrib_sum_old += contrib_old;
-    fileInfo.hit_idf_contrib_sum_new += contrib;
     for (uint32_t tid : minimizerTids) {
       tidScore[tid] += contrib;
       ++consistencyHits[tid];
@@ -1267,10 +1035,6 @@ void processSequence(
             }
 
             const double base_mass = contrib * static_cast<double>(k);
-            if (k < fileInfo.lc_zs_k_hist.size()) {
-              fileInfo.lc_zs_k_hist[k] += 1;
-            }
-            fileInfo.lc_zs_cand_hits += 1;
 
             bool s1 = false;
             bool s2 = false;
@@ -1285,7 +1049,6 @@ void processSequence(
             if (!local_contrast_xor_gate(s1, s2)) {
               continue;
             }
-            fileInfo.lc_zs_xor_hits += 1;
 
             const double k_d = static_cast<double>(k);
             const double M_d = static_cast<double>(M);
@@ -1309,13 +1072,9 @@ void processSequence(
             }
 
             applied_any = true;
-            fileInfo.lc_zs_shared_hits += 1;
-            fileInfo.lc_zs_base_sum += base_mass;
-            fileInfo.lc_zs_l1_sum += zs.l1_sum;
           }
 
           if (applied_any) {
-            fileInfo.lc_zs_enabled_reads += 1;
             {
               const double margin_before = best - second;
               double margin_after = 0.0;
@@ -1328,10 +1087,6 @@ void processSequence(
               constexpr double kGapEps = 1e-6;
               const double denom = std::max(std::abs(margin_before), kGapEps);
               const double frac = std::abs(margin_after - margin_before) / denom;
-              fileInfo.lc_zs_margin_frac_count += 1;
-              fileInfo.lc_zs_margin_frac_sum += frac;
-              fileInfo.lc_zs_margin_frac_max =
-                  std::max(fileInfo.lc_zs_margin_frac_max, frac);
               auto bucket = [](double x) -> size_t {
                 if (x < 0.05) {
                   return 0;
@@ -1354,14 +1109,10 @@ void processSequence(
                 return 6;
               };
               const size_t b = bucket(frac);
-              if (b < fileInfo.lc_zs_margin_frac_hist.size()) {
-                fileInfo.lc_zs_margin_frac_hist[b] += 1;
-              }
             }
             stats = collect_stats();
             if (stats.bestTid == before_second &&
                 stats.secondTid == before_best) {
-              fileInfo.lc_zs_flip_top12 += 1;
             }
             bestTid = stats.bestTid;
             secondTid = stats.secondTid;
@@ -1383,7 +1134,6 @@ void processSequence(
   }
 
   // Optional: dump raw tidScore (pre-EM candidates before thresholds).
-  dump_tidscore_line(id, tax, tidScore);
 
   size_t bestRounded =
       static_cast<size_t>(std::max<double>(0.0, std::llround(best)));
@@ -1612,25 +1362,11 @@ void processSequence(
       constexpr double kPreemBetaRelaxEffEvalMin = 48.0;
       if (config.preem_beta_relax && use_em && !config.low_div_active &&
           !tidScore.empty()) {
-        fileInfo.preem_beta_relax_seen += 1;
-        if (beta_user) {
-          fileInfo.preem_beta_relax_beta_user += 1;
-        }
-        if (eff_eval < kPreemBetaRelaxEffEvalMin) {
-          fileInfo.preem_beta_relax_eff_lt_min += 1;
-        }
         const size_t thr_beta_eval_raw = std::min(thr_beta, thr_eval);
-        if (thr_final_raw == thr_beta_eval_raw) {
-          fileInfo.preem_beta_relax_dom_beta += 1;
-        }
-        if (baseTopK > 0 && preem_n_strict <= (baseTopK / 2)) {
-          fileInfo.preem_beta_relax_strict_le_halfk += 1;
-        }
       }
       if (config.preem_beta_relax && use_em && !config.low_div_active &&
           !beta_user &&
           eff_eval >= kPreemBetaRelaxEffEvalMin && baseTopK > 0) {
-        fileInfo.preem_beta_relax_checks += 1;
         auto decision = decide_preem_beta_relax(
             /*use_em=*/use_em, /*low_div_active=*/config.low_div_active,
             /*beta_user=*/beta_user, /*base_beta=*/beta,
@@ -1644,10 +1380,6 @@ void processSequence(
           preem_beta_relax_applied = true;
           preem_beta_local = decision.beta_local;
           thr_final_used = decision.thr_final_used;
-          fileInfo.preem_beta_relax_applied += 1;
-          fileInfo.preem_beta_relax_thr_drop_sum +=
-              (thr_final_raw - thr_final_used);
-
           // Rebuild candidate list using relaxed threshold.
           result.taxidCount.clear();
           for (const auto &[tid_id, rawScore] : tidScore) {
@@ -1730,23 +1462,6 @@ void processSequence(
   const bool overflow_size =
       (!preem_beta_relax_applied && result.taxidCount.size() > baseTopK);
   const bool binOverflow = overflow_topbins || overflow_size;
-  if (use_em && !config.low_div_active) {
-    if (nearTie_gap) {
-      fileInfo.preem_neartie_gap += 1;
-    }
-    if (nearTie_ratio) {
-      fileInfo.preem_neartie_ratio += 1;
-    }
-    if (overflow_topbins) {
-      fileInfo.preem_overflow_topbins += 1;
-    }
-    if (overflow_size) {
-      fileInfo.preem_overflow_size += 1;
-    }
-  }
-  if (preem_beta_relax_applied && result.taxidCount.size() > baseTopK) {
-    fileInfo.preem_beta_relax_suppressed_overflow += 1;
-  }
   if (nearTie || binOverflow) {
     dynamicTopK = std::max<size_t>(96, dynamicTopK);
   } else if (best_ratio >= 2.5 &&
@@ -1758,9 +1473,6 @@ void processSequence(
              // from entering EM/posterior lists.
              config.preEmTopK <= 16) {
     dynamicTopK = 16;
-  }
-  if (use_em && !config.low_div_active && dynamicTopK >= 96) {
-    fileInfo.preem_dynamic_topk_96 += 1;
   }
 
   // NCBI-only (optional): collapse strain/subspecies taxids to ONE representative
@@ -1869,9 +1581,6 @@ void processSequence(
 
     if (floorTargetTotal > 0 && nonUnclassified == kFloorTrigger &&
         result.taxidCount.size() < floorTargetTotal && topScore > 0.0) {
-      fileInfo.preem_floor_checks += 1;
-      const size_t before = result.taxidCount.size();
-
       robin_hood::unordered_flat_set<uint32_t> seenSpecies;
       seenSpecies.reserve(result.taxidCount.size() + 4);
       for (const auto &kv : result.taxidCount) {
@@ -1920,7 +1629,6 @@ void processSequence(
 
       if (!should_apply_preem_floor(topScore, bestOtherScore,
                                    config.preem_floor_min_ratio)) {
-        fileInfo.preem_floor_skipped_dominant += 1;
       } else {
         const double addMinScore = topScore * config.preem_floor_add_min_ratio;
         const double looseMinScore = static_cast<double>(thr_min_eval);
@@ -1937,7 +1645,6 @@ void processSequence(
           if (cand.second >= addMinScore) {
             ranked_strict.push_back(cand);
           } else {
-            fileInfo.preem_floor_filtered_weak += 1;
             if (cand.second >= looseMinScore) {
               ranked_loose.push_back(cand);
             }
@@ -1993,25 +1700,14 @@ void processSequence(
 
         ensure_preem_floor_candidates(result.taxidCount, ranked_strict,
                                      floorTargetTotal);
-        if (result.taxidCount.size() > before) {
-          fileInfo.preem_floor_applied += 1;
-          fileInfo.preem_floor_added += (result.taxidCount.size() - before);
-        }
 
         const size_t fillTargetTotal =
             std::min(baseTopK + (hasUnclassified ? 1 : 0), dynamicTopK);
         if (config.preem_underfull_fill && fillTargetTotal > floorTargetTotal &&
             result.taxidCount.size() < fillTargetTotal) {
-          fileInfo.preem_underfull_fill_checks += 1;
-          auto fill_res = fill_preem_candidates_underfull(
+          fill_preem_candidates_underfull(
               result.taxidCount, ranked_strict, ranked_loose, fillTargetTotal,
               kPreemUnderfullFillStage2Cap);
-          if (fill_res.applied) {
-            fileInfo.preem_underfull_fill_applied += 1;
-            fileInfo.preem_underfull_fill_added +=
-                (fill_res.stage1_added + fill_res.stage2_added);
-            fileInfo.preem_underfull_fill_stage2_added += fill_res.stage2_added;
-          }
         }
       }
     }
@@ -2020,26 +1716,6 @@ void processSequence(
   if (!result.taxidCount.empty() && use_em) {
     normalize_preem_topk(result.taxidCount, dynamicTopK);
   }
-  if (use_em && !config.low_div_active) {
-    const size_t final_k = result.taxidCount.size();
-    if (final_k <= 16) {
-      fileInfo.preem_finalk_le16 += 1;
-    } else if (final_k <= 32) {
-      fileInfo.preem_finalk_17_32 += 1;
-    } else if (final_k <= 64) {
-      fileInfo.preem_finalk_33_64 += 1;
-    } else if (final_k <= 96) {
-      fileInfo.preem_finalk_65_96 += 1;
-    }
-    if (final_k == 96) {
-      fileInfo.preem_finalk_eq96 += 1;
-    }
-  }
-
-  dump_preem_stats(id, highConfPre, use_em, eff_eval, best, second, best_ratio,
-                   gap, uniqueCount, uniqueRatio, thr_beta, thr_eval,
-                   thr_min_eval, thr_final_used);
-
   // High-div / EM only: fixed-budget keepalive of a strong per-read hint
   // candidate. Do NOT expand K; only replace the weakest tail candidate.
   if (use_em && !config.low_div_active && !result.taxidCount.empty() &&
@@ -2068,25 +1744,12 @@ void processSequence(
         }
       }
 
-      fileInfo.preem_keepalive_attempt += 1;
-      auto res = preem_keepalive_replace_tail(
+      preem_keepalive_replace_tail(
           result.taxidCount, {result.best_taxid_hint, hint_score},
           config.preem_keepalive_min_ratio, config.preem_keepalive_replace_ratio,
           config.preem_keepalive_abs_min);
-      if (res == KeepaliveResult::kApplied) {
-        fileInfo.preem_keepalive_applied += 1;
-      } else if (res == KeepaliveResult::kBlockedLowRatio) {
-        fileInfo.preem_keepalive_blocked_low_ratio += 1;
-      } else if (res == KeepaliveResult::kBlockedLowGain) {
-        fileInfo.preem_keepalive_blocked_low_gain += 1;
-      } else if (res == KeepaliveResult::kBlockedLowAbs) {
-        fileInfo.preem_keepalive_blocked_low_abs += 1;
-      }
     }
   }
-
-  // Optional: dump pre-EM candidate list for P1/P2 analysis.
-  dump_preem_line(result.id, result.taxidCount, highConfPre);
 
   if (!result.taxidCount.empty()) {
     if (presenceEnabled && presenceAcc) {
@@ -2287,92 +1950,6 @@ void classify_streaming(
         fileInfo.maxLen = localFileInfo.maxLen;
       }
       fileInfo.bpLength += localFileInfo.bpLength;
-
-      fileInfo.preem_route_reads += localFileInfo.preem_route_reads;
-      fileInfo.preem_route_rare_reads += localFileInfo.preem_route_rare_reads;
-      fileInfo.preem_cap_checks += localFileInfo.preem_cap_checks;
-      fileInfo.preem_cap_expanded += localFileInfo.preem_cap_expanded;
-      fileInfo.preem_floor_checks += localFileInfo.preem_floor_checks;
-      fileInfo.preem_floor_applied += localFileInfo.preem_floor_applied;
-      fileInfo.preem_floor_added += localFileInfo.preem_floor_added;
-      fileInfo.preem_floor_skipped_dominant +=
-          localFileInfo.preem_floor_skipped_dominant;
-      fileInfo.preem_floor_filtered_weak += localFileInfo.preem_floor_filtered_weak;
-      fileInfo.preem_keepalive_attempt += localFileInfo.preem_keepalive_attempt;
-      fileInfo.preem_keepalive_applied += localFileInfo.preem_keepalive_applied;
-      fileInfo.preem_keepalive_blocked_low_ratio +=
-          localFileInfo.preem_keepalive_blocked_low_ratio;
-      fileInfo.preem_keepalive_blocked_low_gain +=
-          localFileInfo.preem_keepalive_blocked_low_gain;
-      fileInfo.preem_keepalive_blocked_low_abs +=
-          localFileInfo.preem_keepalive_blocked_low_abs;
-      fileInfo.preem_beta_relax_seen += localFileInfo.preem_beta_relax_seen;
-      fileInfo.preem_beta_relax_dom_beta += localFileInfo.preem_beta_relax_dom_beta;
-      fileInfo.preem_beta_relax_strict_le_halfk +=
-          localFileInfo.preem_beta_relax_strict_le_halfk;
-      fileInfo.preem_beta_relax_eff_lt_min += localFileInfo.preem_beta_relax_eff_lt_min;
-      fileInfo.preem_beta_relax_beta_user += localFileInfo.preem_beta_relax_beta_user;
-      fileInfo.preem_beta_relax_checks += localFileInfo.preem_beta_relax_checks;
-      fileInfo.preem_beta_relax_applied += localFileInfo.preem_beta_relax_applied;
-      fileInfo.preem_beta_relax_thr_drop_sum += localFileInfo.preem_beta_relax_thr_drop_sum;
-      fileInfo.preem_beta_relax_suppressed_overflow +=
-          localFileInfo.preem_beta_relax_suppressed_overflow;
-      fileInfo.preem_dynamic_topk_96 += localFileInfo.preem_dynamic_topk_96;
-      fileInfo.preem_underfull_fill_checks +=
-          localFileInfo.preem_underfull_fill_checks;
-      fileInfo.preem_underfull_fill_applied +=
-          localFileInfo.preem_underfull_fill_applied;
-      fileInfo.preem_underfull_fill_added +=
-          localFileInfo.preem_underfull_fill_added;
-      fileInfo.preem_underfull_fill_stage2_added +=
-          localFileInfo.preem_underfull_fill_stage2_added;
-      fileInfo.preem_neartie_gap += localFileInfo.preem_neartie_gap;
-      fileInfo.preem_neartie_ratio += localFileInfo.preem_neartie_ratio;
-      fileInfo.preem_overflow_topbins += localFileInfo.preem_overflow_topbins;
-      fileInfo.preem_overflow_size += localFileInfo.preem_overflow_size;
-      fileInfo.preem_finalk_le16 += localFileInfo.preem_finalk_le16;
-      fileInfo.preem_finalk_17_32 += localFileInfo.preem_finalk_17_32;
-      fileInfo.preem_finalk_33_64 += localFileInfo.preem_finalk_33_64;
-      fileInfo.preem_finalk_65_96 += localFileInfo.preem_finalk_65_96;
-      fileInfo.preem_finalk_eq96 += localFileInfo.preem_finalk_eq96;
-      fileInfo.hit_idf_total += localFileInfo.hit_idf_total;
-      fileInfo.hit_idf_raw_lt0p5 += localFileInfo.hit_idf_raw_lt0p5;
-      for (size_t i = 0; i < fileInfo.hit_idf_raw_bins.size(); ++i) {
-        fileInfo.hit_idf_raw_bins[i] += localFileInfo.hit_idf_raw_bins[i];
-      }
-      fileInfo.hit_idf_contrib_sum_old += localFileInfo.hit_idf_contrib_sum_old;
-      fileInfo.hit_idf_contrib_sum_new += localFileInfo.hit_idf_contrib_sum_new;
-      for (size_t i = 0; i < fileInfo.hit_idf_raw_hist.size(); ++i) {
-        fileInfo.hit_idf_raw_hist[i] += localFileInfo.hit_idf_raw_hist[i];
-      }
-      for (size_t i = 0; i < fileInfo.hit_idf_eff_hist.size(); ++i) {
-        fileInfo.hit_idf_eff_hist[i] += localFileInfo.hit_idf_eff_hist[i];
-      }
-      for (size_t i = 0; i < fileInfo.hit_idf_power_hist.size(); ++i) {
-        fileInfo.hit_idf_power_hist[i] += localFileInfo.hit_idf_power_hist[i];
-      }
-      fileInfo.tf_sat_enabled_reads += localFileInfo.tf_sat_enabled_reads;
-      fileInfo.tf_sat_shared_hits += localFileInfo.tf_sat_shared_hits;
-      fileInfo.tf_sat_damped_hits += localFileInfo.tf_sat_damped_hits;
-      fileInfo.tf_sat_base_sum += localFileInfo.tf_sat_base_sum;
-      fileInfo.tf_sat_drop_sum += localFileInfo.tf_sat_drop_sum;
-      fileInfo.lc_zs_enabled_reads += localFileInfo.lc_zs_enabled_reads;
-      fileInfo.lc_zs_shared_hits += localFileInfo.lc_zs_shared_hits;
-      fileInfo.lc_zs_flip_top12 += localFileInfo.lc_zs_flip_top12;
-      fileInfo.lc_zs_base_sum += localFileInfo.lc_zs_base_sum;
-      fileInfo.lc_zs_l1_sum += localFileInfo.lc_zs_l1_sum;
-      for (size_t i = 0; i < fileInfo.lc_zs_k_hist.size(); ++i) {
-        fileInfo.lc_zs_k_hist[i] += localFileInfo.lc_zs_k_hist[i];
-      }
-      fileInfo.lc_zs_cand_hits += localFileInfo.lc_zs_cand_hits;
-      fileInfo.lc_zs_xor_hits += localFileInfo.lc_zs_xor_hits;
-      fileInfo.lc_zs_margin_frac_count += localFileInfo.lc_zs_margin_frac_count;
-      fileInfo.lc_zs_margin_frac_sum += localFileInfo.lc_zs_margin_frac_sum;
-      fileInfo.lc_zs_margin_frac_max =
-          std::max(fileInfo.lc_zs_margin_frac_max, localFileInfo.lc_zs_margin_frac_max);
-      for (size_t i = 0; i < fileInfo.lc_zs_margin_frac_hist.size(); ++i) {
-        fileInfo.lc_zs_margin_frac_hist[i] += localFileInfo.lc_zs_margin_frac_hist[i];
-      }
       if (presenceSummary) {
         presenceSummary->merge(presenceLocal);
       }
@@ -2446,93 +2023,6 @@ void classify(
         fileInfo.maxLen = localFileInfo.maxLen;
       }
       fileInfo.bpLength += localFileInfo.bpLength;
-
-      fileInfo.preem_route_reads += localFileInfo.preem_route_reads;
-      fileInfo.preem_route_rare_reads += localFileInfo.preem_route_rare_reads;
-      fileInfo.preem_cap_checks += localFileInfo.preem_cap_checks;
-      fileInfo.preem_cap_expanded += localFileInfo.preem_cap_expanded;
-      fileInfo.preem_floor_checks += localFileInfo.preem_floor_checks;
-      fileInfo.preem_floor_applied += localFileInfo.preem_floor_applied;
-      fileInfo.preem_floor_added += localFileInfo.preem_floor_added;
-      fileInfo.preem_floor_skipped_dominant +=
-          localFileInfo.preem_floor_skipped_dominant;
-      fileInfo.preem_floor_filtered_weak += localFileInfo.preem_floor_filtered_weak;
-      fileInfo.preem_keepalive_attempt += localFileInfo.preem_keepalive_attempt;
-      fileInfo.preem_keepalive_applied += localFileInfo.preem_keepalive_applied;
-      fileInfo.preem_keepalive_blocked_low_ratio +=
-          localFileInfo.preem_keepalive_blocked_low_ratio;
-      fileInfo.preem_keepalive_blocked_low_gain +=
-          localFileInfo.preem_keepalive_blocked_low_gain;
-      fileInfo.preem_keepalive_blocked_low_abs +=
-          localFileInfo.preem_keepalive_blocked_low_abs;
-      fileInfo.preem_beta_relax_seen += localFileInfo.preem_beta_relax_seen;
-      fileInfo.preem_beta_relax_dom_beta += localFileInfo.preem_beta_relax_dom_beta;
-      fileInfo.preem_beta_relax_strict_le_halfk +=
-          localFileInfo.preem_beta_relax_strict_le_halfk;
-      fileInfo.preem_beta_relax_eff_lt_min += localFileInfo.preem_beta_relax_eff_lt_min;
-      fileInfo.preem_beta_relax_beta_user += localFileInfo.preem_beta_relax_beta_user;
-      fileInfo.preem_beta_relax_checks += localFileInfo.preem_beta_relax_checks;
-      fileInfo.preem_beta_relax_applied += localFileInfo.preem_beta_relax_applied;
-      fileInfo.preem_beta_relax_thr_drop_sum +=
-          localFileInfo.preem_beta_relax_thr_drop_sum;
-      fileInfo.preem_beta_relax_suppressed_overflow +=
-          localFileInfo.preem_beta_relax_suppressed_overflow;
-      fileInfo.preem_dynamic_topk_96 += localFileInfo.preem_dynamic_topk_96;
-      fileInfo.preem_underfull_fill_checks +=
-          localFileInfo.preem_underfull_fill_checks;
-      fileInfo.preem_underfull_fill_applied +=
-          localFileInfo.preem_underfull_fill_applied;
-      fileInfo.preem_underfull_fill_added +=
-          localFileInfo.preem_underfull_fill_added;
-      fileInfo.preem_underfull_fill_stage2_added +=
-          localFileInfo.preem_underfull_fill_stage2_added;
-      fileInfo.preem_neartie_gap += localFileInfo.preem_neartie_gap;
-      fileInfo.preem_neartie_ratio += localFileInfo.preem_neartie_ratio;
-      fileInfo.preem_overflow_topbins += localFileInfo.preem_overflow_topbins;
-      fileInfo.preem_overflow_size += localFileInfo.preem_overflow_size;
-      fileInfo.preem_finalk_le16 += localFileInfo.preem_finalk_le16;
-      fileInfo.preem_finalk_17_32 += localFileInfo.preem_finalk_17_32;
-      fileInfo.preem_finalk_33_64 += localFileInfo.preem_finalk_33_64;
-      fileInfo.preem_finalk_65_96 += localFileInfo.preem_finalk_65_96;
-      fileInfo.preem_finalk_eq96 += localFileInfo.preem_finalk_eq96;
-      fileInfo.hit_idf_total += localFileInfo.hit_idf_total;
-      fileInfo.hit_idf_raw_lt0p5 += localFileInfo.hit_idf_raw_lt0p5;
-      for (size_t i = 0; i < fileInfo.hit_idf_raw_bins.size(); ++i) {
-        fileInfo.hit_idf_raw_bins[i] += localFileInfo.hit_idf_raw_bins[i];
-      }
-      fileInfo.hit_idf_contrib_sum_old += localFileInfo.hit_idf_contrib_sum_old;
-      fileInfo.hit_idf_contrib_sum_new += localFileInfo.hit_idf_contrib_sum_new;
-      for (size_t i = 0; i < fileInfo.hit_idf_raw_hist.size(); ++i) {
-        fileInfo.hit_idf_raw_hist[i] += localFileInfo.hit_idf_raw_hist[i];
-      }
-      for (size_t i = 0; i < fileInfo.hit_idf_eff_hist.size(); ++i) {
-        fileInfo.hit_idf_eff_hist[i] += localFileInfo.hit_idf_eff_hist[i];
-      }
-      for (size_t i = 0; i < fileInfo.hit_idf_power_hist.size(); ++i) {
-        fileInfo.hit_idf_power_hist[i] += localFileInfo.hit_idf_power_hist[i];
-      }
-      fileInfo.tf_sat_enabled_reads += localFileInfo.tf_sat_enabled_reads;
-      fileInfo.tf_sat_shared_hits += localFileInfo.tf_sat_shared_hits;
-      fileInfo.tf_sat_damped_hits += localFileInfo.tf_sat_damped_hits;
-      fileInfo.tf_sat_base_sum += localFileInfo.tf_sat_base_sum;
-      fileInfo.tf_sat_drop_sum += localFileInfo.tf_sat_drop_sum;
-      fileInfo.lc_zs_enabled_reads += localFileInfo.lc_zs_enabled_reads;
-      fileInfo.lc_zs_shared_hits += localFileInfo.lc_zs_shared_hits;
-      fileInfo.lc_zs_flip_top12 += localFileInfo.lc_zs_flip_top12;
-      fileInfo.lc_zs_base_sum += localFileInfo.lc_zs_base_sum;
-      fileInfo.lc_zs_l1_sum += localFileInfo.lc_zs_l1_sum;
-      for (size_t i = 0; i < fileInfo.lc_zs_k_hist.size(); ++i) {
-        fileInfo.lc_zs_k_hist[i] += localFileInfo.lc_zs_k_hist[i];
-      }
-      fileInfo.lc_zs_cand_hits += localFileInfo.lc_zs_cand_hits;
-      fileInfo.lc_zs_xor_hits += localFileInfo.lc_zs_xor_hits;
-      fileInfo.lc_zs_margin_frac_count += localFileInfo.lc_zs_margin_frac_count;
-      fileInfo.lc_zs_margin_frac_sum += localFileInfo.lc_zs_margin_frac_sum;
-      fileInfo.lc_zs_margin_frac_max =
-          std::max(fileInfo.lc_zs_margin_frac_max, localFileInfo.lc_zs_margin_frac_max);
-      for (size_t i = 0; i < fileInfo.lc_zs_margin_frac_hist.size(); ++i) {
-        fileInfo.lc_zs_margin_frac_hist[i] += localFileInfo.lc_zs_margin_frac_hist[i];
-      }
     }
   }
 }

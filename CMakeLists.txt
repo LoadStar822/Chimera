@@ -133,6 +133,13 @@ target_compile_definitions(Chimera
     CHIMERA_HAS_STROBEMERS=1
 )
 
+if (OpenMP_CXX_FOUND)
+    target_link_libraries(Chimera PRIVATE OpenMP::OpenMP_CXX)
+    message(STATUS "OpenMP found: enabling parallel build.")
+else()
+    message(WARNING "OpenMP not found: building without parallelism.")
+endif()
+
 # 设置包含目录
 target_include_directories(Chimera
     PUBLIC
@@ -148,8 +155,7 @@ target_include_directories(Chimera
     ${PROJECT_SOURCE_DIR}/src/build/filter
 )
 
-
-
+if (EXISTS "${PROJECT_SOURCE_DIR}/tests")
 
 # IMCF 单元测试可执行文件
 add_executable(imcf_filter_tests
@@ -178,11 +184,7 @@ target_compile_definitions(imcf_filter_tests
 )
 
 if (OpenMP_CXX_FOUND)
-    target_link_libraries(Chimera PRIVATE OpenMP::OpenMP_CXX)
     target_link_libraries(imcf_filter_tests PRIVATE OpenMP::OpenMP_CXX)
-    message(STATUS "OpenMP found: enabling parallel build.")
-else()
-    message(WARNING "OpenMP not found: building without parallelism.")
 endif()
 
 target_include_directories(imcf_filter_tests
@@ -672,6 +674,8 @@ target_include_directories(preem_topk_tests
     ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/cereal/include
     ${PROJECT_SOURCE_DIR}/libs/seqan3/include/seqan3/submodules/sdsl-lite/include
 )
+
+endif()
 
 # 忽略 register 关键字警告
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")

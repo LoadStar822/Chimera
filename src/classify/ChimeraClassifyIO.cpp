@@ -10,7 +10,6 @@
 
 #include <dna4_traits.hpp>
 #include <seqan3/alphabet/nucleotide/dna4.hpp>
-#include <seqan3/core/debug_stream.hpp>
 #include <seqan3/utility/views/chunk.hpp>
 
 namespace ChimeraClassify {

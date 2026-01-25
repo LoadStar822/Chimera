@@ -33,7 +33,6 @@
 #include <memory>
 #include "robin_hood.h"
 #include <seqan3/alphabet/nucleotide/dna4.hpp>
-#include <seqan3/core/debug_stream.hpp>
 
 namespace ChimeraClassify {
 		struct ClassifyConfig {
@@ -218,75 +217,7 @@ namespace ChimeraClassify {
 		robin_hood::unordered_flat_map<std::string, size_t> rejectReasons;
 		robin_hood::unordered_flat_map<std::string,
 			robin_hood::unordered_flat_map<std::string, size_t>> rejectByTaxid;
-		size_t preem_route_reads{ 0 };
-		size_t preem_route_rare_reads{ 0 };
-		size_t preem_cap_checks{ 0 };
-		size_t preem_cap_expanded{ 0 };
-		size_t preem_floor_checks{ 0 };
-		size_t preem_floor_applied{ 0 };
-		size_t preem_floor_added{ 0 };
-		size_t preem_floor_skipped_dominant{ 0 };
-		size_t preem_floor_filtered_weak{ 0 };
-		size_t preem_keepalive_attempt{ 0 };
-		size_t preem_keepalive_applied{ 0 };
-		size_t preem_keepalive_blocked_low_ratio{ 0 };
-		size_t preem_keepalive_blocked_low_gain{ 0 };
-		size_t preem_keepalive_blocked_low_abs{ 0 };
-		// Pre-EM beta relax / debugging counters (high-div only).
-		size_t preem_beta_relax_seen{ 0 };
-		size_t preem_beta_relax_dom_beta{ 0 };
-		size_t preem_beta_relax_strict_le_halfk{ 0 };
-		size_t preem_beta_relax_eff_lt_min{ 0 };
-		size_t preem_beta_relax_beta_user{ 0 };
-		size_t preem_beta_relax_checks{ 0 };
-		size_t preem_beta_relax_applied{ 0 };
-		size_t preem_beta_relax_thr_drop_sum{ 0 };
-		size_t preem_beta_relax_suppressed_overflow{ 0 };
-		size_t preem_dynamic_topk_96{ 0 };
-		// High-div / EM only: fixed-budget underfull fill (no pad expansion).
-		size_t preem_underfull_fill_checks{ 0 };
-		size_t preem_underfull_fill_applied{ 0 };
-		size_t preem_underfull_fill_added{ 0 };
-		size_t preem_underfull_fill_stage2_added{ 0 };
-		// High-div / EM only: nearTie/binOverflow breakdown and finalK histogram.
-		size_t preem_neartie_gap{ 0 };
-		size_t preem_neartie_ratio{ 0 };
-		size_t preem_overflow_topbins{ 0 };
-		size_t preem_overflow_size{ 0 };
-		size_t preem_finalk_le16{ 0 };
-		size_t preem_finalk_17_32{ 0 };
-		size_t preem_finalk_33_64{ 0 };
-		size_t preem_finalk_65_96{ 0 };
-		size_t preem_finalk_eq96{ 0 };
-		// Hit-level IDF clamp audit (minimizer scoring).
-			size_t hit_idf_total{ 0 };
-			size_t hit_idf_raw_lt0p5{ 0 };
-			std::array<uint64_t, 4> hit_idf_raw_bins{};
-			double hit_idf_contrib_sum_old{ 0.0 };
-				double hit_idf_contrib_sum_new{ 0.0 };
-					std::array<uint64_t, 64> hit_idf_raw_hist{};
-					std::array<uint64_t, 64> hit_idf_eff_hist{};
-					std::array<uint64_t, 64> hit_idf_power_hist{};
-					// TF saturation audit (shared minimizer de-dup / pile-up suppression).
-					size_t tf_sat_enabled_reads{ 0 };
-					size_t tf_sat_shared_hits{ 0 };
-					size_t tf_sat_damped_hits{ 0 };
-					double tf_sat_base_sum{ 0.0 };
-					double tf_sat_drop_sum{ 0.0 };
-						// Local contrast (zero-sum) audit (within-genus near ties).
-						size_t lc_zs_enabled_reads{ 0 };
-						size_t lc_zs_shared_hits{ 0 };
-						size_t lc_zs_flip_top12{ 0 };
-						double lc_zs_base_sum{ 0.0 };
-						double lc_zs_l1_sum{ 0.0 };
-						std::array<uint64_t, 9> lc_zs_k_hist{};
-						size_t lc_zs_cand_hits{ 0 };
-						size_t lc_zs_xor_hits{ 0 };
-						size_t lc_zs_margin_frac_count{ 0 };
-						double lc_zs_margin_frac_sum{ 0.0 };
-						double lc_zs_margin_frac_max{ 0.0 };
-						std::array<uint64_t, 7> lc_zs_margin_frac_hist{};
-					};
+	};
 
 	struct batchReads {
 		std::vector< std::string >                 ids;
