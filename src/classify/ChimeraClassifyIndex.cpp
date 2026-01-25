@@ -43,14 +43,13 @@ TaxDict build_tax_dict(const std::vector<std::vector<std::string>> &idx2tax) {
   return td;
 }
 
-IMCFIndexStatus loadFilter(
+void loadFilter(
     const std::string &input_file,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf,
     ChimeraBuild::IMCFConfig &imcfConfig,
     std::vector<std::vector<std::string>> &indexToTaxid,
     chimera::presence::CoverageMeta *coverageMeta) {
   namespace fs = std::filesystem;
-  using Clock = std::chrono::steady_clock;
 
   fs::path archivePath{input_file};
   if (!fs::exists(archivePath)) {
@@ -60,10 +59,6 @@ IMCFIndexStatus loadFilter(
     throw std::runtime_error("无法找到 IMCF 主档案: " + input_file);
   }
 
-  fs::path indexBase = archivePath;
-  if (indexBase.extension() == ".imcf") {
-    indexBase.replace_extension("");
-  }
 
   std::ifstream is(archivePath, std::ios::binary);
   if (!is.is_open()) {
@@ -121,33 +116,6 @@ IMCFIndexStatus loadFilter(
         std::to_string(imcfConfig.fpSalt) +
         "，请重新构建数据库或升级程序。");
   }
-  auto timed = [](auto &&fn) {
-    auto start = Clock::now();
-    bool ok = fn();
-    auto end = Clock::now();
-    long long elapsed =
-        std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
-            .count();
-    return std::pair<bool, long long>{ok, elapsed};
-  };
-
-  IMCFIndexStatus status;
-
-  std::string activePath = indexBase.string() + ".imcf.idx";
-  auto [activeLoaded, activeMs] =
-      timed([&]() { return imcf.loadActiveIndex(activePath); });
-  if (!activeLoaded || !imcf.hasActiveIndex()) {
-    auto rebuild = timed([&]() {
-      imcf.buildActiveGroups();
-      return true;
-    });
-    status.builtActive = true;
-    status.activeMs = rebuild.second;
-  } else {
-    status.activeMs = activeMs;
-  }
-
-  return status;
 }
 
 } // namespace ChimeraClassify

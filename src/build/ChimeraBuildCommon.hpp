@@ -70,7 +70,7 @@ std::string tmp_hash_path(const std::string &taxid,
 void saveIMCF(chimera::imcf::InterleavedMergedCuckooFilter &imcf,
               const std::string &output_file,
               std::vector<std::vector<std::string>> &indexToTaxid,
-              IMCFConfig &imcfConfig, bool needIndexStructures,
+              IMCFConfig &imcfConfig,
               const chimera::presence::CoverageMeta *presenceMeta);
 
 std::vector<std::vector<std::string>> buildIMCF(

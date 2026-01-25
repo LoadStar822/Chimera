@@ -596,7 +596,6 @@ uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>
 		const std::string& output_file,
 		std::vector<std::vector<std::string>>& indexToTaxid,
 		IMCFConfig& imcfConfig,
-		bool needIndexStructures,
 		const chimera::presence::CoverageMeta* presenceMeta)
 	{
 	// Open the output file
@@ -642,26 +641,6 @@ uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>
 		return ok;
 	};
 
-	bool runAsyncIndexBuild = false;
-#ifdef _OPENMP
-	if (omp_get_max_threads() > 1) {
-		runAsyncIndexBuild = true;
-	}
-#else
-	if (std::thread::hardware_concurrency() > 1) {
-		runAsyncIndexBuild = true;
-	}
-#endif
-
-	std::future<void> indexFuture;
-	Clock::time_point indexLaunchTime{};
-	if (needIndexStructures && runAsyncIndexBuild) {
-		indexLaunchTime = Clock::now();
-		indexFuture = std::async(std::launch::async, [&imcf]() {
-			imcf.buildActiveGroups();
-		});
-	}
-
 	logStep("Writing filter archive (.imcf)", [&]() {
 		cereal::BinaryOutputArchive archive(os);
 		archive(imcf);
@@ -673,34 +652,6 @@ uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>
 		os.close();
 		return true;
 	});
-
-	if (needIndexStructures) {
-		const char *indexTitle = runAsyncIndexBuild ?
-		    "Building index structures (.idx) [async]" :
-		    "Building index structures (.idx)";
-		std::cout << "  - " << indexTitle << "... " << std::flush;
-		long long indexElapsedMs = 0;
-		if (indexFuture.valid()) {
-			indexFuture.get();
-			auto end = Clock::now();
-			indexElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(end - indexLaunchTime).count();
-		} else {
-			auto start = Clock::now();
-			imcf.buildActiveGroups();
-			auto end = Clock::now();
-			indexElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-		}
-		std::cout << "done (" << formatDuration(indexElapsedMs) << ")" << std::endl;
-
-		std::string idxPath = output_file + ".imcf.idx";
-		logStep("Writing active index (.imcf.idx)", [&]() {
-			if (!imcf.saveActiveIndex(idxPath)) {
-				std::cerr << "Warning: failed to write IMCF index file: " << idxPath << std::endl;
-				return false;
-			}
-			return true;
-		});
-	}
 
 		// Get the file size
 		std::uintmax_t fileSize = std::filesystem::file_size(output_file + ".imcf");

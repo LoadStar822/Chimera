@@ -304,7 +304,6 @@ class InterleavedMergedCuckooFilter {
   size_t tagNum{4};
   int MaxCuckooCount{500};
   size_t hashSize{};
-  std::vector<std::vector<uint32_t>> activeGroups;
   struct StashEntry {
     uint64_t bucket{0};
     uint16_t fingerprint{0};
@@ -397,25 +396,23 @@ class InterleavedMergedCuckooFilter {
   inline void fetchActiveBins(size_t bucket, uint16_t fingerprint,
                               std::vector<uint32_t> &out) const {
     out.clear();
-    if (bucket >= activeGroups.size()) {
+    if (binNum == 0 || hashSize == 0 || bucket >= hashSize) {
       return;
     }
-    const auto &candidates = activeGroups[bucket];
-    if (candidates.empty()) {
-      return;
-    }
-    out.reserve(candidates.size());
-    for (uint32_t bin : candidates) {
+    out.reserve(16);
+    for (uint32_t bin = 0; bin < binNum; ++bin) {
       uint64_t bucketValue = readBucket64(bucket, bin);
       bool match = false;
-      for (int lane = 0; lane < static_cast<int>(tagNum); ++lane) {
-        uint16_t tag = static_cast<uint16_t>((bucketValue >> (lane * 16)) & 0xFFFFu);
-        if (tag == 0u) {
-          continue;
-        }
-        if ((tag & 0x0FFFu) == fingerprint) {
-          match = true;
-          break;
+      if (bucketValue != 0) {
+        for (int lane = 0; lane < static_cast<int>(tagNum); ++lane) {
+          uint16_t tag = static_cast<uint16_t>((bucketValue >> (lane * 16)) & 0xFFFFu);
+          if (tag == 0u) {
+            continue;
+          }
+          if ((tag & 0x0FFFu) == fingerprint) {
+            match = true;
+            break;
+          }
         }
       }
       if (!match) {
@@ -1033,116 +1030,42 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
       }
     };
 
-    if (activeGroups.empty()) {
-      for (size_t base = 0; base < binNum; base += BLOCK) {
-        size_t end = std::min(binNum, base + BLOCK);
-        for (size_t batchStart = base; batchStart < end;
-             batchStart += SUB_BATCH) {
-          size_t batchEnd = std::min(end, batchStart + SUB_BATCH);
-          uint64_t q1[SUB_BATCH];
-          uint64_t q2[SUB_BATCH];
-          size_t bins[SUB_BATCH];
-          size_t cnt = 0;
-          for (size_t binIndex = batchStart; binIndex < batchEnd; ++binIndex) {
-            q1[cnt] = readBucket64(hash1, binIndex);
+    for (size_t base = 0; base < binNum; base += BLOCK) {
+      size_t end = std::min(binNum, base + BLOCK);
+      for (size_t batchStart = base; batchStart < end;
+           batchStart += SUB_BATCH) {
+        size_t batchEnd = std::min(end, batchStart + SUB_BATCH);
+        uint64_t q1[SUB_BATCH];
+        uint64_t q2[SUB_BATCH];
+        size_t bins[SUB_BATCH];
+        size_t cnt = 0;
+        for (size_t binIndex = batchStart; binIndex < batchEnd; ++binIndex) {
+          q1[cnt] = readBucket64(hash1, binIndex);
+          q2[cnt] = readBucket64(hash2, binIndex);
+          bins[cnt] = binIndex;
+          ++cnt;
+        }
 
-            q2[cnt] = readBucket64(hash2, binIndex);
-            bins[cnt] = binIndex;
-            ++cnt;
+        for (size_t i = 0; i < cnt; ++i) {
+          uint32_t bin = static_cast<uint32_t>(bins[i]);
+          if (q1[i] != 0) {
+            process64(q1[i], bin);
           }
-
-          for (size_t i = 0; i < cnt; ++i) {
-            uint32_t bin = static_cast<uint32_t>(bins[i]);
-            if (q1[i] != 0) {
-              process64(q1[i], bin);
-            }
-            if (q2[i] != 0) {
-              process64(q2[i], bin);
-            }
-            forEachStashMatch(bin, hash1, fingerprint,
-                              [&](uint16_t speciesIndex) {
-                                emit(bin, speciesIndex);
-                              });
-            if (hash2 != hash1) {
-              forEachStashMatch(bin, hash2, fingerprint,
-                                [&](uint16_t speciesIndex) {
-                                  emit(bin, speciesIndex);
-                                });
-            }
+          if (q2[i] != 0) {
+            process64(q2[i], bin);
           }
-        }
-      }
-      return;
-    }
-
-    const auto &list1 = activeGroups[hash1];
-    const auto &list2 = activeGroups[hash2];
-    if (list1.empty() && list2.empty()) {
-      return;
-    }
-
-    size_t i = 0, j = 0;
-    uint32_t batchBins[SUB_BATCH];
-    bool active1[SUB_BATCH];
-    bool active2[SUB_BATCH];
-    size_t count = 0;
-
-    auto flush = [&]() {
-      for (size_t idx = 0; idx < count; ++idx) {
-        uint32_t bin = batchBins[idx];
-        uint64_t qPrimary = 0;
-        uint64_t qAlt = 0;
-        if (active1[idx]) {
-          qPrimary = readBucket64(hash1, bin);
-        }
-        if (active2[idx]) {
-          qAlt = readBucket64(hash2, bin);
-        }
-        if (qPrimary != 0) {
-          process64(qPrimary, bin);
-        }
-        if (qAlt != 0) {
-          process64(qAlt, bin);
-        }
-        forEachStashMatch(bin, hash1, fingerprint,
-                          [&](uint16_t speciesIndex) {
-                            emit(bin, speciesIndex);
-                          });
-        if (hash2 != hash1) {
-          forEachStashMatch(bin, hash2, fingerprint,
+          forEachStashMatch(bin, hash1, fingerprint,
                             [&](uint16_t speciesIndex) {
                               emit(bin, speciesIndex);
                             });
+          if (hash2 != hash1) {
+            forEachStashMatch(bin, hash2, fingerprint,
+                              [&](uint16_t speciesIndex) {
+                                emit(bin, speciesIndex);
+                              });
+          }
         }
       }
-      count = 0;
-    };
-
-    while (i < list1.size() || j < list2.size()) {
-      uint32_t bin;
-      bool in1 = false;
-      bool in2 = false;
-      if (j >= list2.size() || (i < list1.size() && list1[i] <= list2[j])) {
-        bin = list1[i++];
-        in1 = true;
-        if (j < list2.size() && list2[j] == bin) {
-          in2 = true;
-          ++j;
-        }
-      } else {
-        bin = list2[j++];
-        in2 = true;
-      }
-      batchBins[count] = bin;
-      active1[count] = in1;
-      active2[count] = in2;
-      ++count;
-      if (count == SUB_BATCH) {
-        flush();
-      }
-    }
-    if (count) {
-      flush();
     }
   }
 
@@ -1173,92 +1096,36 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
       }
     };
 
-    if (activeGroups.empty()) {
-      for (size_t offset = 0; offset < binSubset.size(); offset += SUB_BATCH) {
-        size_t batchEnd = std::min(binSubset.size(), offset + SUB_BATCH);
-        uint64_t q1[SUB_BATCH];
-        uint64_t q2[SUB_BATCH];
-        uint32_t bins[SUB_BATCH];
-        size_t cnt = 0;
-        for (size_t i = offset; i < batchEnd; ++i) {
-          uint32_t binIndex = binSubset[i];
-          if (binIndex >= binNum)
-            continue;
-          bins[cnt] = binIndex;
-          q1[cnt] = readBucket64(hash1, binIndex);
-          q2[cnt] = readBucket64(hash2, binIndex);
-          ++cnt;
-        }
-        for (size_t i = 0; i < cnt; ++i) {
-          uint32_t bin = bins[i];
-          if (q1[i] != 0)
-            process64(q1[i], bin);
-          forEachStashMatch(bin, hash1, fingerprint,
-                            [&](uint16_t speciesIndex) {
-                              emit(bin, speciesIndex);
-                            });
-          if (q2[i] != 0)
-            process64(q2[i], bin);
-          if (hash2 != hash1) {
-            forEachStashMatch(bin, hash2, fingerprint,
-                              [&](uint16_t speciesIndex) {
-                                emit(bin, speciesIndex);
-                              });
-          }
-        }
-      }
-      return;
-    }
-
-    const auto &list1 = activeGroups[hash1];
-    const auto &list2 = activeGroups[hash2];
-
-    auto contains = [](const std::vector<uint32_t> &vec, uint32_t value) {
-      return !vec.empty() && std::binary_search(vec.begin(), vec.end(), value);
-    };
-
     for (size_t offset = 0; offset < binSubset.size(); offset += SUB_BATCH) {
       size_t batchEnd = std::min(binSubset.size(), offset + SUB_BATCH);
-      size_t cnt = 0;
+      uint64_t q1[SUB_BATCH];
+      uint64_t q2[SUB_BATCH];
       uint32_t bins[SUB_BATCH];
-      bool use1[SUB_BATCH];
-      bool use2[SUB_BATCH];
+      size_t cnt = 0;
       for (size_t i = offset; i < batchEnd; ++i) {
         uint32_t binIndex = binSubset[i];
         if (binIndex >= binNum)
           continue;
-        bool in1 = contains(list1, binIndex);
-        bool in2 = contains(list2, binIndex);
-        if (!in1 && !in2)
-          continue;
         bins[cnt] = binIndex;
-        use1[cnt] = in1;
-        use2[cnt] = in2;
+        q1[cnt] = readBucket64(hash1, binIndex);
+        q2[cnt] = readBucket64(hash2, binIndex);
         ++cnt;
       }
-      if (cnt == 0)
-        continue;
       for (size_t i = 0; i < cnt; ++i) {
-        uint32_t binIndex = bins[i];
-        if (use1[i]) {
-          uint64_t q = readBucket64(hash1, binIndex);
-          if (q != 0)
-            process64(q, binIndex);
-          forEachStashMatch(binIndex, hash1, fingerprint,
+        uint32_t bin = bins[i];
+        if (q1[i] != 0)
+          process64(q1[i], bin);
+        forEachStashMatch(bin, hash1, fingerprint,
+                          [&](uint16_t speciesIndex) {
+                            emit(bin, speciesIndex);
+                          });
+        if (q2[i] != 0)
+          process64(q2[i], bin);
+        if (hash2 != hash1) {
+          forEachStashMatch(bin, hash2, fingerprint,
                             [&](uint16_t speciesIndex) {
-                              emit(binIndex, speciesIndex);
+                              emit(bin, speciesIndex);
                             });
-        }
-        if (use2[i]) {
-          uint64_t q = readBucket64(hash2, binIndex);
-          if (q != 0)
-            process64(q, binIndex);
-          if (hash2 != hash1) {
-            forEachStashMatch(binIndex, hash2, fingerprint,
-                              [&](uint16_t speciesIndex) {
-                                emit(binIndex, speciesIndex);
-                              });
-          }
         }
       }
     }
@@ -1353,163 +1220,6 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
         }
       }
     }
-  }
-
-  inline void clearActiveGroups() { activeGroups.clear(); }
-
-  inline bool hasActiveIndex() const {
-    return activeGroups.size() == hashSize && !activeGroups.empty();
-  }
-
-  inline void buildActiveGroups() {
-    if (hashSize == 0 || binNum == 0) {
-      activeGroups.clear();
-      return;
-    }
-
-    activeGroups.assign(hashSize, {});
-
-#pragma omp parallel for schedule(dynamic, 32)
-    for (size_t bucket = 0; bucket < hashSize; ++bucket) {
-      auto &groupList = activeGroups[bucket];
-      groupList.clear();
-      groupList.reserve(16);
-
-      for (uint32_t bin = 0; bin < binNum; ++bin) {
-        uint64_t q = readBucket64(bucket, bin);
-        if (q != 0ULL) {
-          groupList.push_back(static_cast<uint32_t>(bin));
-        }
-      }
-    }
-  }
-
-  inline bool saveActiveIndex(const std::string &path) const {
-    if (hashSize == 0 || binNum == 0) {
-      return false;
-    }
-    if (activeGroups.empty()) {
-      return false;
-    }
-
-    struct IndexHeader {
-      uint32_t magic{0x494D4349u}; // 'IMCI'
-      uint16_t version{1};
-      uint16_t reserved{0};
-      uint64_t binCount{0};
-      uint64_t hashCount{0};
-    };
-
-    std::ofstream out(path, std::ios::binary);
-    if (!out.is_open()) {
-      return false;
-    }
-
-    IndexHeader header;
-    header.binCount = static_cast<uint64_t>(binNum);
-    header.hashCount = static_cast<uint64_t>(hashSize);
-    out.write(reinterpret_cast<const char *>(&header), sizeof(header));
-    if (!out) {
-      return false;
-    }
-
-    std::vector<uint64_t> offsets(hashSize + 1, 0);
-    std::vector<uint8_t> payload;
-    payload.reserve(activeGroups.size() * 4);
-
-    for (size_t bucket = 0; bucket < hashSize; ++bucket) {
-      offsets[bucket] = payload.size();
-      const auto &groupList = activeGroups[bucket];
-      uint32_t prev = 0;
-      bool first = true;
-      for (uint32_t bin : groupList) {
-        uint32_t delta = first ? bin : (bin - prev);
-        first = false;
-        prev = bin;
-        encodeVarint(payload, delta);
-      }
-    }
-    offsets[hashSize] = payload.size();
-
-    out.write(reinterpret_cast<const char *>(offsets.data()),
-              offsets.size() * sizeof(uint64_t));
-    if (!out) {
-      return false;
-    }
-    if (!payload.empty()) {
-      out.write(reinterpret_cast<const char *>(payload.data()), payload.size());
-      if (!out) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  inline bool loadActiveIndex(const std::string &path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in.is_open()) {
-      return false;
-    }
-
-    struct IndexHeader {
-      uint32_t magic;
-      uint16_t version;
-      uint16_t reserved;
-      uint64_t binCount;
-      uint64_t hashCount;
-    };
-
-    IndexHeader header{};
-    in.read(reinterpret_cast<char *>(&header), sizeof(header));
-    if (!in) {
-      return false;
-    }
-    if (header.magic != 0x494D4349u || header.version != 1) {
-      return false;
-    }
-    if (header.binCount != static_cast<uint64_t>(binNum) ||
-        header.hashCount != static_cast<uint64_t>(hashSize)) {
-      return false;
-    }
-
-    std::vector<uint64_t> offsets(header.hashCount + 1, 0);
-    in.read(reinterpret_cast<char *>(offsets.data()),
-            offsets.size() * sizeof(uint64_t));
-    if (!in) {
-      return false;
-    }
-
-    std::vector<uint8_t> payload((std::istreambuf_iterator<char>(in)),
-                                 std::istreambuf_iterator<char>());
-    if (payload.empty() && offsets.back() != 0) {
-      return false;
-    }
-    if (!payload.empty() && offsets.back() > payload.size()) {
-      return false;
-    }
-
-    activeGroups.assign(hashSize, {});
-    for (size_t bucket = 0; bucket < hashSize; ++bucket) {
-      uint64_t start = offsets[bucket];
-      uint64_t end = offsets[bucket + 1];
-      if (start > end || end > payload.size()) {
-        activeGroups.clear();
-        return false;
-      }
-      size_t offset = static_cast<size_t>(start);
-      uint32_t prev = 0;
-      while (offset < end) {
-        uint32_t delta = 0;
-        if (!decodeVarint(payload, offset, delta)) {
-          activeGroups.clear();
-          return false;
-        }
-        uint32_t bin = prev + delta;
-        prev = bin;
-        activeGroups[bucket].push_back(bin);
-      }
-    }
-    return true;
   }
 
   template <std::ranges::range value_range_t>

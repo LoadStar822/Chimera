@@ -423,8 +423,7 @@ void run(BuildConfig config) {
   }
   auto save_start = std::chrono::high_resolution_clock::now();
   std::cout << "Saving IMCF..." << std::endl;
-  saveIMCF(imcf, config.output_file, indexToTaxid, imcfConfig, true,
-           &presence_meta);
+  saveIMCF(imcf, config.output_file, indexToTaxid, imcfConfig, &presence_meta);
   auto save_end = std::chrono::high_resolution_clock::now();
   auto save_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                              save_end - save_start)

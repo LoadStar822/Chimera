@@ -266,6 +266,55 @@ maybe_load_ncbi_taxdump(const std::string &taxonomyKind, bool verbose) {
 namespace ChimeraClassify {
 
 void run(ClassifyConfig config) {
+  auto truth_env_set = []() -> bool {
+    const char *a = std::getenv("CHIMERA_TRUTH_MAP");
+    if (a && *a) {
+      return true;
+    }
+    const char *b = std::getenv("CHIMERA_PROFILE_TRUTH_MAP");
+    if (b && *b) {
+      return true;
+    }
+    const char *c = std::getenv("TRUTH_MAP");
+    if (c && *c) {
+      return true;
+    }
+    return false;
+  };
+  if (!truth_env_set()) {
+    auto try_guess_truth = [&](const std::string &input) -> bool {
+      if (input.empty()) {
+        return false;
+      }
+      std::filesystem::path p(input);
+      std::filesystem::path dir = p.has_parent_path() ? p.parent_path() : std::filesystem::path();
+      if (dir.empty()) {
+        return false;
+      }
+      std::filesystem::path truth = dir / "truth.tsv";
+      if (!std::filesystem::exists(truth)) {
+        return false;
+      }
+      // Only used for Stage0 profiling inside classify hot path; does not affect outputs.
+      setenv("CHIMERA_TRUTH_MAP", truth.c_str(), 0);
+      return true;
+    };
+    bool guessed = false;
+    for (const auto &f : config.singleFiles) {
+      if (try_guess_truth(f)) {
+        guessed = true;
+        break;
+      }
+    }
+    if (!guessed) {
+      for (const auto &f : config.pairedFiles) {
+        if (try_guess_truth(f)) {
+          break;
+        }
+      }
+    }
+  }
+
   if (config.threads == 0) {
     unsigned int hardwareThreads = std::thread::hardware_concurrency();
     if (hardwareThreads == 0) {
@@ -289,10 +338,8 @@ void run(ClassifyConfig config) {
   chimera::imcf::InterleavedMergedCuckooFilter imcf;
   ChimeraBuild::IMCFConfig imcfConfig;
   chimera::presence::CoverageMeta coverageMeta;
-  auto indexStatus =
-      loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid, &coverageMeta);
+  loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid, &coverageMeta);
   WeightingContext weightCtx;
-  long long rebuildActiveMs = 0;
   std::unique_ptr<CountMinSketch> freqSketch;
   std::unique_ptr<NcbiTaxdump> ncbiTaxdump;
   if (coverageMeta.freq_model.enabled()) {
@@ -434,11 +481,6 @@ void run(ClassifyConfig config) {
   ncbiTaxdump = maybe_load_ncbi_taxdump(config.taxonomyKind, config.verbose);
   if (ncbiTaxdump && ncbiTaxdump->enabled()) {
     weightCtx.ncbiTaxdump = ncbiTaxdump.get();
-  }
-  if (indexStatus.builtActive) {
-    rebuildActiveMs = indexStatus.activeMs;
-    std::cout << "IMCF index: active-group list missing, rebuilding in memory ("
-              << rebuildActiveMs << " ms)" << std::endl;
   }
   FeatureMethod db_method =
       (imcfConfig.featureMethod == 1) ? FeatureMethod::Strobemer
@@ -967,6 +1009,162 @@ void run(ClassifyConfig config) {
     std::cout << "Read length stats: min=" << min_print
               << ", max=" << fileInfo.maxLen << ", avg=" << fileInfo.avgLen
               << std::endl;
+  }
+
+  if (config.verbose && fileInfo.s0_reads > 0) {
+    auto frac = [](uint64_t a, uint64_t b) -> double {
+      if (b == 0) {
+        return 0.0;
+      }
+      return static_cast<double>(a) / static_cast<double>(b);
+    };
+    auto pct = [&](uint64_t a, uint64_t b) -> double { return 100.0 * frac(a, b); };
+    auto ms = [](uint64_t ns) -> double { return static_cast<double>(ns) / 1e6; };
+    auto us_per_read = [&](uint64_t ns, uint64_t reads) -> double {
+      if (reads == 0) {
+        return 0.0;
+      }
+      return static_cast<double>(ns) / 1e3 / static_cast<double>(reads);
+    };
+    auto print_kv_hist = [&](const char *label,
+                             const std::vector<std::pair<const char *, uint64_t>> &bins) {
+      std::cout << "  " << label;
+      for (const auto &kv : bins) {
+        std::cout << ' ' << kv.first << '=' << kv.second;
+      }
+      std::cout << std::endl;
+    };
+
+    const uint64_t reads = fileInfo.s0_reads;
+    std::cout << "\nStage0 profile (不影响分类输出):" << std::endl;
+
+    // 1) Candidate recall
+    std::cout << "[stage0][cand] reads=" << reads
+              << " topBins_avg=" << std::fixed << std::setprecision(1)
+              << (reads ? (static_cast<double>(fileInfo.s0_topbins_sum) /
+                           static_cast<double>(reads))
+                        : 0.0)
+              << " fallback_full=" << fileInfo.s0_fallback_full_reads << "/"
+              << reads << " (" << std::setprecision(2)
+              << pct(fileInfo.s0_fallback_full_reads, reads) << "%)"
+              << std::defaultfloat << std::endl;
+    print_kv_hist("topBins_hist:",
+                  {
+                      {"<=16", fileInfo.s0_topbins_hist[0]},
+                      {"<=32", fileInfo.s0_topbins_hist[1]},
+                      {"<=64", fileInfo.s0_topbins_hist[2]},
+                      {"<=128", fileInfo.s0_topbins_hist[3]},
+                      {"<=256", fileInfo.s0_topbins_hist[4]},
+                      {"<=512", fileInfo.s0_topbins_hist[5]},
+                      {">512", fileInfo.s0_topbins_hist[6]},
+                  });
+    if (fileInfo.s0_truth_total > 0) {
+      std::cout << "[stage0][cand] truth_map_hit=" << fileInfo.s0_truth_total
+                << "/" << reads << " (" << std::fixed << std::setprecision(2)
+                << pct(fileInfo.s0_truth_total, reads) << "%)"
+                << " truth_in_db=" << fileInfo.s0_truth_known << "/"
+                << fileInfo.s0_truth_total << " ("
+                << pct(fileInfo.s0_truth_known, fileInfo.s0_truth_total) << "%)"
+                << std::defaultfloat << std::endl;
+      if (fileInfo.s0_truth_known_nonfull > 0) {
+        std::cout << "[stage0][cand] truth_in_topBins(nonfull)="
+                  << fileInfo.s0_truth_in_topbins_nonfull << "/"
+                  << fileInfo.s0_truth_known_nonfull << " (" << std::fixed
+                  << std::setprecision(2)
+                  << pct(fileInfo.s0_truth_in_topbins_nonfull,
+                         fileInfo.s0_truth_known_nonfull)
+                  << "%)" << std::defaultfloat << std::endl;
+      } else {
+        std::cout << "[stage0][cand] truth_in_topBins(nonfull)=n/a (no nonfull+known truth)"
+                  << std::endl;
+      }
+    } else {
+      std::cout << "[stage0][cand] truth_in_topBins=off (set CHIMERA_TRUTH_MAP=<truth.tsv>)"
+                << std::endl;
+    }
+
+    // 2) Hot path counts
+    const uint64_t total_hashes = fileInfo.s0_hashes_sum;
+    const uint64_t total_eval = fileInfo.s0_eval_sum;
+    std::cout << "[stage0][hot] hashes_avg=" << std::fixed << std::setprecision(1)
+              << (reads ? (static_cast<double>(total_hashes) /
+                           static_cast<double>(reads))
+                        : 0.0)
+              << " eval_avg=" << (reads ? (static_cast<double>(total_eval) /
+                                           static_cast<double>(reads))
+                                        : 0.0)
+              << " eval/hash=" << std::setprecision(3)
+              << (total_hashes ? frac(total_eval, total_hashes) : 0.0)
+              << std::defaultfloat << std::endl;
+    std::cout << "[stage0][hot] bulkContain(full/subset)="
+              << fileInfo.s0_bulk_full_calls << "/"
+              << fileInfo.s0_bulk_subset_calls << std::endl;
+    print_kv_hist("hashes_hist:",
+                  {
+                      {"<=64", fileInfo.s0_hashes_hist[0]},
+                      {"<=128", fileInfo.s0_hashes_hist[1]},
+                      {"<=256", fileInfo.s0_hashes_hist[2]},
+                      {"<=512", fileInfo.s0_hashes_hist[3]},
+                      {"<=1024", fileInfo.s0_hashes_hist[4]},
+                      {"<=2048", fileInfo.s0_hashes_hist[5]},
+                      {">2048", fileInfo.s0_hashes_hist[6]},
+                  });
+    print_kv_hist("eval_hist:",
+                  {
+                      {"<=64", fileInfo.s0_eval_hist[0]},
+                      {"<=128", fileInfo.s0_eval_hist[1]},
+                      {"<=256", fileInfo.s0_eval_hist[2]},
+                      {"<=512", fileInfo.s0_eval_hist[3]},
+                      {"<=1024", fileInfo.s0_eval_hist[4]},
+                      {"<=2048", fileInfo.s0_eval_hist[5]},
+                      {">2048", fileInfo.s0_eval_hist[6]},
+                  });
+
+    // 3) Hit distribution
+    const uint64_t hit_min = fileInfo.s0_hit_minimizers;
+    std::cout << "[stage0][hit] minimizer_hit_rate=" << std::fixed << std::setprecision(3)
+              << (total_eval ? frac(hit_min, total_eval) : 0.0)
+              << " deg_avg=" << (hit_min ? (static_cast<double>(fileInfo.s0_deg_sum) /
+                                            static_cast<double>(hit_min))
+                                         : 0.0)
+              << " df_bins_avg="
+              << (hit_min ? (static_cast<double>(fileInfo.s0_df_bins_sum) /
+                             static_cast<double>(hit_min))
+                          : 0.0)
+              << std::defaultfloat << std::endl;
+    print_kv_hist("deg_subset_hist:",
+                  {
+                      {"1", fileInfo.s0_deg_hist[0]},
+                      {"2-3", fileInfo.s0_deg_hist[1]},
+                      {"4-7", fileInfo.s0_deg_hist[2]},
+                      {"8-15", fileInfo.s0_deg_hist[3]},
+                      {"16-31", fileInfo.s0_deg_hist[4]},
+                      {">=32", fileInfo.s0_deg_hist[5]},
+                  });
+    print_kv_hist("df_bins_hist:",
+                  {
+                      {"1", fileInfo.s0_df_bins_hist[0]},
+                      {"2-3", fileInfo.s0_df_bins_hist[1]},
+                      {"4-7", fileInfo.s0_df_bins_hist[2]},
+                      {"8-15", fileInfo.s0_df_bins_hist[3]},
+                      {"16-31", fileInfo.s0_df_bins_hist[4]},
+                      {">=32", fileInfo.s0_df_bins_hist[5]},
+                  });
+
+    // 4) Time breakdown (sum over reads; average per read shown as us/read)
+    const uint64_t t_hash = fileInfo.s0_time_hash_ns;
+    const uint64_t t_cand = fileInfo.s0_time_candidate_ns;
+    const uint64_t t_score = fileInfo.s0_time_scoring_ns;
+    const uint64_t t_post = fileInfo.s0_time_post_ns;
+    const uint64_t t_sum = t_hash + t_cand + t_score + t_post;
+    std::cout << "[stage0][time] ms(hash/cand/score/post/sum)=" << std::fixed
+              << std::setprecision(1) << ms(t_hash) << "/" << ms(t_cand) << "/"
+              << ms(t_score) << "/" << ms(t_post) << "/" << ms(t_sum)
+              << std::defaultfloat << std::endl;
+    std::cout << "[stage0][time] us/read(hash/cand/score/post)=" << std::fixed
+              << std::setprecision(1) << us_per_read(t_hash, reads) << "/"
+              << us_per_read(t_cand, reads) << "/" << us_per_read(t_score, reads)
+              << "/" << us_per_read(t_post, reads) << std::defaultfloat << std::endl;
   }
 
   size_t presenceTotalReads = fileInfo.sequenceNum;
@@ -1919,13 +2117,6 @@ void run(ClassifyConfig config) {
     std::cout << "Unclassified sequences: " << fileInfo.unclassifiedNum << " ("
               << format_percentage(fileInfo.unclassifiedNum, fileInfo.sequenceNum)
               << ")" << std::endl;
-    if (rebuildActiveMs > 0) {
-      std::cout << "Index rebuild summary:" << std::endl;
-      if (rebuildActiveMs > 0) {
-        std::cout << "  Active index: ";
-        print_classify_time(rebuildActiveMs);
-      }
-    }
   }
 
   auto TotalclassifyEnd = std::chrono::high_resolution_clock::now();

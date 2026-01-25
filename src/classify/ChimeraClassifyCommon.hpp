@@ -604,17 +604,11 @@ void print_classify_time(long long milliseconds);
 void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
                 ClassifyConfig config, FileInfo &fileInfo);
 
-struct IMCFIndexStatus {
-  bool builtActive{false};
-  long long activeMs{0};
-};
-
-IMCFIndexStatus loadFilter(const std::string &input_file,
-                           chimera::imcf::InterleavedMergedCuckooFilter &imcf,
-                           ChimeraBuild::IMCFConfig &imcfConfig,
-                           std::vector<std::vector<std::string>> &indexToTaxid,
-                           chimera::presence::CoverageMeta *coverageMeta =
-                               nullptr);
+void loadFilter(const std::string &input_file,
+                chimera::imcf::InterleavedMergedCuckooFilter &imcf,
+                ChimeraBuild::IMCFConfig &imcfConfig,
+                std::vector<std::vector<std::string>> &indexToTaxid,
+                chimera::presence::CoverageMeta *coverageMeta = nullptr);
 
 void saveResult(std::vector<classifyResult> classifyResults,
                 ClassifyConfig config);
