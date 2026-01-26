@@ -88,7 +88,6 @@ void processSequence(
     }
     return static_cast<uint32_t>(mix % presenceSketchBits);
   };
-  const double exclusiveGamma = std::max(0.0, config.exclusive_gamma);
   constexpr double kUniqueEdgeBonus = 3.0;
   const bool has_sample_weight = weightCtx.has_sample_weights();
   double sample_weight = 1.0;
@@ -525,10 +524,6 @@ void processSequence(
         deg_effective, df_bins, /*low_div_active=*/config.low_div_active);
 
     double exclusivityWeight = 1.0;
-    if (exclusiveGamma > 0.0 && deg_effective > 0) {
-      exclusivityWeight =
-          std::pow(static_cast<double>(deg_effective), -exclusiveGamma);
-    }
 
     double totalBins = subset ? static_cast<double>(subset->size())
                               : static_cast<double>(binNumAll);

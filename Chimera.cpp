@@ -465,11 +465,6 @@ int main(int argc, char **argv) {
                    "Decoy generation mode (imcf-edge-shuffle)")
       ->default_val("imcf-edge-shuffle");
   classify
-      ->add_option("--exclusive-gamma", classifyConfig.exclusive_gamma,
-                   "Exclusive edge weighting gamma (0.0-2.0)")
-      ->check(CLI::Range(0.0, 2.0))
-      ->default_val(1.2);
-  classify
       ->add_option("-t,--threads", classifyConfig.threads,
                    "Number of threads for classifying")
       ->default_val(default_threads);

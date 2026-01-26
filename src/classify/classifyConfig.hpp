@@ -87,7 +87,6 @@ namespace ChimeraClassify {
 		double local_contrast_gamma = 0.0;
 		std::string decoy_mode{ "imcf-edge-shuffle" };
 		uint32_t decoy_reps = 3;
-		double exclusive_gamma = 1.2;
 			double presence_pi = 1e-3;
 			double presence_tau = 4.6;
 			double presence_noise = 0.0; // <=0 表示自动估计
@@ -165,7 +164,6 @@ namespace ChimeraClassify {
 				<< std::setw(20) << "Breadth bits:" << config.presence_breadth_bits << std::endl
 				<< std::setw(20) << "Decoy mode:" << config.decoy_mode << std::endl
 				<< std::setw(20) << "Decoy reps:" << config.decoy_reps << std::endl
-			<< std::setw(20) << "Exclusive gamma:" << config.exclusive_gamma << std::endl
 			<< std::setw(20) << "Batch size:" << config.batchSize << std::endl
 			<< std::setw(20) << "EM:" << config.em << std::endl
 			<< std::setw(20) << "Threads:" << config.threads << std::endl

@@ -864,9 +864,8 @@ void run(ClassifyConfig config) {
 
     if (low_div) {
       apply_low_div_overrides(config);
-      std::cout << "[classify][auto] lowdiv=1 overrides: exclusive_gamma="
-                << config.exclusive_gamma
-                << " em_conf_power=" << config.em_conf_power
+      std::cout << "[classify][auto] lowdiv=1 overrides: em_conf_power="
+                << config.em_conf_power
                 << " em_coexist_penalty=" << config.em_coexist_penalty
                 << " dump_post_topk=" << config.dump_post_topk << std::endl;
     } else {
