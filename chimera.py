@@ -315,12 +315,6 @@ def parse_arguments():
         help="Decoy generation mode (imcf-edge-shuffle)",
     )
     classify_parser.add_argument(
-        "--decoy-reps",
-        type=int,
-        default=None,
-        help="Number of IMCF edge-shuffle decoy replicates",
-    )
-    classify_parser.add_argument(
         "--exclusive-gamma",
         type=float,
         default=None,
@@ -789,8 +783,6 @@ def run_chimera(args, chimera_path=None):
             )
         if args.decoy_mode is not None:
             command.extend(["--decoy-mode", args.decoy_mode])
-        if args.decoy_reps is not None:
-            command.extend(["--decoy-reps", str(args.decoy_reps)])
         if args.exclusive_gamma is not None:
             command.extend(["--exclusive-gamma", str(args.exclusive_gamma)])
         if args.post_thres is not None:

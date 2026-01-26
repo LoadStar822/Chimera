@@ -446,20 +446,6 @@ int main(int argc, char **argv) {
       ->add_option("--pre-em-topk", classifyConfig.preEmTopK,
                    "Keep top-K candidates per read before EM/VEM")
       ->default_val(16);
-  classify->add_flag(
-      "--collapse-strain-hits", classifyConfig.collapse_strain_hits,
-      "[NCBI-only] Collapse per-hash hit lists to 1 representative taxid per species (reduces strain saturation; changes scoring).");
-  classify->add_flag(
-      "--collapse-strain-candidates", classifyConfig.collapse_strain_candidates,
-      "[NCBI-only] Collapse pre-EM candidates to 1 representative per species before topK truncation (reduces strain saturation; lighter than --collapse-strain-hits).");
-  classify->add_flag(
-      "--deg-by-species", classifyConfig.deg_by_species,
-      "[NCBI-only] Compute deg/exclusivity by species groups (mitigates strain saturation) while keeping output taxids unchanged.");
-  classify
-      ->add_option("--local-contrast-gamma", classifyConfig.local_contrast_gamma,
-                   "[High-div] Local contrast zero-sum strength inside topM (0 disables)")
-      ->check(CLI::Range(0.0, 1.0))
-      ->default_val(0.0);
   classify
       ->add_option("--presence-pi", classifyConfig.presence_pi,
                    "Presence prior P(z=1) for coverage模型 (0-1)")
@@ -505,11 +491,6 @@ int main(int argc, char **argv) {
       ->add_option("--decoy-mode", classifyConfig.decoy_mode,
                    "Decoy generation mode (imcf-edge-shuffle)")
       ->default_val("imcf-edge-shuffle");
-  classify
-      ->add_option("--decoy-reps", classifyConfig.decoy_reps,
-                   "Number of IMCF edge-shuffle decoy replicates (0-5)")
-      ->check(CLI::Range(0, 5))
-      ->default_val(3);
   classify
       ->add_option("--exclusive-gamma", classifyConfig.exclusive_gamma,
                    "Exclusive edge weighting gamma (0.0-2.0)")
@@ -579,11 +560,6 @@ int main(int argc, char **argv) {
                    "Minimum global class weight")
       ->default_val(5e-4);
   classify
-      ->add_option("--post-min-fraction", classifyConfig.post_min_fraction,
-                   "postEmDecision: ignore taxa with posterior < fraction (0 disables)")
-      ->check(CLI::Range(0.0, 1.0))
-      ->default_val(0.01);
-  classify
       ->add_option("--post-power", classifyConfig.post_power,
                    "postEmDecision: posterior^alpha sharpening (>=1)")
       ->check(CLI::Range(0.0, 10.0))
@@ -602,14 +578,6 @@ int main(int argc, char **argv) {
           ->check(CLI::Range(0u, 512u))
           ->default_val(0);
   postMaxTaxaOpt->default_str("auto");
-  classify
-      ->add_option("--dump-post-topk", classifyConfig.dump_post_topk,
-                   "Dump top-K posterior candidates as POST_TOPK=... token in output TSV (0 disables)")
-      ->check(CLI::Range(0u, 512u))
-      ->default_val(256);
-  classify->add_flag(
-      "--presence-pre-filter", classifyConfig.presence_pre_filter,
-      "Apply presence filter before EM/VEM (hard-prune candidates; may increase unclassified)");
   // TODO: 后处理相关参数暂时废弃，内部逻辑维持默认行为
   classify->add_flag("-q,--quiet", classifyQuietRequested, "Quiet output");
 

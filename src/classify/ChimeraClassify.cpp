@@ -1055,26 +1055,6 @@ void run(ClassifyConfig config) {
   //
   // Default: auto (enabled only when weights are present and highly skewed).
   {
-    enum class WSatRequest {
-      kAuto = 0,
-      kOff = 1,
-      kLog1p = 2,
-    };
-    WSatRequest request = WSatRequest::kAuto;
-    const char *env = std::getenv("CHIMERA_WSAT");
-    if (env && *env) {
-      std::string v(env);
-      std::transform(v.begin(), v.end(), v.begin(),
-                     [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-      if (v == "0" || v == "off" || v == "false" || v == "disabled") {
-        request = WSatRequest::kOff;
-      } else if (v == "log1p" || v == "1" || v == "on" || v == "true" ||
-                 v == "enabled") {
-        request = WSatRequest::kLog1p;
-      } else {
-        request = WSatRequest::kAuto;
-      }
-    }
     const bool low_div = config.low_div_active;
     bool applied = false;
     double scale = 1.0;
@@ -1087,9 +1067,7 @@ void run(ClassifyConfig config) {
         raw.push_back(res.sample_weight);
       }
     }
-    if (request == WSatRequest::kOff) {
-      reason = "disabled_by_env";
-    } else if (low_div) {
+    if (low_div) {
       reason = "low_div";
     } else if (raw.empty()) {
       reason = "no_weights";
@@ -1117,9 +1095,7 @@ void run(ClassifyConfig config) {
       // Auto guard: only apply when the tail is clearly extreme.
       const bool skewed =
           (ratio_p99 >= 16.0) || (ratio_max >= 256.0) || (mx >= 1e5);
-      const bool want = (request == WSatRequest::kLog1p) ||
-                        (request == WSatRequest::kAuto && skewed);
-      if (!want) {
+      if (!skewed) {
         reason = "not_skewed";
       } else if (!(med > 0.0) || !(std::log1p(med) > 0.0)) {
         reason = "bad_median";
@@ -1143,8 +1119,7 @@ void run(ClassifyConfig config) {
           auto oldPrecision = std::cout.precision();
           std::cout.setf(std::ios::fixed);
           std::cout << std::setprecision(4);
-          std::cout << "[em][wsat] requested="
-                    << ((request == WSatRequest::kAuto) ? "auto" : "on")
+          std::cout << "[em][wsat] requested=auto"
                     << " mode=log1p"
                     << " applied=" << (applied ? 1 : 0)
                     << " low_div=" << (low_div ? 1 : 0)
@@ -1286,16 +1261,6 @@ void run(ClassifyConfig config) {
 		    constexpr size_t kAutoPostPiMinL0 = 2000;
 		    constexpr size_t kAutoPostPiMinL1 = 800;
 		    double auto_pi_lo = kAutoPostPiMinLoDefault;
-		    if (const char *env = std::getenv("CHIMERA_AUTO_POST_PI_MIN_LO");
-		        env && *env) {
-		      try {
-		        double v = std::stod(env);
-		        if (v > 0.0) {
-		          auto_pi_lo = v;
-		        }
-		      } catch (...) {
-		      }
-		    }
 		
 		    auto len_tune = ChimeraClassify::tune_post_pi_min_by_avg_len(
 		        tuned_post_pi_min_weights, auto_pi_lo, fileInfo.avgLen,
