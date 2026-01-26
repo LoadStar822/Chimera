@@ -517,6 +517,41 @@ int main(int argc, char **argv) {
   classify->add_option("--em-iter", classifyConfig.emIter, "EM iteration")
       ->default_val(100);
   classify
+      ->add_option("--em-prune-ratio", classifyConfig.em_prune_ratio,
+                   "Relative sparsity prune ratio to max expected count in EM")
+      ->check(CLI::Range(1e-6, 1.0))
+      ->default_val(2e-4);
+  classify
+      ->add_option("--em-prior-strength", classifyConfig.em_prior_strength,
+                   "Dirichlet prior strength (pseudo-count mass); 0 uses alpha only")
+      ->check(CLI::Range(0.0, 10.0))
+      ->default_val(1.0);
+  classify
+      ->add_option("--em-coexist-penalty", classifyConfig.em_coexist_penalty,
+                   "Penalty when multiple taxa tie in EM (0 disables)")
+      ->check(CLI::Range(0.0, 1.0))
+      ->default_val(0.6);
+  classify
+      ->add_option("--em-conf-power", classifyConfig.em_conf_power,
+                   "Confidence exponent for EM M-step weighting (0 disables)")
+      ->check(CLI::Range(0.0, 3.0))
+      ->default_val(2.0);
+  classify
+      ->add_option("--hash-sample-max", classifyConfig.hash_sample_max,
+                   "Max sampled hashes for coarse candidate selection")
+      ->check(CLI::Range(32.0, 4096.0))
+      ->default_val(96);
+  classify
+      ->add_option("--hash-sample-min", classifyConfig.hash_sample_min,
+                   "Min sampled hashes for coarse candidate selection")
+      ->check(CLI::Range(8.0, 1024.0))
+      ->default_val(16);
+  classify
+      ->add_option("--idf-max", classifyConfig.idf_max,
+                   "Upper cap for IDF weight in evaluate_minimizer")
+      ->check(CLI::Range(1.0, 50.0))
+      ->default_val(8.0);
+  classify
       ->add_option("--post-thres", classifyConfig.post_thres,
                    "Posterior acceptance threshold")
       ->default_val(0.56);
@@ -524,6 +559,25 @@ int main(int argc, char **argv) {
       ->add_option("--post-pi-min", classifyConfig.post_pi_min,
                    "Minimum global class weight")
       ->default_val(5e-4);
+  classify
+      ->add_option("--post-power", classifyConfig.post_power,
+                   "postEmDecision: posterior^alpha sharpening (>=1)")
+      ->check(CLI::Range(0.0, 10.0))
+      ->default_val(1.5);
+  auto *postHeadMassOpt =
+      classify
+          ->add_option("--post-head-mass", classifyConfig.post_head_mass,
+                       "postEmDecision: keep top head_mass of sum(posterior^alpha) (0=>auto)")
+          ->check(CLI::Range(0.0, 1.0))
+          ->default_val(0.0);
+  postHeadMassOpt->default_str("auto");
+  auto *postMaxTaxaOpt =
+      classify
+          ->add_option("--post-max-taxa", classifyConfig.post_max_taxa,
+                       "postEmDecision: max taxa per read in taxidCount (0=>auto)")
+          ->check(CLI::Range(0u, 512u))
+          ->default_val(0);
+  postMaxTaxaOpt->default_str("auto");
   // TODO: 后处理相关参数暂时废弃，内部逻辑维持默认行为
   classify->add_flag("-q,--quiet", classifyQuietRequested, "Quiet output");
 
