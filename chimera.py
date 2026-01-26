@@ -248,12 +248,6 @@ def parse_arguments():
         help="Beta multiplier for first-stage filter (default 0.75)",
     )
     classify_parser.add_argument(
-        "--pre-em-topk",
-        type=int,
-        default=None,
-        help="Limit candidates before EM/VEM to top K (default 16)",
-    )
-    classify_parser.add_argument(
         "--presence-pi",
         type=float,
         default=None,
@@ -712,8 +706,6 @@ def run_chimera(args, chimera_path=None):
             command.extend(["-s", str(args.shot_threshold)])
         if args.first_filter_beta is not None:
             command.extend(["--first-filter-beta", str(args.first_filter_beta)])
-        if args.pre_em_topk is not None:
-            command.extend(["--pre-em-topk", str(args.pre_em_topk)])
         if args.presence_pi is not None:
             command.extend(["--presence-pi", str(args.presence_pi)])
         if args.presence_tau is not None:

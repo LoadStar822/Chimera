@@ -1244,9 +1244,6 @@ void processSequence(
     thr_final = std::max({thr_eval, thr_beta, thr_min_eval});
   }
 
-  size_t baseTopK =
-      config.preEmTopK > 0 ? static_cast<size_t>(config.preEmTopK) : 32;
-
   const size_t thr_final_raw = thr_final;
   size_t thr_final_used = thr_final_raw;
   bool preem_beta_relax_applied = false;
@@ -1263,8 +1260,8 @@ void processSequence(
 
   } else {
     if (use_em && config.low_div_active && !tidScore.empty()) {
-      const size_t floorK = std::min<size_t>(128, baseTopK);
-      const size_t poolK = std::max(baseTopK, floorK);
+      const size_t floorK = std::min<size_t>(128, tidScore.size());
+      const size_t poolK = tidScore.size();
       std::vector<std::pair<uint32_t, double>> ranked;
       ranked.reserve(tidScore.size());
       for (const auto &kv : tidScore) {
@@ -1272,9 +1269,10 @@ void processSequence(
       }
       size_t want = std::min(poolK, ranked.size());
       if (want > 0) {
-        std::partial_sort(
-            ranked.begin(), ranked.begin() + want, ranked.end(),
-            [](const auto &a, const auto &b) { return a.second > b.second; });
+        std::sort(ranked.begin(), ranked.end(),
+                  [](const auto &a, const auto &b) {
+                    return a.second > b.second;
+                  });
         ranked.resize(want);
       }
 
@@ -1309,31 +1307,11 @@ void processSequence(
         }
       }
 
-      size_t thr_beta_eval = std::min(thr_beta, thr_eval);
-      if (floor.size() + tail.size() > baseTopK && thr_beta_eval > 0) {
-        const double thr_beta_val = static_cast<double>(thr_beta_eval);
-        std::vector<std::pair<std::string, double>> tail_kept;
-        tail_kept.reserve(tail.size());
-        for (const auto &kv : tail) {
-          if (kv.second >= thr_beta_val) {
-            tail_kept.push_back(kv);
-          }
-        }
-        tail.swap(tail_kept);
-      }
-
       result.taxidCount.reserve(floor.size() + tail.size());
       result.taxidCount.insert(result.taxidCount.end(), floor.begin(),
                                floor.end());
       result.taxidCount.insert(result.taxidCount.end(), tail.begin(),
                                tail.end());
-      if (baseTopK > 0 && result.taxidCount.size() > baseTopK) {
-        std::nth_element(
-            result.taxidCount.begin(),
-            result.taxidCount.begin() + baseTopK, result.taxidCount.end(),
-            [](const auto &a, const auto &b) { return a.second > b.second; });
-        result.taxidCount.resize(baseTopK);
-      }
     } else {
       for (const auto &[tid_id, rawScore] : tidScore) {
         double countVal = std::clamp(rawScore, 0.0, effCap);
@@ -1350,8 +1328,7 @@ void processSequence(
       // High-div / EM only: read-level pre-EM gate relaxation (fixed budget).
       // Motivation: wrong reads often contain truth branch in tidScore(topN) but
       // are pruned by thr_beta_eval/thr_final, leaving no chance for EM/post.
-      // Guard rails: do NOT pad candidates; do NOT expand dynamicTopK due to
-      // size>baseTopK if this relaxation is applied (see binOverflow gate).
+      // Guard rails: do NOT pad candidates when relaxation is applied.
       preem_n_strict = result.taxidCount.size();
       preem_n_used = preem_n_strict;
 
@@ -1363,13 +1340,13 @@ void processSequence(
       }
       if (config.preem_beta_relax && use_em && !config.low_div_active &&
           !beta_user &&
-          eff_eval >= kPreemBetaRelaxEffEvalMin && baseTopK > 0) {
+          eff_eval >= kPreemBetaRelaxEffEvalMin) {
         auto decision = decide_preem_beta_relax(
             /*use_em=*/use_em, /*low_div_active=*/config.low_div_active,
             /*beta_user=*/beta_user, /*base_beta=*/beta,
             /*maxEvidence=*/maxEvidence, /*eff_eval=*/eff_eval,
             /*best_ratio=*/best_ratio, /*unique_ratio=*/uniqueRatio,
-            /*base_topk=*/baseTopK, /*n_strict=*/preem_n_strict,
+            /*n_strict=*/preem_n_strict,
             /*thr_beta=*/thr_beta, /*thr_eval=*/thr_eval,
             /*thr_min_eval=*/thr_min_eval, /*thr_final_raw=*/thr_final_raw,
             /*delta=*/kPreemBetaRelaxDelta, /*eff_eval_min=*/kPreemBetaRelaxEffEvalMin);
@@ -1448,28 +1425,6 @@ void processSequence(
   if (result.taxidCount.empty() && use_em && maxCountValid &&
       maxCount.second > 0.0) {
     result.taxidCount.emplace_back(maxCount);
-  }
-
-  size_t dynamicTopK = baseTopK;
-  double tieGapNeed = std::max(2.0, eff_eval / 24.0);
-  const bool nearTie_gap = (gap < tieGapNeed);
-  const bool nearTie_ratio = (best_ratio < 1.30);
-  const bool nearTie = nearTie_gap || nearTie_ratio;
-  const bool overflow_topbins = (!fallback_full && topBins.size() > 40);
-  const bool overflow_size =
-      (!preem_beta_relax_applied && result.taxidCount.size() > baseTopK);
-  const bool binOverflow = overflow_topbins || overflow_size;
-  if (nearTie || binOverflow) {
-    dynamicTopK = std::max<size_t>(96, dynamicTopK);
-  } else if (best_ratio >= 2.5 &&
-             best >= thr_conf + std::max(1.0, eff_eval / 16.0) &&
-             dynamicTopK > 8 &&
-             // Respect explicit user requests for larger pre-EM candidate lists.
-             // Otherwise, large DBs with many strain/assembly taxids can saturate
-             // the top-K with same-species variants, preventing sister species
-             // from entering EM/posterior lists.
-             config.preEmTopK <= 16) {
-    dynamicTopK = 16;
   }
 
   // NCBI-only (optional): collapse strain/subspecies taxids to ONE representative
@@ -1572,8 +1527,7 @@ void processSequence(
     }
 
     const size_t floorTargetNonUncl =
-        std::min<size_t>(static_cast<size_t>(config.preem_floor_target),
-                         dynamicTopK);
+        static_cast<size_t>(config.preem_floor_target);
     const size_t floorTargetTotal = floorTargetNonUncl + (hasUnclassified ? 1 : 0);
 
     if (floorTargetTotal > 0 && nonUnclassified == kFloorTrigger &&
@@ -1648,21 +1602,6 @@ void processSequence(
           }
         }
 
-        const size_t want_strict =
-            std::min<size_t>(ranked_strict.size(), baseTopK * 8);
-        if (want_strict > 0 && ranked_strict.size() > want_strict) {
-          std::nth_element(
-              ranked_strict.begin(),
-              ranked_strict.begin() +
-                  static_cast<std::ptrdiff_t>(want_strict),
-              ranked_strict.end(), [](const auto &a, const auto &b) {
-                if (a.second != b.second) {
-                  return a.second > b.second;
-                }
-                return a.first < b.first;
-              });
-          ranked_strict.resize(want_strict);
-        }
         std::sort(ranked_strict.begin(), ranked_strict.end(),
                   [](const auto &a, const auto &b) {
                     if (a.second != b.second) {
@@ -1698,8 +1637,7 @@ void processSequence(
         ensure_preem_floor_candidates(result.taxidCount, ranked_strict,
                                      floorTargetTotal);
 
-        const size_t fillTargetTotal =
-            std::min(baseTopK + (hasUnclassified ? 1 : 0), dynamicTopK);
+        const size_t fillTargetTotal = floorTargetTotal;
         if (config.preem_underfull_fill && fillTargetTotal > floorTargetTotal &&
             result.taxidCount.size() < fillTargetTotal) {
           fill_preem_candidates_underfull(
@@ -1710,9 +1648,6 @@ void processSequence(
     }
   }
 
-  if (!result.taxidCount.empty() && use_em) {
-    normalize_preem_topk(result.taxidCount, dynamicTopK);
-  }
   // High-div / EM only: fixed-budget keepalive of a strong per-read hint
   // candidate. Do NOT expand K; only replace the weakest tail candidate.
   if (use_em && !config.low_div_active && !result.taxidCount.empty() &&

@@ -438,10 +438,6 @@ int main(int argc, char **argv) {
                        "Keep bins >= beta * max count in first filter")
           ->default_val(0.80);
   classify
-      ->add_option("--pre-em-topk", classifyConfig.preEmTopK,
-                   "Keep top-K candidates per read before EM/VEM")
-      ->default_val(16);
-  classify
       ->add_option("--presence-pi", classifyConfig.presence_pi,
                    "Presence prior P(z=1) for coverage模型 (0-1)")
       ->check(CLI::Range(1e-6, 0.5))

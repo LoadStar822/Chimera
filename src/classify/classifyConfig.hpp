@@ -51,7 +51,6 @@ namespace ChimeraClassify {
 		double shotThreshold = 0.70;
 		double firstFilterBeta = 0.8;
 		bool firstFilterBeta_user = false; // set when user or auto-override explicitly chooses beta
-		size_t preEmTopK = 16;
 		// High-div / EM only: when pre-EM candidate list collapses to a singleton
 		// species (after strain collapse), keep a tiny floor of additional species
 		// candidates alive to avoid over-pruning sister species. This is NOT a
@@ -149,7 +148,6 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Taxonomy version:" << config.taxonomyVersion << std::endl
 			<< std::setw(20) << "Shot threshold:" << config.shotThreshold << std::endl
 			<< std::setw(20) << "First filter beta:" << config.firstFilterBeta << std::endl
-			<< std::setw(20) << "Pre-EM topK:" << config.preEmTopK << std::endl
 			<< std::setw(20) << "Pre-EM floor:" << config.preem_floor_target << std::endl
 			<< std::setw(20) << "Pre-EM floor min ratio:" << config.preem_floor_min_ratio << std::endl
 			<< std::setw(20) << "Pre-EM floor add ratio:" << config.preem_floor_add_min_ratio << std::endl

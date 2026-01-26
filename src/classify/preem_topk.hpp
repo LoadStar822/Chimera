@@ -19,9 +19,8 @@ struct PreemBetaRelaxDecision {
 inline PreemBetaRelaxDecision decide_preem_beta_relax(
     bool use_em, bool low_div_active, bool beta_user, double base_beta,
     double maxEvidence, double eff_eval, double best_ratio, double unique_ratio,
-    size_t base_topk, size_t n_strict, size_t thr_beta, size_t thr_eval,
-    size_t thr_min_eval, size_t thr_final_raw, size_t delta,
-    double eff_eval_min) {
+    size_t n_strict, size_t thr_beta, size_t thr_eval, size_t thr_min_eval,
+    size_t thr_final_raw, size_t delta, double eff_eval_min) {
   PreemBetaRelaxDecision out;
   out.beta_local = base_beta;
   out.thr_final_used = thr_final_raw;
@@ -44,12 +43,7 @@ inline PreemBetaRelaxDecision decide_preem_beta_relax(
   if (!(eff_eval >= eff_eval_min)) {
     return out;
   }
-  if (base_topk == 0) {
-    return out;
-  }
-  if (n_strict > (base_topk / 2)) {
-    return out;
-  }
+  (void)n_strict;
 
   const size_t thr_beta_eval_raw = std::min(thr_beta, thr_eval);
   if (thr_final_raw != thr_beta_eval_raw) {
@@ -79,37 +73,6 @@ inline PreemBetaRelaxDecision decide_preem_beta_relax(
     out.thr_final_used = thr_final_used;
   }
   return out;
-}
-
-inline bool preem_bin_overflow(bool fallback_full, size_t topBins_size,
-                               size_t taxidCount_size, size_t baseTopK,
-                               bool suppress_size_overflow) {
-  const bool overflow_topbins = (!fallback_full && topBins_size > 40);
-  const bool overflow_size =
-      (!suppress_size_overflow && taxidCount_size > baseTopK);
-  return overflow_topbins || overflow_size;
-}
-
-inline void normalize_preem_topk(std::vector<std::pair<std::string, double>> &items,
-                                 size_t k) {
-  if (items.empty() || k == 0) {
-    return;
-  }
-
-  auto cmp = [](const auto &a, const auto &b) {
-    if (a.second != b.second) {
-      return a.second > b.second;
-    }
-    return a.first < b.first;
-  };
-
-  if (items.size() > k) {
-    std::nth_element(items.begin(), items.begin() + static_cast<std::ptrdiff_t>(k),
-                     items.end(), cmp);
-    items.resize(k);
-  }
-
-  std::sort(items.begin(), items.end(), cmp);
 }
 
 inline void pad_preem_candidates(

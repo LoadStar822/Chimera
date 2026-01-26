@@ -563,7 +563,6 @@ inline bool is_low_diversity(const LowDivStats &stats,
 inline void apply_low_div_overrides(ClassifyConfig &config) {
   config.firstFilterBeta = 0.5;
   config.firstFilterBeta_user = true;
-  config.preEmTopK = 256;
   config.exclusive_gamma = 0.0;
   config.em_conf_power = 1.0;
   config.em_coexist_penalty = 0.0;
