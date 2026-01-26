@@ -1317,8 +1317,7 @@ void run(ClassifyConfig config) {
 		    // - They govern how much posterior mass is allowed to fan out into multiple
 		    //   taxids for *taxidCount* (abundance/presence is very sensitive).
 		    // - POST_TOPK dump uses the pruned+renormalized posterior view (same as decision).
-		    decisionConfig.posterior_min_fraction = config.post_min_fraction;
-	    decisionConfig.posterior_power = config.post_power;
+	    decisionConfig.posterior_min_fraction = config.post_min_fraction;
 
 	    // Default/auto behavior: when we relax global pi to recover recall in
 	    // high-diversity samples, tighten per-read tail allocation to avoid
@@ -1337,7 +1336,6 @@ void run(ClassifyConfig config) {
 
 		    if (config.verbose) {
 		      std::cout << "PostEM tail: min_fraction=" << decisionConfig.posterior_min_fraction
-		                << " power=" << decisionConfig.posterior_power
 		                << " head_mass=" << decisionConfig.posterior_head_mass
 		                << (config.post_head_mass > 0.0 ? " (cli)" : " (auto)")
 		                << " max_taxa=" << decisionConfig.posterior_max_taxa

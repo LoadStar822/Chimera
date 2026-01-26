@@ -108,7 +108,6 @@ namespace ChimeraClassify {
 	double post_pi_min = 5e-4;
 	// postEmDecision posterior tail controls (affect taxidCount sparsity; not POST_TOPK dump)
 	double post_min_fraction = 0.01; // per-read posterior fraction cutoff (0 disables)
-	double post_power = 1.5;         // posterior^alpha sharpening (>=1 recommended)
 	double post_head_mass = 0.0;     // 0 => auto (based on pi tuning); else (0,1]
 	uint32_t post_max_taxa = 0;      // 0 => auto (based on pi tuning); else >=1
 	uint32_t dump_post_topk = 256; // 输出 POST_TOPK=...（用于 profile 侧属内纠错）
@@ -183,7 +182,6 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Posterior thres:" << config.post_thres << std::endl
 			<< std::setw(20) << "Posterior pi min:" << config.post_pi_min << std::endl
 			<< std::setw(20) << "Post min frac:" << config.post_min_fraction << std::endl
-			<< std::setw(20) << "Post power:" << config.post_power << std::endl
 			<< std::setw(20) << "Post head mass:" << (config.post_head_mass > 0.0 ? std::to_string(config.post_head_mass) : std::string("auto")) << std::endl
 			<< std::setw(20) << "Post max taxa:" << (config.post_max_taxa > 0 ? std::to_string(config.post_max_taxa) : std::string("auto")) << std::endl
 			<< std::setw(20) << "Dump POST_TOPK:" << config.dump_post_topk << std::endl;
@@ -230,7 +228,6 @@ namespace ChimeraClassify {
 				double posterior_threshold = 0.56;
 				double min_class_weight = 1e-4;
 				double posterior_min_fraction = 0.01; // 软分配时的最小 posterior 占比阈值
-				double posterior_power = 1.5;        // posterior^alpha 压尖，>1 越尖锐
 				double posterior_head_mass = 0.95;   // 每条 read 只保留 posterior^alpha 的头部质量（抑制长尾）
 				uint32_t posterior_max_taxa = 8;     // 每条 read 最多输出的 taxon 数（抑制长尾）
 				bool allow_fallback_on_reject = false; // 高多样性：放宽拒绝，减少 unclassified

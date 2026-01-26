@@ -1236,8 +1236,7 @@ void postEmDecision(
         total_evidence = 1.0;
       }
 
-	      double alpha = std::max(1.0, decisionConfig.posterior_power);
-	      double head_mass = decisionConfig.posterior_head_mass;
+      double head_mass = decisionConfig.posterior_head_mass;
 	      if (!(head_mass > 0.0 && head_mass <= 1.0)) {
 	        head_mass = 0.95;
 	      }
@@ -1274,7 +1273,7 @@ void postEmDecision(
 	        if (!eligible(taxid, post)) {
 	          continue;
 	        }
-	        sum_adj_total += std::pow(post, alpha);
+        sum_adj_total += post;
 	      }
 	
 	      if (sum_adj_total <= 0.0) {
@@ -1297,7 +1296,7 @@ void postEmDecision(
 	        if (!eligible(taxid, post)) {
 	          continue;
 	        }
-	        double adj = std::pow(post, alpha);
+        double adj = post;
 	        cum_adj += adj;
 	        sum_adj_kept += adj;
 	        kept += 1;
@@ -1321,7 +1320,7 @@ void postEmDecision(
 	        if (!eligible(taxid, post)) {
 	          continue;
 	        }
-	        double adj = std::pow(post, alpha);
+        double adj = post;
 	        cum_adj += adj;
 	        kept += 1;
 	

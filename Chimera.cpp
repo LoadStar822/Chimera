@@ -532,11 +532,6 @@ int main(int argc, char **argv) {
       ->add_option("--post-pi-min", classifyConfig.post_pi_min,
                    "Minimum global class weight")
       ->default_val(5e-4);
-  classify
-      ->add_option("--post-power", classifyConfig.post_power,
-                   "postEmDecision: posterior^alpha sharpening (>=1)")
-      ->check(CLI::Range(0.0, 10.0))
-      ->default_val(1.5);
   auto *postHeadMassOpt =
       classify
           ->add_option("--post-head-mass", classifyConfig.post_head_mass,
