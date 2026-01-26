@@ -432,11 +432,6 @@ int main(int argc, char **argv) {
       ->add_option("-s,--shot-threshold", classifyConfig.shotThreshold,
                    "Shot threshold for classifying")
       ->default_val(0.70);
-  classify
-      ->add_flag("--adaptive-shot,!--no-adaptive-shot",
-                 classifyConfig.adaptive_shot,
-                 "Scale thresholds by actually evaluated syncmers")
-      ->default_val(true);
   auto *firstBetaOpt =
       classify
           ->add_option("--first-filter-beta", classifyConfig.firstFilterBeta,
@@ -469,24 +464,6 @@ int main(int argc, char **argv) {
                    "Sketch bits for presence breadth (power-of-two suggested)")
       ->check(CLI::Range(64u, 1048576u))
       ->default_val(2048);
-  classify
-      ->add_option("--presence-breadth-min-ratio",
-                   classifyConfig.presence_breadth_min_ratio,
-                   "Minimum breadth ratio (0 disables)")
-      ->check(CLI::Range(0.0, 1.0))
-      ->default_val(0.0);
-  classify
-      ->add_option("--presence-breadth-min-obs",
-                   classifyConfig.presence_breadth_min_obs,
-                   "Minimum observed unique signatures (0 disables)")
-      ->check(CLI::Range(0u, 100000000u))
-      ->default_val(0);
-  classify
-      ->add_option("--presence-breadth-penalty",
-                   classifyConfig.presence_breadth_penalty,
-                   "Penalty subtracted from logPosterior when breadth is low (0 disables)")
-      ->check(CLI::Range(0.0, 1e6))
-      ->default_val(0.0);
   classify
       ->add_option("--decoy-mode", classifyConfig.decoy_mode,
                    "Decoy generation mode (imcf-edge-shuffle)")

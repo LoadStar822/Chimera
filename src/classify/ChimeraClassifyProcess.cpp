@@ -1189,16 +1189,13 @@ void processSequence(
   beta = std::clamp(beta, 0.0, 1.0);
   size_t thr_beta =
       static_cast<size_t>(std::floor(beta * std::max(0.0, maxEvidence)));
-  size_t thr_eval = static_cast<size_t>(std::ceil(
-      config.shotThreshold *
-      (config.adaptive_shot ? eff_eval
-                            : static_cast<double>(hashNum))));
+  size_t thr_eval = static_cast<size_t>(
+      std::ceil(config.shotThreshold * eff_eval));
   if (thr_eval == 0) {
     thr_eval = 1;
   }
   if (use_em) {
-    double base =
-        config.adaptive_shot ? eff_eval : static_cast<double>(hashNum);
+    double base = eff_eval;
     double softened_ratio = std::min(config.shotThreshold, 0.45);
     size_t em_eval =
         static_cast<size_t>(std::ceil(base * softened_ratio));

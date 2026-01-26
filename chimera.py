@@ -242,19 +242,6 @@ def parse_arguments():
         help="Shot threshold for classifying (defaults to 0.70 if unset)",
     )
     classify_parser.add_argument(
-        "--adaptive-shot",
-        dest="adaptive_shot",
-        action="store_true",
-        default=None,
-        help="Scale thresholds by evaluated syncmers (default on)",
-    )
-    classify_parser.add_argument(
-        "--no-adaptive-shot",
-        dest="adaptive_shot",
-        action="store_false",
-        help="Disable threshold scaling by evaluated syncmers",
-    )
-    classify_parser.add_argument(
         "--first-filter-beta",
         type=float,
         default=None,
@@ -289,24 +276,6 @@ def parse_arguments():
         type=int,
         default=None,
         help="Sketch bits for presence breadth (power-of-two suggested)",
-    )
-    classify_parser.add_argument(
-        "--presence-breadth-min-ratio",
-        type=float,
-        default=None,
-        help="Minimum breadth ratio (0 disables)",
-    )
-    classify_parser.add_argument(
-        "--presence-breadth-min-obs",
-        type=int,
-        default=None,
-        help="Minimum observed unique signatures (0 disables)",
-    )
-    classify_parser.add_argument(
-        "--presence-breadth-penalty",
-        type=float,
-        default=None,
-        help="Penalty subtracted from logPosterior when breadth is low (0 disables)",
     )
     # presence-unique-deg 固定随数据库，分类侧不再暴露参数
     classify_parser.add_argument(
@@ -741,10 +710,6 @@ def run_chimera(args, chimera_path=None):
         command.extend(["-d", args.database])
         if args.shot_threshold is not None:
             command.extend(["-s", str(args.shot_threshold)])
-        if args.adaptive_shot is True:
-            command.append("--adaptive-shot")
-        elif args.adaptive_shot is False:
-            command.append("--no-adaptive-shot")
         if args.first_filter_beta is not None:
             command.extend(["--first-filter-beta", str(args.first_filter_beta)])
         if args.pre_em_topk is not None:
@@ -758,24 +723,6 @@ def run_chimera(args, chimera_path=None):
         if args.presence_breadth_bits is not None:
             command.extend(
                 ["--presence-breadth-bits", str(args.presence_breadth_bits)]
-            )
-        if args.presence_breadth_min_ratio is not None:
-            command.extend(
-                [
-                    "--presence-breadth-min-ratio",
-                    str(args.presence_breadth_min_ratio),
-                ]
-            )
-        if args.presence_breadth_min_obs is not None:
-            command.extend(
-                ["--presence-breadth-min-obs", str(args.presence_breadth_min_obs)]
-            )
-        if args.presence_breadth_penalty is not None:
-            command.extend(
-                [
-                    "--presence-breadth-penalty",
-                    str(args.presence_breadth_penalty),
-                ]
             )
         if args.presence_unique_deg is not None:
             command.extend(

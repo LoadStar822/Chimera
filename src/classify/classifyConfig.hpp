@@ -49,7 +49,6 @@ namespace ChimeraClassify {
 		std::string taxonomyKind{ "auto" };
 		std::string taxonomyVersion{ "auto" };
 		double shotThreshold = 0.70;
-		bool adaptive_shot = true;
 		double firstFilterBeta = 0.8;
 		bool firstFilterBeta_user = false; // set when user or auto-override explicitly chooses beta
 		size_t preEmTopK = 16;
@@ -96,9 +95,6 @@ namespace ChimeraClassify {
 			uint32_t presence_u_min = 1;
 			bool presence_pre_filter = false; // allow pre-EM presence filter to hard-prune candidates
 			uint32_t presence_breadth_bits = 2048; // breadth sketch bits (power of 2 suggested)
-			double presence_breadth_min_ratio = 0.0; // minimum breadth ratio (0 disables gate)
-			uint32_t presence_breadth_min_obs = 0; // minimum observed uniques (0 disables gate)
-			double presence_breadth_penalty = 0.0; // subtract from logPosterior if breadth low (0 disables)
 			uint16_t threads;
 			bool verbose = true;
 			size_t batchSize;
@@ -152,7 +148,6 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Taxonomy kind:" << config.taxonomyKind << std::endl
 			<< std::setw(20) << "Taxonomy version:" << config.taxonomyVersion << std::endl
 			<< std::setw(20) << "Shot threshold:" << config.shotThreshold << std::endl
-			<< std::setw(20) << "Adaptive shot:" << config.adaptive_shot << std::endl
 			<< std::setw(20) << "First filter beta:" << config.firstFilterBeta << std::endl
 			<< std::setw(20) << "Pre-EM topK:" << config.preEmTopK << std::endl
 			<< std::setw(20) << "Pre-EM floor:" << config.preem_floor_target << std::endl
@@ -173,9 +168,6 @@ namespace ChimeraClassify {
 				<< std::setw(20) << "Presence U min:" << config.presence_u_min << std::endl
 				<< std::setw(20) << "Presence pre:" << config.presence_pre_filter << std::endl
 				<< std::setw(20) << "Breadth bits:" << config.presence_breadth_bits << std::endl
-				<< std::setw(20) << "Breadth min r:" << config.presence_breadth_min_ratio << std::endl
-				<< std::setw(20) << "Breadth min u:" << config.presence_breadth_min_obs << std::endl
-				<< std::setw(20) << "Breadth penalty:" << config.presence_breadth_penalty << std::endl
 				<< std::setw(20) << "Decoy mode:" << config.decoy_mode << std::endl
 				<< std::setw(20) << "Decoy reps:" << config.decoy_reps << std::endl
 			<< std::setw(20) << "Exclusive gamma:" << config.exclusive_gamma << std::endl
