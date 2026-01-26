@@ -234,104 +234,6 @@ def parse_arguments():
     classify_parser.add_argument(
         "-d", "--database", required=True, help="Database file for classifying"
     )
-    classify_parser.add_argument(
-        "-s",
-        "--shot-threshold",
-        type=float,
-        default=None,
-        help="Shot threshold for classifying (defaults to 0.70 if unset)",
-    )
-    classify_parser.add_argument(
-        "--adaptive-shot",
-        dest="adaptive_shot",
-        action="store_true",
-        default=None,
-        help="Scale thresholds by evaluated syncmers (default on)",
-    )
-    classify_parser.add_argument(
-        "--no-adaptive-shot",
-        dest="adaptive_shot",
-        action="store_false",
-        help="Disable threshold scaling by evaluated syncmers",
-    )
-    classify_parser.add_argument(
-        "--first-filter-beta",
-        type=float,
-        default=None,
-        help="Beta multiplier for first-stage filter (default 0.75)",
-    )
-    classify_parser.add_argument(
-        "--pre-em-topk",
-        type=int,
-        default=None,
-        help="Limit candidates before EM/VEM to top K (default 16)",
-    )
-    classify_parser.add_argument(
-        "--presence-pi",
-        type=float,
-        default=None,
-        help="Presence prior probability for coverage model (0-1)",
-    )
-    classify_parser.add_argument(
-        "--presence-tau",
-        type=float,
-        default=None,
-        help="Log posterior odds threshold for coverage model",
-    )
-    classify_parser.add_argument(
-        "--presence-noise",
-        type=float,
-        default=None,
-        help="Override noise μ for coverage model; <=0 auto",
-    )
-    classify_parser.add_argument(
-        "--presence-breadth-bits",
-        type=int,
-        default=None,
-        help="Sketch bits for presence breadth (power-of-two suggested)",
-    )
-    classify_parser.add_argument(
-        "--presence-breadth-min-ratio",
-        type=float,
-        default=None,
-        help="Minimum breadth ratio (0 disables)",
-    )
-    classify_parser.add_argument(
-        "--presence-breadth-min-obs",
-        type=int,
-        default=None,
-        help="Minimum observed unique signatures (0 disables)",
-    )
-    classify_parser.add_argument(
-        "--presence-breadth-penalty",
-        type=float,
-        default=None,
-        help="Penalty subtracted from logPosterior when breadth is low (0 disables)",
-    )
-    # presence-unique-deg 固定随数据库，分类侧不再暴露参数
-    classify_parser.add_argument(
-        "--decoy-mode",
-        default=None,
-        help="Decoy generation mode (imcf-edge-shuffle)",
-    )
-    classify_parser.add_argument(
-        "--exclusive-gamma",
-        type=float,
-        default=None,
-        help="Exclusive edge weighting gamma",
-    )
-    classify_parser.add_argument(
-        "--post-thres",
-        type=float,
-        default=None,
-        help="Posterior acceptance threshold (default 0.56)",
-    )
-    classify_parser.add_argument(
-        "--post-pi-min",
-        type=float,
-        default=None,
-        help="Minimum global class weight (default 0.0005)",
-    )
     # NOTE: LCA 及后处理相关参数暂时废弃，内部逻辑继续沿用默认值
     classify_parser.add_argument(
         "-t",
@@ -342,18 +244,6 @@ def parse_arguments():
     )
     classify_parser.add_argument(
         "-b", "--batch-size", type=int, default=400, help="Batch size for classifying"
-    )
-    classify_parser.add_argument(
-        "-e",
-        "--em",
-        action="store_true",
-        help="Use EM algorithm for classification (default)",
-    )
-    classify_parser.add_argument(
-        "--em-iter", type=int, default=80, help="Number of EM iterations"
-    )
-    classify_parser.add_argument(
-        "--em-threshold", type=float, default=0.001, help="EM threshold"
     )
 
     # Profile subcommand
@@ -721,60 +611,8 @@ def run_chimera(args, chimera_path=None):
             command.extend(["-p"] + args.paired)
         command.extend(["-o", args.output])
         command.extend(["-d", args.database])
-        if args.shot_threshold is not None:
-            command.extend(["-s", str(args.shot_threshold)])
-        if args.adaptive_shot is True:
-            command.append("--adaptive-shot")
-        elif args.adaptive_shot is False:
-            command.append("--no-adaptive-shot")
-        if args.first_filter_beta is not None:
-            command.extend(["--first-filter-beta", str(args.first_filter_beta)])
-        if args.pre_em_topk is not None:
-            command.extend(["--pre-em-topk", str(args.pre_em_topk)])
-        if args.presence_pi is not None:
-            command.extend(["--presence-pi", str(args.presence_pi)])
-        if args.presence_tau is not None:
-            command.extend(["--presence-tau", str(args.presence_tau)])
-        if args.presence_noise is not None:
-            command.extend(["--presence-noise", str(args.presence_noise)])
-        if args.presence_breadth_bits is not None:
-            command.extend(
-                ["--presence-breadth-bits", str(args.presence_breadth_bits)]
-            )
-        if args.presence_breadth_min_ratio is not None:
-            command.extend(
-                [
-                    "--presence-breadth-min-ratio",
-                    str(args.presence_breadth_min_ratio),
-                ]
-            )
-        if args.presence_breadth_min_obs is not None:
-            command.extend(
-                ["--presence-breadth-min-obs", str(args.presence_breadth_min_obs)]
-            )
-        if args.presence_breadth_penalty is not None:
-            command.extend(
-                [
-                    "--presence-breadth-penalty",
-                    str(args.presence_breadth_penalty),
-                ]
-            )
-        if args.decoy_mode is not None:
-            command.extend(["--decoy-mode", args.decoy_mode])
-        if args.exclusive_gamma is not None:
-            command.extend(["--exclusive-gamma", str(args.exclusive_gamma)])
-        if args.post_thres is not None:
-            command.extend(["--post-thres", str(args.post_thres)])
-        # posterior gating now只用 post_thres + post_pi_min
-        if args.post_pi_min is not None:
-            command.extend(["--post-pi-min", str(args.post_pi_min)])
         command.extend(["-t", str(args.threads)])
         command.extend(["-b", str(args.batch_size)])
-        if args.em:
-            command.append("-e")
-            command.extend(["--em-iter", str(args.em_iter)])
-            command.extend(["--em-threshold", str(args.em_threshold)])
-        # EM 温度/先验/penalty 固定内部默认
 
     # Execute the command using the provided run function
     downloader = get_downloader()

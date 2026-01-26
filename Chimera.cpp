@@ -401,102 +401,6 @@ int main(int argc, char **argv) {
       ->required()
       ->check(CLI::ExistingFile);
   classify
-      ->add_option("--feature", classifyConfig.feature,
-                   "Feature 提取方式 (syncmer|strobemer|auto；auto 表示跟随数据库)")
-      ->default_val("auto");
-  auto *strobeKOpt =
-      classify
-          ->add_option("--strobe-k", classifyConfig.strobemer_k,
-                       "Strobemer k-mer 长度 (默认跟随数据库)")
-          ->default_val(0);
-  strobeKOpt->default_str("inherit");
-  auto *strobeOrderOpt =
-      classify
-      ->add_option("--strobe-order", classifyConfig.strobemer_order,
-                       "Strobemer 阶数 (默认跟随数据库，当前仅支持 2)")
-          ->default_val(0);
-  strobeOrderOpt->default_str("inherit");
-  auto *strobeWminOpt =
-      classify
-          ->add_option("--strobe-w-min", classifyConfig.strobemer_w_min,
-                       "Strobemer 最小窗口 (默认跟随数据库)")
-          ->default_val(0);
-  strobeWminOpt->default_str("inherit");
-  auto *strobeWmaxOpt =
-      classify
-          ->add_option("--strobe-w-max", classifyConfig.strobemer_w_max,
-                       "Strobemer 最大窗口 (默认跟随数据库)")
-          ->default_val(0);
-  strobeWmaxOpt->default_str("inherit");
-  classify
-      ->add_option("-s,--shot-threshold", classifyConfig.shotThreshold,
-                   "Shot threshold for classifying")
-      ->default_val(0.70);
-  classify
-      ->add_flag("--adaptive-shot,!--no-adaptive-shot",
-                 classifyConfig.adaptive_shot,
-                 "Scale thresholds by actually evaluated syncmers")
-      ->default_val(true);
-  auto *firstBetaOpt =
-      classify
-          ->add_option("--first-filter-beta", classifyConfig.firstFilterBeta,
-                       "Keep bins >= beta * max count in first filter")
-          ->default_val(0.80);
-  classify
-      ->add_option("--pre-em-topk", classifyConfig.preEmTopK,
-                   "Keep top-K candidates per read before EM/VEM")
-      ->default_val(16);
-  classify
-      ->add_option("--presence-pi", classifyConfig.presence_pi,
-                   "Presence prior P(z=1) for coverage模型 (0-1)")
-      ->check(CLI::Range(1e-6, 0.5))
-      ->default_val(1e-3);
-  classify
-      ->add_option("--presence-tau", classifyConfig.presence_tau,
-                   "Log posterior odds threshold for presence (coverage)")
-      ->default_val(4.6);
-  classify
-      ->add_option("--presence-noise", classifyConfig.presence_noise,
-                   "Override noise μ (per-signature) for coverage; <=0 auto")
-      ->default_val(0.0);
-  classify
-      ->add_option("--presence-u-min", classifyConfig.presence_u_min,
-                   "Minimum U_j used in coverage model to防止极小基因组过拟合 (1-16)")
-      ->default_val(1)
-      ->check(CLI::Range(1u, 16u));
-  classify
-      ->add_option("--presence-breadth-bits", classifyConfig.presence_breadth_bits,
-                   "Sketch bits for presence breadth (power-of-two suggested)")
-      ->check(CLI::Range(64u, 1048576u))
-      ->default_val(2048);
-  classify
-      ->add_option("--presence-breadth-min-ratio",
-                   classifyConfig.presence_breadth_min_ratio,
-                   "Minimum breadth ratio (0 disables)")
-      ->check(CLI::Range(0.0, 1.0))
-      ->default_val(0.0);
-  classify
-      ->add_option("--presence-breadth-min-obs",
-                   classifyConfig.presence_breadth_min_obs,
-                   "Minimum observed unique signatures (0 disables)")
-      ->check(CLI::Range(0u, 100000000u))
-      ->default_val(0);
-  classify
-      ->add_option("--presence-breadth-penalty",
-                   classifyConfig.presence_breadth_penalty,
-                   "Penalty subtracted from logPosterior when breadth is low (0 disables)")
-      ->check(CLI::Range(0.0, 1e6))
-      ->default_val(0.0);
-  classify
-      ->add_option("--decoy-mode", classifyConfig.decoy_mode,
-                   "Decoy generation mode (imcf-edge-shuffle)")
-      ->default_val("imcf-edge-shuffle");
-  classify
-      ->add_option("--exclusive-gamma", classifyConfig.exclusive_gamma,
-                   "Exclusive edge weighting gamma (0.0-2.0)")
-      ->check(CLI::Range(0.0, 2.0))
-      ->default_val(1.2);
-  classify
       ->add_option("-t,--threads", classifyConfig.threads,
                    "Number of threads for classifying")
       ->default_val(default_threads);
@@ -504,26 +408,6 @@ int main(int argc, char **argv) {
       ->add_option("-b,--batch-size", classifyConfig.batchSize,
                    "Batch size for classifying")
       ->default_val(400);
-  bool classifyNoEm = false;
-  auto emFlag = classify->add_flag("-e,--EM", classifyConfig.em,
-                                   "Enable EM mode (default; use --no-em to disable)");
-  auto noEmFlag =
-      classify->add_flag("--no-em", classifyNoEm, "Disable EM mode");
-  noEmFlag->excludes(emFlag);
-  emFlag->excludes(noEmFlag);
-  classify
-      ->add_option("--em-threshold", classifyConfig.emThreshold, "EM threshold")
-      ->default_val(1e-4);
-  classify->add_option("--em-iter", classifyConfig.emIter, "EM iteration")
-      ->default_val(100);
-  classify
-      ->add_option("--post-thres", classifyConfig.post_thres,
-                   "Posterior acceptance threshold")
-      ->default_val(0.56);
-  classify
-      ->add_option("--post-pi-min", classifyConfig.post_pi_min,
-                   "Minimum global class weight")
-      ->default_val(5e-4);
   // TODO: 后处理相关参数暂时废弃，内部逻辑维持默认行为
   classify->add_flag("-q,--quiet", classifyQuietRequested, "Quiet output");
 
@@ -534,13 +418,6 @@ int main(int argc, char **argv) {
 
   CLI11_PARSE(app, argc, argv);
 
-  if (classifyNoEm) {
-    classifyConfig.em = false;
-  }
-  if (firstBetaOpt && firstBetaOpt->count() > 0 &&
-      classifyConfig.firstFilterBeta > 0.0) {
-    classifyConfig.firstFilterBeta_user = true;
-  }
 
   if (show_version) {
     std::cout << "======================================" << std::endl;
