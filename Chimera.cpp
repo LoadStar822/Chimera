@@ -532,20 +532,6 @@ int main(int argc, char **argv) {
       ->add_option("--post-pi-min", classifyConfig.post_pi_min,
                    "Minimum global class weight")
       ->default_val(5e-4);
-  auto *postHeadMassOpt =
-      classify
-          ->add_option("--post-head-mass", classifyConfig.post_head_mass,
-                       "postEmDecision: keep top head_mass of sum(posterior^alpha) (0=>auto)")
-          ->check(CLI::Range(0.0, 1.0))
-          ->default_val(0.0);
-  postHeadMassOpt->default_str("auto");
-  auto *postMaxTaxaOpt =
-      classify
-          ->add_option("--post-max-taxa", classifyConfig.post_max_taxa,
-                       "postEmDecision: max taxa per read in taxidCount (0=>auto)")
-          ->check(CLI::Range(0u, 512u))
-          ->default_val(0);
-  postMaxTaxaOpt->default_str("auto");
   // TODO: 后处理相关参数暂时废弃，内部逻辑维持默认行为
   classify->add_flag("-q,--quiet", classifyQuietRequested, "Quiet output");
 

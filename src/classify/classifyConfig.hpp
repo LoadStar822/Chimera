@@ -108,8 +108,6 @@ namespace ChimeraClassify {
 	double post_pi_min = 5e-4;
 	// postEmDecision posterior tail controls (affect taxidCount sparsity; not POST_TOPK dump)
 	double post_min_fraction = 0.01; // per-read posterior fraction cutoff (0 disables)
-	double post_head_mass = 0.0;     // 0 => auto (based on pi tuning); else (0,1]
-	uint32_t post_max_taxa = 0;      // 0 => auto (based on pi tuning); else >=1
 	uint32_t dump_post_topk = 256; // 输出 POST_TOPK=...（用于 profile 侧属内纠错）
 	bool low_div_auto = true;       // internal: auto low-diversity branch
 	bool low_div_active = false;    // internal: set when low-div branch is enabled
@@ -182,8 +180,6 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Posterior thres:" << config.post_thres << std::endl
 			<< std::setw(20) << "Posterior pi min:" << config.post_pi_min << std::endl
 			<< std::setw(20) << "Post min frac:" << config.post_min_fraction << std::endl
-			<< std::setw(20) << "Post head mass:" << (config.post_head_mass > 0.0 ? std::to_string(config.post_head_mass) : std::string("auto")) << std::endl
-			<< std::setw(20) << "Post max taxa:" << (config.post_max_taxa > 0 ? std::to_string(config.post_max_taxa) : std::string("auto")) << std::endl
 			<< std::setw(20) << "Dump POST_TOPK:" << config.dump_post_topk << std::endl;
 		os << std::string(40, '=') << std::endl;
 
