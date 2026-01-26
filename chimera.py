@@ -355,24 +355,6 @@ def parse_arguments():
     classify_parser.add_argument(
         "--em-threshold", type=float, default=0.001, help="EM threshold"
     )
-    classify_parser.add_argument(
-        "--em-temp",
-        type=float,
-        default=None,
-        help="Softmax temperature inside EM/VEM",
-    )
-    classify_parser.add_argument(
-        "--em-prior-strength",
-        type=float,
-        default=None,
-        help="Dirichlet mass for abundance prior",
-    )
-    classify_parser.add_argument(
-        "--em-coexist-penalty",
-        type=float,
-        default=None,
-        help="Penalty applied when reads have near-tied taxa",
-    )
 
     # Profile subcommand
     profile_parser = subparsers.add_parser("profile", help="Generate sequence profile")
@@ -776,10 +758,6 @@ def run_chimera(args, chimera_path=None):
                     "--presence-breadth-penalty",
                     str(args.presence_breadth_penalty),
                 ]
-            )
-        if args.presence_unique_deg is not None:
-            command.extend(
-                ["--presence-unique-deg", str(args.presence_unique_deg)]
             )
         if args.decoy_mode is not None:
             command.extend(["--decoy-mode", args.decoy_mode])
