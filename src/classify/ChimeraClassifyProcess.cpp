@@ -474,24 +474,6 @@ void processSequence(
       return 0.0;
     }
     size_t deg_effective = deg_subset;
-    if (config.deg_by_species && weightCtx.tid2speciesGroup &&
-        deg_subset > 1) {
-      std::vector<uint32_t> groups;
-      groups.reserve(deg_subset);
-      const auto &map = *weightCtx.tid2speciesGroup;
-      for (uint32_t tid : minimizerTids) {
-        if (tid < map.size()) {
-          groups.push_back(map[tid]);
-        } else {
-          groups.push_back(0x80000000u | tid);
-        }
-      }
-      std::sort(groups.begin(), groups.end());
-      groups.erase(std::unique(groups.begin(), groups.end()), groups.end());
-      if (!groups.empty()) {
-        deg_effective = groups.size();
-      }
-    }
 
     size_t df_bins = 0;
     if (!minimizerBins.empty()) {

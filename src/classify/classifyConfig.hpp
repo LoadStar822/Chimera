@@ -60,11 +60,6 @@ namespace ChimeraClassify {
 		//   before topK truncation (lighter; mainly affects candidate diversity).
 	bool collapse_strain_hits = true;
 		bool collapse_strain_candidates = true;
-		// NCBI-only: compute deg/exclusivity using species groups instead of raw taxid
-		// multiplicity. This helps avoid "strain saturation" (many strain taxids) from
-		// over-penalizing within-genus shared evidence, while keeping output taxids
-		// unchanged (still DB taxids).
-	bool deg_by_species = false;
 			double presence_pi = 1e-3;
 			double presence_tau = 4.6;
 			uint32_t presence_breadth_bits = 2048; // breadth sketch bits (power of 2 suggested)
@@ -121,7 +116,6 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Pre-EM beta relax:" << config.preem_beta_relax << std::endl
 			<< std::setw(20) << "Collapse hits:" << config.collapse_strain_hits << std::endl
 			<< std::setw(20) << "Collapse cands:" << config.collapse_strain_candidates << std::endl
-			<< std::setw(20) << "Deg by species:" << config.deg_by_species << std::endl
 			<< std::setw(20) << "Presence pi:" << config.presence_pi << std::endl
 				<< std::setw(20) << "Presence tau:" << config.presence_tau << std::endl
 				<< std::setw(20) << "Breadth bits:" << config.presence_breadth_bits << std::endl

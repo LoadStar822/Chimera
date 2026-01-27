@@ -118,7 +118,6 @@ struct WeightingContext {
   // species taxid, or a stable synthetic id for non-numeric taxids). Used for
   // computing deg/exclusivity at the species level without changing output
   // taxids or breaking presence coverage meta.
-  const std::vector<uint32_t> *tid2speciesGroup{nullptr};
 
   bool enabled() const { return freqSketch != nullptr; }
   bool has_sample_weights() const { return sampleWeights != nullptr; }

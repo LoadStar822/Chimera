@@ -596,53 +596,6 @@ void run(ClassifyConfig config) {
   std::cout << "[classify] tax_dict tid_count=" << tax.id2str.size()
             << " bins=" << tax.idx2id.size() << std::endl;
   log_stage("after_build_tax_dict");
-  std::vector<uint32_t> tid2speciesGroup;
-  if (config.deg_by_species && weightCtx.ncbiTaxdump &&
-      weightCtx.ncbiTaxdump->enabled()) {
-    tid2speciesGroup.resize(tax.id2str.size(), 0);
-    auto parse_u32 = [](const std::string &s, uint32_t &out) -> bool {
-      if (s.empty()) {
-        return false;
-      }
-      for (unsigned char c : s) {
-        if (!std::isdigit(c)) {
-          return false;
-        }
-      }
-      try {
-        unsigned long v = std::stoul(s);
-        if (v > std::numeric_limits<uint32_t>::max()) {
-          return false;
-        }
-        out = static_cast<uint32_t>(v);
-        return true;
-      } catch (...) {
-        return false;
-      }
-    };
-
-    size_t numeric = 0;
-    size_t mapped = 0;
-    for (uint32_t tid_id = 0; tid_id < tax.id2str.size(); ++tid_id) {
-      const std::string &taxid = tax.id2str[tid_id];
-      uint32_t tid = 0;
-      if (parse_u32(taxid, tid)) {
-        ++numeric;
-        uint32_t sid = weightCtx.ncbiTaxdump->to_species(tid);
-        tid2speciesGroup[tid_id] = sid;
-        ++mapped;
-      } else {
-        // Stable synthetic id to avoid collisions with real numeric taxids.
-        tid2speciesGroup[tid_id] = 0x80000000u | tid_id;
-      }
-    }
-    weightCtx.tid2speciesGroup = &tid2speciesGroup;
-    if (config.verbose) {
-      std::cout << "NCBI tid->species group mapping for deg: tids="
-                << tax.id2str.size() << ", numeric=" << numeric
-                << ", mapped=" << mapped << std::endl;
-    }
-  }
   std::vector<uint32_t> tid2speciesRep;
   if ((config.collapse_strain_hits || config.collapse_strain_candidates) &&
       weightCtx.ncbiTaxdump &&
