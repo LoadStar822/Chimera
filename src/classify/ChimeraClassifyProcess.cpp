@@ -1236,41 +1236,6 @@ void processSequence(
     result.taxidCount.swap(collapsed);
   }
 
-  // High-div / EM only: fixed-budget keepalive of a strong per-read hint
-  // candidate. Do NOT expand K; only replace the weakest tail candidate.
-  if (use_em && !config.low_div_active && !result.taxidCount.empty() &&
-      config.preem_keepalive_min_ratio > 0.0 &&
-      config.preem_keepalive_replace_ratio > 0.0 &&
-      config.preem_keepalive_abs_min > 0.0 &&
-      !result.best_taxid_hint.empty() &&
-      result.best_taxid_hint != "unclassified") {
-    bool hint_in_topk = false;
-    for (const auto &kv : result.taxidCount) {
-      if (kv.first == result.best_taxid_hint) {
-        hint_in_topk = true;
-        break;
-      }
-    }
-    if (!hint_in_topk) {
-      uint32_t hint_id = std::numeric_limits<uint32_t>::max();
-      if (auto it = tax.str2id.find(result.best_taxid_hint);
-          it != tax.str2id.end()) {
-        hint_id = it->second;
-      }
-      double hint_score = 0.0;
-      if (hint_id != std::numeric_limits<uint32_t>::max()) {
-        if (auto it = tidScore.find(hint_id); it != tidScore.end()) {
-          hint_score = std::clamp(it->second, 0.0, effCap);
-        }
-      }
-
-      preem_keepalive_replace_tail(
-          result.taxidCount, {result.best_taxid_hint, hint_score},
-          config.preem_keepalive_min_ratio, config.preem_keepalive_replace_ratio,
-          config.preem_keepalive_abs_min);
-    }
-  }
-
   if (!result.taxidCount.empty()) {
     if (presenceEnabled && presenceAcc) {
       const auto &top = result.taxidCount.front();
