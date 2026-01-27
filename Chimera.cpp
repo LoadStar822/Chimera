@@ -440,11 +440,6 @@ int main(int argc, char **argv) {
                    "Log posterior odds threshold for presence (coverage)")
       ->default_val(4.6);
   classify
-      ->add_option("--presence-u-min", classifyConfig.presence_u_min,
-                   "Minimum U_j used in coverage model to防止极小基因组过拟合 (1-16)")
-      ->default_val(1)
-      ->check(CLI::Range(1u, 16u));
-  classify
       ->add_option("--presence-breadth-bits", classifyConfig.presence_breadth_bits,
                    "Sketch bits for presence breadth (power-of-two suggested)")
       ->check(CLI::Range(64u, 1048576u))

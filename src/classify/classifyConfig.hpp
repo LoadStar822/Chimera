@@ -83,7 +83,6 @@ namespace ChimeraClassify {
 	bool deg_by_species = false;
 			double presence_pi = 1e-3;
 			double presence_tau = 4.6;
-			uint32_t presence_u_min = 1;
 			uint32_t presence_breadth_bits = 2048; // breadth sketch bits (power of 2 suggested)
 			uint16_t threads;
 			bool verbose = true;
@@ -148,7 +147,6 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Deg by species:" << config.deg_by_species << std::endl
 			<< std::setw(20) << "Presence pi:" << config.presence_pi << std::endl
 				<< std::setw(20) << "Presence tau:" << config.presence_tau << std::endl
-				<< std::setw(20) << "Presence U min:" << config.presence_u_min << std::endl
 				<< std::setw(20) << "Breadth bits:" << config.presence_breadth_bits << std::endl
 			<< std::setw(20) << "Batch size:" << config.batchSize << std::endl
 			<< std::setw(20) << "EM:" << config.em << std::endl

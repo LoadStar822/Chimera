@@ -356,8 +356,7 @@ static PresenceDecision evaluate_presence_coverage_impl(
       derived_u_min = exposures[idx];
     }
   }
-  double u_min_effective =
-      std::max<double>(config.presence_u_min, derived_u_min);
+  double u_min_effective = derived_u_min;
 
   auto percentile = [](std::vector<double> values, double q) -> double {
     if (values.empty()) {
