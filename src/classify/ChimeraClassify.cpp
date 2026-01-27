@@ -991,7 +991,7 @@ void run(ClassifyConfig config) {
   }
 
   PresenceFilterStats filterStats{};
-  if (!config.em || config.presence_pre_filter) {
+  if (!config.em) {
     // Presence filter is a strong precision gate for short-read datasets.
     filterStats = apply_presence_filter(presenceDecision, tax, classifyResults,
                                         fileInfo);

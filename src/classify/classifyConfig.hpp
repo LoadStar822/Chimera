@@ -91,7 +91,6 @@ namespace ChimeraClassify {
 			double presence_tau = 4.6;
 			double presence_noise = 0.0; // <=0 表示自动估计
 			uint32_t presence_u_min = 1;
-			bool presence_pre_filter = false; // allow pre-EM presence filter to hard-prune candidates
 			uint32_t presence_breadth_bits = 2048; // breadth sketch bits (power of 2 suggested)
 			uint16_t threads;
 			bool verbose = true;
@@ -159,7 +158,6 @@ namespace ChimeraClassify {
 				<< std::setw(20) << "Presence tau:" << config.presence_tau << std::endl
 				<< std::setw(20) << "Presence noise:" << config.presence_noise << std::endl
 				<< std::setw(20) << "Presence U min:" << config.presence_u_min << std::endl
-				<< std::setw(20) << "Presence pre:" << config.presence_pre_filter << std::endl
 				<< std::setw(20) << "Breadth bits:" << config.presence_breadth_bits << std::endl
 				<< std::setw(20) << "Decoy mode:" << config.decoy_mode << std::endl
 				<< std::setw(20) << "Decoy reps:" << config.decoy_reps << std::endl
