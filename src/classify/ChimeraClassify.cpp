@@ -704,13 +704,7 @@ void run(ClassifyConfig config) {
                 << ", collapsed=" << collapsed << std::endl;
     }
   }
-  if (config.decoy_reps == 0 && !(config.presence_noise > 0.0) &&
-      config.verbose) {
-    std::cerr << "Warning: decoy_reps=0，覆盖模型的噪声将退回默认 μ=1e-4；建议 decoy_reps>=1"
-              << std::endl;
-  }
-  PresenceSummary presenceSummary(static_cast<size_t>(config.decoy_reps),
-                                  config.presence_breadth_bits);
+  PresenceSummary presenceSummary(3, config.presence_breadth_bits);
   PresenceSummary *presencePtr = &presenceSummary;
   uint64_t presenceSeed = 0;
   std::hash<std::string> hasher;
