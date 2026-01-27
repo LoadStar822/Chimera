@@ -358,9 +358,6 @@ int main(int argc, char **argv) {
         value = "auto";
       }
     };
-    auto normalize_presence = [](std::string &value, const char *fallback) {
-      value = fallback; // presence 模式固定为 coverage，参数已移除
-    };
     auto sanitize_version = [](std::string &value) {
       if (value.empty()) {
         value = "auto";
@@ -369,7 +366,6 @@ int main(int argc, char **argv) {
     normalize_kind(classifyConfig.taxonomyKind);
     sanitize_version(classifyConfig.taxonomyVersion);
     normalize_feature(classifyConfig.feature);
-    normalize_presence(classifyConfig.decoy_mode, "imcf-edge-shuffle");
     if (!(classifyConfig.feature == "auto" || classifyConfig.feature == "syncmer" ||
           classifyConfig.feature == "strobemer")) {
       throw CLI::ValidationError("--feature must be one of auto|syncmer|strobemer");
@@ -384,9 +380,6 @@ int main(int argc, char **argv) {
     }
     if (classifyConfig.strobemer_k != 0 && classifyConfig.strobemer_k < 8) {
       throw CLI::ValidationError("--strobe-k must be >= 8 when specified");
-    }
-    if (classifyConfig.decoy_mode != "imcf-edge-shuffle") {
-      throw CLI::ValidationError("--decoy-mode 当前仅支持 imcf-edge-shuffle");
     }
     classifyConfig.verbose = !classifyQuietRequested;
   });
@@ -447,10 +440,6 @@ int main(int argc, char **argv) {
                    "Log posterior odds threshold for presence (coverage)")
       ->default_val(4.6);
   classify
-      ->add_option("--presence-noise", classifyConfig.presence_noise,
-                   "Override noise μ (per-signature) for coverage; <=0 auto")
-      ->default_val(0.0);
-  classify
       ->add_option("--presence-u-min", classifyConfig.presence_u_min,
                    "Minimum U_j used in coverage model to防止极小基因组过拟合 (1-16)")
       ->default_val(1)
@@ -460,10 +449,6 @@ int main(int argc, char **argv) {
                    "Sketch bits for presence breadth (power-of-two suggested)")
       ->check(CLI::Range(64u, 1048576u))
       ->default_val(2048);
-  classify
-      ->add_option("--decoy-mode", classifyConfig.decoy_mode,
-                   "Decoy generation mode (imcf-edge-shuffle)")
-      ->default_val("imcf-edge-shuffle");
   classify
       ->add_option("-t,--threads", classifyConfig.threads,
                    "Number of threads for classifying")

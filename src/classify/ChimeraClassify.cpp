@@ -704,20 +704,8 @@ void run(ClassifyConfig config) {
                 << ", collapsed=" << collapsed << std::endl;
     }
   }
-  PresenceSummary presenceSummary(3, config.presence_breadth_bits);
+  PresenceSummary presenceSummary(config.presence_breadth_bits);
   PresenceSummary *presencePtr = &presenceSummary;
-  uint64_t presenceSeed = 0;
-  std::hash<std::string> hasher;
-  // Stable seed: avoid run_dir/output path affecting decoy randomness so metrics
-  // are reproducible across repeated runs on the same dataset+DB.
-  if (!config.singleFiles.empty()) {
-    presenceSeed ^= hasher(config.singleFiles.front());
-  }
-  if (!config.pairedFiles.empty()) {
-    presenceSeed ^= (hasher(config.pairedFiles.front()) << 1);
-  }
-  presenceSeed ^= (hasher(config.dbFile) << 2);
-  presenceSeed ^= static_cast<uint64_t>(imcfConfig.fpSalt);
 
   size_t avg_len_hint = 0;
   if (config.low_div_auto && config.low_div_probe_reads > 0) {
@@ -737,7 +725,7 @@ void run(ClassifyConfig config) {
 
     classify_streaming(imcfConfig, probeQueues, probe_config, imcf, indexToTaxid,
                        tax, probeResults, probeInfo, probe_done, feature_params,
-                       feature_min_len, weightCtx, nullptr, presenceSeed);
+                       feature_min_len, weightCtx, nullptr);
     probeProducer.join();
 
     if (probeInfo.sequenceNum > 0) {
@@ -898,7 +886,7 @@ void run(ClassifyConfig config) {
             << ")..." << std::endl;
   classify_streaming(imcfConfig, readQueues, config, imcf, indexToTaxid, tax,
                      classifyResults, fileInfo, producer_done, feature_params,
-                     feature_min_len, weightCtx, presencePtr, presenceSeed);
+                     feature_min_len, weightCtx, presencePtr);
   auto classifyEnd = std::chrono::high_resolution_clock::now();
   auto classifyDuration =
       std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd -

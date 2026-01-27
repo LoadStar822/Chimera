@@ -81,15 +81,11 @@ inline uint32_t popcount_vec(const std::vector<uint64_t> &sketch) {
 }
 } // namespace
 
-PresenceAccumulator::PresenceAccumulator(size_t reps, uint32_t breadthBits)
-    : decoyReps(reps), sketchBits(breadthBits),
-      sketchWords(sketch_words(breadthBits)) {}
+PresenceAccumulator::PresenceAccumulator(uint32_t breadthBits)
+    : sketchBits(breadthBits), sketchWords(sketch_words(breadthBits)) {}
 
 PresenceStats &PresenceAccumulator::touch(uint32_t tid) {
   auto [it, inserted] = stats.try_emplace(tid);
-  if (decoyReps > 0 && it->second.decoys.size() != decoyReps) {
-    it->second.decoys.resize(decoyReps, 0);
-  }
   (void)inserted;
   return it->second;
 }
@@ -115,14 +111,6 @@ void PresenceAccumulator::add_target(uint32_t tid, double hit_weight,
   }
 }
 
-void PresenceAccumulator::add_decoy(size_t rep, uint32_t tid, double weight) {
-  if (decoyReps == 0 || rep >= decoyReps) {
-    return;
-  }
-  PresenceStats &entry = touch(tid);
-  entry.decoys[rep] += to_fixed(weight);
-}
-
 void PresenceAccumulator::add_read_support(uint32_t tid, bool uniqueRead) {
   PresenceStats &entry = touch(tid);
   entry.readHits += 1;
@@ -131,9 +119,8 @@ void PresenceAccumulator::add_read_support(uint32_t tid, bool uniqueRead) {
   }
 }
 
-PresenceSummary::PresenceSummary(size_t reps, uint32_t breadthBits)
-    : decoyReps(reps), sketchBits(breadthBits),
-      sketchWords(sketch_words(breadthBits)) {}
+PresenceSummary::PresenceSummary(uint32_t breadthBits)
+    : sketchBits(breadthBits), sketchWords(sketch_words(breadthBits)) {}
 
 void PresenceSummary::merge(const PresenceAccumulator &acc) {
   for (const auto &[tid, entry] : acc.stats) {
@@ -160,89 +147,7 @@ void PresenceSummary::merge(const PresenceAccumulator &acc) {
         }
       }
     }
-    if (decoyReps > 0) {
-      if (dst.decoys.size() != decoyReps) {
-        dst.decoys.resize(decoyReps, 0);
-      }
-      size_t copy = std::min(decoyReps, entry.decoys.size());
-      for (size_t i = 0; i < copy; ++i) {
-        dst.decoys[i] += entry.decoys[i];
-      }
-    }
   }
-}
-
-static PresenceDecision evaluate_presence_tdFDR(const PresenceSummary &summary,
-                                                const TaxDict &tax,
-                                                const ClassifyConfig &config) {
-  PresenceDecision decision;
-  decision.threshold = config.presence_tau;
-  decision.priorPi = config.presence_pi;
-  decision.noiseMu = 0.0;
-  decision.tested = summary.stats.size();
-  if (summary.stats.empty()) {
-    return decision;
-  }
-
-  std::vector<double> pooled;
-  for (const auto &[tid, stats] : summary.stats) {
-    double decoyMax = 0.0;
-    if (!stats.decoys.empty()) {
-      decoyMax = from_fixed(
-          *std::max_element(stats.decoys.begin(), stats.decoys.end()));
-    }
-    pooled.push_back(decoyMax);
-  }
-  std::sort(pooled.begin(), pooled.end(), std::greater<double>());
-  auto decoy_q = [&](double score) -> double {
-    size_t positives = 0;
-    for (double d : pooled) {
-      if (d >= score) {
-        ++positives;
-      } else {
-        break;
-      }
-    }
-    if (pooled.empty()) {
-      return 1.0;
-    }
-    double fdr = static_cast<double>(positives) /
-                 static_cast<double>(std::max<size_t>(1, pooled.size()));
-    return std::min(1.0, fdr);
-  };
-
-  auto prior_odds = std::log(config.presence_pi) -
-                    std::log1p(-config.presence_pi);
-  double tau = config.presence_tau;
-  for (const auto &[tid, stats] : summary.stats) {
-    double score = from_fixed(stats.score);
-    if (score <= 0.0) {
-      continue;
-    }
-    double q = decoy_q(score);
-    decision.qValues[tid] = q;
-    if (q <= 1e-9) {
-      q = 1e-9;
-    }
-    if (q >= 1.0) {
-      q = 1.0 - 1e-9;
-    }
-    double logPost = std::log(q) - std::log1p(-q) + prior_odds;
-    decision.logPosteriors[tid] = logPost;
-    double posterior = 0.5;
-    if (logPost >= 0.0) {
-      posterior = 1.0 / (1.0 + std::exp(-logPost));
-    } else {
-      double e = std::exp(logPost);
-      posterior = e / (1.0 + e);
-    }
-    decision.posteriors[tid] = posterior;
-    if (posterior >= tau) {
-      decision.accepted.insert(tid);
-    }
-  }
-  decision.acceptedCount = decision.accepted.size();
-  return decision;
 }
 
 PresenceFilterStats apply_presence_filter(const PresenceDecision &decision,
@@ -431,7 +336,7 @@ static PresenceDecision evaluate_presence_coverage_impl(
     return exposure;
   };
 
-  double mu = config.presence_noise;
+  double mu = 1e-4;
   double derived_u_min = 0.0;
   {
     std::vector<double> exposures;
@@ -547,39 +452,6 @@ static PresenceDecision evaluate_presence_coverage_impl(
               << std::endl;
   }
 
-  if (!(mu > 0.0)) {
-    double muAccum = 0.0;
-    double weightSum = 0.0;
-    size_t usable_taxa = 0;
-    for (const auto &[tid, stats] : summary.stats) {
-      double exposure = resolve_exposure(tid);
-      if (exposure <= 0.0) {
-        exposure = resolve_unique(tid);
-      }
-      if (exposure <= 0.0) {
-        exposure = std::max(1.0, from_fixed(stats.hits));
-      }
-      if (!stats.decoys.empty()) {
-        double decoyMean = 0.0;
-        for (uint64_t d : stats.decoys) {
-          decoyMean += from_fixed(d);
-        }
-        decoyMean /= static_cast<double>(stats.decoys.size());
-        double mu_j = decoyMean / exposure;
-        muAccum += mu_j * exposure;
-        weightSum += exposure;
-        ++usable_taxa;
-      }
-    }
-    if (config.verbose) {
-      std::cout << "presence mu-est: usable_taxa=" << usable_taxa
-                << ", weightSum=" << std::scientific << weightSum
-                << std::defaultfloat << std::endl;
-    }
-    if (weightSum > 0.0) {
-      mu = muAccum / weightSum;
-    }
-  }
   if (!(mu > 0.0)) {
     mu = 1e-4;
   }

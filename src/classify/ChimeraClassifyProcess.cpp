@@ -56,7 +56,7 @@ void processSequence(
     ClassifyConfig &config, const WeightingContext &weightCtx, GroupHeat &heat,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
-    PresenceAccumulator *presenceAcc, uint64_t decoySeed) {
+    PresenceAccumulator *presenceAcc) {
   size_t hashNum = hashs1.size();
   auto xor_reduce = [](const std::vector<uint64_t> &vals) {
     uint64_t acc = 0;
@@ -69,8 +69,6 @@ void processSequence(
   const size_t binNumAll = indexToTaxid.size();
   heat.ensure(binNumAll);
   const bool presenceEnabled = (presenceAcc != nullptr);
-  const size_t presenceDecoyReps =
-      presenceEnabled ? presenceAcc->decoyReps : 0;
   const uint32_t presenceSketchBits =
       presenceEnabled ? presenceAcc->sketchBits : 0;
   const bool presenceSketchPow2 =
@@ -648,15 +646,6 @@ void processSequence(
                                 localUniqueEdge, unique_bucket,
                                 breadth_bucket);
       }
-      if (presenceDecoyReps > 0 && deg_subset > 0) {
-        for (size_t rep = 0; rep < presenceDecoyReps; ++rep) {
-          uint64_t mix = splitmix64(
-              value ^ (static_cast<uint64_t>(rep + 1) << 17) ^ decoySeed);
-          size_t pick = static_cast<size_t>(mix % deg_subset);
-          uint32_t decoyTid = minimizerTids[pick];
-          presenceAcc->add_decoy(rep, decoyTid, score_weight);
-        }
-      }
     }
     if (uniqueEdge && !minimizerTids.empty()) {
       ++uniqueHits[minimizerTids.front()];
@@ -887,7 +876,7 @@ void processSequence(
 
   // --- EM 模式下的模糊保护 ---
   // 当使用 EM 时，如果 Top1/Top2 的分值比例不足 3 倍，视为不确定，让其进入 EM。
-  // 过低的比例容易被近缘物种或 decoy 抢占，需延后由 EM 全局推断。
+  // 过低的比例容易被近缘物种抢占，需延后由 EM 全局推断。
   if (config.em && best_ratio < 3.0) {
     highConfPre = false;
   }
@@ -1481,7 +1470,7 @@ void processBatch(
     std::vector<classifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
-    PresenceAccumulator *presenceAcc, uint64_t decoySeed) {
+    PresenceAccumulator *presenceAcc) {
   std::vector<uint64_t> hashs1;
   hashs1.reserve(2048);
   if (!batch.seqs2.empty()) {
@@ -1512,7 +1501,7 @@ void processBatch(
       }
       processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
                       weightCtx, heat, imcf, batch.ids[i], classifyResults,
-                      fileInfo, presenceAcc, decoySeed);
+                      fileInfo, presenceAcc);
     }
   } else {
     for (size_t i = 0; i < batch.seqs.size(); i++) {
@@ -1536,7 +1525,7 @@ void processBatch(
       }
       processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
                       weightCtx, heat, imcf, batch.ids[i], classifyResults,
-                      fileInfo, presenceAcc, decoySeed);
+                      fileInfo, presenceAcc);
     }
   }
 }
@@ -1550,8 +1539,7 @@ void classify_streaming(
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
     std::atomic<bool> &producer_done,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
-    const WeightingContext &weightCtx, PresenceSummary *presenceSummary,
-    uint64_t decoySeed) {
+    const WeightingContext &weightCtx, PresenceSummary *presenceSummary) {
 
 #pragma omp parallel
   {
@@ -1575,7 +1563,6 @@ void classify_streaming(
     GroupHeat heat;
     heat.ensure(indexToTaxid.size());
     PresenceAccumulator presenceLocal(
-        presenceSummary ? presenceSummary->decoyReps : 0,
         presenceSummary ? presenceSummary->sketchBits : 0);
     PresenceAccumulator *presencePtr =
         presenceSummary ? &presenceLocal : nullptr;
@@ -1584,7 +1571,7 @@ void classify_streaming(
       if (readQueue.try_dequeue(batch)) {
         processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
                      localClassifyResults, feature_params, feature_min_len,
-                     localFileInfo, heat, weightCtx, presencePtr, decoySeed);
+                     localFileInfo, heat, weightCtx, presencePtr);
         continue;
       }
       if (producer_done.load(std::memory_order_acquire)) {
@@ -1664,7 +1651,7 @@ void classify(
     while (readQueue.try_dequeue(batch)) {
       processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
                    localClassifyResults, feature_params, feature_min_len,
-                   localFileInfo, heat, weightCtx, nullptr, 0);
+                   localFileInfo, heat, weightCtx, nullptr);
     }
 #pragma omp critical
     {

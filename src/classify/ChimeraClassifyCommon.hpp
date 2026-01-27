@@ -576,35 +576,31 @@ struct PresenceStats {
   uint64_t uniqueHits{0};
   uint64_t readHits{0};
   uint64_t uniqueReads{0};
-  std::vector<uint64_t> decoys;
   std::vector<uint64_t> uniqueSketch;
   std::vector<uint64_t> breadthSketch;
 };
 
 struct PresenceAccumulator {
-  size_t decoyReps{0};
   uint32_t sketchBits{0};
   size_t sketchWords{0};
   robin_hood::unordered_flat_map<uint32_t, PresenceStats> stats;
 
-  explicit PresenceAccumulator(size_t reps = 0, uint32_t breadthBits = 0);
+  explicit PresenceAccumulator(uint32_t breadthBits = 0);
   PresenceStats &touch(uint32_t tid);
   void add_target(uint32_t tid, double hit_weight, double score_weight,
                   bool uniqueEdge, bool localUniqueEdge,
                   uint32_t unique_bucket,
                   uint32_t breadth_bucket);
   void add_read_support(uint32_t tid, bool uniqueRead);
-  void add_decoy(size_t rep, uint32_t tid, double weight);
   bool sketches_enabled() const { return sketchWords > 0; }
 };
 
 struct PresenceSummary {
-  size_t decoyReps{0};
   uint32_t sketchBits{0};
   size_t sketchWords{0};
   robin_hood::unordered_flat_map<uint32_t, PresenceStats> stats;
 
-  explicit PresenceSummary(size_t reps = 0, uint32_t breadthBits = 0);
+  explicit PresenceSummary(uint32_t breadthBits = 0);
   void merge(const PresenceAccumulator &acc);
 };
 
@@ -619,7 +615,6 @@ struct PresenceDecision {
   double priorPi{0.0};
   size_t tested{0};
   size_t acceptedCount{0};
-  size_t decoyPositives{0};
 };
 
 PresenceDecision evaluate_presence_coverage(
@@ -648,7 +643,7 @@ void processSequence(
     ClassifyConfig &config, const WeightingContext &weightCtx, GroupHeat &heat,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
-    PresenceAccumulator *presenceAcc, uint64_t decoySeed);
+    PresenceAccumulator *presenceAcc);
 
 void processBatch(
     batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
@@ -657,7 +652,7 @@ void processBatch(
     std::vector<classifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
-    PresenceAccumulator *presenceAcc, uint64_t decoySeed);
+    PresenceAccumulator *presenceAcc);
 
 void classify_streaming(
     ChimeraBuild::IMCFConfig &imcfConfig,
@@ -668,8 +663,7 @@ void classify_streaming(
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
     std::atomic<bool> &producer_done,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
-    const WeightingContext &weightCtx, PresenceSummary *presenceSummary,
-    uint64_t decoySeed);
+    const WeightingContext &weightCtx, PresenceSummary *presenceSummary);
 
 void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
