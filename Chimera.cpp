@@ -495,11 +495,6 @@ int main(int argc, char **argv) {
       ->check(CLI::Range(0.0, 10.0))
       ->default_val(1.0);
   classify
-      ->add_option("--em-coexist-penalty", classifyConfig.em_coexist_penalty,
-                   "Penalty when multiple taxa tie in EM (0 disables)")
-      ->check(CLI::Range(0.0, 1.0))
-      ->default_val(0.6);
-  classify
       ->add_option("--em-conf-power", classifyConfig.em_conf_power,
                    "Confidence exponent for EM M-step weighting (0 disables)")
       ->check(CLI::Range(0.0, 3.0))

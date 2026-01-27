@@ -101,7 +101,6 @@ namespace ChimeraClassify {
 		size_t emIter;
 	double em_prune_ratio = 2e-4;   // relative to max_expected in EM sparsity
 	double em_prior_strength = 1.0; // Dirichlet mass; 0 uses alpha only
-		double em_coexist_penalty = 0.6; // penalty for near-tied taxa in EM softmax
 	double em_conf_power = 2.0;     // confidence exponent for EM M-step (0 disables)
 	double post_thres = 0.56;
 	double post_pi_min = 5e-4;
@@ -170,7 +169,6 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Verbose:" << config.verbose << std::endl
 			<< std::setw(20) << "EM prune ratio:" << config.em_prune_ratio << std::endl
 			<< std::setw(20) << "EM prior strength:" << config.em_prior_strength << std::endl
-			<< std::setw(20) << "EM coexist penalty:" << config.em_coexist_penalty << std::endl
 			<< std::setw(20) << "EM conf power:" << config.em_conf_power << std::endl
 			<< std::setw(20) << "Hash sample min:" << config.hash_sample_min << std::endl
 			<< std::setw(20) << "Hash sample max:" << config.hash_sample_max << std::endl

@@ -762,7 +762,6 @@ void run(ClassifyConfig config) {
       EMOptions options;
       options.temp = 1.05;
       options.prior_strength = config.em_prior_strength;
-      options.coexist_penalty = config.em_coexist_penalty;
       options.prune_ratio = config.em_prune_ratio;
       options.conf_power = config.em_conf_power;
       auto [posterior, weights] = EMAlgorithm(
@@ -866,7 +865,6 @@ void run(ClassifyConfig config) {
       apply_low_div_overrides(config);
       std::cout << "[classify][auto] lowdiv=1 overrides: em_conf_power="
                 << config.em_conf_power
-                << " em_coexist_penalty=" << config.em_coexist_penalty
                 << " dump_post_topk=" << config.dump_post_topk << std::endl;
     } else {
       std::cout << "[classify][auto] lowdiv=0 use default classify config"
@@ -1146,7 +1144,6 @@ void run(ClassifyConfig config) {
     EMOptions options;
     options.temp = 1.05;
     options.prior_strength = config.em_prior_strength; // 可选先验强度，默认 0
-    options.coexist_penalty = config.em_coexist_penalty;
     options.prune_ratio = config.em_prune_ratio;
     options.conf_power = config.em_conf_power;
     auto [posterior, weights] =
