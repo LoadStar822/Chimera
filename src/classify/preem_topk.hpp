@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <string>
 #include <utility>
-#include <unordered_set>
 #include <vector>
 
 namespace ChimeraClassify {
@@ -73,92 +72,6 @@ inline PreemBetaRelaxDecision decide_preem_beta_relax(
     out.thr_final_used = thr_final_used;
   }
   return out;
-}
-
-inline void pad_preem_candidates(
-    std::vector<std::pair<std::string, double>> &items,
-    const std::vector<std::pair<std::string, double>> &ranked, size_t target) {
-  if (target == 0 || items.size() >= target || ranked.empty()) {
-    return;
-  }
-
-  std::unordered_set<std::string> seen;
-  seen.reserve(items.size() + 8);
-  for (const auto &kv : items) {
-    seen.insert(kv.first);
-  }
-
-  for (const auto &kv : ranked) {
-    if (items.size() >= target) {
-      break;
-    }
-    if (kv.first == "unclassified") {
-      continue;
-    }
-    if (!(kv.second > 0.0)) {
-      continue;
-    }
-    if (!seen.insert(kv.first).second) {
-      continue;
-    }
-    items.push_back(kv);
-  }
-}
-
-inline void ensure_preem_floor_candidates(
-    std::vector<std::pair<std::string, double>> &items,
-    const std::vector<std::pair<std::string, double>> &ranked,
-    size_t floor_k) {
-  pad_preem_candidates(items, ranked, floor_k);
-}
-
-struct PreemUnderfullFillResult {
-  bool applied{false};
-  size_t stage1_added{0};
-  size_t stage2_added{0};
-};
-
-inline PreemUnderfullFillResult fill_preem_candidates_underfull(
-    std::vector<std::pair<std::string, double>> &items,
-    const std::vector<std::pair<std::string, double>> &ranked_strict,
-    const std::vector<std::pair<std::string, double>> &ranked_loose,
-    size_t target, size_t stage2_cap) {
-  PreemUnderfullFillResult out;
-  if (target == 0 || items.size() >= target) {
-    return out;
-  }
-
-  const size_t before = items.size();
-  pad_preem_candidates(items, ranked_strict, target);
-  const size_t after_stage1 = items.size();
-  out.stage1_added = after_stage1 - before;
-
-  if (items.size() < target && stage2_cap > 0 && !ranked_loose.empty()) {
-    const size_t want = std::min(stage2_cap, ranked_loose.size());
-    std::vector<std::pair<std::string, double>> limited;
-    limited.reserve(want);
-    for (size_t i = 0; i < want; ++i) {
-      limited.push_back(ranked_loose[i]);
-    }
-    pad_preem_candidates(items, limited, target);
-  }
-  out.stage2_added = items.size() - after_stage1;
-  out.applied = (items.size() > before);
-  return out;
-}
-
-inline bool should_apply_preem_floor(double top1_score, double top2_score,
-                                     double min_ratio) {
-  if (!(top1_score > 0.0)) {
-    return false;
-  }
-  if (!(top2_score > 0.0)) {
-    return false;
-  }
-  if (!(min_ratio > 0.0)) {
-    return false;
-  }
-  return (top2_score / top1_score) >= min_ratio;
 }
 
 enum class KeepaliveResult {

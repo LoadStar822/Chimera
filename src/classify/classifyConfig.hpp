@@ -51,22 +51,12 @@ namespace ChimeraClassify {
 		double shotThreshold = 0.70;
 		double firstFilterBeta = 0.8;
 		bool firstFilterBeta_user = false; // set when user or auto-override explicitly chooses beta
-		// High-div / EM only: when pre-EM candidate list collapses to a singleton
-		// species (after strain collapse), keep a tiny floor of additional species
-		// candidates alive to avoid over-pruning sister species. This is NOT a
-		// pad-to-32 expansion.
-		uint32_t preem_floor_target = 4;           // target #non-unclassified species
-		double preem_floor_min_ratio = 0.20;       // trigger gate: top2/top1 >= ratio
-		double preem_floor_add_min_ratio = 0.10;   // add gate: cand_score >= top1*ratio
 		// High-div / EM only: fixed-budget keepalive (replace tail, no pad expansion).
 		// Protect a strong per-read hint candidate from being pruned out of the
 		// pre-EM topK, so the correct branch can enter EM/posterior lists.
 		double preem_keepalive_min_ratio = 0.20;      // require hint_score >= top1_score * ratio
 			double preem_keepalive_replace_ratio = 1.00;  // require hint_score >= tail_score * ratio
 		double preem_keepalive_abs_min = 2.0;         // absolute hint score floor
-		// High-div / EM only: underfull fixed-budget fill (no pad expansion).
-		// Disabled by default (can be enabled for experiments).
-		bool preem_underfull_fill = false;
 		// High-div / EM only: experimental beta gate relaxation (disabled by default).
 		bool preem_beta_relax = false;
 		// NCBI-only experimental knobs for strain/assembly saturation:
@@ -134,13 +124,9 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Taxonomy version:" << config.taxonomyVersion << std::endl
 			<< std::setw(20) << "Shot threshold:" << config.shotThreshold << std::endl
 			<< std::setw(20) << "First filter beta:" << config.firstFilterBeta << std::endl
-			<< std::setw(20) << "Pre-EM floor:" << config.preem_floor_target << std::endl
-			<< std::setw(20) << "Pre-EM floor min ratio:" << config.preem_floor_min_ratio << std::endl
-			<< std::setw(20) << "Pre-EM floor add ratio:" << config.preem_floor_add_min_ratio << std::endl
 			<< std::setw(20) << "Pre-EM keepalive min ratio:" << config.preem_keepalive_min_ratio << std::endl
 			<< std::setw(20) << "Pre-EM keepalive repl ratio:" << config.preem_keepalive_replace_ratio << std::endl
 			<< std::setw(20) << "Pre-EM keepalive abs min:" << config.preem_keepalive_abs_min << std::endl
-			<< std::setw(20) << "Pre-EM underfull fill:" << config.preem_underfull_fill << std::endl
 			<< std::setw(20) << "Pre-EM beta relax:" << config.preem_beta_relax << std::endl
 			<< std::setw(20) << "Collapse hits:" << config.collapse_strain_hits << std::endl
 			<< std::setw(20) << "Collapse cands:" << config.collapse_strain_candidates << std::endl
