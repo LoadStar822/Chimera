@@ -330,13 +330,6 @@ def parse_arguments():
         default=None,
         help="Dirichlet mass for abundance prior",
     )
-    classify_parser.add_argument(
-        "--em-coexist-penalty",
-        type=float,
-        default=None,
-        help="Penalty applied when reads have near-tied taxa",
-    )
-
     # Profile subcommand
     profile_parser = subparsers.add_parser("profile", help="Generate sequence profile")
     profile_parser.add_argument(

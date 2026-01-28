@@ -26,7 +26,6 @@ struct EMOptions {
 	double alpha = 1e-6;
 	double temp = 1.0;
 	double prior_strength = 0.0;
-	double coexist_penalty = 0.0;
 	double prune_ratio = 1e-3; // relative threshold to max_expected for sparsity
 	double conf_power = 0.0;   // confidence weighting exponent; 0 disables
 };
@@ -192,8 +191,6 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 
 				std::vector<std::pair<std::string, double>> candidates;
 				double max_count = 0.0;
-				double second_count = 0.0;
-				std::string best_taxid;
 				for (const auto& [taxid, count] : source.taxidCount) {
 					if (detail::is_unclassified(taxid)) {
 						continue;
@@ -201,11 +198,7 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 					double c = count / source.evaluated;
 					candidates.emplace_back(taxid, c);
 					if (c > max_count) {
-						second_count = max_count;
 						max_count = c;
-						best_taxid = taxid;
-					} else if (c > second_count) {
-						second_count = c;
 					}
 				}
 
@@ -217,14 +210,6 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 				if (denom <= 0.0) {
 					denom = options.eps * static_cast<double>(candidates.size());
 				}
-				double penalty_scale = 0.0;
-				if (options.coexist_penalty > 0.0 && second_count > 0.0) {
-					double ratio_est = max_count /
-					                 std::max(second_count, options.eps);
-					double tightness = std::clamp((1.5 - ratio_est) / 0.5, 0.0, 1.0);
-					penalty_scale = options.coexist_penalty * tightness;
-				}
-
 					std::vector<std::pair<std::string, double>> log_components;
 					log_components.reserve(candidates.size());
 				for (const auto& [taxid, c] : candidates) {
@@ -236,11 +221,7 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 					double log_likelihood = options.temp * std::log(std::max(likelihood, options.eps));
 					double prior = std::max(it->second, options.eps);
 					double log_prior = std::log(prior);
-					double coexist = 0.0;
-					if (!best_taxid.empty() && taxid != best_taxid) {
-						coexist = penalty_scale;
-					}
-					log_components.emplace_back(taxid, log_prior + log_likelihood - coexist);
+					log_components.emplace_back(taxid, log_prior + log_likelihood);
 				}
 
 				if (log_components.empty()) {
