@@ -1,5 +1,4 @@
 #include "ChimeraClassifyCommon.hpp"
-#include "preem_topk.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -958,11 +957,6 @@ void processSequence(
 
   const size_t thr_final_raw = thr_final;
   size_t thr_final_used = thr_final_raw;
-  bool preem_beta_relax_applied = false;
-  double preem_beta_local = beta;
-  size_t preem_n_strict = 0;
-  size_t preem_n_used = 0;
-
   if (highConfPre && bestTid < tax.id2str.size()) {
     double bestEvidence = std::clamp(best, 0.0, effCap);
     const std::string &taxid = tax.id2str[bestTid];
@@ -1037,51 +1031,6 @@ void processSequence(
         }
       }
 
-      // High-div / EM only: read-level pre-EM gate relaxation (fixed budget).
-      // Motivation: wrong reads often contain truth branch in tidScore(topN) but
-      // are pruned by thr_beta_eval/thr_final, leaving no chance for EM/post.
-      // Guard rails: do NOT pad candidates when relaxation is applied.
-      preem_n_strict = result.taxidCount.size();
-      preem_n_used = preem_n_strict;
-
-      constexpr size_t kPreemBetaRelaxDelta = 8;
-      constexpr double kPreemBetaRelaxEffEvalMin = 48.0;
-      if (config.preem_beta_relax && use_em && !config.low_div_active &&
-          !tidScore.empty()) {
-        const size_t thr_beta_eval_raw = std::min(thr_beta, thr_eval);
-      }
-      if (config.preem_beta_relax && use_em && !config.low_div_active &&
-          !beta_user &&
-          eff_eval >= kPreemBetaRelaxEffEvalMin) {
-        auto decision = decide_preem_beta_relax(
-            /*use_em=*/use_em, /*low_div_active=*/config.low_div_active,
-            /*beta_user=*/beta_user, /*base_beta=*/beta,
-            /*maxEvidence=*/maxEvidence, /*eff_eval=*/eff_eval,
-            /*best_ratio=*/best_ratio, /*unique_ratio=*/uniqueRatio,
-            /*n_strict=*/preem_n_strict,
-            /*thr_beta=*/thr_beta, /*thr_eval=*/thr_eval,
-            /*thr_min_eval=*/thr_min_eval, /*thr_final_raw=*/thr_final_raw,
-            /*delta=*/kPreemBetaRelaxDelta, /*eff_eval_min=*/kPreemBetaRelaxEffEvalMin);
-        if (decision.applied) {
-          preem_beta_relax_applied = true;
-          preem_beta_local = decision.beta_local;
-          thr_final_used = decision.thr_final_used;
-          // Rebuild candidate list using relaxed threshold.
-          result.taxidCount.clear();
-          for (const auto &[tid_id, rawScore] : tidScore) {
-            double countVal = std::clamp(rawScore, 0.0, effCap);
-            if (countVal >= static_cast<double>(thr_final_used)) {
-              const std::string &taxid = tax.id2str[tid_id];
-              result.taxidCount.emplace_back(taxid, countVal);
-              if (tid_id == bestTid) {
-                maxCount = std::make_pair(taxid, countVal);
-                maxCountValid = true;
-              }
-            }
-          }
-          preem_n_used = result.taxidCount.size();
-        }
-      }
     }
   }
 

@@ -51,8 +51,6 @@ namespace ChimeraClassify {
 		double shotThreshold = 0.70;
 		double firstFilterBeta = 0.8;
 		bool firstFilterBeta_user = false; // set when user or auto-override explicitly chooses beta
-		// High-div / EM only: experimental beta gate relaxation (disabled by default).
-		bool preem_beta_relax = false;
 		// NCBI-only experimental knobs for strain/assembly saturation:
 		// - collapse_strain_hits: collapse per-hash hit lists to 1 representative taxid per species
 		//   (affects scoring/deg on the hot path; can change behavior).
@@ -113,7 +111,6 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Taxonomy version:" << config.taxonomyVersion << std::endl
 			<< std::setw(20) << "Shot threshold:" << config.shotThreshold << std::endl
 			<< std::setw(20) << "First filter beta:" << config.firstFilterBeta << std::endl
-			<< std::setw(20) << "Pre-EM beta relax:" << config.preem_beta_relax << std::endl
 			<< std::setw(20) << "Collapse hits:" << config.collapse_strain_hits << std::endl
 			<< std::setw(20) << "Collapse cands:" << config.collapse_strain_candidates << std::endl
 			<< std::setw(20) << "Presence pi:" << config.presence_pi << std::endl
