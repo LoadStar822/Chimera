@@ -70,7 +70,7 @@ namespace ChimeraClassify {
 	double em_prune_ratio = 2e-4;   // relative to max_expected in EM sparsity
 	// em_prior_strength removed (Dirichlet prior disabled)
 	double em_conf_power = 2.0;     // confidence exponent for EM M-step (0 disables)
-	double post_thres = 0.56;
+	// post_thres removed (posterior threshold fixed internally)
 	double post_pi_min = 5e-4;
 	// postEmDecision posterior tail controls (affect taxidCount sparsity; not POST_TOPK dump)
 	uint32_t dump_post_topk = 256; // 输出 POST_TOPK=...（用于 profile 侧属内纠错）
@@ -124,7 +124,6 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Hash sample min:" << config.hash_sample_min << std::endl
 			<< std::setw(20) << "Hash sample max:" << config.hash_sample_max << std::endl
 			<< std::setw(20) << "IDF max:" << config.idf_max << std::endl
-			<< std::setw(20) << "Posterior thres:" << config.post_thres << std::endl
 			<< std::setw(20) << "Posterior pi min:" << config.post_pi_min << std::endl
 			<< std::setw(20) << "Dump POST_TOPK:" << config.dump_post_topk << std::endl;
 		os << std::string(40, '=') << std::endl;

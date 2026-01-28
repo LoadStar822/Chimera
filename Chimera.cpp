@@ -490,10 +490,6 @@ int main(int argc, char **argv) {
       ->check(CLI::Range(1.0, 50.0))
       ->default_val(8.0);
   classify
-      ->add_option("--post-thres", classifyConfig.post_thres,
-                   "Posterior acceptance threshold")
-      ->default_val(0.56);
-  classify
       ->add_option("--post-pi-min", classifyConfig.post_pi_min,
                    "Minimum global class weight")
       ->default_val(5e-4);

@@ -1095,7 +1095,6 @@ void run(ClassifyConfig config) {
 	  }
 		  if (posteriorModelUsed) {
 		    DecisionConfig decisionConfig;
-		    decisionConfig.posterior_threshold = config.post_thres;
 		    // Auto-tune post_pi_min for high-diversity samples:
 		    // a fixed global pi cut (e.g., 5e-4) can hard-kill low-abundance true taxa,
 		    // causing massive unclassified reads on datasets like CAMI-long/short.
