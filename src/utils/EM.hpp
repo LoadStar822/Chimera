@@ -61,6 +61,7 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 	const EMOptions& options,
 	const std::unordered_map<std::string, double>* prior_scale = nullptr) {
 	std::vector<classifyResult> results = input;
+	(void)tol;
 	std::unordered_set<std::string> taxid_set;
 	for (const auto& record : results) {
 		for (const auto& [taxid, count] : record.taxidCount) {
@@ -310,7 +311,6 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 		}
 		double prune_thres = max_expected * options.prune_ratio; // 低于主导物种一定比例的视为噪声
 
-		double diff = 0.0;
 		for (const auto& taxid : taxid_list) {
 			double expected = 0.0;
 			auto it = expected_counts.find(taxid);
@@ -324,12 +324,7 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 			                             ? prior_mass * abundance_prior[taxid]
 			                             : options.alpha;
 			double updated = (expected + prior_component) / denominator;
-			diff += std::abs(pi[taxid] - updated);
 			pi[taxid] = updated;
-		}
-
-		if (diff < tol) {
-			break;
 		}
 
 		++iteration;

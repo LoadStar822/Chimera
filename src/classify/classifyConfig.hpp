@@ -65,10 +65,8 @@ namespace ChimeraClassify {
 			bool verbose = true;
 			size_t batchSize;
 	bool em = true;
-		double emThreshold;
 		size_t emIter;
 	double em_prune_ratio = 2e-4;   // relative to max_expected in EM sparsity
-	// em_prior_strength removed (Dirichlet prior disabled)
 	double em_conf_power = 2.0;     // confidence exponent for EM M-step (0 disables)
 		double post_pi_min = 5e-4;
 	// postEmDecision posterior tail controls (affect taxidCount sparsity; not POST_TOPK dump)

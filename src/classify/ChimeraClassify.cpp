@@ -698,8 +698,8 @@ void run(ClassifyConfig config) {
       options.temp = 1.05;
       options.prune_ratio = config.em_prune_ratio;
       options.conf_power = config.em_conf_power;
-      auto [posterior, weights] = EMAlgorithm(
-          probeResults, config.emIter, config.emThreshold, options, nullptr);
+      auto [posterior, weights] =
+          EMAlgorithm(probeResults, config.emIter, 0.0, options, nullptr);
       probeResults = std::move(posterior);
       probe_em = true;
     }
@@ -1080,7 +1080,7 @@ void run(ClassifyConfig config) {
     options.prune_ratio = config.em_prune_ratio;
     options.conf_power = config.em_conf_power;
     auto [posterior, weights] =
-        EMAlgorithm(classifyResults, config.emIter, config.emThreshold, options,
+        EMAlgorithm(classifyResults, config.emIter, 0.0, options,
                     emPriorScale.empty() ? nullptr : &emPriorScale);
     classifyResults = std::move(posterior);
     classWeights = std::move(weights);

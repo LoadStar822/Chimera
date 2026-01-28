@@ -459,9 +459,6 @@ int main(int argc, char **argv) {
       classify->add_flag("--no-em", classifyNoEm, "Disable EM mode");
   noEmFlag->excludes(emFlag);
   emFlag->excludes(noEmFlag);
-  classify
-      ->add_option("--em-threshold", classifyConfig.emThreshold, "EM threshold")
-      ->default_val(1e-4);
   classify->add_option("--em-iter", classifyConfig.emIter, "EM iteration")
       ->default_val(100);
   classify

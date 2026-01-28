@@ -59,6 +59,7 @@ VEMAlgorithm(const std::vector<classifyResult>& input,
 	const VEMOptions& options,
 	const std::unordered_map<std::string, double>* prior_scale = nullptr) {
 	std::vector<classifyResult> results = input;
+	(void)tol;
 	std::unordered_set<std::string> taxid_set;
 	for (const auto& record : results) {
 		for (const auto& [taxid, count] : record.taxidCount) {
@@ -271,7 +272,6 @@ VEMAlgorithm(const std::vector<classifyResult>& input,
 			denominator = 1.0;
 		}
 
-		double diff = 0.0;
 		for (const auto& taxid : taxid_list) {
 			double expected = 0.0;
 			auto it = expected_counts.find(taxid);
@@ -282,12 +282,7 @@ VEMAlgorithm(const std::vector<classifyResult>& input,
 			                             ? prior_mass * abundance_prior[taxid]
 			                             : options.alpha;
 			double updated = (expected + prior_component) / denominator;
-			diff += std::abs(pi[taxid] - updated);
 			pi[taxid] = updated;
-		}
-
-		if (diff < tol) {
-			break;
 		}
 
 		++iteration;
