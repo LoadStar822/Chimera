@@ -1069,16 +1069,6 @@ void postEmDecision(
         total_evidence = 1.0;
       }
 
-      // Winner-take-all for high-confidence reads to suppress long-tail spillover.
-      constexpr double kPosteriorGapWTA = 0.15;
-      if ((gate_top_score - gate_second_score) >= kPosteriorGapWTA) {
-        double fallback =
-            static_cast<double>(std::max<double>(1.0, std::llround(total_evidence)));
-        result.taxidCount.emplace_back(top.first, fallback);
-        result.reject_reason.clear();
-        continue;
-      }
-	
 	      auto eligible = [&](const std::string &taxid, double post) -> bool {
 	        if (!(post > 0.0)) {
 	          return false;
