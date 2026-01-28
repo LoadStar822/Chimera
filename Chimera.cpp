@@ -470,11 +470,6 @@ int main(int argc, char **argv) {
       ->check(CLI::Range(1e-6, 1.0))
       ->default_val(2e-4);
   classify
-      ->add_option("--em-prior-strength", classifyConfig.em_prior_strength,
-                   "Dirichlet prior strength (pseudo-count mass); 0 uses alpha only")
-      ->check(CLI::Range(0.0, 10.0))
-      ->default_val(1.0);
-  classify
       ->add_option("--em-conf-power", classifyConfig.em_conf_power,
                    "Confidence exponent for EM M-step weighting (0 disables)")
       ->check(CLI::Range(0.0, 3.0))

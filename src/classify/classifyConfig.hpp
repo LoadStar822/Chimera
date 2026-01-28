@@ -68,12 +68,11 @@ namespace ChimeraClassify {
 		double emThreshold;
 		size_t emIter;
 	double em_prune_ratio = 2e-4;   // relative to max_expected in EM sparsity
-	double em_prior_strength = 1.0; // Dirichlet mass; 0 uses alpha only
+	// em_prior_strength removed (Dirichlet prior disabled)
 	double em_conf_power = 2.0;     // confidence exponent for EM M-step (0 disables)
 	double post_thres = 0.56;
 	double post_pi_min = 5e-4;
 	// postEmDecision posterior tail controls (affect taxidCount sparsity; not POST_TOPK dump)
-	double post_min_fraction = 0.01; // per-read posterior fraction cutoff (0 disables)
 	uint32_t dump_post_topk = 256; // 输出 POST_TOPK=...（用于 profile 侧属内纠错）
 	bool low_div_auto = true;       // internal: auto low-diversity branch
 	bool low_div_active = false;    // internal: set when low-div branch is enabled
@@ -121,14 +120,12 @@ namespace ChimeraClassify {
 			<< std::setw(20) << "Threads:" << config.threads << std::endl
 			<< std::setw(20) << "Verbose:" << config.verbose << std::endl
 			<< std::setw(20) << "EM prune ratio:" << config.em_prune_ratio << std::endl
-			<< std::setw(20) << "EM prior strength:" << config.em_prior_strength << std::endl
 			<< std::setw(20) << "EM conf power:" << config.em_conf_power << std::endl
 			<< std::setw(20) << "Hash sample min:" << config.hash_sample_min << std::endl
 			<< std::setw(20) << "Hash sample max:" << config.hash_sample_max << std::endl
 			<< std::setw(20) << "IDF max:" << config.idf_max << std::endl
 			<< std::setw(20) << "Posterior thres:" << config.post_thres << std::endl
 			<< std::setw(20) << "Posterior pi min:" << config.post_pi_min << std::endl
-			<< std::setw(20) << "Post min frac:" << config.post_min_fraction << std::endl
 			<< std::setw(20) << "Dump POST_TOPK:" << config.dump_post_topk << std::endl;
 		os << std::string(40, '=') << std::endl;
 
@@ -172,7 +169,6 @@ namespace ChimeraClassify {
 			struct DecisionConfig {
 				double posterior_threshold = 0.56;
 				double min_class_weight = 1e-4;
-				double posterior_min_fraction = 0.01; // 软分配时的最小 posterior 占比阈值
 				double posterior_head_mass = 0.95;   // 每条 read 只保留 posterior^alpha 的头部质量（抑制长尾）
 				uint32_t posterior_max_taxa = 8;     // 每条 read 最多输出的 taxon 数（抑制长尾）
 				bool allow_fallback_on_reject = false; // 高多样性：放宽拒绝，减少 unclassified

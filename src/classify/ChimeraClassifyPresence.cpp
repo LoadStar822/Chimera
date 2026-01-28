@@ -1127,9 +1127,6 @@ void postEmDecision(
 	        if (!(post > 0.0)) {
 	          return false;
 	        }
-	        if (post < decisionConfig.posterior_min_fraction) {
-	          return false;
-	        }
 	        if (taxid != top.first &&
 	            presence_level(taxid) == PresenceLevel::kRejected) {
 	          return false;

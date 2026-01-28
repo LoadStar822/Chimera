@@ -696,7 +696,6 @@ void run(ClassifyConfig config) {
     if (config.em && !probeResults.empty()) {
       EMOptions options;
       options.temp = 1.05;
-      options.prior_strength = config.em_prior_strength;
       options.prune_ratio = config.em_prune_ratio;
       options.conf_power = config.em_conf_power;
       auto [posterior, weights] = EMAlgorithm(
@@ -1078,7 +1077,6 @@ void run(ClassifyConfig config) {
     std::cout << "Running EM algorithm..." << std::endl;
     EMOptions options;
     options.temp = 1.05;
-    options.prior_strength = config.em_prior_strength; // 可选先验强度，默认 0
     options.prune_ratio = config.em_prune_ratio;
     options.conf_power = config.em_conf_power;
     auto [posterior, weights] =
@@ -1248,7 +1246,6 @@ void run(ClassifyConfig config) {
 		    // - They govern how much posterior mass is allowed to fan out into multiple
 		    //   taxids for *taxidCount* (abundance/presence is very sensitive).
 		    // - POST_TOPK dump uses the pruned+renormalized posterior view (same as decision).
-	    decisionConfig.posterior_min_fraction = config.post_min_fraction;
 
 	    // Default/auto behavior: when we relax global pi to recover recall in
 	    // high-diversity samples, tighten per-read tail allocation to avoid
@@ -1264,8 +1261,7 @@ void run(ClassifyConfig config) {
 		    decisionConfig.allow_fallback_on_reject = !config.low_div_active;
 
 		    if (config.verbose) {
-		      std::cout << "PostEM tail: min_fraction=" << decisionConfig.posterior_min_fraction
-		                << " head_mass=" << decisionConfig.posterior_head_mass
+		      std::cout << "PostEM tail: head_mass=" << decisionConfig.posterior_head_mass
 		                << " max_taxa=" << decisionConfig.posterior_max_taxa
 		                << " fallback_on_reject=" << (decisionConfig.allow_fallback_on_reject ? 1 : 0)
 		                << " fallback_gap_min=" << decisionConfig.fallback_gap_min
