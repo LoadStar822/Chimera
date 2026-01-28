@@ -978,24 +978,6 @@ void postEmDecision(
 	      result.presence_passed = true;
 	    }
 
-    double dyn_post = decisionConfig.posterior_threshold;
-    double evalWeight = result.evaluated;
-    if (evalWeight < 24.0) {
-      dyn_post = std::max(dyn_post, 0.60);
-    } else if (evalWeight < 48.0) {
-      dyn_post = std::max(dyn_post, 0.56);
-    } else {
-      dyn_post = std::max(dyn_post, 0.52);
-    }
-    if (top_presence == PresenceLevel::kRejected) {
-      dyn_post = std::max(dyn_post,
-                          decisionConfig.posterior_threshold + kRejectDynPostBoost);
-    }
-    if (result.presence_passed) {
-      dyn_post = std::max(0.40, dyn_post - 0.10);
-    } else {
-      dyn_post = std::max(0.45, dyn_post);
-    }
     double class_weight = 0.0;
     bool weight_ok = true;
     if (!classWeights.empty()) {
@@ -1013,30 +995,10 @@ void postEmDecision(
 	            rej_stats.applied_gate += 1;
 	          }
 	        }
-	        // Soft gate: when the read-level posterior is very confident and well-separated,
-	        // allow a lower global pi threshold to avoid rejecting low-abundance true taxa.
-	        // This is intentionally conservative (needs both high posterior and a clear gap).
-	        if (result.presence_passed && top_presence != PresenceLevel::kRejected &&
-	            pi_min > 0.0 && gate_top_score > dyn_post && dyn_post < 0.999) {
-	          auto clamp01 = [](double x) {
-	            return std::max(0.0, std::min(1.0, x));
-	          };
-	          double soft =
-	              clamp01((gate_top_score - dyn_post) / (1.0 - dyn_post));
-	          double gap = gate_top_score - gate_second_score;
-	          double gap_factor = clamp01(gap / 0.20);
-	          soft *= gap_factor;
-	          // emphasize only very confident cases
-	          soft *= soft;
-          // do not relax all the way down to presence floor unless presence already passed
-          constexpr double kSoftPiFloor = 1e-5;
-          const double floor = std::max(kPresencePiFloor, kSoftPiFloor);
-          pi_min = (1.0 - soft) * pi_min + soft * floor;
-        }
-	        weight_ok = (class_weight >= pi_min);
-	      }
-	    }
-		    bool pass = weight_ok && (gate_top_score >= dyn_post);
+        weight_ok = (class_weight >= pi_min);
+      }
+    }
+    bool pass = weight_ok;
 
 		    if (pass) {
 		      selrej_fulln_stats.checks += 1;
