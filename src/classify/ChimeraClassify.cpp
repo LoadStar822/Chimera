@@ -1249,12 +1249,8 @@ void run(ClassifyConfig config) {
 	    // Default/auto behavior: when we relax global pi to recover recall in
 	    // high-diversity samples, tighten per-read tail allocation to avoid
 	    // exploding the number of tiny non-zero taxa.
-	    double auto_head_mass = 0.95;
-	    uint32_t auto_max_taxa = 8;
-	    if (tuned_post_pi_min > 0.0 && tuned_post_pi_min < config.post_pi_min) {
-	      auto_head_mass = 0.90;
-	      auto_max_taxa = 5;
-	    }
+    double auto_head_mass = 0.95;
+    uint32_t auto_max_taxa = 8;
 		    decisionConfig.posterior_head_mass = auto_head_mass;
 		    decisionConfig.posterior_max_taxa = auto_max_taxa;
 		    decisionConfig.allow_fallback_on_reject = !config.low_div_active;
