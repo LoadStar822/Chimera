@@ -758,28 +758,7 @@ void postEmDecision(
 		  };
 		  PruneAuditStats prune_stats;
 
-			  struct RejectOverrideStats {
-			    size_t checks{0};
-			    size_t applied_gate{0};
-			    size_t blocked_low_weight{0};
-			    size_t blocked_cap{0};
-			    size_t blocked_low_margin{0};
-			    size_t margin_lt_0{0};
-			    size_t margin_0_to_ln2{0};
-			    size_t margin_ge_ln2{0};
-			    size_t applied_margin_lt_0{0};
-			    size_t applied_margin_0_to_ln2{0};
-			    size_t applied_margin_ge_ln2{0};
-			    std::vector<double> fullpost_applied;
-			    std::vector<double> gap_applied;
-			    std::vector<double> pruned1_prob_full_applied;
-			    std::vector<double> w_over_pi_prune_applied;
-			    std::vector<double> log_odds_vals;
-			    std::vector<double> log_penalty_vals;
-			    std::vector<double> margin_vals;
-			  };
-			  RejectOverrideStats rej_stats;
-			  size_t prior_clipping_applied_total{0};
+  size_t prior_clipping_applied_total{0};
 
 	  auto parse_u32 = [](const std::string &s, uint32_t &out) -> bool {
 	    if (s.empty()) {
@@ -861,83 +840,6 @@ void postEmDecision(
 	      }
 		    }
 	
-		    double reject_override_floor = 0.0;
-		    bool reject_override_active = false;
-		    if (prune_active_sample && decisionConfig.allow_fallback_on_reject &&
-		        pruned.audit.top1_removed && full_top1_presence == PresenceLevel::kRejected) {
-		      rej_stats.checks += 1;
-		      const double pi_prune = std::min(decisionConfig.min_class_weight, 1e-4);
-		      if (pi_prune > 0.0) {
-		        const std::string &pruned_top1_taxid = posterior.front().first;
-		        double pruned1_prob_full = 0.0;
-		        for (size_t i = 0; i < posterior_full.size() && i < 64; ++i) {
-		          const auto &kv = posterior_full[i];
-		          if (kv.first == pruned_top1_taxid) {
-		            pruned1_prob_full = kv.second;
-		            break;
-		          }
-		        }
-	
-		        const double alt_prob = std::max({pruned1_prob_full, full_p2, pi_prune});
-			        // Evidence margin should be computed against the binding constraint.
-			        // In this top1_removed + rejected-top1 path, the binding constraint is
-			        // the prune threshold; the weight-gate penalty is handled by clipping
-			        // thresholds down to w(t) when applying the override.
-			        const double pi_min = pi_prune * kRejectFactor;
-	
-		        const double margin =
-		            (full_top1_weight > 0.0)
-		                ? compute_margin(full_p1, alt_prob, pi_min, full_top1_weight, 0.0)
-		                : -std::numeric_limits<double>::infinity();
-		        if (full_top1_weight > 0.0) {
-		          rej_stats.log_odds_vals.push_back(safe_log(full_p1 / alt_prob));
-		          rej_stats.log_penalty_vals.push_back(
-		              safe_log(pi_min / full_top1_weight));
-		        }
-		        rej_stats.margin_vals.push_back(margin);
-		        if (!(margin >= 0.0)) {
-		          rej_stats.margin_lt_0 += 1;
-		        } else if (margin < kPriorClippingLn2) {
-		          rej_stats.margin_0_to_ln2 += 1;
-		        } else {
-		          rej_stats.margin_ge_ln2 += 1;
-		        }
-	
-		        if (!(full_top1_weight > 0.0)) {
-		          rej_stats.blocked_low_weight += 1;
-		        } else if (margin < kPriorClippingTau) {
-		          rej_stats.blocked_low_margin += 1;
-		        } else if (prior_clipping_applied_total >= kPriorClippingCap) {
-		          rej_stats.blocked_cap += 1;
-		        } else {
-		          // Prior clipping: lower the per-read reject thresholds just enough
-		          // to let this (strong-evidence) rejected top1 survive both prune
-		          // and the weight gate (without changing candidate sets upstream).
-		          reject_override_floor = full_top1_weight;
-		          PostEmPruneTop1Override top1_override;
-		          top1_override.taxid = full_top1_taxid;
-		          top1_override.local_pi_min_floor = reject_override_floor;
-		          top1_override.active = true;
-		          auto pruned_override = prune_post_em_posterior(
-		              posterior_full, decisionConfig.min_class_weight, classWeights,
-		              presence_level, kPresencePiFloor, kRejectFactor, &top1_override);
-		          posterior = std::move(pruned_override.posterior);
-		          reject_override_active = true;
-		          prior_clipping_applied_total += 1;
-		          rej_stats.fullpost_applied.push_back(full_p1);
-		          rej_stats.gap_applied.push_back(full_gap);
-		          rej_stats.pruned1_prob_full_applied.push_back(pruned1_prob_full);
-		          rej_stats.w_over_pi_prune_applied.push_back(full_top1_weight / pi_prune);
-		          if (!(margin >= 0.0)) {
-		            rej_stats.applied_margin_lt_0 += 1;
-		          } else if (margin < kPriorClippingLn2) {
-		            rej_stats.applied_margin_0_to_ln2 += 1;
-		          } else {
-		            rej_stats.applied_margin_ge_ln2 += 1;
-		          }
-		        }
-		      }
-		    }
 
 	    // Ensure POST_TOPK uses the same (pruned/renormalized) posterior view as the
 	    // final decision logic. This reduces long-tail noise in low-diversity
@@ -989,11 +891,6 @@ void postEmDecision(
           pi_min = std::min(pi_min, kPresencePiFloor);
 	        } else if (top_presence == PresenceLevel::kRejected) {
 	          pi_min = std::min(1.0, pi_min * kRejectFactor);
-	          if (reject_override_active && top.first == full_top1_taxid &&
-	              reject_override_floor > 0.0 && class_weight >= reject_override_floor) {
-	            pi_min = std::min(pi_min, reject_override_floor);
-	            rej_stats.applied_gate += 1;
-	          }
 	        }
         weight_ok = (class_weight >= pi_min);
       }
@@ -1433,57 +1330,6 @@ void postEmDecision(
 	              << std::endl;
 	  }
 
-	  if (prune_active_sample && prune_stats.reads_total > 0) {
-	    auto q = [](std::vector<double> vals, double p) -> double {
-	      if (vals.empty()) {
-	        return 0.0;
-	      }
-	      p = std::max(0.0, std::min(1.0, p));
-	      const size_t idx = static_cast<size_t>(
-	          std::floor(p * static_cast<double>(vals.size() - 1)));
-	      std::nth_element(vals.begin(),
-	                       vals.begin() + static_cast<std::ptrdiff_t>(idx),
-	                       vals.end());
-	      return vals[idx];
-	    };
-
-		    std::cout << "PostEM reject override: checks=" << rej_stats.checks
-		              << ", applied_prune=" << rej_stats.fullpost_applied.size()
-		              << ", applied_gate=" << rej_stats.applied_gate
-		              << ", tau=" << format_val(kPriorClippingTau)
-		              << ", cap=" << kPriorClippingCap
-		              << ", M_bins(<0/0_ln2/>=ln2)=" << rej_stats.margin_lt_0 << '/'
-		              << rej_stats.margin_0_to_ln2 << '/' << rej_stats.margin_ge_ln2
-		              << ", applied_M_bins(<0/0_ln2/>=ln2)="
-		              << rej_stats.applied_margin_lt_0 << '/'
-		              << rej_stats.applied_margin_0_to_ln2 << '/'
-		              << rej_stats.applied_margin_ge_ln2
-		              << ", blocked_low_weight=" << rej_stats.blocked_low_weight
-		              << ", blocked_cap=" << rej_stats.blocked_cap
-		              << ", blocked_low_margin=" << rej_stats.blocked_low_margin
-		              << ", fullpost(p50/p90)="
-		              << format_val(q(rej_stats.fullpost_applied, 0.50)) << '/'
-		              << format_val(q(rej_stats.fullpost_applied, 0.90))
-		              << ", gap(p50/p90)=" << format_val(q(rej_stats.gap_applied, 0.50))
-		              << '/' << format_val(q(rej_stats.gap_applied, 0.90))
-		              << ", pruned1_prob_full(p50/p90)="
-		              << format_val(q(rej_stats.pruned1_prob_full_applied, 0.50))
-		              << '/'
-		              << format_val(q(rej_stats.pruned1_prob_full_applied, 0.90))
-		              << ", w_over_pi_prune(p50/p90)="
-		              << format_val(q(rej_stats.w_over_pi_prune_applied, 0.50)) << '/'
-		              << format_val(q(rej_stats.w_over_pi_prune_applied, 0.90))
-		              << ", log_odds(p50/p90)="
-		              << format_val(q(rej_stats.log_odds_vals, 0.50)) << '/'
-		              << format_val(q(rej_stats.log_odds_vals, 0.90))
-		              << ", log_penalty(p50/p90)="
-		              << format_val(q(rej_stats.log_penalty_vals, 0.50)) << '/'
-		              << format_val(q(rej_stats.log_penalty_vals, 0.90))
-		              << ", margin(p50/p90)="
-		              << format_val(q(rej_stats.margin_vals, 0.50)) << '/'
-		              << format_val(q(rej_stats.margin_vals, 0.90))
-		              << std::endl;
-		  }
 
 				}
 
