@@ -1240,28 +1240,15 @@ void run(ClassifyConfig config) {
 		      std::cout.precision(oldPrecision);
 		    }
 		
-		    decisionConfig.min_class_weight = tuned_post_pi_min;
-		    // postEmDecision tail controls:
-		    // - They govern how much posterior mass is allowed to fan out into multiple
-		    //   taxids for *taxidCount* (abundance/presence is very sensitive).
-		    // - POST_TOPK dump uses the pruned+renormalized posterior view (same as decision).
+    decisionConfig.min_class_weight = tuned_post_pi_min;
+    decisionConfig.allow_fallback_on_reject = !config.low_div_active;
 
-	    // Default/auto behavior: when we relax global pi to recover recall in
-	    // high-diversity samples, tighten per-read tail allocation to avoid
-	    // exploding the number of tiny non-zero taxa.
-    double auto_head_mass = 0.95;
-    uint32_t auto_max_taxa = 8;
-		    decisionConfig.posterior_head_mass = auto_head_mass;
-		    decisionConfig.posterior_max_taxa = auto_max_taxa;
-		    decisionConfig.allow_fallback_on_reject = !config.low_div_active;
-
-		    if (config.verbose) {
-		      std::cout << "PostEM tail: head_mass=" << decisionConfig.posterior_head_mass
-		                << " max_taxa=" << decisionConfig.posterior_max_taxa
-		                << " fallback_on_reject=" << (decisionConfig.allow_fallback_on_reject ? 1 : 0)
-		                << " fallback_gap_min=" << decisionConfig.fallback_gap_min
-		                << std::endl;
-		    }
+    if (config.verbose) {
+      std::cout << "PostEM decision: fallback_on_reject="
+                << (decisionConfig.allow_fallback_on_reject ? 1 : 0)
+                << " fallback_gap_min=" << decisionConfig.fallback_gap_min
+                << std::endl;
+    }
 
     postEmDecision(classifyResults, decisionConfig, classWeights, tax,
                    &presenceDecision, weightCtx.ncbiTaxdump, fileInfo.avgLen);

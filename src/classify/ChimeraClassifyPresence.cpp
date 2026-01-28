@@ -1069,21 +1069,15 @@ void postEmDecision(
         total_evidence = 1.0;
       }
 
-      double head_mass = decisionConfig.posterior_head_mass;
-	      if (!(head_mass > 0.0 && head_mass <= 1.0)) {
-	        head_mass = 0.95;
-	      }
-	      size_t max_taxa = static_cast<size_t>(decisionConfig.posterior_max_taxa);
-	      if (max_taxa < 1) {
-	        max_taxa = 1;
-	      }
-
-		      // Winner-take-all for high-confidence reads to suppress long-tail spillover.
-		      constexpr double kPosteriorGapWTA = 0.15;
-		      if ((gate_top_score - gate_second_score) >= kPosteriorGapWTA) {
-		        head_mass = 1.0;
-		        max_taxa = 1;
-		      }
+      // Winner-take-all for high-confidence reads to suppress long-tail spillover.
+      constexpr double kPosteriorGapWTA = 0.15;
+      if ((gate_top_score - gate_second_score) >= kPosteriorGapWTA) {
+        double fallback =
+            static_cast<double>(std::max<double>(1.0, std::llround(total_evidence)));
+        result.taxidCount.emplace_back(top.first, fallback);
+        result.reject_reason.clear();
+        continue;
+      }
 	
 	      auto eligible = [&](const std::string &taxid, double post) -> bool {
 	        if (!(post > 0.0)) {
@@ -1114,57 +1108,20 @@ void postEmDecision(
 	        continue;
 	      }
 	
-	      // Per-read posterior head truncation:
-	      // keep only the top taxa covering `head_mass` of sum(post^alpha),
-	      // and at most `max_taxa` taxa, to suppress long-tail non-zero outputs.
-	      double sum_adj_kept = 0.0;
-	      double cum_adj = 0.0;
-	      size_t kept = 0;
-	      for (const auto &kv : posterior) {
-	        const std::string &taxid = kv.first;
-	        double post = kv.second;
-	        if (!eligible(taxid, post)) {
-	          continue;
-	        }
+      for (const auto &kv : posterior) {
+        const std::string &taxid = kv.first;
+        double post = kv.second;
+        if (!eligible(taxid, post)) {
+          continue;
+        }
         double adj = post;
-	        cum_adj += adj;
-	        sum_adj_kept += adj;
-	        kept += 1;
-	        if (kept >= max_taxa || cum_adj >= head_mass * sum_adj_total) {
-	          break;
-	        }
-	      }
-	      if (sum_adj_kept <= 0.0) {
-	        double fallback =
-	            static_cast<double>(std::max<double>(1.0, std::llround(total_evidence)));
-	        result.taxidCount.emplace_back(top.first, fallback);
-	        result.reject_reason.clear();
-	        continue;
-	      }
-	
-	      cum_adj = 0.0;
-	      kept = 0;
-	      for (const auto &kv : posterior) {
-	        const std::string &taxid = kv.first;
-	        double post = kv.second;
-	        if (!eligible(taxid, post)) {
-	          continue;
-	        }
-        double adj = post;
-	        cum_adj += adj;
-	        kept += 1;
-	
-	        double weight = adj / sum_adj_kept;
-	        double frac = weight * total_evidence;
-	        double count_val = static_cast<double>(std::llround(frac));
-	        if (count_val > 0.0) {
-	          result.taxidCount.emplace_back(taxid, count_val);
-	        }
-	
-	        if (kept >= max_taxa || cum_adj >= head_mass * sum_adj_total) {
-	          break;
-	        }
-	      }
+        double weight = adj / sum_adj_total;
+        double frac = weight * total_evidence;
+        double count_val = static_cast<double>(std::llround(frac));
+        if (count_val > 0.0) {
+          result.taxidCount.emplace_back(taxid, count_val);
+        }
+      }
 	
 	      if (result.taxidCount.empty()) {
 	        double fallback =
