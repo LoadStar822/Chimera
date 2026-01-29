@@ -386,26 +386,6 @@ void processSequence(
     idf_power = 1.0 + lambda;
   }
 
-  // High-div only: suppress repeated shared minimizers on long reads/contigs.
-  // Guard rails:
-  // - low-div branch: off (ATCC safety line)
-  // - short datasets (avgLen small): off (cami-short safety line)
-  // - short reads within long datasets: off (avoid overhead)
-  constexpr size_t kTfSaturationMinAvgLen = 1200;
-  constexpr size_t kTfSaturationMinReadLen = 2048;
-  constexpr uint32_t kTfSaturationBuckets = 1u << 15; // 32768
-  constexpr uint32_t kTfSaturationMask = kTfSaturationBuckets - 1u;
-  constexpr uint8_t kTfSaturationCap = 16;
-  constexpr double kTfSaturationAlpha = 1.0;
-  const bool tf_saturation_enabled =
-      (!config.low_div_active && fileInfo.avgLen >= kTfSaturationMinAvgLen &&
-       readLen >= kTfSaturationMinReadLen);
-  std::vector<uint8_t> tf_saturation_counts;
-  if (tf_saturation_enabled) {
-    tf_saturation_counts.assign(kTfSaturationBuckets, 0);
-  }
-
-
   auto bucket_degree = [](size_t d) -> size_t {
     if (d <= 1) {
       return 0;
@@ -534,18 +514,6 @@ void processSequence(
         }
       }
       freqFactor *= bg_idf;
-      constexpr size_t kStopwordStartLen = 2048;
-      constexpr double kStopwordSpan = 4096.0;
-      const double eta = stopword_tail_eta_for_read(
-          config.low_div_active, weightCtx.freqStats.df_high_threshold, readLen,
-          kStopwordStartLen, kStopwordSpan);
-      if (eta > 0.0) {
-        const uint32_t df_ref = stopword_tail_df_ref(
-            weightCtx.freqStats.df_high_threshold, /*divisor=*/1);
-        constexpr double kStopwordMinFactor = 0.25;
-        freqFactor *=
-            stopword_tail_factor(df_est, df_ref, eta, kStopwordMinFactor);
-      }
       freqFactor = std::clamp(freqFactor, 0.05, 8.0);
     }
 
@@ -572,38 +540,6 @@ void processSequence(
     }
     double contrib = idf * base * bonus;
     double contrib_old = idf_old * base * bonus;
-
-    // TF saturation: apply to shared/common minimizers to suppress pile-up.
-    // Under topBins/subset routing, a globally common minimizer can degenerate
-    // to deg_effective==1, so we also gate by df_est (freqSketch) when
-    // available.
-    bool tf_shared = false;
-    if (tf_saturation_enabled) {
-      tf_shared = (deg_effective > 1);
-      if (!tf_shared && has_freq &&
-          weightCtx.freqStats.df_high_threshold !=
-              std::numeric_limits<uint32_t>::max()) {
-        const uint32_t gate = std::max<uint32_t>(
-            1u, weightCtx.freqStats.df_high_threshold / 2u);
-        tf_shared = (df_est >= gate);
-      }
-    }
-
-    if (tf_shared) {
-      const uint32_t idx =
-          static_cast<uint32_t>(splitmix64(value)) & kTfSaturationMask;
-      uint8_t c = tf_saturation_counts[idx];
-      if (c < kTfSaturationCap) {
-        ++c;
-        tf_saturation_counts[idx] = c;
-      } else {
-        c = kTfSaturationCap;
-      }
-      const double tf =
-          tf_saturation_factor(static_cast<uint32_t>(c), kTfSaturationAlpha);
-      contrib *= tf;
-      contrib_old *= tf;
-    }
 
     for (uint32_t tid : minimizerTids) {
       tidScore[tid] += contrib;
@@ -819,9 +755,6 @@ void processSequence(
     binHitCount.clear();
     uniqueHits.clear();
     consistencyHits.clear();
-    if (tf_saturation_enabled) {
-      std::fill(tf_saturation_counts.begin(), tf_saturation_counts.end(), 0);
-    }
     eff_eval = 0.0;
     n_eval = 0;
     for (size_t i = 0; i < hashs1.size(); ++i) {
