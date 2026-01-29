@@ -374,17 +374,7 @@ void processSequence(
   const std::vector<uint32_t> *activeSubset =
       (fallback_full || topBins.size() == binNumAll) ? nullptr : &topBins;
 
-  // High-div: adapt IDF downweighting strength to read evidence to avoid
-  // over-suppressing signal in shorter/low-evidence reads.
   double idf_power = 1.0;
-  if (!config.low_div_active) {
-    const double scale = std::max<double>(
-        1.0, static_cast<double>(config.hash_sample_min) *
-                 static_cast<double>(config.hash_sample_max));
-    const double lambda =
-        std::clamp(static_cast<double>(readLen) / scale, 0.0, 1.0);
-    idf_power = 1.0 + lambda;
-  }
 
   auto bucket_degree = [](size_t d) -> size_t {
     if (d <= 1) {
@@ -500,19 +490,6 @@ void processSequence(
           std::log((vocab + 1.0) / (static_cast<double>(df_est) + 1.0));
       bg_idf = bg_idf / std::log(2.0);
       bg_idf = std::clamp(bg_idf, 0.25, 6.0);
-      if (weightCtx.freqStats.df_high_threshold !=
-              std::numeric_limits<uint32_t>::max() &&
-          df_est >= weightCtx.freqStats.df_high_threshold) {
-        double damp = std::log2(
-            static_cast<double>(weightCtx.freqStats.df_high_threshold + 1.0));
-        double denom = std::log2(static_cast<double>(df_est + 2.0));
-        if (denom > 0.0) {
-          damp = std::clamp(damp / denom, 0.05, 0.5);
-          freqFactor *= damp;
-        } else {
-          freqFactor *= 0.25;
-        }
-      }
       freqFactor *= bg_idf;
       freqFactor = std::clamp(freqFactor, 0.05, 8.0);
     }
