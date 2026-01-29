@@ -449,8 +449,6 @@ void processSequence(
     const size_t df_eff = effective_df_bins(
         deg_effective, df_bins, /*low_div_active=*/config.low_div_active);
 
-    double exclusivityWeight = 1.0;
-
     double totalBins = subset ? static_cast<double>(subset->size())
                               : static_cast<double>(binNumAll);
     if (totalBins <= 0.0) {
@@ -491,7 +489,7 @@ void processSequence(
     const bool localUniqueEdge = is_local_unique_edge(deg_effective, df_bins);
     double denom = std::log2(2.0 + static_cast<double>(deg_effective));
     double weight = denom > 0.0 ? 1.0 / denom : 1.0;
-    double base = weight * freqFactor * exclusivityWeight;
+    double base = weight * freqFactor;
     double bonus = 1.0;
     if (uniqueEdge) {
       if (!config.low_div_active && deg_effective == 1 && df_eff == 1 &&
@@ -508,7 +506,7 @@ void processSequence(
     }
     if (presenceEnabled && !minimizerTids.empty()) {
       const double hit_weight = presence_weight;
-      const double score_weight = exclusivityWeight * hit_weight;
+      const double score_weight = hit_weight;
       uint32_t unique_bucket = std::numeric_limits<uint32_t>::max();
       uint32_t breadth_bucket = std::numeric_limits<uint32_t>::max();
       if (localUniqueEdge && presenceSketchBits > 0) {
