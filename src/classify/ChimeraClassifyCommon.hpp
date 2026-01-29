@@ -136,20 +136,6 @@ inline bool allow_unique_edge(std::size_t deg_effective, std::size_t df_bins,
   return df_est <= threshold;
 }
 
-inline bool allow_low_df_boost(std::size_t df_bins, bool has_freq,
-                               bool freq_trusted, uint32_t df_est,
-                               uint32_t unique_deg_threshold) {
-  if (df_bins > 2) {
-    return false;
-  }
-  if (!has_freq || !freq_trusted) {
-    return true;
-  }
-  const uint32_t threshold = std::max<uint32_t>(1u, unique_deg_threshold);
-  const uint32_t df_gate = static_cast<uint32_t>(2u * threshold + 1u);
-  return df_est <= df_gate;
-}
-
 // Treat a minimizer hit as "species-unique" even when the underlying species
 // spans multiple bins (df_bins>1). This corrects bin-level fragmentation that
 // would otherwise downweight IDF and disable unique-edge boosts.

@@ -497,9 +497,6 @@ void processSequence(
     const bool uniqueEdge = allow_unique_edge(
         deg_effective, df_eff, has_freq, weightCtx.freq_trusted, df_est,
         imcfConfig.presenceUniqueDeg);
-    const bool low_df_boost = allow_low_df_boost(
-        df_eff, has_freq, weightCtx.freq_trusted, df_est,
-        imcfConfig.presenceUniqueDeg);
     const bool localUniqueEdge = is_local_unique_edge(deg_effective, df_bins);
     double denom = std::log2(2.0 + static_cast<double>(deg_effective));
     double weight = denom > 0.0 ? 1.0 / denom : 1.0;
@@ -512,8 +509,6 @@ void processSequence(
       } else {
         bonus = kUniqueEdgeBonus;
       }
-    } else if (low_df_boost) {
-      bonus = 1.5;
     }
     double contrib = idf * base * bonus;
     double contrib_old = idf_old * base * bonus;
