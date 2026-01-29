@@ -349,10 +349,8 @@ void processSequence(
 
   robin_hood::unordered_flat_map<uint32_t, double> tidScore;
   robin_hood::unordered_flat_map<uint32_t, uint32_t> uniqueHits;
-  robin_hood::unordered_flat_map<uint32_t, uint32_t> consistencyHits;
   tidScore.reserve(128);
   uniqueHits.reserve(128);
-  consistencyHits.reserve(128);
 
   robin_hood::unordered_flat_map<uint32_t, uint32_t> binHitCount;
   binHitCount.reserve(128);
@@ -509,7 +507,6 @@ void processSequence(
 
     for (uint32_t tid : minimizerTids) {
       tidScore[tid] += contrib;
-      ++consistencyHits[tid];
     }
     if (presenceEnabled && !minimizerTids.empty()) {
       const double hit_weight = presence_weight;
@@ -589,7 +586,6 @@ void processSequence(
     double gap = 0.0;
     size_t uniqueCount = 0;
     double uniqueRatio = 0.0;
-    size_t consistency = 0;
   };
 
   auto collect_stats = [&]() -> EvidenceStats {
@@ -601,26 +597,10 @@ void processSequence(
       if (auto it = uniqueHits.find(stats.bestTid); it != uniqueHits.end()) {
         stats.uniqueCount = it->second;
       }
-      if (auto it = consistencyHits.find(stats.bestTid);
-          it != consistencyHits.end()) {
-        stats.consistency = it->second;
-      }
     }
     double denom = eff_eval > 0.0 ? eff_eval : 1.0;
     stats.uniqueRatio = static_cast<double>(stats.uniqueCount) / denom;
     return stats;
-  };
-
-  auto consistency_ratio = [&](uint32_t tid) -> double {
-    if (tid == std::numeric_limits<uint32_t>::max() || n_eval == 0) {
-      return 0.0;
-    }
-    auto it = consistencyHits.find(tid);
-    if (it == consistencyHits.end()) {
-      return 0.0;
-    }
-    return static_cast<double>(it->second) /
-           static_cast<double>(std::max<size_t>(1, n_eval));
   };
 
   size_t n0 = std::min<size_t>(64, hashs1.size());
@@ -720,7 +700,6 @@ void processSequence(
     tidScore.clear();
     binHitCount.clear();
     uniqueHits.clear();
-    consistencyHits.clear();
     eff_eval = 0.0;
     n_eval = 0;
     for (size_t i = 0; i < hashs1.size(); ++i) {
