@@ -469,7 +469,6 @@ void processSequence(
     const double idf_linear = std::clamp(idf_raw, idf_min_linear, idf_max_eff);
     double idf =
         clamp_idf(idf_raw, config.low_div_active, config.idf_max, idf_power);
-    double idf_old = idf_linear;
 
     double freqFactor = 1.0;
     const bool has_freq = weightCtx.enabled();
@@ -503,7 +502,6 @@ void processSequence(
       }
     }
     double contrib = idf * base * bonus;
-    double contrib_old = idf_old * base * bonus;
 
     for (uint32_t tid : minimizerTids) {
       tidScore[tid] += contrib;
