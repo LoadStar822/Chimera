@@ -100,12 +100,6 @@ void processSequence(
   // Presence model is sensitive to extremely large sample weights (read counts).
   // Use a tempered weight so presence stays a useful gate instead of saturating.
   double presence_weight = sample_weight;
-  if (has_sample_weight) {
-    presence_weight = std::sqrt(sample_weight);
-    if (!(presence_weight > 0.0)) {
-      presence_weight = 1.0;
-    }
-  }
 
   auto note_reject = [&](const std::string &reason,
                          const std::string &taxid_hint) {
