@@ -462,9 +462,6 @@ void processSequence(
     const size_t df_idf = df_for_idf(df_bins, df_eff, config.low_div_active,
                                      readLen, kDfEffIdfMaxLen);
     double idf_raw = idf_raw_from_df_bins(totalBins, df_idf);
-    const double idf_min_linear = config.low_div_active ? 0.5 : 0.0;
-    const double idf_max_eff = std::max(idf_min_linear, config.idf_max);
-    const double idf_linear = std::clamp(idf_raw, idf_min_linear, idf_max_eff);
     double idf =
         clamp_idf(idf_raw, config.low_div_active, config.idf_max, idf_power);
 
