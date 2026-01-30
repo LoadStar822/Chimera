@@ -113,7 +113,6 @@ int main(int argc, char **argv) {
       std::min<unsigned int>(hardware_threads, 192u));
 
   bool buildQuietRequested = false;
-  bool classifyQuietRequested = false;
 
   // Build
   build
@@ -337,7 +336,7 @@ int main(int argc, char **argv) {
 
   // Custom validation function to ensure that the --paired option must have an
   // even number of files
-  classify->callback([pairedOpt, &classifyConfig, &classifyQuietRequested]() {
+  classify->callback([pairedOpt, &classifyConfig]() {
     if (pairedOpt->count() > 0 && pairedOpt->count() % 2 != 0) {
       throw CLI::ValidationError(
           "--paired option must have an even number of input files");
@@ -357,7 +356,6 @@ int main(int argc, char **argv) {
     };
     normalize_kind(classifyConfig.taxonomyKind);
     sanitize_version(classifyConfig.taxonomyVersion);
-    classifyConfig.verbose = !classifyQuietRequested;
   });
 
   classify
@@ -439,7 +437,6 @@ int main(int argc, char **argv) {
                    "Minimum global class weight")
       ->default_val(5e-4);
   // TODO: 后处理相关参数暂时废弃，内部逻辑维持默认行为
-  classify->add_flag("-q,--quiet", classifyQuietRequested, "Quiet output");
 
   if (argc == 1) {
     std::cout << app.help() << std::endl;

@@ -444,7 +444,6 @@ struct TaxDict {
 
 TaxDict build_tax_dict(const std::vector<std::vector<std::string>> &idx2tax);
 
-void print_classify_time(long long milliseconds);
 
 void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
                 ClassifyConfig config, FileInfo &fileInfo,
@@ -507,10 +506,8 @@ struct PresenceSummary {
 
 struct PresenceDecision {
   std::unordered_set<uint32_t> accepted;
-  robin_hood::unordered_flat_map<uint32_t, double> qValues;
   robin_hood::unordered_flat_map<uint32_t, double> posteriors;
   robin_hood::unordered_flat_map<uint32_t, double> logPosteriors;
-  robin_hood::unordered_flat_map<uint32_t, double> lambdaHats;
   double threshold{1.0};
   double noiseMu{0.0};
   double priorPi{0.0};

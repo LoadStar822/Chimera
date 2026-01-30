@@ -437,20 +437,6 @@ static PresenceDecision evaluate_presence_coverage_impl(
   const double rate_cut = percentile(noise_rate, 0.95);
   const double read_ratio_cut = percentile(noise_read_ratio, 0.95);
 
-  if (config.verbose) {
-    std::cout << "[presence][auto] local_unique_gate="
-              << ((unique_cut > 0.0 || breadth_cut > 0.0) ? "on" : "off")
-              << " score_q30=" << std::scientific << score_cut
-              << " score_q90=" << score_high
-              << " unique_q95=" << unique_cut
-              << " breadth_q95=" << breadth_cut
-              << " rate_q95=" << rate_cut
-              << " readratio_q95=" << read_ratio_cut
-              << " noise_n=" << noise_unique.size()
-              << " total=" << summary.stats.size() << std::defaultfloat
-              << std::endl;
-  }
-
   if (!(mu > 0.0)) {
     mu = 1e-4;
   }
@@ -560,7 +546,6 @@ static PresenceDecision evaluate_presence_coverage_impl(
     }
     double logPosterior = logBF + logPriorOdds;
     decision.logPosteriors[tid] = logPosterior;
-    decision.lambdaHats[tid] = lambda_hat;
     double posteriorProb = 0.5;
     if (logPosterior >= 0.0) {
       posteriorProb = 1.0 / (1.0 + std::exp(-logPosterior));
@@ -568,7 +553,6 @@ static PresenceDecision evaluate_presence_coverage_impl(
       double e = std::exp(logPosterior);
       posteriorProb = e / (1.0 + e);
     }
-    decision.qValues[tid] = posteriorProb;
     decision.posteriors[tid] = posteriorProb;
     if (logPosterior >= config.presence_tau) {
       decision.accepted.insert(tid);
@@ -601,35 +585,11 @@ void postEmDecision(
     const NcbiTaxdump *ncbiTaxdump, size_t meanReadLen) {
   constexpr const char *kUnclassified = "unclassified";
 
-	auto format_val = [](double value) {
-		std::ostringstream oss;
-		oss.setf(std::ios::fixed);
-		oss << std::setprecision(4) << value;
-    return oss.str();
-  };
-
-	  using PresenceLevel = PostEmPresenceLevel;
+		  using PresenceLevel = PostEmPresenceLevel;
 
   constexpr double kPresencePiFloor = 1e-6;
   constexpr double kRejectFactor = 2.0;
   constexpr double kRejectDynPostBoost = 0.04;
-		  struct SelectiveRejectFullnStats {
-		    size_t checks{0};
-		    size_t small_n{0};
-		    size_t applied{0};
-		  };
-		  SelectiveRejectFullnStats selrej_fulln_stats;
-		  struct SelectiveCertHintRescueStats {
-		    size_t eligible{0};
-		    size_t hint_missing{0};
-		    size_t hint_not_in_topk{0};
-		    size_t hint_rank0{0};
-		    size_t hint_rank1{0};
-		    size_t hint_rank2{0};
-		    size_t rescued_rank1{0};
-		    size_t candidate_rank2{0};
-		  };
-		  SelectiveCertHintRescueStats selcert_hint_stats;
 		  constexpr size_t kSelectiveRejectFullnMin = 10;
 		  constexpr size_t kSelectiveRejectFullnPrunedMax = 6;
 		  const bool selective_reject_fulln_enabled =
@@ -687,38 +647,8 @@ void postEmDecision(
 		    return PresenceLevel::kUnknown;
 			  };
 
-		  struct FallbackGateStats {
-		    size_t rejected_total{0};
-		    size_t rejected_em_post{0};
-		    size_t rejected_posterior_weight{0};
-		    size_t fallback_applied{0};
-		    size_t fallback_blocked_hint_not_in_topk{0};
-		    size_t fallback_blocked_genus_conflict{0};
-		    size_t fallback_blocked_gap_em_post{0};
-		    size_t fallback_blocked_gap_posterior_weight{0};
-    size_t fallback_used_hint{0};
-			    std::vector<double> gaps_rejected_em_post;
-			    std::vector<double> gaps_rejected_posterior_weight;
-			  };
-
-		  FallbackGateStats fb_stats;
-		  constexpr size_t kFallbackHintTopK = 16;
-		  constexpr double kFallbackGenusConflictGapMax = 0.20;
-
-		  struct PruneAuditStats {
-		    size_t reads_total{0};
-		    size_t reads_empty_posterior{0};
-		    size_t pruning_active{0};
-		    size_t pruned_any{0};
-		    size_t top1_removed{0};
-		    size_t pruned_all_fallback_full{0};
-		    size_t top1_removed_w_lt_1e_5{0};
-		    std::vector<double> dropped_mass_vals;
-		    std::vector<double> top1_removed_fullpost_vals;
-		    std::vector<double> top1_removed_gap_vals;
-		    double dropped_mass_sum{0.0};
-		  };
-		  PruneAuditStats prune_stats;
+			  constexpr size_t kFallbackHintTopK = 16;
+			  constexpr double kFallbackGenusConflictGapMax = 0.20;
 
 	  auto parse_u32 = [](const std::string &s, uint32_t &out) -> bool {
 	    if (s.empty()) {
@@ -741,21 +671,16 @@ void postEmDecision(
 	    }
 	  };
 
-	  const bool prune_active_sample =
-	      (decisionConfig.min_class_weight > 0.0 && !classWeights.empty());
-
-	  for (auto &result : results) {
-	    prune_stats.reads_total += 1;
-	    // Keep the full posterior list (sorted) for dumping/analysis (POST_TOPK),
-	    // but use a pruned+renormalized view for final decisions and taxidCount
-	    // to avoid exploding long-tail allocations.
-	    auto posterior_full = std::move(result.posteriors);
-	    if (posterior_full.empty()) {
-	      prune_stats.reads_empty_posterior += 1;
-	      result.taxidCount.clear();
-	      result.taxidCount.emplace_back(kUnclassified, 1.0);
-	      continue;
-	    }
+		  for (auto &result : results) {
+		    // Keep the full posterior list (sorted) for dumping/analysis (POST_TOPK),
+		    // but use a pruned+renormalized view for final decisions and taxidCount
+		    // to avoid exploding long-tail allocations.
+		    auto posterior_full = std::move(result.posteriors);
+		    if (posterior_full.empty()) {
+		      result.taxidCount.clear();
+		      result.taxidCount.emplace_back(kUnclassified, 1.0);
+		      continue;
+		    }
 	    std::sort(posterior_full.begin(), posterior_full.end(),
 	              [](const auto &a, const auto &b) { return a.second > b.second; });
 
@@ -779,26 +704,6 @@ void postEmDecision(
 	    std::vector<std::pair<std::string, double>> posterior =
 	        std::move(pruned.posterior);
 
-	    if (pruned.audit.pruning_active) {
-	      prune_stats.pruning_active += 1;
-	      if (pruned.audit.fallback_full) {
-	        prune_stats.pruned_all_fallback_full += 1;
-	      }
-	      if (pruned.audit.pruned_any) {
-	        prune_stats.pruned_any += 1;
-	        prune_stats.dropped_mass_sum += pruned.audit.dropped_mass;
-	        prune_stats.dropped_mass_vals.push_back(pruned.audit.dropped_mass);
-	      }
-	      if (pruned.audit.top1_removed) {
-	        prune_stats.top1_removed += 1;
-	        prune_stats.top1_removed_fullpost_vals.push_back(
-	            pruned.audit.full_top1_post);
-	        prune_stats.top1_removed_gap_vals.push_back(pruned.audit.full_gap);
-	        if (pruned.audit.full_top1_weight < 1e-5) {
-	          prune_stats.top1_removed_w_lt_1e_5 += 1;
-	        }
-	      }
-		    }
 	
 
 	    // Ensure POST_TOPK uses the same (pruned/renormalized) posterior view as the
@@ -857,58 +762,36 @@ void postEmDecision(
     }
     bool pass = weight_ok;
 
-		    if (pass) {
-		      selrej_fulln_stats.checks += 1;
-		      const size_t full_n = posterior_full.size();
-		      const size_t pruned_n = posterior.size();
-	      if (pruned_n <= kSelectiveRejectFullnPrunedMax) {
-	        selrej_fulln_stats.small_n += 1;
-	      }
-		      if (selective_reject_fulln_enabled && pruned.audit.pruned_any &&
-		          full_n >= kSelectiveRejectFullnMin &&
-		          pruned_n <= kSelectiveRejectFullnPrunedMax) {
-		        selrej_fulln_stats.applied += 1;
-		        selcert_hint_stats.eligible += 1;
-		        bool rescued = false;
-		        if (!result.best_taxid_hint.empty() &&
-		            result.best_taxid_hint != kUnclassified) {
-		          const auto hint_hit = lookup_taxid_in_topk(
-		              posterior, result.best_taxid_hint, posterior.size());
-		          if (!hint_hit.found) {
-		            selcert_hint_stats.hint_not_in_topk += 1;
-		          } else {
-		            if (hint_hit.rank == 0) {
-		              selcert_hint_stats.hint_rank0 += 1;
-		            } else if (hint_hit.rank == 1) {
-		              selcert_hint_stats.hint_rank1 += 1;
-		            } else if (hint_hit.rank == 2) {
-		              selcert_hint_stats.hint_rank2 += 1;
-		            }
-
-		            // Only rescue when the hint is the pruned POST_TOPK rank-1 (top2).
-		            // Empirically this bucket has much higher precision than "hint==top1"
-		            // and avoids leaking high-confidence wrong reads back into output.
-		            if (hint_hit.rank == 1) {
-		              selcert_hint_stats.rescued_rank1 += 1;
-		              double total_evidence =
-		                  (result.sample_weight > 0.0) ? result.sample_weight
-		                                              : result.evaluated;
-		              if (!(total_evidence > 0.0)) {
-		                total_evidence = 1.0;
-		              }
-		              double fallback = static_cast<double>(
-		                  std::max<double>(1.0, std::llround(total_evidence)));
-		              result.taxidCount.clear();
-		              result.taxidCount.emplace_back(result.best_taxid_hint, fallback);
-		              result.reject_reason.clear();
-		              rescued = true;
-		            } else if (hint_hit.rank == 2) {
-		              selcert_hint_stats.candidate_rank2 += 1;
-		            }
-		          }
-		        } else {
-		          selcert_hint_stats.hint_missing += 1;
-		        }
+			    if (pass) {
+			      const size_t full_n = posterior_full.size();
+			      const size_t pruned_n = posterior.size();
+			      if (selective_reject_fulln_enabled && pruned.audit.pruned_any &&
+			          full_n >= kSelectiveRejectFullnMin &&
+			          pruned_n <= kSelectiveRejectFullnPrunedMax) {
+			        bool rescued = false;
+				        if (!result.best_taxid_hint.empty() &&
+				            result.best_taxid_hint != kUnclassified) {
+				          const auto hint_hit = lookup_taxid_in_topk(
+				              posterior, result.best_taxid_hint, posterior.size());
+				          // Only rescue when the hint is the pruned POST_TOPK rank-1 (top2).
+				          // Empirically this bucket has much higher precision than "hint==top1"
+				          // and avoids leaking high-confidence wrong reads back into output.
+				          if (hint_hit.found && hint_hit.rank == 1) {
+				            double total_evidence =
+				                (result.sample_weight > 0.0) ? result.sample_weight
+				                                            : result.evaluated;
+				            if (!(total_evidence > 0.0)) {
+				              total_evidence = 1.0;
+				            }
+				            double fallback = static_cast<double>(
+				                std::max<double>(1.0, std::llround(total_evidence)));
+				            result.taxidCount.clear();
+				            result.taxidCount.emplace_back(result.best_taxid_hint,
+				                                           fallback);
+				            result.reject_reason.clear();
+				            rescued = true;
+				          }
+				        }
 		        if (rescued) {
 		          continue;
 		        }
@@ -995,26 +878,10 @@ void postEmDecision(
 				          std::max(0.0, std::min(1.0, decisionConfig.fallback_gap_min));
 				      const bool reject_by_weight = !weight_ok;
 				      const bool reject_is_em_post = !reject_by_weight;
-				      const char *reject_reason_str =
-				          reject_is_em_post ? "em_post" : "posterior_weight";
-				      const double gap_min = base_gap_min;
-
-			      fb_stats.rejected_total += 1;
-			      if (reject_is_em_post) {
-		        fb_stats.rejected_em_post += 1;
-		        fb_stats.gaps_rejected_em_post.push_back(gap);
-		      } else {
-		        fb_stats.rejected_posterior_weight += 1;
-		        fb_stats.gaps_rejected_posterior_weight.push_back(gap);
-		      }
+					      const double gap_min = base_gap_min;
 
 			      if (gap < gap_min) {
-			        if (reject_is_em_post) {
-			          fb_stats.fallback_blocked_gap_em_post += 1;
-			        } else {
-			          fb_stats.fallback_blocked_gap_posterior_weight += 1;
-			        }
-			        // keep rejected
+				        // keep rejected
 			      } else {
 			        bool genus_conflict_block = false;
 			        if (ncbiTaxdump && ncbiTaxdump->enabled() &&
@@ -1029,9 +896,8 @@ void postEmDecision(
 			                (g1 != 0 && g2 != 0 && g1 != g2);
 			          }
 			        }
-			        if (genus_conflict_block) {
-			          fb_stats.fallback_blocked_genus_conflict += 1;
-			          // keep rejected
+				        if (genus_conflict_block) {
+				          // keep rejected
 			        } else {
 			          std::string fallback_taxid = top.first;
 			          bool using_hint = false;
@@ -1051,12 +917,10 @@ void postEmDecision(
 		                break;
 		              }
 		            }
-		            if (!hint_in_topk) {
-		              fb_stats.fallback_blocked_hint_not_in_topk += 1;
-		              // keep rejected
-		            } else {
-		              fb_stats.fallback_used_hint += 1;
-		              double total_evidence =
+			            if (!hint_in_topk) {
+			              // keep rejected
+			            } else {
+			              double total_evidence =
 		                  (result.sample_weight > 0.0) ? result.sample_weight
 			                                              : result.evaluated;
 			              if (!(total_evidence > 0.0)) {
@@ -1065,10 +929,9 @@ void postEmDecision(
 			              double fallback = static_cast<double>(
 			                  std::max<double>(1.0, std::llround(total_evidence)));
 				              result.taxidCount.clear();
-				              result.taxidCount.emplace_back(fallback_taxid, fallback);
-				              result.reject_reason.clear();
-				              fb_stats.fallback_applied += 1;
-				              continue;
+					              result.taxidCount.emplace_back(fallback_taxid, fallback);
+					              result.reject_reason.clear();
+					              continue;
 				            }
 				          } else {
 			            double total_evidence = (result.sample_weight > 0.0)
@@ -1080,10 +943,9 @@ void postEmDecision(
 			            double fallback = static_cast<double>(
 			                std::max<double>(1.0, std::llround(total_evidence)));
 				            result.taxidCount.clear();
-				            result.taxidCount.emplace_back(fallback_taxid, fallback);
-				            result.reject_reason.clear();
-				            fb_stats.fallback_applied += 1;
-				            continue;
+					            result.taxidCount.emplace_back(fallback_taxid, fallback);
+					            result.reject_reason.clear();
+					            continue;
 				          }
 				        }
 				      }
@@ -1095,100 +957,6 @@ void postEmDecision(
 		      result.reject_reason = weight_ok ? "em_post" : "posterior_weight";
 		    }
 			  }
-
-		  if (decisionConfig.allow_fallback_on_reject && fb_stats.rejected_total > 0) {
-    auto q = [](std::vector<double> vals, double p) -> double {
-      if (vals.empty()) {
-        return 0.0;
-      }
-      p = std::max(0.0, std::min(1.0, p));
-      const size_t idx =
-          static_cast<size_t>(std::floor(p * static_cast<double>(vals.size() - 1)));
-      std::nth_element(vals.begin(),
-                       vals.begin() + static_cast<std::ptrdiff_t>(idx), vals.end());
-      return vals[idx];
-    };
-
-    std::cout << "PostEM fallback gate: rejected=" << fb_stats.rejected_total
-	              << " (em_post=" << fb_stats.rejected_em_post
-	              << ", posterior_weight=" << fb_stats.rejected_posterior_weight
-	              << "), applied=" << fb_stats.fallback_applied
-	              << ", used_hint=" << fb_stats.fallback_used_hint
-	              << ", blocked_hint_not_in_topk="
-	              << fb_stats.fallback_blocked_hint_not_in_topk
-	              << ", blocked_genus_conflict="
-	              << fb_stats.fallback_blocked_genus_conflict
-	              << ", blocked_gap_em_post=" << fb_stats.fallback_blocked_gap_em_post
-	              << ", blocked_gap_posterior_weight="
-	              << fb_stats.fallback_blocked_gap_posterior_weight
-	              << ", gap_em_post(p50/p90)="
-              << q(fb_stats.gaps_rejected_em_post, 0.50) << '/'
-              << q(fb_stats.gaps_rejected_em_post, 0.90)
-              << ", gap_posterior_weight(p50/p90)="
-	              << q(fb_stats.gaps_rejected_posterior_weight, 0.50) << '/'
-	              << q(fb_stats.gaps_rejected_posterior_weight, 0.90) << std::endl;
-		  }
-
-		  if (decisionConfig.allow_fallback_on_reject && selrej_fulln_stats.checks > 0) {
-		    std::cout << "[classify][auto] selective_reject_fulln: enabled="
-		              << (selective_reject_fulln_enabled ? 1 : 0)
-		              << " full_n_min=" << kSelectiveRejectFullnMin
-		              << " pruned_n_max=" << kSelectiveRejectFullnPrunedMax
-		              << " meanReadLen=" << meanReadLen
-		              << " checks=" << selrej_fulln_stats.checks
-		              << " small_n=" << selrej_fulln_stats.small_n
-		              << " applied=" << selrej_fulln_stats.applied
-		              << " selcert_hint(eligible/missing/not_in_topk/r0/r1/r2)="
-		              << selcert_hint_stats.eligible << '/'
-		              << selcert_hint_stats.hint_missing << '/'
-		              << selcert_hint_stats.hint_not_in_topk << '/'
-		              << selcert_hint_stats.hint_rank0 << '/'
-		              << selcert_hint_stats.hint_rank1 << '/'
-		              << selcert_hint_stats.hint_rank2
-		              << " selcert_rescue(r1)=" << selcert_hint_stats.rescued_rank1
-		              << " selcert_candidate(r2)=" << selcert_hint_stats.candidate_rank2
-		              << std::endl;
-		  }
-
-		  if (prune_active_sample && prune_stats.reads_total > 0) {
-	    auto q = [](std::vector<double> vals, double p) -> double {
-	      if (vals.empty()) {
-	        return 0.0;
-	      }
-	      p = std::max(0.0, std::min(1.0, p));
-	      const size_t idx = static_cast<size_t>(
-	          std::floor(p * static_cast<double>(vals.size() - 1)));
-	      std::nth_element(vals.begin(),
-	                       vals.begin() + static_cast<std::ptrdiff_t>(idx),
-	                       vals.end());
-	      return vals[idx];
-	    };
-
-	    double dropped_mean = 0.0;
-	    if (prune_stats.pruned_any > 0) {
-	      dropped_mean =
-	          prune_stats.dropped_mass_sum / static_cast<double>(prune_stats.pruned_any);
-	    }
-
-	    std::cout << "PostEM prune audit: reads=" << prune_stats.reads_total
-	              << ", empty=" << prune_stats.reads_empty_posterior
-	              << ", pruned_any=" << prune_stats.pruned_any
-	              << ", top1_removed=" << prune_stats.top1_removed
-	              << ", pruned_all_fallback_full="
-	              << prune_stats.pruned_all_fallback_full
-	              << ", dropped_mass(mean/p50/p90)=" << format_val(dropped_mean)
-	              << '/' << format_val(q(prune_stats.dropped_mass_vals, 0.50))
-	              << '/' << format_val(q(prune_stats.dropped_mass_vals, 0.90))
-	              << ", top1_removed_fullpost(p50/p90)="
-	              << format_val(q(prune_stats.top1_removed_fullpost_vals, 0.50))
-	              << '/' << format_val(q(prune_stats.top1_removed_fullpost_vals, 0.90))
-	              << ", top1_removed_gap(p50/p90)="
-	              << format_val(q(prune_stats.top1_removed_gap_vals, 0.50)) << '/'
-	              << format_val(q(prune_stats.top1_removed_gap_vals, 0.90))
-	              << ", top1_removed_w<1e-5=" << prune_stats.top1_removed_w_lt_1e_5
-	              << std::endl;
-	  }
-
 
 				}
 

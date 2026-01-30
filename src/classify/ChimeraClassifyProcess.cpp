@@ -101,13 +101,6 @@ void processSequence(
   // Use a tempered weight so presence stays a useful gate instead of saturating.
   double presence_weight = sample_weight;
 
-  auto note_reject = [&](const std::string &reason,
-                         const std::string &taxid_hint) {
-    fileInfo.rejectReasons[reason] += 1;
-    if (!taxid_hint.empty()) {
-      fileInfo.rejectByTaxid[taxid_hint][reason] += 1;
-    }
-  };
 
   // Sample a subset of hashes for coarse candidate selection.
   size_t targetSample = hashNum / 2;
@@ -971,15 +964,9 @@ void processSequence(
         }
       }
     }
-    for (const auto &entry : result.taxidCount) {
-      fileInfo.taxidTotalMatches[entry.first] += 1;
-    }
-
     bool isUniqueMapping = (result.taxidCount.size() == 1);
     if (isUniqueMapping) {
       fileInfo.uniqueTaxids.insert(result.taxidCount.front().first);
-      const std::string &taxid = result.taxidCount.front().first;
-      fileInfo.taxidUniqueMatches[taxid] += 1;
     }
 
     fileInfo.classifiedNum++;
@@ -1001,9 +988,6 @@ void processSequence(
         result.reject_reason = "low_eval";
       }
     }
-    note_reject(result.reject_reason,
-                result.best_taxid_hint.empty() ? bestTaxidStr
-                                               : result.best_taxid_hint);
   }
 
   classifyResults.emplace_back(std::move(result));
@@ -1138,13 +1122,6 @@ void classify_streaming(
       fileInfo.uniqueTaxids.insert(localFileInfo.uniqueTaxids.begin(),
                                    localFileInfo.uniqueTaxids.end());
 
-      for (const auto &[taxid, count] : localFileInfo.taxidTotalMatches) {
-        fileInfo.taxidTotalMatches[taxid] += count;
-      }
-
-      for (const auto &[taxid, count] : localFileInfo.taxidUniqueMatches) {
-        fileInfo.taxidUniqueMatches[taxid] += count;
-      }
       size_t localMin =
           (localFileInfo.minLen == kInvalidLength) ? 0 : localFileInfo.minLen;
       if (localMin > 0 &&
@@ -1211,13 +1188,6 @@ void classify(
       fileInfo.uniqueTaxids.insert(localFileInfo.uniqueTaxids.begin(),
                                    localFileInfo.uniqueTaxids.end());
 
-      for (const auto &[taxid, count] : localFileInfo.taxidTotalMatches) {
-        fileInfo.taxidTotalMatches[taxid] += count;
-      }
-
-      for (const auto &[taxid, count] : localFileInfo.taxidUniqueMatches) {
-        fileInfo.taxidUniqueMatches[taxid] += count;
-      }
       size_t localMin =
           (localFileInfo.minLen == kInvalidLength) ? 0 : localFileInfo.minLen;
       if (localMin > 0 &&

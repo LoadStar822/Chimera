@@ -54,7 +54,6 @@ namespace ChimeraClassify {
 			double presence_tau = 4.6;
 			uint32_t presence_breadth_bits = 2048; // breadth sketch bits (power of 2 suggested)
 			uint16_t threads;
-			bool verbose = true;
 			size_t batchSize;
 	bool em = true;
 		size_t emIter;
@@ -71,48 +70,6 @@ namespace ChimeraClassify {
 		double idf_max = 8.0;
 		};
 
-	inline std::ostream& operator<<(std::ostream& os, const ClassifyConfig& config) {
-		os << std::string(40, '=') << std::endl;
-		os << " Classify Configuration " << std::endl;
-		os << std::string(40, '=') << std::endl;
-
-		os << std::left
-			<< std::setw(20) << "Single files:" << std::endl;
-		for (const auto& file : config.singleFiles) {
-			os << std::setw(20) << "" << file << std::endl;
-		}
-			os << std::setw(20) << "Paired files:" << std::endl;
-			for (const auto& file : config.pairedFiles) {
-				os << std::setw(20) << "" << file << std::endl;
-			}
-			os << std::setw(20) << "Weight map:"
-				<< (config.weight_map_file.empty() ? "none" : config.weight_map_file) << std::endl;
-			os << std::setw(20) << "Output file:" << config.outputFile << std::endl
-				<< std::setw(20) << "Database file:" << config.dbFile << std::endl
-			<< std::setw(20) << "Taxonomy kind:" << config.taxonomyKind << std::endl
-			<< std::setw(20) << "Taxonomy version:" << config.taxonomyVersion << std::endl
-			<< std::setw(20) << "Shot threshold:" << config.shotThreshold << std::endl
-			<< std::setw(20) << "First filter beta:" << config.firstFilterBeta << std::endl
-			<< std::setw(20) << "Collapse hits:" << config.collapse_strain_hits << std::endl
-			<< std::setw(20) << "Presence pi:" << config.presence_pi << std::endl
-				<< std::setw(20) << "Presence tau:" << config.presence_tau << std::endl
-				<< std::setw(20) << "Breadth bits:" << config.presence_breadth_bits << std::endl
-			<< std::setw(20) << "Batch size:" << config.batchSize << std::endl
-			<< std::setw(20) << "EM:" << config.em << std::endl
-			<< std::setw(20) << "Threads:" << config.threads << std::endl
-			<< std::setw(20) << "Verbose:" << config.verbose << std::endl
-			<< std::setw(20) << "EM prune ratio:" << config.em_prune_ratio << std::endl
-			<< std::setw(20) << "EM conf power:" << config.em_conf_power << std::endl
-			<< std::setw(20) << "Hash sample min:" << config.hash_sample_min << std::endl
-			<< std::setw(20) << "Hash sample max:" << config.hash_sample_max << std::endl
-			<< std::setw(20) << "IDF max:" << config.idf_max << std::endl
-			<< std::setw(20) << "Posterior pi min:" << config.post_pi_min << std::endl
-			<< std::setw(20) << "Dump POST_TOPK:" << config.dump_post_topk << std::endl;
-		os << std::string(40, '=') << std::endl;
-
-		return os;
-	}
-
 	struct FileInfo {
 		size_t fileNum{ 0 };
 		size_t sequenceNum{ 0 };
@@ -123,11 +80,6 @@ namespace ChimeraClassify {
 		size_t avgLen = 0;
 		size_t bpLength = 0;
 		std::unordered_set<std::string> uniqueTaxids;
-		robin_hood::unordered_flat_map<std::string, size_t> taxidTotalMatches;
-		robin_hood::unordered_flat_map<std::string, size_t> taxidUniqueMatches;
-		robin_hood::unordered_flat_map<std::string, size_t> rejectReasons;
-		robin_hood::unordered_flat_map<std::string,
-			robin_hood::unordered_flat_map<std::string, size_t>> rejectByTaxid;
 	};
 
 	struct batchReads {

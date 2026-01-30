@@ -163,7 +163,7 @@ static inline std::string trim_copy(std::string s) {
 }
 
 static std::unique_ptr<ChimeraClassify::NcbiTaxdump>
-maybe_load_ncbi_taxdump(const std::string &taxonomyKind, bool verbose) {
+maybe_load_ncbi_taxdump(const std::string &taxonomyKind) {
   if (taxonomyKind != "ncbi") {
     return nullptr;
   }
@@ -173,19 +173,11 @@ maybe_load_ncbi_taxdump(const std::string &taxonomyKind, bool verbose) {
                           : "/mnt/sda/tianqinzhong/project/SimDataset/taxdump";
   std::filesystem::path nodes = base / "nodes.dmp";
   if (!std::filesystem::exists(nodes)) {
-    if (verbose) {
-      std::cerr << "Warning: nodes.dmp not found, skip strain->species collapse: "
-                << nodes.string() << std::endl;
-    }
     return nullptr;
   }
 
   std::ifstream is(nodes);
   if (!is.is_open()) {
-    if (verbose) {
-      std::cerr << "Warning: cannot open nodes.dmp, skip strain->species collapse: "
-                << nodes.string() << std::endl;
-    }
     return nullptr;
   }
 
@@ -252,12 +244,6 @@ maybe_load_ncbi_taxdump(const std::string &taxonomyKind, bool verbose) {
   if (!tax->enabled()) {
     return nullptr;
   }
-  if (verbose) {
-    std::cout << "Loaded NCBI nodes.dmp for strain->species collapse: "
-              << "nodes=" << parsed << ", max_id=" << max_id
-              << ", species_nodes=" << species_nodes
-              << ", genus_nodes=" << genus_nodes << std::endl;
-  }
   return tax;
 }
 
@@ -279,11 +265,7 @@ void run(ClassifyConfig config) {
     config.threads = static_cast<uint16_t>(hardwareThreads);
   }
 
-  if (config.verbose) {
-    std::cout << config << std::endl;
-  }
   omp_set_num_threads(config.threads);
-  auto TotalclassifyStart = std::chrono::high_resolution_clock::now();
 
   std::vector<std::vector<std::string>> indexToTaxid;
   chimera::imcf::InterleavedMergedCuckooFilter imcf;
@@ -301,36 +283,14 @@ void run(ClassifyConfig config) {
       weightCtx.freqSketch = freqSketch.get();
       weightCtx.freqStats = coverageMeta.freq_model.stats;
       weightCtx.freqQuantile = coverageMeta.freq_model.quantile;
-    } catch (const std::exception &ex) {
-      std::cerr << "Warning: 无法加载频率 Sketch，回退到旧权重模型: " << ex.what()
-                << std::endl;
+    } catch (const std::exception &) {
     }
   }
   size_t uniq_nonzero = 0;
-  uint64_t uniq_max = 0;
-  size_t density_nonzero = 0;
-  double density_max = 0.0;
-  size_t genome_nonzero = 0;
-  size_t total_nonzero = 0;
   if (!coverageMeta.entries.empty()) {
     for (const auto &entry : coverageMeta.entries) {
       if (entry.unique_signatures > 0) {
         ++uniq_nonzero;
-        if (entry.unique_signatures > uniq_max) {
-          uniq_max = entry.unique_signatures;
-        }
-      }
-      if (entry.unique_density > 0.0) {
-        ++density_nonzero;
-        if (entry.unique_density > density_max) {
-          density_max = entry.unique_density;
-        }
-      }
-      if (entry.total_signatures > 0) {
-        ++total_nonzero;
-      }
-      if (entry.genome_length > 0) {
-        ++genome_nonzero;
       }
     }
   }
@@ -339,51 +299,13 @@ void run(ClassifyConfig config) {
   if (coverageMeta.freq_model.enabled() && !coverageMeta.entries.empty() &&
       uniq_nonzero == 0) {
     freq_trusted = false;
-    std::cout << "[presence][auto] unique_gate=off reason=unique_nonzero0 "
-              << "entries=" << coverageMeta.entries.size()
-              << " total_nonzero=" << total_nonzero
-              << " genome_nonzero=" << genome_nonzero << std::endl;
-    if (total_nonzero > 0 && genome_nonzero > 0) {
-      std::cout << "[presence][auto] exposure_fallback=total_density "
-                << "reason=unique_nonzero0 total_nonzero=" << total_nonzero
-                << " genome_nonzero=" << genome_nonzero << std::endl;
-    }
   }
   weightCtx.freq_trusted = freq_trusted;
 
-		  if (config.verbose) {
-		    std::cout << "DB presence meta: entries=" << coverageMeta.entries.size()
-		              << ", ref_read_len=" << coverageMeta.ref_read_length
-		              << ", span=" << coverageMeta.effective_span
-		              << ", unique_deg=" << coverageMeta.unique_deg_threshold
-		              << ", freq_model.enabled=" << coverageMeta.freq_model.enabled()
-		              << ", freq_model.depth=" << coverageMeta.freq_model.depth
-		              << ", freq_model.width=" << coverageMeta.freq_model.width
-		              << ", freq_model.quantile=" << coverageMeta.freq_model.quantile
-		              << ", freq.df_high_threshold=" << weightCtx.freqStats.df_high_threshold
-		              << ", freq.df_max_observed=" << weightCtx.freqStats.df_max_observed
-		              << ", freq.nonzero_counters=" << weightCtx.freqStats.nonzero_counters
-		              << ", counters=" << coverageMeta.freq_model.counters.size()
-		              << std::endl;
-		    std::cout << "DB presence meta stats: unique_nonzero=" << uniq_nonzero
-		              << ", unique_max=" << uniq_max
-		              << ", density_nonzero=" << density_nonzero
-              << ", density_max=" << std::scientific << density_max
-              << std::defaultfloat << ", genome_nonzero=" << genome_nonzero
-              << std::endl;
-  }
-
   std::unordered_map<std::string, double> sampleWeights;
   if (!config.weight_map_file.empty()) {
-    std::cout << "Loading sample weight map: " << config.weight_map_file
-              << std::endl;
     sampleWeights = load_weight_map_file(config.weight_map_file);
-    if (sampleWeights.empty()) {
-      std::cerr << "Warning: weight map parsed empty; fallback to default weights."
-                << std::endl;
-    } else {
-      std::cout << "Loaded " << sampleWeights.size()
-                << " sample weights." << std::endl;
+    if (!sampleWeights.empty()) {
       weightCtx.sampleWeights = &sampleWeights;
     }
   }
@@ -429,7 +351,7 @@ void run(ClassifyConfig config) {
   // Optional NCBI strain/subspecies -> species collapse.
   // This helps avoid candidate saturation by many strain taxids, which can
   // prevent sister species from entering pre-EM/posterior lists.
-  ncbiTaxdump = maybe_load_ncbi_taxdump(config.taxonomyKind, config.verbose);
+  ncbiTaxdump = maybe_load_ncbi_taxdump(config.taxonomyKind);
   if (ncbiTaxdump && ncbiTaxdump->enabled()) {
     weightCtx.ncbiTaxdump = ncbiTaxdump.get();
   }
@@ -451,49 +373,7 @@ void run(ClassifyConfig config) {
       prepare_feature_params_for_classify(imcfConfig, final_method,
                                           feature_min_len);
 
-  if (config.verbose) {
-    if (final_method == FeatureMethod::Strobemer) {
-      std::cout << "Feature method: strobemer (k="
-                << static_cast<int>(imcfConfig.strobeK)
-                << ", order=" << static_cast<int>(imcfConfig.strobeOrder)
-                << ", w=[" << imcfConfig.strobeWmin << ','
-                << imcfConfig.strobeWmax
-                << "], seed=" << static_cast<unsigned long long>(imcfConfig.seed64)
-                << ")" << std::endl;
-    } else {
-      std::cout << "Feature method: syncmer (k="
-                << static_cast<int>(imcfConfig.kmerSize)
-                << ", s=" << imcfConfig.smerSize
-                << ", pos=" << imcfConfig.syncmerPosition
-                << ", seed=" << static_cast<unsigned long long>(imcfConfig.seed64)
-                << ")" << std::endl;
-    }
-  }
-
-  auto stage_t0 = std::chrono::steady_clock::now();
-  auto stage_last = stage_t0;
-  auto log_stage = [&](const char *stage) {
-    auto now = std::chrono::steady_clock::now();
-    auto delta_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(now - stage_last)
-            .count();
-    auto total_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(now - stage_t0)
-            .count();
-    uint64_t rss_kb = current_rss_kb();
-    std::cout << "[classify] stage=" << stage
-              << " rss_gib=" << std::fixed << std::setprecision(2)
-              << kb_to_gib(rss_kb) << std::defaultfloat
-              << " delta_ms=" << delta_ms << " total_ms=" << total_ms
-              << std::endl;
-    stage_last = now;
-  };
-
-  log_stage("before_build_tax_dict");
   const TaxDict tax = build_tax_dict(indexToTaxid);
-  std::cout << "[classify] tax_dict tid_count=" << tax.id2str.size()
-            << " bins=" << tax.idx2id.size() << std::endl;
-  log_stage("after_build_tax_dict");
   std::vector<uint32_t> tid2speciesRep;
   if (config.collapse_strain_hits && weightCtx.ncbiTaxdump &&
       weightCtx.ncbiTaxdump->enabled()) {
@@ -547,12 +427,6 @@ void run(ClassifyConfig config) {
       }
     }
     weightCtx.tid2speciesRep = &tid2speciesRep;
-    if (config.verbose) {
-      std::cout << "NCBI tid->species representative mapping: tids="
-                << tax.id2str.size() << ", numeric=" << numeric
-                << ", species=" << species2rep.size()
-                << ", collapsed=" << collapsed << std::endl;
-    }
   }
   PresenceSummary presenceSummary(config.presence_breadth_bits);
   PresenceSummary *presencePtr = &presenceSummary;
@@ -560,7 +434,6 @@ void run(ClassifyConfig config) {
   size_t avg_len_hint = 0;
   if (config.low_div_auto && config.low_div_probe_reads > 0) {
     ClassifyConfig probe_config = config;
-    probe_config.verbose = false;
 
     FileInfo probeInfo;
     std::vector<moodycamel::ConcurrentQueue<batchReads>> probeQueues(
@@ -684,22 +557,8 @@ void run(ClassifyConfig config) {
         compute_low_div_stats(counts, unclassified_reads, kLowDivTopK);
     bool low_div = is_low_diversity(stats, kLowDivTopMass, kLowDivEffSpeciesMax);
 
-    std::cout << "[classify][auto] lowdiv probe: reads=" << probeInfo.sequenceNum
-              << " eff_species=" << std::fixed << std::setprecision(2)
-              << stats.eff_species << " top_mass=" << (stats.top_mass * 100.0)
-              << " low_div=" << (low_div ? 1 : 0)
-              << " thresh_top_mass=" << (kLowDivTopMass * 100.0)
-              << " eff_species_max=" << kLowDivEffSpeciesMax << std::defaultfloat
-              << std::endl;
-
     if (low_div) {
       apply_low_div_overrides(config);
-      std::cout << "[classify][auto] lowdiv=1 overrides: em_conf_power="
-                << config.em_conf_power
-                << " dump_post_topk=" << config.dump_post_topk << std::endl;
-    } else {
-      std::cout << "[classify][auto] lowdiv=0 use default classify config"
-                << std::endl;
     }
   }
 
@@ -714,33 +573,15 @@ void run(ClassifyConfig config) {
   std::unordered_map<std::string, double> classWeights;
   bool posteriorModelUsed = false;
 
-  auto readStart = std::chrono::high_resolution_clock::now();
-  std::cout << "Reading input files..." << std::endl;
   std::atomic<bool> producer_done{false};
-  auto readEnd = readStart;
   std::thread producer([&]() {
     parseReads(readQueues, config, fileInfo);
-    readEnd = std::chrono::high_resolution_clock::now();
-    if (config.verbose) {
-      auto readDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
-          readEnd - readStart);
-      std::cout << "\nRead time: ";
-      print_classify_time(readDuration.count());
-    }
     producer_done.store(true, std::memory_order_release);
   });
 
-  auto classifyStart = std::chrono::high_resolution_clock::now();
-  std::cout << "Classifying sequences by imcf (feature="
-            << feature_method_to_string(final_method)
-            << ")..." << std::endl;
   classify_streaming(imcfConfig, readQueues, config, imcf, indexToTaxid, tax,
                      classifyResults, fileInfo, producer_done, feature_params,
                      feature_min_len, weightCtx, presencePtr);
-  auto classifyEnd = std::chrono::high_resolution_clock::now();
-  auto classifyDuration =
-      std::chrono::duration_cast<std::chrono::milliseconds>(classifyEnd -
-                                                            classifyStart);
   producer.join();
   // Determinism: classify_streaming merges thread-local batches in the order
   // threads finish, which is non-deterministic. Sort by read/contig id before
@@ -749,28 +590,8 @@ void run(ClassifyConfig config) {
             [](const classifyResult &a, const classifyResult &b) {
               return a.id < b.id;
             });
-  if (config.verbose) {
-    std::cout << "Classify time: ";
-    print_classify_time(classifyDuration.count());
-    if (classifyDuration.count() > 0 && fileInfo.sequenceNum > 0) {
-      double readsPerSec =
-          static_cast<double>(fileInfo.sequenceNum) /
-          (static_cast<double>(classifyDuration.count()) / 1000.0);
-      std::cout << "平均分类速度: " << std::fixed << std::setprecision(1)
-                << readsPerSec << " reads/s" << std::defaultfloat << std::endl;
-    }
-  }
   if (fileInfo.sequenceNum > 0) {
     fileInfo.avgLen = fileInfo.bpLength / fileInfo.sequenceNum;
-  }
-  if (config.verbose && fileInfo.sequenceNum > 0) {
-    size_t min_print =
-        (fileInfo.minLen == 0 || fileInfo.minLen == kInvalidLength)
-            ? 0
-            : fileInfo.minLen;
-    std::cout << "Read length stats: min=" << min_print
-              << ", max=" << fileInfo.maxLen << ", avg=" << fileInfo.avgLen
-              << std::endl;
   }
 
   size_t presenceTotalReads = fileInfo.sequenceNum;
@@ -784,56 +605,9 @@ void run(ClassifyConfig config) {
   PresenceDecision presenceDecision = evaluate_presence_coverage(
       presenceSummary, tax, config, coverageMeta, presenceTotalReads,
       presenceMeanReadLen);
-  if (config.verbose) {
-    auto oldFlags = std::cout.flags();
-    auto oldPrecision = std::cout.precision();
-    std::cout << "Presence caller (coverage): tests=" << presenceDecision.tested
-              << ", accepted=" << presenceDecision.acceptedCount
-              << ", mu=" << std::scientific << std::setprecision(6)
-              << presenceDecision.noiseMu << ", pi=" << config.presence_pi
-              << ", tau=" << config.presence_tau << std::defaultfloat
-              << std::endl;
-
-    if (!presenceDecision.logPosteriors.empty()) {
-      std::vector<double> vals;
-      vals.reserve(presenceDecision.logPosteriors.size());
-      for (const auto &kv : presenceDecision.logPosteriors) {
-        vals.push_back(kv.second);
-      }
-      std::sort(vals.begin(), vals.end());
-      auto pick = [&](double q) -> double {
-        if (vals.empty()) {
-          return 0.0;
-        }
-        q = std::clamp(q, 0.0, 1.0);
-        size_t idx = static_cast<size_t>(
-            std::floor(q * static_cast<double>(vals.size() - 1)));
-        if (idx >= vals.size()) {
-          idx = vals.size() - 1;
-        }
-        return vals[idx];
-      };
-      std::cout << "Presence logPosterior: p50=" << std::fixed
-                << std::setprecision(3) << pick(0.50)
-                << ", p90=" << pick(0.90) << ", p99=" << pick(0.99)
-                << ", max=" << vals.back() << std::defaultfloat << std::endl;
-    }
-    std::cout.flags(oldFlags);
-    std::cout.precision(oldPrecision);
-  }
-
-  PresenceFilterStats filterStats{};
   if (!config.em) {
     // Presence filter is a strong precision gate for short-read datasets.
-    filterStats = apply_presence_filter(presenceDecision, tax, classifyResults,
-                                        fileInfo);
-    if (config.verbose &&
-        (filterStats.trimmedAssignments > 0 ||
-         filterStats.forcedUnclassified > 0)) {
-      std::cout << "Presence filter: trimmed " << filterStats.trimmedAssignments
-                << " assignments, forced " << filterStats.forcedUnclassified
-                << " reads to unclassified" << std::endl;
-    }
+    apply_presence_filter(presenceDecision, tax, classifyResults, fileInfo);
   }
 
   std::unordered_map<std::string, double> emPriorScale;
@@ -884,9 +658,7 @@ void run(ClassifyConfig config) {
   // Default: auto (enabled only when weights are present and highly skewed).
   {
     const bool low_div = config.low_div_active;
-    bool applied = false;
     double scale = 1.0;
-    std::string reason = "disabled";
 
     std::vector<double> raw;
     raw.reserve(classifyResults.size());
@@ -895,11 +667,7 @@ void run(ClassifyConfig config) {
         raw.push_back(res.sample_weight);
       }
     }
-    if (low_div) {
-      reason = "low_div";
-    } else if (raw.empty()) {
-      reason = "no_weights";
-    } else {
+    if (!low_div && !raw.empty()) {
       std::sort(raw.begin(), raw.end());
       auto pick = [&](double q) -> double {
         if (raw.empty()) {
@@ -923,56 +691,18 @@ void run(ClassifyConfig config) {
       // Auto guard: only apply when the tail is clearly extreme.
       const bool skewed =
           (ratio_p99 >= 16.0) || (ratio_max >= 256.0) || (mx >= 1e5);
-      if (!skewed) {
-        reason = "not_skewed";
-      } else if (!(med > 0.0) || !(std::log1p(med) > 0.0)) {
-        reason = "bad_median";
-      } else {
+      if (skewed && (med > 0.0) && (std::log1p(med) > 0.0)) {
         scale = med / std::log1p(med);
         for (auto &res : classifyResults) {
           if (res.sample_weight > 0.0) {
             res.sample_weight = scale * std::log1p(res.sample_weight);
           }
         }
-        applied = true;
-        reason = "ok";
-
-        if (config.verbose) {
-          const double eff_p50 = scale * std::log1p(med);
-          const double eff_p90 = scale * std::log1p(p90);
-          const double eff_p99 = scale * std::log1p(p99);
-          const double eff_max = scale * std::log1p(mx);
-
-          auto oldFlags = std::cout.flags();
-          auto oldPrecision = std::cout.precision();
-          std::cout.setf(std::ios::fixed);
-          std::cout << std::setprecision(4);
-          std::cout << "[em][wsat] requested=auto"
-                    << " mode=log1p"
-                    << " applied=" << (applied ? 1 : 0)
-                    << " low_div=" << (low_div ? 1 : 0)
-                    << " avgLen=" << fileInfo.avgLen
-                    << " raw(p50/p90/p99/max)=" << med << '/' << p90 << '/'
-                    << p99 << '/' << mx
-                    << " raw_ratio(max/med)=" << (mx / denom)
-                    << " raw_ratio(p99/med)=" << (p99 / denom)
-                    << " eff(p50/p90/p99/max)=" << eff_p50 << '/' << eff_p90
-                    << '/' << eff_p99 << '/' << eff_max
-                    << " scale=" << scale << " reason=" << reason
-                    << std::endl;
-          std::cout.flags(oldFlags);
-          std::cout.precision(oldPrecision);
-        }
       }
     }
-    (void)applied;
-    (void)scale;
-    (void)reason;
   }
 
   if (config.em) {
-    auto EMstart = std::chrono::high_resolution_clock::now();
-    std::cout << "Running EM algorithm..." << std::endl;
     EMOptions options;
     options.temp = 1.05;
     options.prune_ratio = config.em_prune_ratio;
@@ -983,14 +713,7 @@ void run(ClassifyConfig config) {
     classifyResults = std::move(posterior);
     classWeights = std::move(weights);
     posteriorModelUsed = true;
-    auto EMend = std::chrono::high_resolution_clock::now();
-    auto EMduration =
-        std::chrono::duration_cast<std::chrono::milliseconds>(EMend - EMstart);
-    if (config.verbose) {
-      std::cout << "EM time: ";
-      print_classify_time(EMduration.count());
-    }
-	  }
+  }
 		  if (posteriorModelUsed) {
 		    DecisionConfig decisionConfig;
 		    // Auto-tune post_pi_min for high-diversity samples:
@@ -1004,7 +727,6 @@ void run(ClassifyConfig config) {
 		    double top10_mass = 0.0;
 		    double top50_mass = 0.0;
 		    double tail_base = 0.0;
-		    bool weight_stats_ok = false;
 		    bool head_heavy = false;
 		    if (!config.low_div_active && tuned_post_pi_min > 0.0 &&
 		        !classWeights.empty()) {
@@ -1019,7 +741,6 @@ void run(ClassifyConfig config) {
 		        }
 		      }
 		      if (total_mass > 0.0 && weights.size() > 1) {
-		        weight_stats_ok = true;
 		        std::sort(weights.begin(), weights.end(),
 		                  [](double a, double b) { return a > b; });
 		        const size_t topK = std::min<size_t>(10, weights.size());
@@ -1093,60 +814,9 @@ void run(ClassifyConfig config) {
 		        kAutoPostPiMinL1);
 		    tuned_post_pi_min = len_tune.tuned;
 		
-		    std::string reason = "base";
-		    if (!(config.post_pi_min > 0.0)) {
-		      reason = "disabled";
-		    } else if (config.low_div_active) {
-		      reason = "lowdiv";
-		    } else {
-		      const bool weights_tuned =
-		          (tuned_post_pi_min_weights > 0.0 &&
-		           tuned_post_pi_min_weights < config.post_pi_min);
-		      if (weights_tuned && len_tune.applied) {
-		        reason = "weights+avgLen";
-		      } else if (len_tune.applied) {
-		        reason = "avgLen";
-		      } else if (weights_tuned) {
-		        reason = "weights";
-		      }
-		    }
-		
-		    {
-		      auto oldFlags = std::cout.flags();
-		      auto oldPrecision = std::cout.precision();
-		      std::cout.setf(std::ios::scientific);
-		      std::cout << std::setprecision(6);
-		      std::cout << "[em][auto] post_pi_min=" << tuned_post_pi_min
-		                << " reason=" << reason
-		                << " low_div=" << (config.low_div_active ? 1 : 0)
-		                << " avgLen=" << fileInfo.avgLen
-		                << " base=" << config.post_pi_min
-		                << " tuned_w=" << tuned_post_pi_min_weights
-		                << " pi_lo=" << auto_pi_lo;
-		      if (len_tune.applied) {
-		        std::cout << " t=" << std::fixed << std::setprecision(3) << len_tune.t;
-		      }
-		      if (weight_stats_ok) {
-		        std::cout << std::defaultfloat
-		                  << " top10_mass=" << top10_mass
-		                  << " top50_mass=" << top50_mass
-		                  << " tail_mass=" << tail_base
-		                  << " head_heavy=" << (head_heavy ? 1 : 0);
-		      }
-		      std::cout << std::endl;
-		      std::cout.flags(oldFlags);
-		      std::cout.precision(oldPrecision);
-		    }
 		
     decisionConfig.min_class_weight = tuned_post_pi_min;
     decisionConfig.allow_fallback_on_reject = !config.low_div_active;
-
-    if (config.verbose) {
-      std::cout << "PostEM decision: fallback_on_reject="
-                << (decisionConfig.allow_fallback_on_reject ? 1 : 0)
-                << " fallback_gap_min=" << decisionConfig.fallback_gap_min
-                << std::endl;
-    }
 
     postEmDecision(classifyResults, decisionConfig, classWeights, tax,
                    &presenceDecision, weightCtx.ncbiTaxdump, fileInfo.avgLen);
@@ -1162,113 +832,7 @@ void run(ClassifyConfig config) {
     }
   }
 
-  auto accumulate_rejects = [&]() {
-    fileInfo.rejectReasons.clear();
-    fileInfo.rejectByTaxid.clear();
-    for (const auto &res : classifyResults) {
-      if (res.reject_reason.empty()) {
-        continue;
-      }
-      fileInfo.rejectReasons[res.reject_reason] += 1;
-      std::string hint = res.best_taxid_hint;
-      if (hint.empty() && !res.taxidCount.empty() &&
-          res.taxidCount.front().first != "unclassified") {
-        hint = res.taxidCount.front().first;
-      }
-      if (!hint.empty()) {
-        fileInfo.rejectByTaxid[hint][res.reject_reason] += 1;
-      }
-    }
-  };
-  accumulate_rejects();
-
-  auto print_rejects = [&]() {
-    if (fileInfo.rejectReasons.empty()) {
-      return;
-    }
-    std::cout << "Reject breakdown (reads):" << std::endl;
-    std::vector<std::pair<std::string, size_t>> reasons;
-    reasons.reserve(fileInfo.rejectReasons.size());
-    for (const auto &kv : fileInfo.rejectReasons) {
-      reasons.emplace_back(kv.first, kv.second);
-    }
-    std::sort(reasons.begin(), reasons.end(),
-              [](auto &a, auto &b) { return a.second > b.second; });
-    size_t topR = std::min<size_t>(8, reasons.size());
-    for (size_t i = 0; i < topR; ++i) {
-      std::cout << "  - " << reasons[i].first << ": " << reasons[i].second
-                << std::endl;
-    }
-    std::cout << "  total rejected: " << fileInfo.unclassifiedNum << std::endl;
-    std::vector<std::pair<std::string, size_t>> taxa;
-    for (const auto &kv : fileInfo.rejectByTaxid) {
-      size_t sum = 0;
-      for (const auto &r : kv.second)
-        sum += r.second;
-      taxa.emplace_back(kv.first, sum);
-    }
-    std::sort(taxa.begin(), taxa.end(),
-              [](auto &a, auto &b) { return a.second > b.second; });
-    size_t topT = std::min<size_t>(5, taxa.size());
-    for (size_t i = 0; i < topT; ++i) {
-      std::cout << "  taxid " << taxa[i].first << ": " << taxa[i].second
-                << " rejected (";
-      const auto &mp = fileInfo.rejectByTaxid[taxa[i].first];
-      size_t shown = 0;
-      for (auto it = mp.begin(); it != mp.end() && shown < 3; ++it, ++shown) {
-        std::cout << it->first << "=" << it->second;
-        if (shown + 1 < 3 && std::next(it) != mp.end())
-          std::cout << ", ";
-      }
-      std::cout << ")" << std::endl;
-    }
-  };
-	  if (config.verbose) {
-	    print_rejects();
-	  }
-
-  auto saveStart = std::chrono::high_resolution_clock::now();
-  std::cout << "Saving classification results..." << std::endl;
   saveResult(classifyResults, config);
-  auto saveEnd = std::chrono::high_resolution_clock::now();
-  auto saveDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
-      saveEnd - saveStart);
-  if (config.verbose) {
-    std::cout << "\nSave time: ";
-    print_classify_time(saveDuration.count());
-    std::cout << "Total sequences: " << fileInfo.sequenceNum << std::endl;
-
-    const auto format_percentage = [](size_t part, size_t total) {
-      std::ostringstream oss;
-      if (total == 0) {
-        oss << "N/A";
-        return oss.str();
-      }
-      oss.setf(std::ios::fixed);
-      oss << std::setprecision(2)
-          << static_cast<double>(part) * 100.0 /
-                 static_cast<double>(total)
-          << '%';
-      return oss.str();
-    };
-
-    std::cout << "Classified sequences: " << fileInfo.classifiedNum << " ("
-              << format_percentage(fileInfo.classifiedNum, fileInfo.sequenceNum)
-              << ")" << std::endl;
-    std::cout << "Unclassified sequences: " << fileInfo.unclassifiedNum << " ("
-              << format_percentage(fileInfo.unclassifiedNum, fileInfo.sequenceNum)
-              << ")" << std::endl;
-  }
-
-  auto TotalclassifyEnd = std::chrono::high_resolution_clock::now();
-  auto TotalclassifyDuration =
-      std::chrono::duration_cast<std::chrono::milliseconds>(TotalclassifyEnd -
-                                                            TotalclassifyStart);
-
-  if (config.verbose) {
-    std::cout << "\nTotal classify time: ";
-    print_classify_time(TotalclassifyDuration.count());
-  }
 }
 
 } // namespace ChimeraClassify

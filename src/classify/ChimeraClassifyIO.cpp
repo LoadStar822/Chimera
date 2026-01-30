@@ -39,9 +39,7 @@ ReadStats sample_read_stats(const ClassifyConfig &config, size_t max_reads) {
           if (stats.count >= max_reads)
             break;
         }
-      } catch (const std::exception &e) {
-        std::cerr << "Warning: 采样读取文件 " << file
-                  << " 失败: " << e.what() << std::endl;
+      } catch (const std::exception &) {
       }
       if (stats.count >= max_reads)
         break;
@@ -65,10 +63,7 @@ ReadStats sample_read_stats(const ClassifyConfig &config, size_t max_reads) {
           if (stats.count >= max_reads)
             break;
         }
-      } catch (const std::exception &e) {
-        std::cerr << "Warning: 采样读取文件 " << config.pairedFiles[i]
-                  << " 或 " << config.pairedFiles[i + 1]
-                  << " 失败: " << e.what() << std::endl;
+      } catch (const std::exception &) {
       }
       if (stats.count >= max_reads)
         break;
@@ -210,29 +205,6 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
   fileInfo.sequenceNum += totalSequences;
   fileInfo.fileNum += totalFiles;
 
-  if (config.verbose) {
-    std::cout << "Number of files: " << fileInfo.fileNum << std::endl;
-    std::cout << "Number of sequences: " << fileInfo.sequenceNum << std::endl
-              << std::endl;
-  }
-}
-
-void print_classify_time(long long milliseconds) {
-  long long total_seconds = milliseconds / 1000;
-  long long seconds = total_seconds % 60;
-  long long total_minutes = total_seconds / 60;
-  long long minutes = total_minutes % 60;
-  long long hours = total_minutes / 60;
-
-  if (hours > 0) {
-    std::cout << hours << "h " << minutes << "min " << seconds << "s "
-              << milliseconds % 1000 << "ms" << std::endl;
-  } else if (minutes > 0) {
-    std::cout << minutes << "min " << seconds << "s "
-              << milliseconds % 1000 << "ms" << std::endl;
-  } else {
-    std::cout << seconds << "s " << milliseconds % 1000 << "ms" << std::endl;
-  }
 }
 
 void saveResult(std::vector<classifyResult> classifyResults,
