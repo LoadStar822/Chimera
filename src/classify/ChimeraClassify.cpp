@@ -495,8 +495,7 @@ void run(ClassifyConfig config) {
             << " bins=" << tax.idx2id.size() << std::endl;
   log_stage("after_build_tax_dict");
   std::vector<uint32_t> tid2speciesRep;
-  if ((config.collapse_strain_hits || config.collapse_strain_candidates) &&
-      weightCtx.ncbiTaxdump &&
+  if (config.collapse_strain_hits && weightCtx.ncbiTaxdump &&
       weightCtx.ncbiTaxdump->enabled()) {
     tid2speciesRep.resize(tax.id2str.size());
     for (uint32_t i = 0; i < tid2speciesRep.size(); ++i) {
