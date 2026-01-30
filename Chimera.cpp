@@ -398,13 +398,6 @@ int main(int argc, char **argv) {
       ->add_option("-b,--batch-size", classifyConfig.batchSize,
                    "Batch size for classifying")
       ->default_val(400);
-  bool classifyNoEm = false;
-  auto emFlag = classify->add_flag("-e,--EM", classifyConfig.em,
-                                   "Enable EM mode (default; use --no-em to disable)");
-  auto noEmFlag =
-      classify->add_flag("--no-em", classifyNoEm, "Disable EM mode");
-  noEmFlag->excludes(emFlag);
-  emFlag->excludes(noEmFlag);
   classify->add_option("--em-iter", classifyConfig.emIter, "EM iteration")
       ->default_val(100);
   classify
@@ -445,9 +438,6 @@ int main(int argc, char **argv) {
 
   CLI11_PARSE(app, argc, argv);
 
-  if (classifyNoEm) {
-    classifyConfig.em = false;
-  }
   if (firstBetaOpt && firstBetaOpt->count() > 0 &&
       classifyConfig.firstFilterBeta > 0.0) {
     classifyConfig.firstFilterBeta_user = true;

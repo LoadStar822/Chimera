@@ -97,9 +97,7 @@ void processSequence(
   if (!(sample_weight > 0.0)) {
     sample_weight = 1.0;
   }
-  // Presence model is sensitive to extremely large sample weights (read counts).
-  // Use a tempered weight so presence stays a useful gate instead of saturating.
-  double presence_weight = sample_weight;
+  double presence_weight = 1.0;
 
 
   // Sample a subset of hashes for coarse candidate selection.
