@@ -596,11 +596,6 @@ void run(ClassifyConfig config) {
 
   size_t presenceTotalReads = fileInfo.sequenceNum;
   size_t presenceMeanReadLen = fileInfo.avgLen;
-  if (weightCtx.has_sample_weights()) {
-    presenceMeanReadLen = (coverageMeta.ref_read_length > 0)
-                              ? static_cast<size_t>(coverageMeta.ref_read_length)
-                              : static_cast<size_t>(150);
-  }
 
   PresenceDecision presenceDecision = evaluate_presence_coverage(
       presenceSummary, tax, config, coverageMeta, presenceTotalReads,
