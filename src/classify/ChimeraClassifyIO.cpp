@@ -82,7 +82,8 @@ ReadStats sample_read_stats(const ClassifyConfig &config, size_t max_reads) {
 }
 
 void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
-                ClassifyConfig config, FileInfo &fileInfo) {
+                ClassifyConfig config, FileInfo &fileInfo,
+                size_t max_reads) {
   if (readQueues.empty()) {
     throw std::runtime_error("readQueues is empty");
   }
@@ -110,7 +111,6 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
 
   size_t totalSequences = 0;
   size_t totalFiles = 0;
-  const size_t max_reads = config.max_reads;
   bool reached_limit = false;
 
   if (!config.singleFiles.empty()) {

@@ -69,7 +69,6 @@ namespace ChimeraClassify {
 	bool low_div_auto = true;       // internal: auto low-diversity branch
 	bool low_div_active = false;    // internal: set when low-div branch is enabled
 	uint32_t low_div_probe_reads = 200000; // internal: probe reads for low-div detect
-	size_t max_reads = 0;           // internal: stop after N reads (0 disables)
 	size_t hash_sample_min = 16;
 	size_t hash_sample_max = 96;
 		double idf_max = 8.0;

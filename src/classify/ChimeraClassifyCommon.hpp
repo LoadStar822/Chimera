@@ -447,7 +447,8 @@ TaxDict build_tax_dict(const std::vector<std::vector<std::string>> &idx2tax);
 void print_classify_time(long long milliseconds);
 
 void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
-                ClassifyConfig config, FileInfo &fileInfo);
+                ClassifyConfig config, FileInfo &fileInfo,
+                size_t max_reads = 0);
 
 void loadFilter(const std::string &input_file,
                 chimera::imcf::InterleavedMergedCuckooFilter &imcf,

@@ -561,7 +561,6 @@ void run(ClassifyConfig config) {
   size_t avg_len_hint = 0;
   if (config.low_div_auto && config.low_div_probe_reads > 0) {
     ClassifyConfig probe_config = config;
-    probe_config.max_reads = config.low_div_probe_reads;
     probe_config.verbose = false;
 
     FileInfo probeInfo;
@@ -570,7 +569,8 @@ void run(ClassifyConfig config) {
     std::vector<classifyResult> probeResults;
     std::atomic<bool> probe_done{false};
     std::thread probeProducer([&]() {
-      parseReads(probeQueues, probe_config, probeInfo);
+      parseReads(probeQueues, probe_config, probeInfo,
+                 config.low_div_probe_reads);
       probe_done.store(true, std::memory_order_release);
     });
 
