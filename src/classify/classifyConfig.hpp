@@ -41,11 +41,6 @@ namespace ChimeraClassify {
 			std::string weight_map_file; // optional contig/read weight map (CAMI mapping.tsv or id<TAB>weight)
 			std::string outputFile;
 			std::string dbFile;
-		std::string feature{ "auto" };
-		uint8_t strobemer_k{ 0 };      // inherit from DB unless >0
-		uint8_t strobemer_order{ 0 };
-		uint16_t strobemer_w_min{ 0 };
-		uint16_t strobemer_w_max{ 0 };
 		std::string taxonomyKind{ "auto" };
 		std::string taxonomyVersion{ "auto" };
 		double shotThreshold = 0.70;
@@ -98,11 +93,6 @@ namespace ChimeraClassify {
 				<< (config.weight_map_file.empty() ? "none" : config.weight_map_file) << std::endl;
 			os << std::setw(20) << "Output file:" << config.outputFile << std::endl
 				<< std::setw(20) << "Database file:" << config.dbFile << std::endl
-				<< std::setw(20) << "Feature method:" << config.feature << std::endl
-			<< std::setw(20) << "Strobemer k:" << static_cast<int>(config.strobemer_k) << std::endl
-			<< std::setw(20) << "Strobemer order:" << static_cast<int>(config.strobemer_order) << std::endl
-			<< std::setw(20) << "Strobemer w_min:" << config.strobemer_w_min << std::endl
-			<< std::setw(20) << "Strobemer w_max:" << config.strobemer_w_max << std::endl
 			<< std::setw(20) << "Taxonomy kind:" << config.taxonomyKind << std::endl
 			<< std::setw(20) << "Taxonomy version:" << config.taxonomyVersion << std::endl
 			<< std::setw(20) << "Shot threshold:" << config.shotThreshold << std::endl

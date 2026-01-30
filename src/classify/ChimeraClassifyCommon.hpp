@@ -28,7 +28,6 @@ namespace ChimeraClassify {
 using FeatureMethod = chimera::feature::Method;
 inline constexpr size_t kInvalidLength = std::numeric_limits<size_t>::max();
 
-FeatureMethod parse_feature_method_string(std::string feature);
 std::string feature_method_to_string(FeatureMethod method);
 
 struct MarginDecision {
@@ -432,7 +431,7 @@ ReadStats sample_read_stats(const ClassifyConfig &config,
                             size_t max_reads = 20000);
 
 chimera::feature::Params prepare_feature_params_for_classify(
-    const ChimeraBuild::IMCFConfig &imcfConfig, ClassifyConfig &config,
+    const ChimeraBuild::IMCFConfig &imcfConfig,
     FeatureMethod method, size_t &feature_min_len);
 
 // --- fast taxid dictionary ---

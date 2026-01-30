@@ -436,112 +436,10 @@ void run(ClassifyConfig config) {
   FeatureMethod db_method =
       (imcfConfig.featureMethod == 1) ? FeatureMethod::Strobemer
                                       : FeatureMethod::Syncmer;
-  FeatureMethod user_method = parse_feature_method_string(config.feature);
-  FeatureMethod desired_method = user_method;
-  std::string db_method_str = feature_method_to_string(db_method);
-  std::string user_method_str = feature_method_to_string(user_method);
-  uint8_t desired_k = config.strobemer_k;
-  uint8_t desired_order = config.strobemer_order;
-  uint16_t desired_w_min = config.strobemer_w_min;
-  uint16_t desired_w_max = config.strobemer_w_max;
-
-  if (user_method == FeatureMethod::Auto) {
-    ReadStats stats = sample_read_stats(config);
-    double avg_len =
-        (stats.count == 0)
-            ? 0.0
-            : static_cast<double>(stats.total_len) /
-                  static_cast<double>(stats.count);
-    if (stats.count == 0) {
-      desired_method = db_method;
-    } else {
-      size_t representative_len = static_cast<size_t>(std::llround(avg_len));
-      if (representative_len == 0)
-        representative_len = stats.max_len;
-      chimera::feature::Params suggested =
-          chimera::feature::auto_params_from_readlen(representative_len);
-      if (suggested.method == chimera::feature::Method::Strobemer) {
-        size_t required = chimera::feature::min_required_length(suggested);
-        if (stats.max_len < required) {
-          suggested.method = chimera::feature::Method::Syncmer;
-        }
-      }
-      desired_method = static_cast<FeatureMethod>(suggested.method);
-      if (suggested.method == chimera::feature::Method::Strobemer) {
-        desired_k = suggested.strobe.k;
-        desired_order = suggested.strobe.order;
-        desired_w_min = suggested.strobe.w_min;
-        desired_w_max = suggested.strobe.w_max;
-      } else {
-        desired_k = 0;
-        desired_order = 0;
-        desired_w_min = 0;
-        desired_w_max = 0;
-      }
-    }
+  FeatureMethod final_method = db_method;
+  if (final_method == FeatureMethod::Strobemer && imcfConfig.strobeK == 0) {
+    throw std::runtime_error("IMCF 数据库缺少 strobemer 参数，无法分类。");
   }
-
-  FeatureMethod final_method = desired_method;
-  if (final_method == FeatureMethod::Strobemer) {
-    if (db_method != FeatureMethod::Strobemer) {
-      std::cout << "[info] 输入 reads 建议使用 strobemer，但数据库为 syncmer，自动改用 syncmer。"
-                << std::endl;
-      final_method = db_method;
-    } else {
-      if (imcfConfig.strobeK == 0) {
-        throw std::runtime_error("IMCF 数据库缺少 strobemer 参数，无法分类。");
-      }
-      if (user_method == FeatureMethod::Auto) {
-        if (desired_k != 0 &&
-            (desired_k != imcfConfig.strobeK ||
-             desired_order != imcfConfig.strobeOrder ||
-             desired_w_min != imcfConfig.strobeWmin ||
-             desired_w_max != imcfConfig.strobeWmax)) {
-          std::cout
-              << "[warn] 自动参数建议 strobemer(k=" << static_cast<int>(desired_k)
-              << ", order=" << static_cast<int>(desired_order) << ", w=["
-              << desired_w_min << ',' << desired_w_max
-              << "])，但数据库为 strobemer(k="
-              << static_cast<int>(imcfConfig.strobeK)
-              << ", order=" << static_cast<int>(imcfConfig.strobeOrder)
-              << ", w=[" << imcfConfig.strobeWmin << ','
-              << imcfConfig.strobeWmax
-              << "])，将沿用数据库参数。如需匹配自动建议，请重新构建数据库。"
-              << std::endl;
-        }
-      }
-      config.strobemer_k = imcfConfig.strobeK;
-      config.strobemer_order = imcfConfig.strobeOrder;
-      config.strobemer_w_min = imcfConfig.strobeWmin;
-      config.strobemer_w_max = imcfConfig.strobeWmax;
-    }
-  } else {
-    if (db_method == FeatureMethod::Strobemer) {
-      std::cout << "[warn] 自动模式建议使用 syncmer，但数据库是 strobemer，将沿用数据库参数。"
-                << std::endl;
-      final_method = db_method;
-      config.strobemer_k = imcfConfig.strobeK;
-      config.strobemer_order = imcfConfig.strobeOrder;
-      config.strobemer_w_min = imcfConfig.strobeWmin;
-      config.strobemer_w_max = imcfConfig.strobeWmax;
-    } else {
-      config.strobemer_k = 0;
-      config.strobemer_order = 0;
-      config.strobemer_w_min = 0;
-      config.strobemer_w_max = 0;
-    }
-  }
-
-  if (final_method != db_method) {
-    std::ostringstream oss;
-    oss << "数据库构建特征方法为 " << feature_method_to_string(db_method)
-        << "，但分类配置要求 " << feature_method_to_string(final_method)
-        << "，请调整 --feature 参数或重新构建数据库。";
-    throw std::runtime_error(oss.str());
-  }
-
-  std::string final_method_str = feature_method_to_string(final_method);
-  config.feature = final_method_str;
 
   if (final_method == FeatureMethod::Strobemer &&
       !chimera::feature::strobemer_available()) {
@@ -550,16 +448,16 @@ void run(ClassifyConfig config) {
 
   size_t feature_min_len = 0;
   chimera::feature::Params feature_params =
-      prepare_feature_params_for_classify(imcfConfig, config, final_method,
+      prepare_feature_params_for_classify(imcfConfig, final_method,
                                           feature_min_len);
 
   if (config.verbose) {
     if (final_method == FeatureMethod::Strobemer) {
       std::cout << "Feature method: strobemer (k="
-                << static_cast<int>(config.strobemer_k)
-                << ", order=" << static_cast<int>(config.strobemer_order)
-                << ", w=[" << config.strobemer_w_min << ','
-                << config.strobemer_w_max
+                << static_cast<int>(imcfConfig.strobeK)
+                << ", order=" << static_cast<int>(imcfConfig.strobeOrder)
+                << ", w=[" << imcfConfig.strobeWmin << ','
+                << imcfConfig.strobeWmax
                 << "], seed=" << static_cast<unsigned long long>(imcfConfig.seed64)
                 << ")" << std::endl;
     } else {
@@ -834,7 +732,8 @@ void run(ClassifyConfig config) {
   });
 
   auto classifyStart = std::chrono::high_resolution_clock::now();
-  std::cout << "Classifying sequences by imcf (feature=" << config.feature
+  std::cout << "Classifying sequences by imcf (feature="
+            << feature_method_to_string(final_method)
             << ")..." << std::endl;
   classify_streaming(imcfConfig, readQueues, config, imcf, indexToTaxid, tax,
                      classifyResults, fileInfo, producer_done, feature_params,

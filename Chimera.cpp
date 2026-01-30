@@ -350,14 +350,6 @@ int main(int argc, char **argv) {
         value = "auto";
       }
     };
-    auto normalize_feature = [](std::string &value) {
-      std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-      });
-      if (value.empty()) {
-        value = "auto";
-      }
-    };
     auto sanitize_version = [](std::string &value) {
       if (value.empty()) {
         value = "auto";
@@ -365,22 +357,6 @@ int main(int argc, char **argv) {
     };
     normalize_kind(classifyConfig.taxonomyKind);
     sanitize_version(classifyConfig.taxonomyVersion);
-    normalize_feature(classifyConfig.feature);
-    if (!(classifyConfig.feature == "auto" || classifyConfig.feature == "syncmer" ||
-          classifyConfig.feature == "strobemer")) {
-      throw CLI::ValidationError("--feature must be one of auto|syncmer|strobemer");
-    }
-    if (classifyConfig.strobemer_w_min != 0 && classifyConfig.strobemer_w_max != 0 &&
-        classifyConfig.strobemer_w_min > classifyConfig.strobemer_w_max) {
-      throw CLI::ValidationError("--strobe-w-min must be <= --strobe-w-max");
-    }
-    if (classifyConfig.strobemer_order != 0 &&
-        classifyConfig.strobemer_order != 2) {
-      throw CLI::ValidationError("--strobe-order 当前仅支持取 2");
-    }
-    if (classifyConfig.strobemer_k != 0 && classifyConfig.strobemer_k < 8) {
-      throw CLI::ValidationError("--strobe-k must be >= 8 when specified");
-    }
     classifyConfig.verbose = !classifyQuietRequested;
   });
 
@@ -393,34 +369,6 @@ int main(int argc, char **argv) {
                    "Database file for classifying")
       ->required()
       ->check(CLI::ExistingFile);
-  classify
-      ->add_option("--feature", classifyConfig.feature,
-                   "Feature 提取方式 (syncmer|strobemer|auto；auto 表示跟随数据库)")
-      ->default_val("auto");
-  auto *strobeKOpt =
-      classify
-          ->add_option("--strobe-k", classifyConfig.strobemer_k,
-                       "Strobemer k-mer 长度 (默认跟随数据库)")
-          ->default_val(0);
-  strobeKOpt->default_str("inherit");
-  auto *strobeOrderOpt =
-      classify
-      ->add_option("--strobe-order", classifyConfig.strobemer_order,
-                       "Strobemer 阶数 (默认跟随数据库，当前仅支持 2)")
-          ->default_val(0);
-  strobeOrderOpt->default_str("inherit");
-  auto *strobeWminOpt =
-      classify
-          ->add_option("--strobe-w-min", classifyConfig.strobemer_w_min,
-                       "Strobemer 最小窗口 (默认跟随数据库)")
-          ->default_val(0);
-  strobeWminOpt->default_str("inherit");
-  auto *strobeWmaxOpt =
-      classify
-          ->add_option("--strobe-w-max", classifyConfig.strobemer_w_max,
-                       "Strobemer 最大窗口 (默认跟随数据库)")
-          ->default_val(0);
-  strobeWmaxOpt->default_str("inherit");
   classify
       ->add_option("-s,--shot-threshold", classifyConfig.shotThreshold,
                    "Shot threshold for classifying")
