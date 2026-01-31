@@ -20,7 +20,6 @@
 #include "classifyConfig.hpp"
 #include "kthread.h"
 #include <EM.hpp>
-#include <VEM.hpp>
 #include <buildConfig.hpp>
 #include <cereal/cereal.hpp>
 #include <cereal/types/utility.hpp>
