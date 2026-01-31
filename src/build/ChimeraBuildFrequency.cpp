@@ -148,8 +148,6 @@ void build_hash_frequency_sketch(
       files_used.clear();
       if (file_ptrs.size() <= kSketchFileCap) {
         files_used = file_ptrs;
-      } else if (kSketchFileCap == 1) {
-        files_used.push_back(file_ptrs.front());
       } else {
         files_used.reserve(kSketchFileCap);
         const size_t n = file_ptrs.size();
