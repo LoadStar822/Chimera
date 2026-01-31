@@ -253,69 +253,12 @@ void PresenceSummary::merge(const PresenceAccumulator &acc) {
   }
 }
 
-PresenceFilterStats apply_presence_filter(const PresenceDecision &decision,
-                                          const TaxDict &tax,
-                                          std::vector<classifyResult>
-                                              &classifyResults,
-                                          FileInfo &fileInfo) {
-  PresenceFilterStats stats;
-  if (decision.accepted.empty()) {
-    return stats;
-  }
-  auto keepTaxid = [&](const std::string &taxid) {
-    if (taxid == "unclassified") {
-      return true;
-    }
-    auto it = tax.str2id.find(taxid);
-    if (it == tax.str2id.end()) {
-      return true;
-    }
-    return decision.accepted.find(it->second) != decision.accepted.end();
-  };
-  for (auto &result : classifyResults) {
-    if (result.taxidCount.empty()) {
-      continue;
-    }
-    auto before = result.taxidCount.size();
-    result.taxidCount.erase(
-        std::remove_if(result.taxidCount.begin(), result.taxidCount.end(),
-                       [&](const auto &kv) { return !keepTaxid(kv.first); }),
-        result.taxidCount.end());
-    stats.trimmedAssignments += before - result.taxidCount.size();
-    if (result.taxidCount.empty()) {
-      result.taxidCount.emplace_back("unclassified", 1);
-      ++stats.forcedUnclassified;
-      if (result.reject_reason.empty()) {
-        result.reject_reason = "presence_filter";
-      }
-    }
-    if (!result.posteriors.empty()) {
-      result.posteriors.erase(
-          std::remove_if(result.posteriors.begin(), result.posteriors.end(),
-                         [&](const auto &kv) { return !keepTaxid(kv.first); }),
-          result.posteriors.end());
-    }
-  }
-  for (auto it = fileInfo.uniqueTaxids.begin();
-       it != fileInfo.uniqueTaxids.end();) {
-    auto mapIt = tax.str2id.find(*it);
-    if (mapIt != tax.str2id.end() &&
-        decision.accepted.find(mapIt->second) == decision.accepted.end()) {
-      it = fileInfo.uniqueTaxids.erase(it);
-    } else {
-      ++it;
-    }
-  }
-  return stats;
-}
-
 static PresenceDecision evaluate_presence_coverage_impl(
     const PresenceSummary &summary, const TaxDict &tax,
     const ClassifyConfig &config, const chimera::presence::CoverageMeta &meta,
     size_t totalReads, size_t meanReadLen, bool unique_only) {
   PresenceDecision decision;
   decision.threshold = config.presence_tau;
-  decision.priorPi = config.presence_pi;
   if (summary.stats.empty()) {
     return decision;
   }
@@ -532,12 +475,10 @@ static PresenceDecision evaluate_presence_coverage_impl(
     mu = 1e-4;
   }
   mu = std::max(mu, 1e-8);
-  decision.noiseMu = mu;
 
   double pi = std::clamp(config.presence_pi, 1e-9, 1.0 - 1e-6);
   double logPriorOdds = std::log(pi) - std::log1p(-pi);
 
-  decision.tested = summary.stats.size();
   for (const auto &[tid, stats] : summary.stats) {
     double exposure = resolve_exposure(tid);
     if (exposure <= 0.0) {
@@ -645,11 +586,7 @@ static PresenceDecision evaluate_presence_coverage_impl(
       posteriorProb = e / (1.0 + e);
     }
     decision.posteriors[tid] = posteriorProb;
-    if (logPosterior >= config.presence_tau) {
-      decision.accepted.insert(tid);
-    }
   }
-  decision.acceptedCount = decision.accepted.size();
   return decision;
 }
 

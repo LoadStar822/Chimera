@@ -491,29 +491,15 @@ struct PresenceSummary {
 };
 
 struct PresenceDecision {
-  std::unordered_set<uint32_t> accepted;
   robin_hood::unordered_flat_map<uint32_t, double> posteriors;
   robin_hood::unordered_flat_map<uint32_t, double> logPosteriors;
   double threshold{1.0};
-  double noiseMu{0.0};
-  double priorPi{0.0};
-  size_t tested{0};
-  size_t acceptedCount{0};
 };
 
 PresenceDecision evaluate_presence_coverage(
     const PresenceSummary &summary, const TaxDict &tax,
     const ClassifyConfig &config, const chimera::presence::CoverageMeta &meta,
     size_t totalReads, size_t meanReadLen);
-
-struct PresenceFilterStats {
-  size_t trimmedAssignments{0};
-  size_t forcedUnclassified{0};
-};
-
-PresenceFilterStats apply_presence_filter(
-    const PresenceDecision &decision, const TaxDict &tax,
-    std::vector<classifyResult> &classifyResults, FileInfo &fileInfo);
 
 void processSequence(
     const std::vector<uint64_t> &hashs1, size_t readLen,

@@ -549,10 +549,6 @@ void run(ClassifyConfig config) {
   PresenceDecision presenceDecision = evaluate_presence_coverage(
       presenceSummary, tax, config, coverageMeta, presenceTotalReads,
       presenceMeanReadLen);
-  if (!config.em) {
-    // Presence filter is a strong precision gate for short-read datasets.
-    apply_presence_filter(presenceDecision, tax, classifyResults, fileInfo);
-  }
 
   std::unordered_map<std::string, double> emPriorScale;
   if (!coverageMeta.entries.empty()) {
