@@ -431,7 +431,6 @@ void run(ClassifyConfig config) {
   PresenceSummary presenceSummary(config.presence_breadth_bits);
   PresenceSummary *presencePtr = &presenceSummary;
 
-  size_t avg_len_hint = 0;
   if (config.low_div_auto && config.low_div_probe_reads > 0) {
     ClassifyConfig probe_config = config;
 
@@ -450,10 +449,6 @@ void run(ClassifyConfig config) {
                        tax, probeResults, probeInfo, probe_done, feature_params,
                        feature_min_len, weightCtx, nullptr);
     probeProducer.join();
-
-    if (probeInfo.sequenceNum > 0) {
-      avg_len_hint = probeInfo.bpLength / probeInfo.sequenceNum;
-    }
 
     if (!probeResults.empty()) {
       std::sort(probeResults.begin(), probeResults.end(),
@@ -563,9 +558,6 @@ void run(ClassifyConfig config) {
   }
 
   FileInfo fileInfo;
-  if (avg_len_hint > 0) {
-    fileInfo.avgLen = avg_len_hint;
-  }
   seqan3::contrib::bgzf_thread_count = config.threads;
   std::vector<moodycamel::ConcurrentQueue<batchReads>> readQueues(
       static_cast<size_t>(std::max<uint16_t>(1, config.threads)));
