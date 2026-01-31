@@ -30,7 +30,6 @@
 #include <algorithm>
 #include <cctype>
 #include <thread>
-#include <vector>
 
 #if defined(__unix__) || defined(__APPLE__) || defined(__linux__)
 #include <sys/utsname.h>

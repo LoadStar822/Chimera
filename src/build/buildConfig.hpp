@@ -24,7 +24,6 @@
 #include <iomanip>
 #include <cstdint>
 #include <string>
-#include <type_traits>
 #include <cereal/cereal.hpp>
 #include <cereal/types/string.hpp>
 

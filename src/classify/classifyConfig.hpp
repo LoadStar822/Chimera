@@ -20,18 +20,13 @@
 #pragma once
 #ifndef CLASSIFYCONFIG_HPP
 #define CLASSIFYCONFIG_HPP
-#include <iostream>
-#include <vector>
-#include <array>
-#include <unordered_set>
-#include <string>
-#include <cmath>
-#include <iomanip>
-#include <limits>
+#include <cstddef>
 #include <cstdint>
-#include <atomic>
-#include <memory>
-#include "robin_hood.h"
+#include <string>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
 #include <seqan3/alphabet/nucleotide/dna4.hpp>
 
 namespace ChimeraClassify {
