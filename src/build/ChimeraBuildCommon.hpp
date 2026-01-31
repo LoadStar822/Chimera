@@ -82,12 +82,4 @@ std::vector<std::vector<std::string>> buildIMCF(
     uint16_t effectiveSpan, uint16_t refReadLen, uint32_t uniqueDegThreshold,
     chimera::presence::CoverageMeta *coverageMeta);
 
-chimera::presence::CoverageMeta compute_presence_meta(
-    const robin_hood::unordered_flat_map<std::string, uint64_t> &hashCount,
-    std::string_view featureSuffix,
-    const HashFrequencyContext *hashFreqContext,
-    const robin_hood::unordered_flat_map<std::string, uint64_t> *bpCount,
-    uint16_t effectiveSpan, uint16_t refReadLen,
-    uint32_t uniqueDegThreshold, uint16_t threads);
-
 } // namespace ChimeraBuild
