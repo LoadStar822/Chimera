@@ -112,14 +112,6 @@ namespace ChimeraBuild {
 		size_t skippedNum = 0;
 		size_t skippedSeqNum = 0;
 		size_t bpLength = 0;
-
-		void operator+=(const FileInfo& other) {
-			fileNum += other.fileNum;
-			invalidNum += other.invalidNum;
-			sequenceNum += other.sequenceNum;
-			skippedNum += other.skippedNum;
-			bpLength += other.bpLength;
-		}
 	};
 
 	struct IMCFConfig {
