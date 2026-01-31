@@ -18,30 +18,6 @@
 
 namespace ChimeraBuild {
 
-uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount) {
-		uint64_t maxValue = 0;
-		for (const auto& kv : hashCount) {
-			if (kv.second > maxValue) {
-				maxValue = kv.second;
-			}
-		}
-		return maxValue;
-	}
-
-	/**
-	* Calculate the total size of all values in the hashCount map.
-	*
-	* @param hashCount The map containing the values.
-	* @return The total size.
-	*/
-	uint64_t calculateTotalSize(const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount) {
-		uint64_t totalSize = 0;
-		for (const auto& kv : hashCount) {
-			totalSize += kv.second;
-		}
-		return totalSize;
-	}
-
 	/**
 	 * @brief Constructs the Interleaved Merged Cuckoo Filter (IMCF) using provided groups and returns a mapping of indices to taxids.
 	 *
@@ -549,7 +525,6 @@ uint64_t getMaxValue(const robin_hood::unordered_flat_map<std::string, uint64_t>
 		}
 
 		if (collectCoverage) {
-			coverageMeta->entries.clear();
 			coverageMeta->entries.reserve(taxidToIndex.size());
 			for (const auto& kv : taxidToIndex) {
 				const std::string& taxid = kv.first;
