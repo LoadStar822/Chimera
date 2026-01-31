@@ -64,16 +64,6 @@ namespace ChimeraBuild {
 		size_t sig_s_max{ 131072 };
 		size_t k_base{ 400000 };
 		size_t k_min{ 100000 };
-		// DF-aware deterministic sampling during DB build.
-		// Keeps all hashes with small df and progressively down-samples common hashes.
-		bool df_sampling{ false };
-		uint32_t df_sampling_ref{ 64 };
-		double df_sampling_gamma{ 1.0 };
-		// Global sampling scale (0 => auto, larger => keep more).
-		double df_sampling_scale{ 0.0 };
-		// Block-level exact dedup within each taxid (sort+unique per block).
-		bool block_dedup{ true };
-		size_t dedup_block_hashes{ 1u << 20 };
 		uint32_t presence_unique_deg{ 1 };
 	};
 
@@ -107,12 +97,6 @@ namespace ChimeraBuild {
 			<< std::setw(25) << "Sig s max:" << config.sig_s_max << std::endl
 			<< std::setw(25) << "K base:" << config.k_base << std::endl
 			<< std::setw(25) << "K min:" << config.k_min << std::endl
-			<< std::setw(25) << "DF sampling:" << (config.df_sampling ? "true" : "false") << std::endl
-			<< std::setw(25) << "DF sample ref:" << config.df_sampling_ref << std::endl
-			<< std::setw(25) << "DF sample gamma:" << config.df_sampling_gamma << std::endl
-			<< std::setw(25) << "DF sample scale:" << (config.df_sampling_scale > 0.0 ? std::to_string(config.df_sampling_scale) : "auto") << std::endl
-			<< std::setw(25) << "Block dedup:" << (config.block_dedup ? "true" : "false") << std::endl
-			<< std::setw(25) << "Dedup block hashes:" << config.dedup_block_hashes << std::endl
 			<< std::setw(25) << "Presence unique deg:" << config.presence_unique_deg << std::endl
 			<< std::setw(25) << "Verbose:" << config.verbose << std::endl;
 

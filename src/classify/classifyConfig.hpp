@@ -96,7 +96,6 @@ namespace ChimeraClassify {
 			double sample_weight{ 0.0 }; // 可选样本权重（如 CAMI number_reads）；0 表示未提供
 			std::string reject_reason; // 为空表示未拒绝或接受
 			std::string best_taxid_hint; // 最佳候选 taxid（即使未被接受）
-			bool presence_passed{ false }; // 是否通过 presence 层
 		};
 
 			struct DecisionConfig {

@@ -14,68 +14,6 @@
 
 namespace ChimeraClassify {
 
-void ReadStats::update(size_t len) {
-  if (len == 0)
-    return;
-  ++count;
-  total_len += len;
-  if (len < min_len)
-    min_len = len;
-  if (len > max_len)
-    max_len = len;
-}
-
-ReadStats sample_read_stats(const ClassifyConfig &config, size_t max_reads) {
-  ReadStats stats;
-  if (!config.singleFiles.empty()) {
-    for (const auto &file : config.singleFiles) {
-      try {
-        seqan3::sequence_file_input<
-            raptor::dna4_traits,
-            seqan3::fields<seqan3::field::id, seqan3::field::seq>>
-            fin{file};
-        for (auto &record : fin) {
-          stats.update(record.sequence().size());
-          if (stats.count >= max_reads)
-            break;
-        }
-      } catch (const std::exception &) {
-      }
-      if (stats.count >= max_reads)
-        break;
-    }
-  } else if (!config.pairedFiles.empty()) {
-    for (size_t i = 0; i + 1 < config.pairedFiles.size(); i += 2) {
-      try {
-        seqan3::sequence_file_input<
-            raptor::dna4_traits,
-            seqan3::fields<seqan3::field::id, seqan3::field::seq>>
-            fin1{config.pairedFiles[i]};
-        seqan3::sequence_file_input<
-            raptor::dna4_traits,
-            seqan3::fields<seqan3::field::id, seqan3::field::seq>>
-            fin2{config.pairedFiles[i + 1]};
-        auto it1 = fin1.begin();
-        auto it2 = fin2.begin();
-        for (; it1 != fin1.end() && it2 != fin2.end(); ++it1, ++it2) {
-          stats.update((*it1).sequence().size());
-          stats.update((*it2).sequence().size());
-          if (stats.count >= max_reads)
-            break;
-        }
-      } catch (const std::exception &) {
-      }
-      if (stats.count >= max_reads)
-        break;
-    }
-  }
-  if (stats.count == 0) {
-    stats.min_len = 0;
-    stats.max_len = 0;
-  }
-  return stats;
-}
-
 void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
                 ClassifyConfig config, FileInfo &fileInfo,
                 size_t max_reads) {

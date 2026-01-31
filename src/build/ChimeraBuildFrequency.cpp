@@ -72,7 +72,6 @@ void build_hash_frequency_sketch(
   context.passA_total_hashes.store(0, std::memory_order_relaxed);
   context.passB_total_hashes.store(0, std::memory_order_relaxed);
   context.passB_filtered_hashes.store(0, std::memory_order_relaxed);
-  context.passB_sampled_out_hashes.store(0, std::memory_order_relaxed);
   context.stats = {};
   context.quantile = 0.999;
   std::cout << "Building hash frequency sketch (depth=" << kSketchDepth

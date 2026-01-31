@@ -29,7 +29,6 @@ struct HashFrequencyContext {
   std::atomic<uint64_t> passA_total_hashes{0};
   std::atomic<uint64_t> passB_total_hashes{0};
   std::atomic<uint64_t> passB_filtered_hashes{0};
-  std::atomic<uint64_t> passB_sampled_out_hashes{0};
 
   bool enabled() const { return static_cast<bool>(sketch); }
 };

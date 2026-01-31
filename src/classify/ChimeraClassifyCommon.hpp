@@ -28,8 +28,6 @@ namespace ChimeraClassify {
 using FeatureMethod = chimera::feature::Method;
 inline constexpr size_t kInvalidLength = std::numeric_limits<size_t>::max();
 
-std::string feature_method_to_string(FeatureMethod method);
-
 struct MarginDecision {
   bool accept{false};
   size_t need{0};
@@ -418,18 +416,6 @@ inline void apply_low_div_overrides(ClassifyConfig &config) {
   config.low_div_active = true;
 }
 
-struct ReadStats {
-  size_t count{0};
-  size_t total_len{0};
-  size_t min_len{kInvalidLength};
-  size_t max_len{0};
-
-  void update(size_t len);
-};
-
-ReadStats sample_read_stats(const ClassifyConfig &config,
-                            size_t max_reads = 20000);
-
 chimera::feature::Params prepare_feature_params_for_classify(
     const ChimeraBuild::IMCFConfig &imcfConfig,
     FeatureMethod method, size_t &feature_min_len);
@@ -516,11 +502,6 @@ struct PresenceDecision {
 };
 
 PresenceDecision evaluate_presence_coverage(
-    const PresenceSummary &summary, const TaxDict &tax,
-    const ClassifyConfig &config, const chimera::presence::CoverageMeta &meta,
-    size_t totalReads, size_t meanReadLen);
-
-PresenceDecision evaluate_presence_coverage_unique(
     const PresenceSummary &summary, const TaxDict &tax,
     const ClassifyConfig &config, const chimera::presence::CoverageMeta &meta,
     size_t totalReads, size_t meanReadLen);

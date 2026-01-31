@@ -1,6 +1,6 @@
 #include "ChimeraClassifyCommon.hpp"
-#include "post_em_debug_dump.hpp"
-#include "post_em_prune_audit.hpp"
+
+#include <utils/Parse.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -13,6 +13,109 @@
 namespace ChimeraClassify {
 
 namespace {
+enum class PostEmPresenceLevel {
+  kUnknown = 0,
+  kAccepted = 1,
+  kRejected = 2,
+};
+
+struct PostEmPruneAudit {
+  bool pruned_any{false};
+};
+
+struct PostEmPruneResult {
+  std::vector<std::pair<std::string, double>> posterior;
+  PostEmPruneAudit audit;
+};
+
+struct PostEmPruneTop1Override {
+  std::string taxid;
+  double local_pi_min_floor{0.0};
+  bool active{false};
+};
+
+template <class PresenceLevelFn>
+inline PostEmPruneResult prune_post_em_posterior(
+    const std::vector<std::pair<std::string, double>> &posterior_full_sorted,
+    double min_class_weight,
+    const std::unordered_map<std::string, double> &classWeights,
+    PresenceLevelFn presence_level, double presence_pi_floor,
+    double reject_factor,
+    const PostEmPruneTop1Override *top1_override = nullptr) {
+  PostEmPruneResult out;
+  out.posterior = posterior_full_sorted;
+
+  const double pi_prune = std::min(min_class_weight, 1e-4);
+  const bool pruning_active =
+      (pi_prune > 0.0 && min_class_weight > 0.0 && !classWeights.empty());
+  if (!pruning_active || posterior_full_sorted.empty()) {
+    return out;
+  }
+
+  std::vector<std::pair<std::string, double>> pruned;
+  pruned.reserve(posterior_full_sorted.size());
+  double sum = 0.0;
+  for (const auto &kv : posterior_full_sorted) {
+    const PostEmPresenceLevel pres = presence_level(kv.first);
+    double local_pi_min = pi_prune;
+    if (pres == PostEmPresenceLevel::kAccepted) {
+      local_pi_min = std::min(pi_prune, presence_pi_floor);
+    } else if (pres == PostEmPresenceLevel::kRejected) {
+      local_pi_min = pi_prune * reject_factor;
+    }
+    if (top1_override && top1_override->active && !top1_override->taxid.empty() &&
+        kv.first == top1_override->taxid && pres == PostEmPresenceLevel::kRejected &&
+        top1_override->local_pi_min_floor > 0.0) {
+      local_pi_min = std::min(local_pi_min, top1_override->local_pi_min_floor);
+    }
+    auto it = classWeights.find(kv.first);
+    const double w = (it != classWeights.end()) ? it->second : 0.0;
+    if (w >= local_pi_min) {
+      pruned.push_back(kv);
+      sum += kv.second;
+    }
+  }
+
+  // Soft behavior: if nothing survives, keep the original (full) posterior.
+  if (pruned.empty()) {
+    return out;
+  }
+
+  out.audit.pruned_any = (pruned.size() < posterior_full_sorted.size());
+  if (sum > 0.0) {
+    for (auto &kv : pruned) {
+      kv.second /= sum;
+    }
+  }
+  out.posterior = std::move(pruned);
+  return out;
+}
+
+struct TopkLookup {
+  bool found{false};
+  std::size_t rank{0};
+  double prob{0.0};
+};
+
+inline TopkLookup lookup_taxid_in_topk(
+    const std::vector<std::pair<std::string, double>> &posterior_sorted,
+    const std::string &taxid, std::size_t topk) {
+  TopkLookup out;
+  if (taxid.empty() || topk == 0 || posterior_sorted.empty()) {
+    return out;
+  }
+  const std::size_t k = std::min<std::size_t>(topk, posterior_sorted.size());
+  for (std::size_t i = 0; i < k; ++i) {
+    if (posterior_sorted[i].first == taxid) {
+      out.found = true;
+      out.rank = i;
+      out.prob = posterior_sorted[i].second;
+      return out;
+    }
+  }
+  return out;
+}
+
 constexpr double kPresenceFixedScale = 1048576.0; // 2^20
 constexpr uint32_t kInvalidBucket = std::numeric_limits<uint32_t>::max();
 
@@ -178,18 +281,6 @@ PresenceFilterStats apply_presence_filter(const PresenceDecision &decision,
         std::remove_if(result.taxidCount.begin(), result.taxidCount.end(),
                        [&](const auto &kv) { return !keepTaxid(kv.first); }),
         result.taxidCount.end());
-    bool passed = false;
-    for (auto &kv : result.taxidCount) {
-      auto itid = tax.str2id.find(kv.first);
-      if (itid != tax.str2id.end() &&
-          decision.accepted.find(itid->second) != decision.accepted.end()) {
-        passed = true;
-        break;
-      }
-    }
-    if (passed) {
-      result.presence_passed = true;
-    }
     stats.trimmedAssignments += before - result.taxidCount.size();
     if (result.taxidCount.empty()) {
       result.taxidCount.emplace_back("unclassified", 1);
@@ -570,14 +661,6 @@ PresenceDecision evaluate_presence_coverage(
                                         meanReadLen, false);
 }
 
-PresenceDecision evaluate_presence_coverage_unique(
-    const PresenceSummary &summary, const TaxDict &tax,
-    const ClassifyConfig &config, const chimera::presence::CoverageMeta &meta,
-    size_t totalReads, size_t meanReadLen) {
-  return evaluate_presence_coverage_impl(summary, tax, config, meta, totalReads,
-                                        meanReadLen, true);
-}
-
 void postEmDecision(
     std::vector<classifyResult> &results, const DecisionConfig &decisionConfig,
     const std::unordered_map<std::string, double> &classWeights,
@@ -589,7 +672,6 @@ void postEmDecision(
 
   constexpr double kPresencePiFloor = 1e-6;
   constexpr double kRejectFactor = 2.0;
-  constexpr double kRejectDynPostBoost = 0.04;
 		  constexpr size_t kSelectiveRejectFullnMin = 10;
 		  constexpr size_t kSelectiveRejectFullnPrunedMax = 6;
 		  const bool selective_reject_fulln_enabled =
@@ -650,27 +732,6 @@ void postEmDecision(
 			  constexpr size_t kFallbackHintTopK = 16;
 			  constexpr double kFallbackGenusConflictGapMax = 0.20;
 
-	  auto parse_u32 = [](const std::string &s, uint32_t &out) -> bool {
-	    if (s.empty()) {
-	      return false;
-	    }
-	    for (unsigned char c : s) {
-	      if (!std::isdigit(c)) {
-	        return false;
-	      }
-	    }
-	    try {
-	      unsigned long v = std::stoul(s);
-	      if (v > std::numeric_limits<uint32_t>::max()) {
-	        return false;
-	      }
-	      out = static_cast<uint32_t>(v);
-	      return true;
-	    } catch (...) {
-	      return false;
-	    }
-	  };
-
 		  for (auto &result : results) {
 		    // Keep the full posterior list (sorted) for dumping/analysis (POST_TOPK),
 		    // but use a pruned+renormalized view for final decisions and taxidCount
@@ -683,20 +744,6 @@ void postEmDecision(
 		    }
 	    std::sort(posterior_full.begin(), posterior_full.end(),
 	              [](const auto &a, const auto &b) { return a.second > b.second; });
-
-	    const std::string &full_top1_taxid = posterior_full.front().first;
-	    const double full_p1 = posterior_full.front().second;
-	    const double full_p2 =
-	        (posterior_full.size() > 1) ? posterior_full[1].second : 0.0;
-	    const double full_gap = full_p1 - full_p2;
-	    const PresenceLevel full_top1_presence = presence_level(full_top1_taxid);
-	    double full_top1_weight = 0.0;
-	    if (!classWeights.empty()) {
-	      auto itw = classWeights.find(full_top1_taxid);
-	      if (itw != classWeights.end()) {
-	        full_top1_weight = itw->second;
-	      }
-	    }
 
 	    auto pruned = prune_post_em_posterior(
 	        posterior_full, decisionConfig.min_class_weight, classWeights,
@@ -741,9 +788,6 @@ void postEmDecision(
 	    const double gate_second_score = std::min(second_score, full_second_score);
 
 	    PresenceLevel top_presence = presence_level(top.first);
-	    if (top_presence == PresenceLevel::kAccepted) {
-	      result.presence_passed = true;
-	    }
 
     double class_weight = 0.0;
     bool weight_ok = true;
@@ -888,8 +932,8 @@ void postEmDecision(
 			            posterior.size() > 1 && gap < kFallbackGenusConflictGapMax) {
 			          uint32_t tid1 = 0;
 			          uint32_t tid2 = 0;
-			          if (parse_u32(top.first, tid1) &&
-			              parse_u32(posterior[1].first, tid2)) {
+			          if (chimera::utils::try_parse_u32(top.first, tid1) &&
+			              chimera::utils::try_parse_u32(posterior[1].first, tid2)) {
 			            const uint32_t g1 = ncbiTaxdump->to_genus(tid1);
 			            const uint32_t g2 = ncbiTaxdump->to_genus(tid2);
 			            genus_conflict_block =

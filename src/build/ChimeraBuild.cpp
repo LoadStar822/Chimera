@@ -298,11 +298,9 @@ void run(BuildConfig config) {
         hashFreqContext.passB_total_hashes.load(std::memory_order_relaxed);
     const uint64_t filtered = hashFreqContext.passB_filtered_hashes.load(
         std::memory_order_relaxed);
-    const uint64_t sampled_out =
-        hashFreqContext.passB_sampled_out_hashes.load(std::memory_order_relaxed);
     const uint64_t kept =
-        (total_checked >= filtered + sampled_out)
-            ? (total_checked - filtered - sampled_out)
+        (total_checked >= filtered)
+            ? (total_checked - filtered)
             : 0;
 
     auto fmt_ratio = [&](uint64_t num) -> std::string {
@@ -320,14 +318,6 @@ void run(BuildConfig config) {
               << " (" << fmt_ratio(filtered) << "%)"
               << " with df >= " << hashFreqContext.stats.df_high_threshold
               << std::endl;
-    if (config.df_sampling) {
-      std::cout << "Hash DF sampling dropped " << sampled_out << " / "
-                << total_checked << " (" << fmt_ratio(sampled_out) << "%)"
-                << " [ref=" << std::max<uint32_t>(1u, config.df_sampling_ref)
-                << ", gamma=" << std::max(0.0, config.df_sampling_gamma)
-                << ", scale=" << std::max(0.0, config.df_sampling_scale) << "]"
-                << std::endl;
-    }
     std::cout << "Hash DF kept " << kept << " / " << total_checked << " ("
               << fmt_ratio(kept) << "%)" << std::endl;
   }

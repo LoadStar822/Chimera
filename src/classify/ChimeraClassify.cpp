@@ -12,9 +12,10 @@
  */
 #include "ChimeraClassifyCommon.hpp"
 
+#include <utils/Parse.hpp>
+
 #include <algorithm>
 #include <atomic>
-#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -212,10 +213,8 @@ maybe_load_ncbi_taxdump(const std::string &taxonomyKind) {
     }
     uint32_t tid = 0;
     uint32_t parent = 0;
-    try {
-      tid = static_cast<uint32_t>(std::stoul(fields[0]));
-      parent = static_cast<uint32_t>(std::stoul(fields[1]));
-    } catch (...) {
+    if (!chimera::utils::try_parse_u32(fields[0], tid) ||
+        !chimera::utils::try_parse_u32(fields[1], parent)) {
       continue;
     }
     const std::string &rank = fields[2];
@@ -382,27 +381,6 @@ void run(ClassifyConfig config) {
       tid2speciesRep[i] = i;
     }
 
-    auto parse_u32 = [](const std::string &s, uint32_t &out) -> bool {
-      if (s.empty()) {
-        return false;
-      }
-      for (unsigned char c : s) {
-        if (!std::isdigit(c)) {
-          return false;
-        }
-      }
-      try {
-        unsigned long v = std::stoul(s);
-        if (v > std::numeric_limits<uint32_t>::max()) {
-          return false;
-        }
-        out = static_cast<uint32_t>(v);
-        return true;
-      } catch (...) {
-        return false;
-      }
-    };
-
     robin_hood::unordered_flat_map<uint32_t, uint32_t> species2rep;
     species2rep.reserve(tax.id2str.size() / 2 + 1);
     size_t numeric = 0;
@@ -410,7 +388,7 @@ void run(ClassifyConfig config) {
     for (uint32_t tid_id = 0; tid_id < tax.id2str.size(); ++tid_id) {
       const std::string &taxid = tax.id2str[tid_id];
       uint32_t tid = 0;
-      if (!parse_u32(taxid, tid)) {
+      if (!chimera::utils::try_parse_u32(taxid, tid)) {
         continue;
       }
       ++numeric;
@@ -473,27 +451,6 @@ void run(ClassifyConfig config) {
     species_counts.reserve(probeResults.size() / 4 + 8);
     double unclassified_weight = 0.0;
 
-    auto parse_u32 = [](const std::string &s, uint32_t &out) -> bool {
-      if (s.empty()) {
-        return false;
-      }
-      for (unsigned char c : s) {
-        if (!std::isdigit(c)) {
-          return false;
-        }
-      }
-      try {
-        unsigned long v = std::stoul(s);
-        if (v > std::numeric_limits<uint32_t>::max()) {
-          return false;
-        }
-        out = static_cast<uint32_t>(v);
-        return true;
-      } catch (...) {
-        return false;
-      }
-    };
-
     for (const auto &res : probeResults) {
       double weight = (res.sample_weight > 0.0) ? res.sample_weight : 1.0;
       std::string top;
@@ -528,7 +485,7 @@ void run(ClassifyConfig config) {
       std::string key = top;
       if (weightCtx.ncbiTaxdump && weightCtx.ncbiTaxdump->enabled()) {
         uint32_t tid = 0;
-        if (parse_u32(top, tid)) {
+        if (chimera::utils::try_parse_u32(top, tid)) {
           uint32_t sid = weightCtx.ncbiTaxdump->to_species(tid);
           if (sid > 0) {
             key = std::to_string(sid);

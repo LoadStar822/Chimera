@@ -789,25 +789,6 @@ void processSequence(
     thr_min_eval = std::max<size_t>(thr_min_eval, 8);
   }
 
-  double TOT = 0.0;
-  for (const auto &kv : tidScore) {
-    TOT += kv.second;
-  }
-
-  size_t M = 0;
-  if (!topBins.empty()) {
-    for (auto b : topBins) {
-      if (b < tax.idx2id.size()) {
-        M += tax.idx2id[b].size();
-      }
-    }
-  } else {
-    for (size_t b = 0; b < tax.idx2id.size(); ++b) {
-      M += tax.idx2id[b].size();
-    }
-  }
-  M = std::max<size_t>(M, 1);
-
   size_t thr_final = 0;
   if (use_em) {
     size_t thr_beta_eval = std::min(thr_beta, thr_eval);
@@ -818,7 +799,6 @@ void processSequence(
   }
 
   const size_t thr_final_raw = thr_final;
-  size_t thr_final_used = thr_final_raw;
   if (highConfPre && bestTid < tax.id2str.size()) {
     double bestEvidence = std::clamp(best, 0.0, effCap);
     const std::string &taxid = tax.id2str[bestTid];

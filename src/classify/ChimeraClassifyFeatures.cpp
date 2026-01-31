@@ -8,18 +8,6 @@
 
 namespace ChimeraClassify {
 
-std::string feature_method_to_string(FeatureMethod method) {
-  switch (method) {
-  case FeatureMethod::Syncmer:
-    return "syncmer";
-  case FeatureMethod::Strobemer:
-    return "strobemer";
-  case FeatureMethod::Auto:
-  default:
-    return "auto";
-  }
-}
-
 MarginDecision decide_high_conf(size_t best, size_t second, double eff_eval) {
   MarginDecision dc;
   dc.margin = static_cast<double>(best) - static_cast<double>(second);
