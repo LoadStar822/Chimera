@@ -121,7 +121,7 @@ def parse_arguments():
         help="Number of threads for building",
     )
     build_parser.add_argument(
-        "--load-factor", type=float, default=0.9, help="IMCF 滤器的负载因子"
+        "--load-factor", type=float, default=0.85, help="IMCF 滤器的负载因子"
     )
     build_parser.add_argument(
         "-M",
@@ -129,6 +129,12 @@ def parse_arguments():
         type=int,
         default=0,
         help="Maximum number of hashes per taxid",
+    )
+    build_parser.add_argument(
+        "--presence-unique-deg",
+        type=int,
+        default=1,
+        help="Degree cutoff (<=) treated as unique signature for coverage meta",
     )
     build_parser.add_argument(
         "--taxonomy-kind",
@@ -188,7 +194,7 @@ def parse_arguments():
         help="Number of threads for building",
     )
     download_build_parser.add_argument(
-        "--load-factor", type=float, default=0.9, help="IMCF 滤器的负载因子"
+        "--load-factor", type=float, default=0.85, help="IMCF 滤器的负载因子"
     )
     download_build_parser.add_argument(
         "-M",
@@ -260,34 +266,16 @@ def parse_arguments():
         help="Log posterior odds threshold for coverage model",
     )
     classify_parser.add_argument(
-        "--presence-noise",
-        type=float,
-        default=None,
-        help="Override noise μ for coverage model; <=0 auto",
-    )
-    classify_parser.add_argument(
         "--presence-breadth-bits",
         type=int,
         default=None,
         help="Sketch bits for presence breadth (power-of-two suggested)",
     )
-    # presence-unique-deg 固定随数据库，分类侧不再暴露参数
     classify_parser.add_argument(
-        "--decoy-mode",
+        "--weight-map",
+        dest="weight_map",
         default=None,
-        help="Decoy generation mode (imcf-edge-shuffle)",
-    )
-    classify_parser.add_argument(
-        "--exclusive-gamma",
-        type=float,
-        default=None,
-        help="Exclusive edge weighting gamma",
-    )
-    classify_parser.add_argument(
-        "--post-thres",
-        type=float,
-        default=None,
-        help="Posterior acceptance threshold (default 0.56)",
+        help="Optional contig/read weight map: id<TAB>weight or CAMI mapping.tsv",
     )
     classify_parser.add_argument(
         "--post-pi-min",
@@ -306,30 +294,6 @@ def parse_arguments():
     classify_parser.add_argument(
         "-b", "--batch-size", type=int, default=400, help="Batch size for classifying"
     )
-    classify_parser.add_argument(
-        "-e",
-        "--em",
-        action="store_true",
-        help="Use EM algorithm for classification (default)",
-    )
-    classify_parser.add_argument(
-        "--em-iter", type=int, default=80, help="Number of EM iterations"
-    )
-    classify_parser.add_argument(
-        "--em-threshold", type=float, default=0.001, help="EM threshold"
-    )
-    classify_parser.add_argument(
-        "--em-temp",
-        type=float,
-        default=None,
-        help="Softmax temperature inside EM/VEM",
-    )
-    classify_parser.add_argument(
-        "--em-prior-strength",
-        type=float,
-        default=None,
-        help="Dirichlet mass for abundance prior",
-    )
     # Profile subcommand
     profile_parser = subparsers.add_parser("profile", help="Generate sequence profile")
     profile_parser.add_argument(
@@ -347,12 +311,6 @@ def parse_arguments():
         default="auto",
         choices=["auto", "ncbi", "gtdb"],
         help="Profile 使用的 taxonomy 数据源标识（auto 将尝试自动推断）",
-    )
-    profile_parser.add_argument(
-        "--taxonomy-version",
-        dest="taxonomy_version",
-        default="auto",
-        help="Profile 使用的 taxonomy 数据版本标识（可选）",
     )
     profile_parser.add_argument(
         "--taxonomy-info",
@@ -385,9 +343,6 @@ def parse_arguments():
         sys.exit(1)
 
     args = parser.parse_args()
-
-    if args.command == "classify" and not args.em:
-        args.em = True
 
     if args.command in {"build", "download_and_build"}:
         if args.syncmer_s < 1:
@@ -456,6 +411,8 @@ def run_chimera(args, chimera_path=None):
                 candidate_info = Path(args.input[0]).resolve().parent / "tax.info"
                 if candidate_info.exists():
                     args.taxonomy_info = str(candidate_info)
+        if isinstance(args.output, str) and args.output.lower().endswith(".tsv"):
+            args.output = args.output[: -len(".tsv")]
         if args.krona:
             downloader = get_downloader()
             from src.profile import conversion2Krona
@@ -478,7 +435,6 @@ def run_chimera(args, chimera_path=None):
                 args.input,
                 args.output,
                 taxonomy_kind=args.taxonomy_kind,
-                taxonomy_version=args.taxonomy_version,
                 taxonomy_info=args.taxonomy_info,
                 taxonomy_meta=args.taxonomy_meta,
                 abundance_mode=args.abundance_mode,
@@ -519,6 +475,8 @@ def run_chimera(args, chimera_path=None):
         command.extend(
             ["--presence-unique-deg", str(args.presence_unique_deg)]
         )
+        command.extend(["--taxonomy-kind", str(args.taxonomy_kind)])
+        command.extend(["--taxonomy-version", str(args.taxonomy_version)])
 
     elif args.command == "classify":
         if args.single:
@@ -535,32 +493,16 @@ def run_chimera(args, chimera_path=None):
             command.extend(["--presence-pi", str(args.presence_pi)])
         if args.presence_tau is not None:
             command.extend(["--presence-tau", str(args.presence_tau)])
-        if args.presence_noise is not None:
-            command.extend(["--presence-noise", str(args.presence_noise)])
         if args.presence_breadth_bits is not None:
             command.extend(
                 ["--presence-breadth-bits", str(args.presence_breadth_bits)]
             )
-        if args.presence_unique_deg is not None:
-            command.extend(
-                ["--presence-unique-deg", str(args.presence_unique_deg)]
-            )
-        if args.decoy_mode is not None:
-            command.extend(["--decoy-mode", args.decoy_mode])
-        if args.exclusive_gamma is not None:
-            command.extend(["--exclusive-gamma", str(args.exclusive_gamma)])
-        if args.post_thres is not None:
-            command.extend(["--post-thres", str(args.post_thres)])
-        # posterior gating now只用 post_thres + post_pi_min
+        if args.weight_map is not None:
+            command.extend(["--weight-map", str(args.weight_map)])
         if args.post_pi_min is not None:
             command.extend(["--post-pi-min", str(args.post_pi_min)])
         command.extend(["-t", str(args.threads)])
         command.extend(["-b", str(args.batch_size)])
-        if args.em:
-            command.append("-e")
-            command.extend(["--em-iter", str(args.em_iter)])
-            command.extend(["--em-threshold", str(args.em_threshold)])
-        # EM 温度/先验/penalty 固定内部默认
 
     # Execute the command using the provided run function
     downloader = get_downloader()

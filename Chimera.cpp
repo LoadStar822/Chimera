@@ -175,38 +175,6 @@ int main(int argc, char **argv) {
                    "每 taxid 最多写入的 hash 数 (0=>auto=2e6)")
       ->default_val(0);
   build
-      ->add_option("--k-base", buildConfig.k_base,
-                   "每 taxid 的基准 hash 预算 (5Mb 时)")
-      ->default_val(400000);
-  build
-      ->add_option("--k-min", buildConfig.k_min,
-                   "每 taxid 最少写入的 hash 数")
-      ->default_val(100000);
-  build
-      ->add_option("--core-alpha", buildConfig.core_alpha,
-                   "Core-IDF 中的 core 平滑项 alpha")
-      ->default_val(1.0);
-  build
-      ->add_option("--core-beta", buildConfig.core_beta,
-                   "Core-IDF 中的 core 指数 beta")
-      ->default_val(2.0);
-  build
-      ->add_option("--taxid-file-cap", buildConfig.taxid_file_cap,
-                   "每个 taxid 参与 Core-IDF 的 genome 文件上限 (0=>不限制)")
-      ->default_val(256);
-  build
-      ->add_option("--sig-oversample", buildConfig.sig_oversample,
-                   "候选池倍率: 目标 K 的 oversample 倍")
-      ->default_val(6.0);
-  build
-      ->add_option("--sig-s-min", buildConfig.sig_s_min,
-                   "每文件签名最小大小")
-      ->default_val(512);
-  build
-      ->add_option("--sig-s-max", buildConfig.sig_s_max,
-                   "每文件签名最大大小")
-      ->default_val(131072);
-  build
       ->add_option("--presence-unique-deg", buildConfig.presence_unique_deg,
                    "Degree cutoff (<=) treated as unique signature for coverage meta")
       ->default_val(1)
@@ -295,18 +263,6 @@ int main(int argc, char **argv) {
     }
     if (buildConfig.strobemer_order != 2) {
       throw CLI::ValidationError("--strobe-order 当前仅支持取 2");
-    }
-    if (buildConfig.sig_s_min == 0) {
-      throw CLI::ValidationError("--sig-s-min must be > 0");
-    }
-    if (buildConfig.sig_s_max < buildConfig.sig_s_min) {
-      throw CLI::ValidationError("--sig-s-max must be >= --sig-s-min");
-    }
-    if (buildConfig.sig_oversample < 1.0) {
-      throw CLI::ValidationError("--sig-oversample must be >= 1");
-    }
-    if (buildConfig.core_alpha < 0.0 || buildConfig.core_beta < 0.0) {
-      throw CLI::ValidationError("--core-alpha/--core-beta must be >= 0");
     }
     buildConfig.verbose = !buildQuietRequested;
   });

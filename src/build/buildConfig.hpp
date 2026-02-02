@@ -54,15 +54,6 @@ namespace ChimeraBuild {
 		bool verbose = true;
 		double load_factor{ 0.85 };
 		size_t max_hashes_per_taxid = 0;
-		// Core-IDF signature selection
-		double core_alpha{ 1.0 };
-		double core_beta{ 2.0 };
-		uint32_t taxid_file_cap{ 256 };
-		double sig_oversample{ 6.0 };
-		size_t sig_s_min{ 512 };
-		size_t sig_s_max{ 131072 };
-		size_t k_base{ 400000 };
-		size_t k_min{ 100000 };
 		uint32_t presence_unique_deg{ 1 };
 	};
 
@@ -74,7 +65,7 @@ namespace ChimeraBuild {
 		os << std::left
 			<< std::setw(25) << "Input file:" << config.input_file << std::endl
 			<< std::setw(25) << "Output file:" << config.output_file << std::endl
-		<< std::setw(25) << "Feature method:" << config.feature << std::endl
+			<< std::setw(25) << "Feature method:" << config.feature << std::endl
 			<< std::setw(25) << "Strobemer k:" << static_cast<int>(config.strobemer_k) << std::endl
 			<< std::setw(25) << "Strobemer order:" << static_cast<int>(config.strobemer_order) << std::endl
 			<< std::setw(25) << "Strobemer w_min:" << config.strobemer_w_min << std::endl
@@ -88,14 +79,6 @@ namespace ChimeraBuild {
 			<< std::setw(25) << "Threads:" << config.threads << std::endl
 			<< std::setw(25) << "Load factor:" << config.load_factor << std::endl
 			<< std::setw(25) << "K max per taxid:" << config.max_hashes_per_taxid << std::endl
-			<< std::setw(25) << "Core alpha:" << config.core_alpha << std::endl
-			<< std::setw(25) << "Core beta:" << config.core_beta << std::endl
-			<< std::setw(25) << "Taxid file cap:" << config.taxid_file_cap << std::endl
-			<< std::setw(25) << "Sig oversample:" << config.sig_oversample << std::endl
-			<< std::setw(25) << "Sig s min:" << config.sig_s_min << std::endl
-			<< std::setw(25) << "Sig s max:" << config.sig_s_max << std::endl
-			<< std::setw(25) << "K base:" << config.k_base << std::endl
-			<< std::setw(25) << "K min:" << config.k_min << std::endl
 			<< std::setw(25) << "Presence unique deg:" << config.presence_unique_deg << std::endl
 			<< std::setw(25) << "Verbose:" << config.verbose << std::endl;
 

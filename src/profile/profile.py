@@ -12,20 +12,8 @@ from .taxonomy_utils import (
     read_taxonomy_meta,
 )
 
-# 目标层级及其在 NCBI taxonomy 中可能出现的 rank 名称
-LEVEL_ALIASES = {
-    "acellular root": ("acellular root",),
-    "realm": ("realm",),
-    "domain": ("domain", "superkingdom"),
-    "clade": ("clade",),
-    "phylum": ("phylum",),
-    "class": ("class",),
-    "order": ("order",),
-    "family": ("family",),
-    "genus": ("genus",),
-    "species": ("species",),
-    "strain": ("strain",),
-}
+# Profile 的核心输出是 species 级别（可聚合得到丰度 profile）。
+# 为减少无用复杂度与输出噪音，这里只输出 species 一个层级。
 
 UNCLASSIFIED = "unclassified"
 # 最小 evidence：posterior_evidence 票数下限，过滤低支持的长尾假阳性
@@ -53,24 +41,15 @@ HIGH_DIVERSITY_GENUS_LOCAL_TOPK = 3
 HIGH_DIVERSITY_GENUS_LOCAL_POST_TOPK = 16
 
 
-def _normalize_rank(rank: Optional[str]) -> Optional[str]:
-    if rank is None:
-        return None
-    rank_lower = rank.lower()
-    for level, aliases in LEVEL_ALIASES.items():
-        if rank_lower in aliases:
-            return level
-    return None
-
-
-def _should_mark_unclassified(level: str, has_level: Dict[str, bool]) -> bool:
-    if level == "domain":
-        return not has_level.get("acellular root", False)
-    if level == "realm":
-        return has_level.get("acellular root", False)
-    if level == "acellular root":
-        return has_level.get("realm", False) or not has_level.get("domain", False)
-    return True
+def _normalize_abundance_mode(abundance_mode: Optional[str]) -> str:
+    mode = (abundance_mode or "soft_seq").strip().lower()
+    if mode in {"soft", "soft_seq", "soft_tax"}:
+        return "soft_seq"
+    if mode in {"hard", "hard_seq"}:
+        return "hard_seq"
+    if mode in {"top1"}:
+        return "top1"
+    raise ValueError(f"Unknown abundance_mode: {abundance_mode}")
 
 
 def _infer_genus(species_name: str) -> Optional[str]:
@@ -260,8 +239,7 @@ def _ncbi_taxid_to_species(
     species_name: Optional[str] = None
     for node in lineage:
         rank = rank_map.get(node)
-        normalized = _normalize_rank(rank)
-        if normalized != "species":
+        if rank != "species":
             continue
         name = name_map.get(node)
         if name:
@@ -282,8 +260,7 @@ def _gtdb_node_to_species(
     species_name: Optional[str] = None
     for current in taxonomy.iter_lineage(node):
         node_rank = taxonomy.rank.get(current)
-        normalized = _normalize_rank(node_rank)
-        if normalized != "species":
+        if node_rank != "species":
             continue
         species_name = taxonomy.display_name(current)
         break
@@ -592,15 +569,7 @@ def _parse_primary_taxid_and_count(
 def _collect_taxids(
     input_files: Iterable[str], expect_numeric: bool, abundance_mode: str = "soft_seq"
 ) -> Tuple[Counter[str], int]:
-    mode = (abundance_mode or "soft_seq").strip().lower()
-    if mode in {"soft", "soft_seq", "soft_tax"}:
-        mode = "soft_seq"
-    elif mode in {"hard", "hard_seq"}:
-        mode = "hard_seq"
-    elif mode in {"top1"}:
-        mode = "top1"
-    else:
-        raise ValueError(f"Unknown abundance_mode: {abundance_mode}")
+    mode = _normalize_abundance_mode(abundance_mode)
 
     taxid_counts: Counter[str] = Counter()
     unclassified_reads = 0
@@ -662,56 +631,20 @@ def _aggregate_levels(
     taxid_counts: Counter[int],
     base_unclassified: int,
 ) -> Dict[str, Counter]:
-    count_by_level: Dict[str, Counter[str]] = {
-        level: Counter() for level in LEVEL_ALIASES
-    }
+    species: Counter[str] = Counter()
     if base_unclassified:
-        for level in count_by_level:
-            count_by_level[level][UNCLASSIFIED] += base_unclassified
+        species[UNCLASSIFIED] += base_unclassified
     if tax is None:
-        return count_by_level
+        return {"species": species}
 
+    cache: Dict[int, Optional[str]] = {}
     for taxid, count in taxid_counts.items():
-        try:
-            lineage = tax.get_lineage(taxid)
-            rank_map = tax.get_rank(lineage)
-            name_map = tax.get_taxid_translator(lineage)
-        except Exception:
-            for level in count_by_level:
-                count_by_level[level][UNCLASSIFIED] += count
-            continue
-
-        has_level = {level: False for level in LEVEL_ALIASES}
-        hits: Dict[str, List[str]] = {level: [] for level in LEVEL_ALIASES}
-
-        for node in lineage:
-            rank = rank_map.get(node)
-            if not rank or rank == "no rank":
-                continue
-            normalized = _normalize_rank(rank)
-            if not normalized:
-                continue
-            name = name_map.get(node)
-            if not name:
-                continue
-            if normalized != "clade" and has_level[normalized]:
-                continue
-            hits[normalized].append(name)
-            has_level[normalized] = True
-
-        for level, names in hits.items():
-            if not names:
-                continue
-            for name in names:
-                count_by_level[level][name] += count
-
-        for level in LEVEL_ALIASES:
-            if hits[level]:
-                continue
-            if _should_mark_unclassified(level, has_level):
-                count_by_level[level][UNCLASSIFIED] += count
-
-    return count_by_level
+        sp = _ncbi_taxid_to_species(tax, int(taxid), cache)
+        if sp:
+            species[sp] += count
+        else:
+            species[UNCLASSIFIED] += count
+    return {"species": species}
 
 
 def _aggregate_gtdb_levels(
@@ -719,48 +652,27 @@ def _aggregate_gtdb_levels(
     taxid_counts: Counter[str],
     base_unclassified: int,
 ) -> Dict[str, Counter[str]]:
-    count_by_level: Dict[str, Counter[str]] = {
-        level: Counter() for level in LEVEL_ALIASES
-    }
+    species: Counter[str] = Counter()
     if base_unclassified:
-        for level in count_by_level:
-            count_by_level[level][UNCLASSIFIED] += base_unclassified
+        species[UNCLASSIFIED] += base_unclassified
 
+    cache: Dict[str, Optional[str]] = {}
     for node, count in taxid_counts.items():
         if node not in taxonomy.rank:
-            for level in count_by_level:
-                count_by_level[level][UNCLASSIFIED] += count
+            species[UNCLASSIFIED] += count
             continue
-        has_level = {level: False for level in LEVEL_ALIASES}
-        recorded_any = False
-        for current in taxonomy.iter_lineage(node):
-            node_rank = taxonomy.rank.get(current)
-            normalized = _normalize_rank(node_rank)
-            if not normalized:
-                continue
-            if normalized != "clade" and has_level[normalized]:
-                continue
-            display_name = taxonomy.display_name(current)
-            count_by_level[normalized][display_name] += count
-            has_level[normalized] = True
-            recorded_any = True
-        if not recorded_any:
-            for level in count_by_level:
-                count_by_level[level][UNCLASSIFIED] += count
-            continue
-        for level in LEVEL_ALIASES:
-            if level == "clade":
-                continue
-            if not has_level[level] and _should_mark_unclassified(level, has_level):
-                count_by_level[level][UNCLASSIFIED] += count
-    return count_by_level
+        sp = _gtdb_node_to_species(taxonomy, node, cache)
+        if sp:
+            species[sp] += count
+        else:
+            species[UNCLASSIFIED] += count
+    return {"species": species}
 
 
 def process_file(
     input_files: Iterable[str],
     output_file: str,
     taxonomy_kind: str = "auto",
-    taxonomy_version: str = "auto",
     taxonomy_info: Optional[str] = None,
     taxonomy_meta: Optional[str] = None,
     abundance_mode: str = "soft_seq",
@@ -838,15 +750,7 @@ def process_file(
     # soft_seq tends to spread evidence into a long tail, which hurts presence precision
     # on MOCK-style mixtures. For low diversity, fall back to top1 (per-read) abundance,
     # then apply the species-level low-diversity cutoff.
-    normalized_mode = (abundance_mode or "soft_seq").strip().lower()
-    if normalized_mode in {"soft", "soft_seq", "soft_tax"}:
-        normalized_mode = "soft_seq"
-    elif normalized_mode in {"hard", "hard_seq"}:
-        normalized_mode = "hard_seq"
-    elif normalized_mode in {"top1"}:
-        normalized_mode = "top1"
-    else:
-        normalized_mode = "soft_seq"
+    normalized_mode = _normalize_abundance_mode(abundance_mode)
 
     species_counter = count_by_level.get("species")
     species_total = total_counts_by_level.get("species", 0)
@@ -902,51 +806,20 @@ def process_file(
     support_by_level: Optional[Dict[str, Counter[str]]] = None
     if HIGH_DIVERSITY_SPECIES_SUPPORT_MIN and HIGH_DIVERSITY_SPECIES_SUPPORT_MIN > 1:
         # If we already run top1 mode (e.g., low-diversity auto override), support is redundant.
-        mode_for_support = (abundance_mode or "soft_seq").strip().lower()
-        if mode_for_support not in {"top1"}:
+        mode_for_support = _normalize_abundance_mode(abundance_mode)
+        if mode_for_support != "top1":
             support_by_level = get_top1_by_level()
 
     # Low-diversity status used for species-level post-processing.
-    # NOTE: This uses the *current* species distribution (soft_seq or top1 after auto-switch),
-    # matching the original logic inside the output loop.
+    # NOTE: detection is performed above using the top1 distribution to avoid soft_seq tail inflation.
     species_is_low_diversity = force_low_diversity
-    if not species_is_low_diversity:
-        final_species_counter = count_by_level.get("species")
-        final_species_total = total_counts_by_level.get("species", 0)
-        if (
-            final_species_counter
-            and final_species_total > 0
-            and sum(final_species_counter.values()) > 0
-        ):
-            uncls_count = final_species_counter.get(UNCLASSIFIED, 0)
-            eff_total = max(0, final_species_total - uncls_count)
-            rels = []
-            shannon_eff = 0.0
-            if eff_total > 0:
-                for taxon, count in final_species_counter.items():
-                    if taxon == UNCLASSIFIED:
-                        continue
-                    p = count / eff_total
-                    if p > 0:
-                        shannon_eff -= p * math.log(p)
-                    rels.append(p)
-            rels.sort(reverse=True)
-            top_mass = sum(rels[:LOW_DIVERSITY_TOP_K])
-            eff_species = math.exp(shannon_eff) if shannon_eff > 0 else 0.0
-            species_is_low_diversity = (top_mass >= LOW_DIVERSITY_TOP_MASS) and (
-                eff_species <= LOW_DIVERSITY_EFF_SPECIES_MAX
-            )
 
-    with open(output_file + ".tsv", "w") as outfile:
-        mode = (abundance_mode or "soft_seq").strip().lower()
-        if mode in {"soft", "soft_seq", "soft_tax"}:
-            mode = "soft_seq"
-        elif mode in {"hard", "hard_seq"}:
-            mode = "hard_seq"
-        elif mode in {"top1"}:
-            mode = "top1"
-        else:
-            mode = "soft_seq"
+    output_base = output_file
+    if output_base.lower().endswith(".tsv"):
+        output_base = output_base[: -len(".tsv")]
+
+    with open(output_base + ".tsv", "w") as outfile:
+        mode = _normalize_abundance_mode(abundance_mode)
         outfile.write(f"# abundance_mode={mode}\n")
         count_unit = "sequence" if mode == "top1" else "posterior_evidence"
         outfile.write(f"# count_unit={count_unit}\n")
