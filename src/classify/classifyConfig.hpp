@@ -41,16 +41,11 @@ namespace ChimeraClassify {
 		double shotThreshold = 0.70;
 		double firstFilterBeta = 0.8;
 		bool firstFilterBeta_user = false; // set when user or auto-override explicitly chooses beta
-		// NCBI-only experimental knob for strain/assembly saturation:
-		// - collapse_strain_hits: collapse per-hash hit lists to 1 representative taxid per species
-		//   (affects scoring/deg on the hot path; can change behavior).
-	bool collapse_strain_hits = true;
 			double presence_pi = 1e-3;
 			double presence_tau = 4.6;
 			uint32_t presence_breadth_bits = 2048; // breadth sketch bits (power of 2 suggested)
 			uint16_t threads;
 			size_t batchSize;
-	bool em = true;
 		size_t emIter;
 	double em_prune_ratio = 2e-4;   // relative to max_expected in EM sparsity
 	double em_conf_power = 2.0;     // confidence exponent for EM M-step (0 disables)

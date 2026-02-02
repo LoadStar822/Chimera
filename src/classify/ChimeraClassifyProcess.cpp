@@ -720,7 +720,7 @@ void processSequence(
   // --- EM 模式下的模糊保护 ---
   // 当使用 EM 时，如果 Top1/Top2 的分值比例不足 3 倍，视为不确定，让其进入 EM。
   // 过低的比例容易被近缘物种抢占，需延后由 EM 全局推断。
-  if (config.em && best_ratio < 3.0) {
+  if (best_ratio < 3.0) {
     highConfPre = false;
   }
   // --------------------------------
@@ -747,7 +747,7 @@ void processSequence(
     }
   }
 
-  bool use_em = config.em && !highConfPre;
+  bool use_em = !highConfPre;
 
   double maxEvidence = std::min(best, eff_eval);
   double beta = config.firstFilterBeta;
@@ -756,7 +756,7 @@ void processSequence(
     beta = 0.8;
     beta_user = false;
   }
-  if (config.em && !beta_user) {
+  if (!beta_user) {
     beta = 0.45; // EM 模式放宽初筛门槛，确保真实物种不被挡在外
   }
   beta = std::clamp(beta, 0.0, 1.0);

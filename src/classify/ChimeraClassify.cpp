@@ -374,8 +374,7 @@ void run(ClassifyConfig config) {
 
   const TaxDict tax = build_tax_dict(indexToTaxid);
   std::vector<uint32_t> tid2speciesRep;
-  if (config.collapse_strain_hits && weightCtx.ncbiTaxdump &&
-      weightCtx.ncbiTaxdump->enabled()) {
+  if (weightCtx.ncbiTaxdump && weightCtx.ncbiTaxdump->enabled()) {
     tid2speciesRep.resize(tax.id2str.size());
     for (uint32_t i = 0; i < tid2speciesRep.size(); ++i) {
       tid2speciesRep[i] = i;
@@ -436,7 +435,7 @@ void run(ClassifyConfig config) {
     }
 
     bool probe_em = false;
-    if (config.em && !probeResults.empty()) {
+    if (!probeResults.empty()) {
       EMOptions options;
       options.temp = 1.05;
       options.prune_ratio = config.em_prune_ratio;
@@ -642,18 +641,16 @@ void run(ClassifyConfig config) {
     }
   }
 
-  if (config.em) {
-    EMOptions options;
-    options.temp = 1.05;
-    options.prune_ratio = config.em_prune_ratio;
-    options.conf_power = config.em_conf_power;
-    auto [posterior, weights] =
-        EMAlgorithm(classifyResults, config.emIter, 0.0, options,
-                    emPriorScale.empty() ? nullptr : &emPriorScale);
-    classifyResults = std::move(posterior);
-    classWeights = std::move(weights);
-    posteriorModelUsed = true;
-  }
+  EMOptions options;
+  options.temp = 1.05;
+  options.prune_ratio = config.em_prune_ratio;
+  options.conf_power = config.em_conf_power;
+  auto [posterior, weights] =
+      EMAlgorithm(classifyResults, config.emIter, 0.0, options,
+                  emPriorScale.empty() ? nullptr : &emPriorScale);
+  classifyResults = std::move(posterior);
+  classWeights = std::move(weights);
+  posteriorModelUsed = true;
 		  if (posteriorModelUsed) {
 		    DecisionConfig decisionConfig;
 		    // Auto-tune post_pi_min for high-diversity samples:
