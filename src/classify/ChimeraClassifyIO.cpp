@@ -143,6 +143,7 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
 
 void saveResult(std::vector<classifyResult> classifyResults,
                 ClassifyConfig config) {
+  constexpr size_t kDumpPostTopK = 16;
   std::string outputFile = config.outputFile;
   if (std::filesystem::path(outputFile).extension() != ".tsv") {
     outputFile += ".tsv";
@@ -176,13 +177,11 @@ void saveResult(std::vector<classifyResult> classifyResults,
         os << taxid << ':' << count << '\t';
       }
     }
-    if (config.dump_post_topk > 0 && !result.posteriors.empty()) {
+    if (!result.posteriors.empty()) {
       if (handled) {
         os << '\t';
       }
-      const size_t k =
-          std::min<size_t>(static_cast<size_t>(config.dump_post_topk),
-                           result.posteriors.size());
+      const size_t k = std::min(kDumpPostTopK, result.posteriors.size());
       std::ostringstream oss;
       oss.setf(std::ios::fixed);
       oss << std::setprecision(6);
