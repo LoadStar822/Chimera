@@ -410,9 +410,6 @@ inline void apply_low_div_overrides(ClassifyConfig &config) {
   config.firstFilterBeta = 0.5;
   config.firstFilterBeta_user = true;
   config.em_conf_power = 1.0;
-  // Low-diversity: still dump a small POST_TOPK so downstream profile can
-  // leverage a second evidence stream without exploding I/O.
-  config.dump_post_topk = 16;
   config.low_div_active = true;
 }
 
