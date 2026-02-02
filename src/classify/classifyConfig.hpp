@@ -51,9 +51,7 @@ namespace ChimeraClassify {
 	double em_conf_power = 2.0;     // confidence exponent for EM M-step (0 disables)
 		double post_pi_min = 5e-4;
 	// postEmDecision posterior tail controls (affect taxidCount sparsity; not POST_TOPK dump)
-	bool low_div_auto = true;       // internal: auto low-diversity branch
 	bool low_div_active = false;    // internal: set when low-div branch is enabled
-	uint32_t low_div_probe_reads = 200000; // internal: probe reads for low-div detect
 	size_t hash_sample_min = 16;
 	size_t hash_sample_max = 96;
 		double idf_max = 8.0;

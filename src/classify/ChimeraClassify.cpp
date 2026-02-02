@@ -408,7 +408,8 @@ void run(ClassifyConfig config) {
   PresenceSummary presenceSummary(config.presence_breadth_bits);
   PresenceSummary *presencePtr = &presenceSummary;
 
-  if (config.low_div_auto && config.low_div_probe_reads > 0) {
+  constexpr uint32_t kLowDivProbeReads = 200000;
+  if (kLowDivProbeReads > 0) {
     ClassifyConfig probe_config = config;
 
     FileInfo probeInfo;
@@ -418,7 +419,7 @@ void run(ClassifyConfig config) {
     std::atomic<bool> probe_done{false};
     std::thread probeProducer([&]() {
       parseReads(probeQueues, probe_config, probeInfo,
-                 config.low_div_probe_reads);
+                 kLowDivProbeReads);
       probe_done.store(true, std::memory_order_release);
     });
 
