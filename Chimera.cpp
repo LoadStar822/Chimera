@@ -236,17 +236,8 @@ int main(int argc, char **argv) {
         value = "auto";
       }
     };
-    auto sanitize_version = [](std::string &value) {
-      if (value.empty()) {
-        value = "auto";
-      }
-    };
     normalize_kind(buildConfig.taxonomy_kind);
     normalize_feature(buildConfig.feature);
-    sanitize_version(buildConfig.taxonomy_version);
-    if (min_length_option->count() == 0) {
-      buildConfig.min_length = buildConfig.kmer_size;
-    }
     buildConfig.min_length = std::max<uint64_t>(buildConfig.min_length, buildConfig.kmer_size);
     if (!(buildConfig.feature == "auto" || buildConfig.feature == "syncmer" ||
           buildConfig.feature == "strobemer")) {
@@ -293,21 +284,6 @@ int main(int argc, char **argv) {
       throw CLI::ValidationError(
           "--paired option must have an even number of input files");
     }
-    auto normalize_kind = [](std::string &value) {
-      std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-      });
-      if (value.empty()) {
-        value = "auto";
-      }
-    };
-    auto sanitize_version = [](std::string &value) {
-      if (value.empty()) {
-        value = "auto";
-      }
-    };
-    normalize_kind(classifyConfig.taxonomyKind);
-    sanitize_version(classifyConfig.taxonomyVersion);
   });
 
   classify
