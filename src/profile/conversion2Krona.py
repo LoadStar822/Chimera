@@ -43,7 +43,7 @@ def _parse_taxid_from_line(line: str, expect_numeric: bool) -> Optional[str]:
     if len(parts) < 2:
         return None
     for token in parts[1:]:
-        if not token or token.startswith("POST_TOP2="):
+        if not token or token.startswith("POST_"):
             continue
         if token.lower() == UNCLASSIFIED:
             return UNCLASSIFIED

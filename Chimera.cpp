@@ -275,12 +275,11 @@ int main(int argc, char **argv) {
                        ->check(CLI::ExistingFile);
 
   // Add --paired option
-  auto pairedOpt =
-      classify
-          ->add_option("-p,--paired", classifyConfig.pairedFiles,
-                       "Paired input files for classifying")
-          ->check(CLI::ExistingFile)
-          ->excludes(singleOpt); // Ensure that single and paired are mutually exclusive
+  classify
+      ->add_option("-p,--paired", classifyConfig.pairedFiles,
+                   "Paired input files for classifying")
+      ->check(CLI::ExistingFile)
+      ->excludes(singleOpt); // Ensure that single and paired are mutually exclusive
 
   classify->add_option("--weight-map", classifyConfig.weight_map_file,
                        "Optional contig/read weight map: id<TAB>weight or CAMI mapping.tsv")
@@ -288,8 +287,9 @@ int main(int argc, char **argv) {
 
   // Custom validation function to ensure that the --paired option must have an
   // even number of files
-  classify->callback([pairedOpt, &classifyConfig]() {
-    if (pairedOpt->count() > 0 && pairedOpt->count() % 2 != 0) {
+  classify->callback([&classifyConfig]() {
+    if (!classifyConfig.pairedFiles.empty() &&
+        classifyConfig.pairedFiles.size() % 2 != 0) {
       throw CLI::ValidationError(
           "--paired option must have an even number of input files");
     }
