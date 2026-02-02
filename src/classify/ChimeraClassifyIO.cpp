@@ -84,10 +84,6 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
       flush_batch(shard, pending[shard], false);
     }
   } else if (!config.pairedFiles.empty()) {
-    if (config.pairedFiles.size() % 2 != 0) {
-      throw std::runtime_error("Paired input requires an even number of files");
-    }
-
     std::vector<batchReads> pending(shardCount);
     for (auto &b : pending) {
       init_batch(b, true);

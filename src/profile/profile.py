@@ -33,12 +33,6 @@ HIGH_DIVERSITY_FINAL_REL_CUTOFF = 0.02
 # 用 top1 的“出现次数”做第二信号：只要 support 足够（>=K）就保留，
 # 以便在提高 head mass（救 recall）时仍能压住 FP 物种种类数。
 HIGH_DIVERSITY_SPECIES_SUPPORT_MIN = 3
-# 高多样性样本：genus-local split（两遍扫描，基于 POST_TOPK 约束属内物种集合）。
-HIGH_DIVERSITY_GENUS_LOCAL_SPLIT = True
-HIGH_DIVERSITY_GENUS_LOCAL_THRES = 0.70
-HIGH_DIVERSITY_GENUS_LOCAL_ALPHA = 0.90
-HIGH_DIVERSITY_GENUS_LOCAL_TOPK = 3
-HIGH_DIVERSITY_GENUS_LOCAL_POST_TOPK = 16
 
 
 def _normalize_abundance_mode(abundance_mode: Optional[str]) -> str:
@@ -124,49 +118,6 @@ def _is_lowdiv_rescue_species_name_ok(species_name: str) -> bool:
     return True
 
 
-def _ncbi_species_name_for_taxid(
-    tax: NCBITaxa, taxid: int, cache: Dict[int, Optional[str]]
-) -> Optional[str]:
-    if taxid in cache:
-        return cache[taxid]
-    try:
-        lineage = tax.get_lineage(taxid)
-        rank_map = tax.get_rank(lineage)
-        name_map = tax.get_taxid_translator(lineage)
-    except Exception:
-        cache[taxid] = None
-        return None
-    name: Optional[str] = None
-    for node in lineage:
-        if rank_map.get(node) == "species":
-            name = name_map.get(node)
-            break
-    if not name:
-        name = name_map.get(taxid)
-    cache[taxid] = name
-    return name
-
-
-def _gtdb_species_name_for_node(
-    taxonomy: GtdbTaxonomy, node: str, cache: Dict[str, Optional[str]]
-) -> Optional[str]:
-    if node in cache:
-        return cache[node]
-    name: Optional[str] = None
-    try:
-        for current in taxonomy.iter_lineage(node):
-            if taxonomy.rank.get(current) == "species":
-                name = taxonomy.display_name(current)
-                break
-        if not name:
-            if node in taxonomy.rank:
-                name = taxonomy.display_name(node)
-    except Exception:
-        name = None
-    cache[node] = name
-    return name
-
-
 def _parse_post_topk_from_tokens(
     tokens: List[str], expect_numeric: bool, topk: int
 ) -> List[Tuple[str, float]]:
@@ -197,26 +148,6 @@ def _parse_post_topk_from_tokens(
                 break
         return out
     return []
-
-
-def _has_post_topk_tokens(
-    input_files: Iterable[str], max_lines: int = 2000
-) -> bool:
-    if max_lines <= 0:
-        return False
-    remaining = max_lines
-    for input_file in input_files:
-        try:
-            with open(input_file, "r", errors="ignore") as infile:
-                for raw in infile:
-                    if "POST_TOPK=" in raw:
-                        return True
-                    remaining -= 1
-                    if remaining <= 0:
-                        return False
-        except OSError:
-            continue
-    return False
 
 
 def _ncbi_taxid_to_species(
@@ -343,171 +274,6 @@ def _collect_post_topk_species_stats(
                         hi_support[sp] += 1
 
     return any_support, hi_support, prob_mass
-
-
-def _genus_local_split_species_counter(
-    *,
-    input_files: Iterable[str],
-    expect_numeric: bool,
-    resolved_kind: str,
-    tax: Optional[NCBITaxa],
-    gtdb_taxonomy: Optional[GtdbTaxonomy],
-    topk: int,
-    genus_thres: float,
-    alpha: float,
-    top_k: int,
-) -> Counter[str]:
-    """Genus-local split using POST_TOPK (two-pass)."""
-    ncbi_cache: Dict[int, Optional[str]] = {}
-    gtdb_cache: Dict[str, Optional[str]] = {}
-
-    def taxid_to_species(tid: str) -> Optional[str]:
-        if resolved_kind == "gtdb":
-            if gtdb_taxonomy is None:
-                return None
-            return _gtdb_species_name_for_node(gtdb_taxonomy, tid, gtdb_cache)
-        if tax is None:
-            return None
-        try:
-            itid = int(tid)
-        except ValueError:
-            return None
-        return _ncbi_species_name_for_taxid(tax, itid, ncbi_cache)
-
-    # First pass: accumulate support per-genus per-species.
-    support: Dict[str, Dict[str, float]] = {}
-    total_reads = 0
-    used_reads = 0
-    for input_file in input_files:
-        with open(input_file, "r", errors="ignore") as infile:
-            for raw in infile:
-                line = raw.rstrip("\n")
-                if not line:
-                    continue
-                parts = line.split("\t")
-                if len(parts) < 2:
-                    continue
-                tokens = [t.strip() for t in parts[1:] if t.strip()]
-                if not tokens:
-                    continue
-                total_reads += 1
-                primary = _parse_primary_taxid_and_count(line, expect_numeric=expect_numeric)
-                if primary is None:
-                    continue
-                _, mass = primary
-
-                cand = _parse_post_topk_from_tokens(tokens, expect_numeric=expect_numeric, topk=topk)
-                if not cand:
-                    continue
-
-                genus_post: Dict[str, float] = {}
-                sp_post: Dict[str, float] = {}
-                for tid, prob in cand:
-                    sp = taxid_to_species(tid)
-                    if not sp:
-                        continue
-                    gname = _infer_genus(sp)
-                    if gname is None:
-                        continue
-                    genus_post[gname] = genus_post.get(gname, 0.0) + prob
-                    prev = sp_post.get(sp)
-                    if prev is None or prob > prev:
-                        sp_post[sp] = prob
-                if not genus_post:
-                    continue
-                top_genus, top_mass = max(genus_post.items(), key=lambda kv: kv[1])
-                if top_mass < float(genus_thres):
-                    continue
-                used_reads += 1
-                for sp, prob in sp_post.items():
-                    if _infer_genus(sp) != top_genus:
-                        continue
-                    support.setdefault(top_genus, {})
-                    support[top_genus][sp] = support[top_genus].get(sp, 0.0) + mass * prob
-
-    # Determine keep sets per genus.
-    keep: Dict[str, set[str]] = {}
-    for gname, mp in support.items():
-        items = sorted(mp.items(), key=lambda kv: kv[1], reverse=True)
-        total = sum(v for _, v in items)
-        kept: set[str] = set()
-        cum = 0.0
-        for sp, val in items:
-            if len(kept) >= int(top_k):
-                break
-            kept.add(sp)
-            cum += val
-            if total > 0 and cum >= float(alpha) * total:
-                break
-        if not kept and items:
-            kept.add(items[0][0])
-        keep[gname] = kept
-
-    # Second pass: redistribute within genus keep set.
-    out: Counter[str] = Counter()
-    corrected = 0
-    for input_file in input_files:
-        with open(input_file, "r", errors="ignore") as infile:
-            for raw in infile:
-                line = raw.rstrip("\n")
-                if not line:
-                    continue
-                parts = line.split("\t")
-                if len(parts) < 2:
-                    continue
-                tokens = [t.strip() for t in parts[1:] if t.strip()]
-                if not tokens:
-                    continue
-                primary = _parse_primary_taxid_and_count(line, expect_numeric=expect_numeric)
-                if primary is None:
-                    out[UNCLASSIFIED] += 1
-                    continue
-                top_tid, mass = primary
-                base_sp = taxid_to_species(top_tid) or UNCLASSIFIED
-
-                cand = _parse_post_topk_from_tokens(tokens, expect_numeric=expect_numeric, topk=topk)
-                if not cand:
-                    out[base_sp] += mass
-                    continue
-
-                genus_post: Dict[str, float] = {}
-                sp_post: Dict[str, float] = {}
-                for tid, prob in cand:
-                    sp = taxid_to_species(tid)
-                    if not sp:
-                        continue
-                    gname = _infer_genus(sp)
-                    if gname is None:
-                        continue
-                    genus_post[gname] = genus_post.get(gname, 0.0) + prob
-                    prev = sp_post.get(sp)
-                    if prev is None or prob > prev:
-                        sp_post[sp] = prob
-                if not genus_post:
-                    out[base_sp] += mass
-                    continue
-
-                top_genus, top_mass = max(genus_post.items(), key=lambda kv: kv[1])
-                allowed = keep.get(top_genus)
-                if top_mass >= float(genus_thres) and allowed:
-                    sum_prob = 0.0
-                    for sp, prob in sp_post.items():
-                        if sp in allowed and _infer_genus(sp) == top_genus:
-                            sum_prob += prob
-                    if sum_prob > 0.0:
-                        for sp, prob in sp_post.items():
-                            if sp in allowed and _infer_genus(sp) == top_genus:
-                                out[sp] += mass * (prob / sum_prob)
-                        if base_sp not in allowed:
-                            corrected += 1
-                        continue
-                out[base_sp] += mass
-
-    print(
-        "Genus-local split: total="
-        f"{total_reads} used={used_reads} genera={len(keep)} corrected={corrected}"
-    )
-    return out
 
 
 def _parse_primary_taxid(line: str, expect_numeric: bool) -> Optional[str]:
@@ -756,7 +522,7 @@ def process_file(
     species_total = total_counts_by_level.get("species", 0)
     is_low_diversity = False
     force_low_diversity = False
-    if species_counter and species_total > 0 and sum(species_counter.values()) > 0:
+    if species_counter and species_total > 0:
         # Use top1 distribution for low-diversity detection to avoid soft_seq tail inflation.
         detect_counter = species_counter
         detect_total = species_total
@@ -825,283 +591,254 @@ def process_file(
         outfile.write(f"# count_unit={count_unit}\n")
         outfile.write("Taxon\tCount\tRelative Abundance (%)\n")
 
-        for level, taxon_counter in count_by_level.items():
-            total_count = total_counts_by_level[level]
-            if total_count == 0:
-                continue
+        taxon_counter = count_by_level.get("species")
+        total_count = total_counts_by_level.get("species", 0)
+        if not taxon_counter or total_count == 0:
+            return
 
-            display_level = " ".join(part.capitalize() for part in level.split())
-            outfile.write(f"\n## {display_level} Level ##\n")
+        outfile.write("\n## Species Level ##\n")
 
-            items = []
-            unclassified_item = None
-            for taxon, count in taxon_counter.items():
-                if taxon == UNCLASSIFIED:
-                    unclassified_item = (taxon, count)
-                else:
-                    items.append((taxon, count))
-            items.sort(key=lambda item: item[1], reverse=True)
-            if unclassified_item:
-                items.append(unclassified_item)
+        items: List[Tuple[str, float]] = []
+        unclassified_item: Optional[Tuple[str, float]] = None
+        for taxon, count in taxon_counter.items():
+            if taxon == UNCLASSIFIED:
+                unclassified_item = (taxon, count)
+            else:
+                items.append((taxon, count))
+        items.sort(key=lambda item: item[1], reverse=True)
+        if unclassified_item:
+            items.append(unclassified_item)
 
-            filtered_items = list(items)
+        filtered_items = list(items)
 
-            if level == "species" and filtered_items:
-                uncls_count = taxon_counter.get(UNCLASSIFIED, 0)
-                eff_total = max(0, total_count - uncls_count)
+        if filtered_items:
+            uncls_count = taxon_counter.get(UNCLASSIFIED, 0)
+            eff_total = max(0, total_count - uncls_count)
 
-                if species_is_low_diversity:
-                    # Low-diversity: head-mass prune on species to drop tiny FP tails.
-                    # (Exclude UNCLASSIFIED from the denominator and keep at least K taxa.)
-                    if (
-                        LOW_DIVERSITY_SPECIES_HEAD_MASS
-                        and float(LOW_DIVERSITY_SPECIES_HEAD_MASS) > 0
-                        and eff_total > 0
-                        and filtered_items
-                    ):
-                        non_uncls: List[Tuple[str, float]] = []
-                        uncls_item = None
-                        for taxon, count in filtered_items:
-                            if taxon == UNCLASSIFIED:
-                                uncls_item = (taxon, float(count))
-                            else:
-                                non_uncls.append((taxon, float(count)))
-                        non_uncls.sort(key=lambda it: it[1], reverse=True)
+            if species_is_low_diversity:
+                # Low-diversity: head-mass prune on species to drop tiny FP tails.
+                # (Exclude UNCLASSIFIED from the denominator and keep at least K taxa.)
+                if (
+                    LOW_DIVERSITY_SPECIES_HEAD_MASS
+                    and float(LOW_DIVERSITY_SPECIES_HEAD_MASS) > 0
+                    and eff_total > 0
+                    and filtered_items
+                ):
+                    non_uncls: List[Tuple[str, float]] = []
+                    uncls_item = None
+                    for taxon, count in filtered_items:
+                        if taxon == UNCLASSIFIED:
+                            uncls_item = (taxon, float(count))
+                        else:
+                            non_uncls.append((taxon, float(count)))
+                    non_uncls.sort(key=lambda it: it[1], reverse=True)
 
-                        # Use the mass after species-level filtering as denominator.
-                        # `eff_total` may include tiny tails already removed by prefilters,
-                        # which can make head-mass pruning keep one extra FP taxon.
-                        denom_total = sum(c for _, c in non_uncls)
+                    # Use the mass after species-level filtering as denominator.
+                    # `eff_total` may include tiny tails already removed by prefilters,
+                    # which can make head-mass pruning keep one extra FP taxon.
+                    denom_total = sum(c for _, c in non_uncls)
 
-                        before_n = len(non_uncls)
-                        kept: List[Tuple[str, float]] = []
-                        cum = 0.0
-                        head_mass = float(LOW_DIVERSITY_SPECIES_HEAD_MASS)
-                        min_keep = int(LOW_DIVERSITY_SPECIES_HEAD_MIN_KEEP)
-                        for i, (taxon, count) in enumerate(non_uncls):
-                            kept.append((taxon, count))
-                            cum += float(count)
-                            if (
-                                (i + 1) >= min_keep
-                                and denom_total > 0
-                                and ((cum / float(denom_total)) * 100.0) >= head_mass
-                            ):
-                                break
-                        filtered_items = kept + ([uncls_item] if uncls_item else [])
-                        after_n = len(kept)
-                        kept_pct = (
-                            ((cum / float(denom_total)) * 100.0) if denom_total > 0 else 0.0
-                        )
-                        print(
-                            "[profile][auto] lowdiv_species_headmass="
-                            f"enabled=1 head_mass={head_mass:.2f} min_keep={min_keep} "
-                            f"before={before_n} after={after_n} kept_pct={kept_pct:.2f}"
-                        )
-
-                    # Low-diversity: ultra-conservative presence-only rescue for NEW genera
-                    # using high-probability POST_TOPK evidence.
-                    #
-                    # Rationale: Some true low-abundance species may never win top1 but can
-                    # appear as a strong alternative (p>=prob_min) in a limited number of reads.
-                    # We only allow adding NEW genera (to avoid intragenus long-tail explosion),
-                    # and we add only a tiny pseudo-count (>=MIN_EVIDENCE) so abundance stays stable.
-                    has_post_topk = _has_post_topk_tokens(input_files)
-                    prob_hi = 0.20
-                    support_min = max(50, int(eff_total * 0.00002))
-                    # Guard against "hitchhiker" taxa that show up in many POST_TOPK lists
-                    # with tiny probabilities (common in low-div samples, especially within
-                    # Enterobacteriaceae-like families). This prevents spurious taxa from
-                    # passing support_min and inflating presence FPs.
-                    support_hi_frac_min = 0.01
-
-                    max_added = 3
-                    added: List[Tuple[str, int, int, float]] = []
-                    if has_post_topk and prob_hi > 0 and support_min > 0:
-                        existing_species = {
-                            taxon
-                            for taxon, _ in filtered_items
-                            if taxon != UNCLASSIFIED
-                        }
-                        existing_genera: set[str] = set()
-                        for sp in existing_species:
-                            g = _infer_genus(sp)
-                            if g:
-                                existing_genera.add(g)
-
-                        any_support, hi_support, prob_mass = _collect_post_topk_species_stats(
-                            input_files=input_files,
-                            expect_numeric=expect_numeric,
-                            resolved_kind=resolved_kind,
-                            tax=tax,
-                            gtdb_taxonomy=(
-                                gtdb_taxonomy if resolved_kind == "gtdb" else None
-                            ),
-                            prob_hi=float(prob_hi),
-                            topk=16,
-                        )
-                        candidates: List[Tuple[str, int, int, float, float]] = []
-                        for sp, hi in hi_support.items():
-                            if not sp or sp == UNCLASSIFIED:
-                                continue
-                            if not _is_lowdiv_rescue_species_name_ok(sp):
-                                continue
-                            if sp in existing_species:
-                                continue
-                            any_c = int(any_support.get(sp, 0))
-                            if any_c <= 0:
-                                continue
-                            mass = float(prob_mass.get(sp, 0.0))
-                            frac = (float(hi) / float(any_c)) if any_c > 0 else 0.0
-                            if int(hi) < int(support_min):
-                                continue
-                            if frac < float(support_hi_frac_min):
-                                continue
-                            g = _infer_genus(sp)
-                            if g and g in existing_genera:
-                                continue
-                            candidates.append((sp, int(hi), any_c, mass, frac))
-                        # Prefer stronger evidence: higher posterior mass first.
-                        candidates.sort(
-                            key=lambda it: (it[3], it[1], it[4]),
-                            reverse=True,
-                        )
-
-                        if candidates:
-                            pseudo = float(MIN_EVIDENCE)
-                            keep = candidates[: int(max_added)]
-                            uncls_item = None
-                            kept_items: List[Tuple[str, float]] = []
-                            for taxon, count in filtered_items:
-                                if taxon == UNCLASSIFIED:
-                                    uncls_item = (taxon, count)
-                                else:
-                                    kept_items.append((taxon, float(count)))
-                            # append rescued taxa (tiny counts; keep them at tail)
-                            for sp, hi, any_c, mass, _ in keep:
-                                kept_items.append((sp, pseudo))
-                                added.append((sp, int(hi), int(any_c), float(mass)))
-                            # re-sort non-unclassified part by count desc to keep output stable
-                            kept_items.sort(key=lambda it: it[1], reverse=True)
-                            filtered_items = kept_items + ([uncls_item] if uncls_item else [])
-
-                    if has_post_topk:
-                        added_text = (
-                            ",".join(
-                                [
-                                    f"{sp}:hi={hi}/any={any_c}:mass={mass:.2f}"
-                                    for sp, hi, any_c, mass in added
-                                ]
-                            )
-                            if added
-                            else ""
-                        )
-                        print(
-                            "[profile][auto] lowdiv_posttopk_newgenus_rescue="
-                            f"enabled=1 prob_hi={prob_hi:.2f} "
-                            f"support_min={support_min} "
-                            f"support_hi_frac_min={float(support_hi_frac_min):.4f} "
-                            f"max_added={max_added} "
-                            f"added={len(added)} [{added_text}]"
-                        )
-                    else:
-                        print(
-                            "[profile][auto] lowdiv_posttopk_newgenus_rescue="
-                            "enabled=0 reason=no_post_topk"
-                        )
-                else:
-                    if HIGH_DIVERSITY_GENUS_LOCAL_SPLIT:
-                        split = _genus_local_split_species_counter(
-                            input_files=input_files,
-                            expect_numeric=expect_numeric,
-                            resolved_kind=resolved_kind,
-                            tax=tax,
-                            gtdb_taxonomy=(gtdb_taxonomy if resolved_kind == "gtdb" else None),
-                            topk=int(HIGH_DIVERSITY_GENUS_LOCAL_POST_TOPK),
-                            genus_thres=float(HIGH_DIVERSITY_GENUS_LOCAL_THRES),
-                            alpha=float(HIGH_DIVERSITY_GENUS_LOCAL_ALPHA),
-                            top_k=int(HIGH_DIVERSITY_GENUS_LOCAL_TOPK),
-                        )
-                        if split:
-                            taxon_counter = split
-                            total_count = sum(taxon_counter.values())
-                            uncls_count = taxon_counter.get(UNCLASSIFIED, 0)
-                            eff_total = max(0, total_count - uncls_count)
-                            items = taxon_counter.most_common()
-                            filtered_items = list(items)
-
-                    # High-diversity: trim long tail by head mass (exclude UNCLASSIFIED).
-                    # This suppresses hundreds of tiny non-zero species that destroy
-                    # presence precision, without affecting per-read assignments.
-                    if hd_species_head_mass is not None:
-                        denom = eff_total if eff_total > 0 else total_count
-                        kept = set()
-                        cum = 0.0
-                        uncls = None
-                        for taxon, count in filtered_items:
-                            if taxon == UNCLASSIFIED:
-                                uncls = (taxon, count)
-                                continue
-                            rel = (count / denom) * 100 if denom > 0 else 0.0
-                            kept.add(taxon)
-                            cum += rel
-                            if cum >= float(hd_species_head_mass):
-                                break
-
-                        # Union with top1 support>=K to keep repeated low-abundance taxa
-                        # while filtering scatter-type singletons.
+                    before_n = len(non_uncls)
+                    kept: List[Tuple[str, float]] = []
+                    cum = 0.0
+                    head_mass = float(LOW_DIVERSITY_SPECIES_HEAD_MASS)
+                    min_keep = int(LOW_DIVERSITY_SPECIES_HEAD_MIN_KEEP)
+                    for i, (taxon, count) in enumerate(non_uncls):
+                        kept.append((taxon, count))
+                        cum += float(count)
                         if (
-                            HIGH_DIVERSITY_SPECIES_SUPPORT_MIN
-                            and HIGH_DIVERSITY_SPECIES_SUPPORT_MIN > 1
-                            and support_by_level
+                            (i + 1) >= min_keep
+                            and denom_total > 0
+                            and ((cum / float(denom_total)) * 100.0) >= head_mass
                         ):
-                            support_species = support_by_level.get("species")
-                            if support_species:
-                                for taxon, sup in support_species.items():
-                                    if taxon != UNCLASSIFIED and sup >= HIGH_DIVERSITY_SPECIES_SUPPORT_MIN:
-                                        kept.add(taxon)
+                            break
+                    filtered_items = kept + ([uncls_item] if uncls_item else [])
+                    after_n = len(kept)
+                    kept_pct = (
+                        ((cum / float(denom_total)) * 100.0) if denom_total > 0 else 0.0
+                    )
+                    print(
+                        "[profile][auto] lowdiv_species_headmass="
+                        f"enabled=1 head_mass={head_mass:.2f} min_keep={min_keep} "
+                        f"before={before_n} after={after_n} kept_pct={kept_pct:.2f}"
+                    )
 
-                        if kept:
-                            rebuilt = []
-                            for taxon, count in items:
-                                if taxon == UNCLASSIFIED:
-                                    if uncls is not None:
-                                        rebuilt.append(uncls)
-                                    continue
-                                if taxon in kept:
-                                    rebuilt.append((taxon, count))
-                            if uncls is not None and not rebuilt:
-                                rebuilt.append(uncls)
-                            if rebuilt:
-                                filtered_items = rebuilt
+                # Low-diversity: ultra-conservative presence-only rescue for NEW genera
+                # using high-probability POST_TOPK evidence.
+                #
+                # Rationale: Some true low-abundance species may never win top1 but can
+                # appear as a strong alternative (p>=prob_min) in a limited number of reads.
+                # We only allow adding NEW genera (to avoid intragenus long-tail explosion),
+                # and we add only a tiny pseudo-count (>=MIN_EVIDENCE) so abundance stays stable.
+                prob_hi = 0.20
+                support_min = max(50, int(eff_total * 0.00002))
+                # Guard against "hitchhiker" taxa that show up in many POST_TOPK lists
+                # with tiny probabilities (common in low-div samples, especially within
+                # Enterobacteriaceae-like families). This prevents spurious taxa from
+                # passing support_min and inflating presence FPs.
+                support_hi_frac_min = 0.01
 
-                    # Final hard cutoff on species relative abundance (high-diversity only).
-                    if (
-                        level == "species"
-                        and not species_is_low_diversity
-                        and HIGH_DIVERSITY_FINAL_REL_CUTOFF
-                        and HIGH_DIVERSITY_FINAL_REL_CUTOFF > 0
-                        and filtered_items
-                    ):
-                        denom = eff_total if eff_total > 0 else total_count
-                        final_items: List[Tuple[str, float]] = []
+                max_added = 3
+                added: List[Tuple[str, int, int, float]] = []
+                if prob_hi > 0 and support_min > 0:
+                    existing_species = {
+                        taxon
+                        for taxon, _ in filtered_items
+                        if taxon != UNCLASSIFIED
+                    }
+                    existing_genera: set[str] = set()
+                    for sp in existing_species:
+                        g = _infer_genus(sp)
+                        if g:
+                            existing_genera.add(g)
+
+                    any_support, hi_support, prob_mass = _collect_post_topk_species_stats(
+                        input_files=input_files,
+                        expect_numeric=expect_numeric,
+                        resolved_kind=resolved_kind,
+                        tax=tax,
+                        gtdb_taxonomy=(
+                            gtdb_taxonomy if resolved_kind == "gtdb" else None
+                        ),
+                        prob_hi=float(prob_hi),
+                        topk=16,
+                    )
+                    candidates: List[Tuple[str, int, int, float, float]] = []
+                    for sp, hi in hi_support.items():
+                        if not sp or sp == UNCLASSIFIED:
+                            continue
+                        if not _is_lowdiv_rescue_species_name_ok(sp):
+                            continue
+                        if sp in existing_species:
+                            continue
+                        any_c = int(any_support.get(sp, 0))
+                        if any_c <= 0:
+                            continue
+                        mass = float(prob_mass.get(sp, 0.0))
+                        frac = (float(hi) / float(any_c)) if any_c > 0 else 0.0
+                        if int(hi) < int(support_min):
+                            continue
+                        if frac < float(support_hi_frac_min):
+                            continue
+                        g = _infer_genus(sp)
+                        if g and g in existing_genera:
+                            continue
+                        candidates.append((sp, int(hi), any_c, mass, frac))
+                    # Prefer stronger evidence: higher posterior mass first.
+                    candidates.sort(
+                        key=lambda it: (it[3], it[1], it[4]),
+                        reverse=True,
+                    )
+
+                    if candidates:
+                        pseudo = float(MIN_EVIDENCE)
+                        keep = candidates[: int(max_added)]
+                        uncls_item = None
+                        kept_items: List[Tuple[str, float]] = []
                         for taxon, count in filtered_items:
                             if taxon == UNCLASSIFIED:
-                                final_items.append((taxon, count))
-                                continue
-                            rel = (count / denom) * 100 if denom > 0 else 0.0
-                            if rel >= float(HIGH_DIVERSITY_FINAL_REL_CUTOFF):
-                                final_items.append((taxon, count))
-                        if final_items:
-                            filtered_items = final_items
+                                uncls_item = (taxon, count)
+                            else:
+                                kept_items.append((taxon, float(count)))
+                        # append rescued taxa (tiny counts; keep them at tail)
+                        for sp, hi, any_c, mass, _ in keep:
+                            kept_items.append((sp, pseudo))
+                            added.append((sp, int(hi), int(any_c), float(mass)))
+                        # re-sort non-unclassified part by count desc to keep output stable
+                        kept_items.sort(key=lambda it: it[1], reverse=True)
+                        filtered_items = kept_items + ([uncls_item] if uncls_item else [])
 
-            if not filtered_items:
-                # 阈值过高导致清空时，保留原始未截断结果
-                filtered_items = items
-
-            total_filtered = sum(c for _, c in filtered_items)
-
-            for taxon, count in filtered_items:
-                relative_abundance = (count / total_filtered) * 100 if total_filtered > 0 else 0.0
-                outfile.write(
-                    f"{taxon}\t{count}\t{relative_abundance:.2f}\n"
+                added_text = (
+                    ",".join(
+                        [
+                            f"{sp}:hi={hi}/any={any_c}:mass={mass:.2f}"
+                            for sp, hi, any_c, mass in added
+                        ]
+                    )
+                    if added
+                    else ""
                 )
+                print(
+                    "[profile][auto] lowdiv_posttopk_newgenus_rescue="
+                    f"enabled=1 prob_hi={prob_hi:.2f} "
+                    f"support_min={support_min} "
+                    f"support_hi_frac_min={float(support_hi_frac_min):.4f} "
+                    f"max_added={max_added} "
+                    f"added={len(added)} [{added_text}]"
+                )
+            else:
+                # High-diversity: trim long tail by head mass (exclude UNCLASSIFIED).
+                # This suppresses hundreds of tiny non-zero species that destroy
+                # presence precision, without affecting per-read assignments.
+                if hd_species_head_mass is not None:
+                    denom = eff_total if eff_total > 0 else total_count
+                    kept = set()
+                    cum = 0.0
+                    uncls = None
+                    for taxon, count in filtered_items:
+                        if taxon == UNCLASSIFIED:
+                            uncls = (taxon, count)
+                            continue
+                        rel = (count / denom) * 100 if denom > 0 else 0.0
+                        kept.add(taxon)
+                        cum += rel
+                        if cum >= float(hd_species_head_mass):
+                            break
+
+                    # Union with top1 support>=K to keep repeated low-abundance taxa
+                    # while filtering scatter-type singletons.
+                    if (
+                        HIGH_DIVERSITY_SPECIES_SUPPORT_MIN
+                        and HIGH_DIVERSITY_SPECIES_SUPPORT_MIN > 1
+                        and support_by_level
+                    ):
+                        support_species = support_by_level.get("species")
+                        if support_species:
+                            for taxon, sup in support_species.items():
+                                if taxon != UNCLASSIFIED and sup >= HIGH_DIVERSITY_SPECIES_SUPPORT_MIN:
+                                    kept.add(taxon)
+
+                    if kept:
+                        rebuilt = []
+                        for taxon, count in items:
+                            if taxon == UNCLASSIFIED:
+                                if uncls is not None:
+                                    rebuilt.append(uncls)
+                                continue
+                            if taxon in kept:
+                                rebuilt.append((taxon, count))
+                        if uncls is not None and not rebuilt:
+                            rebuilt.append(uncls)
+                        if rebuilt:
+                            filtered_items = rebuilt
+
+                # Final hard cutoff on species relative abundance (high-diversity only).
+                if (
+                    not species_is_low_diversity
+                    and HIGH_DIVERSITY_FINAL_REL_CUTOFF
+                    and HIGH_DIVERSITY_FINAL_REL_CUTOFF > 0
+                    and filtered_items
+                ):
+                    denom = eff_total if eff_total > 0 else total_count
+                    final_items: List[Tuple[str, float]] = []
+                    for taxon, count in filtered_items:
+                        if taxon == UNCLASSIFIED:
+                            final_items.append((taxon, count))
+                            continue
+                        rel = (count / denom) * 100 if denom > 0 else 0.0
+                        if rel >= float(HIGH_DIVERSITY_FINAL_REL_CUTOFF):
+                            final_items.append((taxon, count))
+                    if final_items:
+                        filtered_items = final_items
+
+        if not filtered_items:
+            # 阈值过高导致清空时，保留原始未截断结果
+            filtered_items = items
+
+        total_filtered = sum(c for _, c in filtered_items)
+
+        for taxon, count in filtered_items:
+            relative_abundance = (count / total_filtered) * 100 if total_filtered > 0 else 0.0
+            outfile.write(
+                f"{taxon}\t{count}\t{relative_abundance:.2f}\n"
+            )

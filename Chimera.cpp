@@ -280,10 +280,7 @@ int main(int argc, char **argv) {
           ->add_option("-p,--paired", classifyConfig.pairedFiles,
                        "Paired input files for classifying")
           ->check(CLI::ExistingFile)
-          ->excludes(
-              singleOpt) // Ensure that single and paired are mutually exclusive
-          ->each([](const std::string &) {
-          }); // Use each to allow multiple inputs for paired
+          ->excludes(singleOpt); // Ensure that single and paired are mutually exclusive
 
   classify->add_option("--weight-map", classifyConfig.weight_map_file,
                        "Optional contig/read weight map: id<TAB>weight or CAMI mapping.tsv")
