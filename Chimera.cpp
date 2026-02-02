@@ -169,7 +169,7 @@ int main(int argc, char **argv) {
   build
       ->add_option("--load-factor", buildConfig.load_factor,
                    "IMCF 滤器负载因子")
-      ->default_val(0.8);
+      ->default_val(0.85);
   build
       ->add_option("-M,--max-hashes,--k-max", buildConfig.max_hashes_per_taxid,
                    "每 taxid 最多写入的 hash 数 (0=>auto=2e6)")

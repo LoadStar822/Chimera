@@ -52,7 +52,7 @@ namespace ChimeraBuild {
 		uint64_t min_length{ 0 };
 		uint16_t threads;
 		bool verbose = true;
-		double load_factor{ 0.8 };
+		double load_factor{ 0.85 };
 		size_t max_hashes_per_taxid = 0;
 		// Core-IDF signature selection
 		double core_alpha{ 1.0 };
