@@ -184,10 +184,6 @@ maybe_load_ncbi_taxdump(const std::string &taxonomyKind) {
 
   auto tax = std::make_unique<ChimeraClassify::NcbiTaxdump>();
   std::string line;
-  uint32_t max_id = 0;
-  size_t species_nodes = 0;
-  size_t genus_nodes = 0;
-  size_t parsed = 0;
   while (std::getline(is, line)) {
     if (line.empty()) {
       continue;
@@ -226,18 +222,8 @@ maybe_load_ncbi_taxdump(const std::string &taxonomyKind) {
     tax->parent[tid] = parent;
     const bool is_sp = (rank == "species");
     tax->is_species[tid] = is_sp ? 1 : 0;
-    if (is_sp) {
-      ++species_nodes;
-    }
     const bool is_g = (rank == "genus");
     tax->is_genus[tid] = is_g ? 1 : 0;
-    if (is_g) {
-      ++genus_nodes;
-    }
-    if (tid > max_id) {
-      max_id = tid;
-    }
-    ++parsed;
   }
 
   if (!tax->enabled()) {
@@ -314,43 +300,16 @@ void run(ClassifyConfig config) {
                      return static_cast<char>(std::tolower(ch));
                    });
   };
-  std::string resolvedKind = imcfConfig.taxonomyKind;
-  if (resolvedKind.empty()) {
-    resolvedKind = "ncbi";
-  } else {
-    normalize_kind(resolvedKind);
+  std::string taxonomyKind = imcfConfig.taxonomyKind;
+  if (taxonomyKind.empty()) {
+    taxonomyKind = "ncbi";
   }
-  if (config.taxonomyKind == "auto" || config.taxonomyKind.empty()) {
-    config.taxonomyKind = resolvedKind;
-  } else {
-    std::string requestedKind = config.taxonomyKind;
-    normalize_kind(requestedKind);
-    if (requestedKind != resolvedKind) {
-      throw std::runtime_error("数据库 taxonomy_kind (" + resolvedKind +
-                               ") 与分类请求 (" + requestedKind +
-                               ") 不匹配，请检查参数 –-taxonomy-kind。");
-    }
-    config.taxonomyKind = requestedKind;
-  }
-  std::string resolvedVersion = imcfConfig.taxonomyVersion;
-  if (resolvedVersion.empty()) {
-    resolvedVersion = resolvedKind == "gtdb" ? "gtdb-auto" : "ncbi-taxdump";
-  }
-  if (config.taxonomyVersion == "auto" || config.taxonomyVersion.empty()) {
-    config.taxonomyVersion = resolvedVersion;
-  } else {
-    if (config.taxonomyVersion != resolvedVersion) {
-      std::ostringstream oss;
-      oss << "数据库 taxonomy_version (" << resolvedVersion
-          << ") 与分类请求 (" << config.taxonomyVersion
-          << ") 不一致，请检查参数 –-taxonomy-version。";
-      throw std::runtime_error(oss.str());
-    }
-  }
+  normalize_kind(taxonomyKind);
+
   // Optional NCBI strain/subspecies -> species collapse.
   // This helps avoid candidate saturation by many strain taxids, which can
   // prevent sister species from entering pre-EM/posterior lists.
-  ncbiTaxdump = maybe_load_ncbi_taxdump(config.taxonomyKind);
+  ncbiTaxdump = maybe_load_ncbi_taxdump(taxonomyKind);
   if (ncbiTaxdump && ncbiTaxdump->enabled()) {
     weightCtx.ncbiTaxdump = ncbiTaxdump.get();
   }
@@ -382,15 +341,12 @@ void run(ClassifyConfig config) {
 
     robin_hood::unordered_flat_map<uint32_t, uint32_t> species2rep;
     species2rep.reserve(tax.id2str.size() / 2 + 1);
-    size_t numeric = 0;
-    size_t collapsed = 0;
     for (uint32_t tid_id = 0; tid_id < tax.id2str.size(); ++tid_id) {
       const std::string &taxid = tax.id2str[tid_id];
       uint32_t tid = 0;
       if (!chimera::utils::try_parse_u32(taxid, tid)) {
         continue;
       }
-      ++numeric;
       uint32_t sid = weightCtx.ncbiTaxdump->to_species(tid);
       auto it = species2rep.find(sid);
       if (it == species2rep.end()) {
@@ -398,9 +354,6 @@ void run(ClassifyConfig config) {
         tid2speciesRep[tid_id] = tid_id;
       } else {
         tid2speciesRep[tid_id] = it->second;
-        if (it->second != tid_id) {
-          ++collapsed;
-        }
       }
     }
     weightCtx.tid2speciesRep = &tid2speciesRep;
@@ -410,20 +363,18 @@ void run(ClassifyConfig config) {
 
   constexpr uint32_t kLowDivProbeReads = 200000;
   if (kLowDivProbeReads > 0) {
-    ClassifyConfig probe_config = config;
-
     FileInfo probeInfo;
     std::vector<moodycamel::ConcurrentQueue<batchReads>> probeQueues(
         static_cast<size_t>(std::max<uint16_t>(1, config.threads)));
     std::vector<classifyResult> probeResults;
     std::atomic<bool> probe_done{false};
     std::thread probeProducer([&]() {
-      parseReads(probeQueues, probe_config, probeInfo,
+      parseReads(probeQueues, config, probeInfo,
                  kLowDivProbeReads);
       probe_done.store(true, std::memory_order_release);
     });
 
-    classify_streaming(imcfConfig, probeQueues, probe_config, imcf, indexToTaxid,
+    classify_streaming(imcfConfig, probeQueues, config, imcf, indexToTaxid,
                        tax, probeResults, probeInfo, probe_done, feature_params,
                        feature_min_len, weightCtx, nullptr);
     probeProducer.join();

@@ -36,8 +36,6 @@ namespace ChimeraClassify {
 			std::string weight_map_file; // optional contig/read weight map (CAMI mapping.tsv or id<TAB>weight)
 			std::string outputFile;
 			std::string dbFile;
-		std::string taxonomyKind{ "auto" };
-		std::string taxonomyVersion{ "auto" };
 		double shotThreshold = 0.70;
 		double firstFilterBeta = 0.8;
 		bool firstFilterBeta_user = false; // set when user or auto-override explicitly chooses beta
