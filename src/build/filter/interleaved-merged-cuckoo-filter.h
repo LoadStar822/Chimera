@@ -32,8 +32,11 @@
 #include <cereal/details/helpers.hpp>
 #include <cereal/types/memory.hpp>
 #include <cereal/types/vector.hpp>
+#include <chrono>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <kvec.h>
@@ -51,6 +54,7 @@
 #include <utility>
 #include <vector>
 #include <xxhash.h>
+#include <memory>
 
 
 static inline size_t ceil_div_u64(uint64_t a, uint64_t b) {
@@ -70,6 +74,13 @@ static inline size_t next_pow2(size_t v) {
   v |= v >> 32;
 #endif
   return v + 1;
+}
+
+static inline uint8_t bits_required_u64(uint64_t v) {
+  if (v == 0) {
+    return 1;
+  }
+  return static_cast<uint8_t>(64 - std::countl_zero(v));
 }
 
 namespace chimera::imcf {
@@ -313,7 +324,42 @@ class InterleavedMergedCuckooFilter {
       ar(bucket, fingerprint, speciesMask);
     }
   };
+  struct QueryIndex {
+    static constexpr uint32_t FP_BITS = 12;
+    std::vector<uint64_t> bucketBase;  // size = hashSize + 1
+    sdsl::int_vector<0> prefix;        // width = prefix_bits
+    sdsl::int_vector<0> entries;       // width = entry_bits
+    uint8_t g{8};                      // group bits for fp_lo
+    uint32_t groupSize{0};             // 1 << g
+    uint32_t stride{0};                // groupSize + 1
+    uint8_t fpHiBits{0};               // 12 - g
+    uint8_t prefix_bits{0};
+    uint8_t entry_bits{0};
+
+    void refresh() {
+      groupSize = 1u << g;
+      stride = groupSize + 1;
+      fpHiBits = static_cast<uint8_t>(FP_BITS - g);
+    }
+
+    template <class Archive> void serialize(Archive &ar) {
+      ar(bucketBase, prefix, entries, g, prefix_bits, entry_bits);
+      if constexpr (Archive::is_loading::value) {
+        refresh();
+      }
+    }
+  };
+
+  struct StashFlat {
+    uint32_t bucket{0};
+    uint16_t fp{0};
+    uint16_t mask{0};
+    uint32_t bin{0};
+  };
+
   std::vector<std::vector<StashEntry>> stash;
+  std::unique_ptr<QueryIndex> qidx;
+  uint8_t storageMode{0}; // 0=classic, 1=qidx-only, 2=both
   std::atomic<uint64_t> insertFailureTotal{0};
   std::atomic<uint64_t> insertFailureSaturated{0};
 
@@ -372,6 +418,15 @@ class InterleavedMergedCuckooFilter {
     return bucketLinear * tagNum * 16;
   }
 
+  inline void loadBucketWords(size_t bucket, std::vector<uint64_t> &out) const {
+    out.resize(binNum);
+    if (binNum == 0) {
+      return;
+    }
+    const uint64_t start = static_cast<uint64_t>(bucket) * static_cast<uint64_t>(binNum);
+    std::memcpy(out.data(), data.data() + start, binNum * sizeof(uint64_t));
+  }
+
   inline uint64_t readBucketRaw(size_t bucketLinear) const {
     // 桶布局为 4×16bit，总长度固定 64bit，且 bit_offset 总是 64 的倍数。
     // 直接按 word 访问可避免 sdsl::int_vector 的 get_int/set_int 抽象开销。
@@ -390,6 +445,10 @@ class InterleavedMergedCuckooFilter {
   inline void writeBucket64(size_t bucket, size_t bin, uint64_t value) {
     size_t linear = bucketLinearIndex(bucket, bin);
     writeBucketRaw(linear, value);
+  }
+
+  inline bool has_qidx() const {
+    return static_cast<bool>(qidx);
   }
 
 
@@ -430,6 +489,22 @@ class InterleavedMergedCuckooFilter {
     }
   }
 
+  inline uint64_t qidx_prefix(size_t bucket, uint32_t group) const {
+    return qidx->prefix[(uint64_t)bucket * qidx->stride + group];
+  }
+
+  struct QidxLookupState {
+    size_t hash1{0};
+    size_t hash2{0};
+    uint32_t group{0};
+    uint16_t hi{0};
+    uint64_t hiMask{0};
+  };
+
+  inline QidxLookupState make_qidx_lookup_state(uint64_t value) const;
+  inline void qidx_group_range(size_t bucket, uint32_t group, uint64_t &start,
+                               uint64_t &end) const;
+
   static inline void encodeVarint(std::vector<uint8_t> &out, uint32_t value) {
     while (value >= 0x80) {
       out.push_back(static_cast<uint8_t>((value & 0x7F) | 0x80));
@@ -468,6 +543,7 @@ class InterleavedMergedCuckooFilter {
 
 public:
   InterleavedMergedCuckooFilter() = default;
+  ~InterleavedMergedCuckooFilter() = default;
   InterleavedMergedCuckooFilter(std::vector<Group> &groups,
                                 ChimeraBuild::IMCFConfig &config) {
     uint64_t maxTotalHash = 0;
@@ -509,10 +585,33 @@ public:
   }
 
   template <class Archive> void serialize(Archive &ar) {
-    ar(data, binNum, binSize, tagNum, MaxCuckooCount, hashSize, stash);
-    if constexpr (Archive::is_loading::value) {
-      if (stash.size() != binNum) {
-        stash.resize(binNum);
+    ar(storageMode, binNum, binSize, tagNum, MaxCuckooCount, hashSize);
+    if (storageMode == 0) {
+      ar(data, stash);
+      if constexpr (Archive::is_loading::value) {
+        if (stash.size() != binNum) {
+          stash.resize(binNum);
+        }
+        qidx.reset();
+      }
+    } else if (storageMode == 1) {
+      if constexpr (Archive::is_loading::value) {
+        qidx = std::make_unique<QueryIndex>();
+      }
+      ar(*qidx);
+      if constexpr (Archive::is_loading::value) {
+        data = sdsl::bit_vector();
+        stash.clear();
+      }
+    } else { // storageMode == 2 (classic + qidx)
+      if constexpr (Archive::is_loading::value) {
+        qidx = std::make_unique<QueryIndex>();
+      }
+      ar(data, stash, *qidx);
+      if constexpr (Archive::is_loading::value) {
+        if (stash.size() != binNum) {
+          stash.resize(binNum);
+        }
       }
     }
   }
@@ -576,6 +675,14 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
 	}
 
 	inline void route(uint64_t value, std::vector<uint32_t> &bins) const {
+    if (has_qidx()) {
+      route_qidx(value, bins);
+      return;
+    }
+    route_scan(value, bins);
+  }
+
+  inline void route_scan(uint64_t value, std::vector<uint32_t> &bins) const {
     bins.clear();
 
     uint16_t fingerprint = reduceTo12bit(value);
@@ -616,6 +723,8 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
       }
     }
   }
+
+  inline void route_qidx(uint64_t value, std::vector<uint32_t> &bins) const;
 
   /**
    * @brief 插入指纹。
@@ -787,6 +896,24 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
     }
     return stats;
   }
+
+  inline void release_classic_storage() {
+    sdsl::bit_vector().swap(data);
+    stash.clear();
+    stash.shrink_to_fit();
+  }
+
+  inline void set_storage_mode(uint8_t mode) {
+    storageMode = mode;
+  }
+
+  inline uint8_t get_storage_mode() const {
+    return storageMode;
+  }
+
+  inline void build_query_index(bool include_stash = true, bool verify = true,
+                                bool low_peak_mode = false,
+                                bool drop_classic_before_materialize = false);
 
   /**
    * @brief 踢出流程，只在两桶之间往返。
@@ -1005,7 +1132,16 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
   }
 
   template <class EmitFn>
-	inline void bulkContain_events(uint64_t value, EmitFn &&emit) {
+  inline void bulkContain_events(uint64_t value, EmitFn &&emit) {
+    if (has_qidx()) {
+      bulkContain_events_qidx(value, std::forward<EmitFn>(emit));
+      return;
+    }
+    bulkContain_events_scan(value, std::forward<EmitFn>(emit));
+  }
+
+  template <class EmitFn>
+	inline void bulkContain_events_scan(uint64_t value, EmitFn &&emit) {
     uint16_t fingerprint = reduceTo12bit(value);
     size_t hash1 = hashIndex(value);
     size_t hash2 = altHash(hash1, fingerprint);
@@ -1070,7 +1206,21 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
   }
 
   template <class EmitFn>
+  inline void bulkContain_events_qidx(uint64_t value, EmitFn &&emit);
+
+  template <class EmitFn>
 	inline void bulkContain_events_subset(uint64_t value,
+                                        const std::vector<uint32_t> &binSubset,
+                                        EmitFn &&emit) {
+    if (has_qidx()) {
+      bulkContain_events_subset_qidx(value, binSubset, std::forward<EmitFn>(emit));
+      return;
+    }
+    bulkContain_events_subset_scan(value, binSubset, std::forward<EmitFn>(emit));
+  }
+
+  template <class EmitFn>
+	inline void bulkContain_events_subset_scan(uint64_t value,
                                         const std::vector<uint32_t> &binSubset,
                                         EmitFn &&emit) {
     uint16_t fingerprint = reduceTo12bit(value);
@@ -1130,6 +1280,10 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
       }
     }
   }
+
+  template <class EmitFn>
+  inline void bulkContain_events_subset_qidx(
+      uint64_t value, const std::vector<uint32_t> &binSubset, EmitFn &&emit);
 
   template <std::ranges::range value_range_t, class CounterMatrix>
   inline void bulkCount_sparse(
@@ -1244,4 +1398,7 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
     }
   }
 };
+
+#include "interleaved-merged-cuckoo-filter-qimcf-impl.h"
+
 } // namespace chimera::imcf

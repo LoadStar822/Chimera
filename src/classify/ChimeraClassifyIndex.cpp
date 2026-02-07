@@ -103,6 +103,11 @@ void loadFilter(
         std::to_string(imcfConfig.hashVersion) +
         "，请使用当前 Chimera 重新构建数据库。");
   }
+  if (imcf.get_storage_mode() != 1) {
+    throw std::runtime_error(
+        "IMCF 数据库存储模式不兼容：仅支持 qidx-only (storageMode=1)。"
+        "请使用当前 Chimera 重新构建数据库。");
+  }
   if (imcfConfig.seed64 == 0) {
     throw std::runtime_error(
         "IMCF 数据库缺少 syncmer 种子信息，请重新执行 Chimera build。");

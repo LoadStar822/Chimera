@@ -11,6 +11,9 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <queue>
 #include <sstream>
 #include <stdexcept>
@@ -355,6 +358,39 @@ void run(BuildConfig config) {
     print_build_time(imcf_build_total_time);
     std::cout << std::endl;
     std::cout << imcf << std::endl;
+  }
+  if (config.verbose) {
+    std::cout << "Releasing pre-QIMCF buffers..." << std::endl;
+  }
+  robin_hood::unordered_flat_map<std::string, std::vector<std::string>>()
+      .swap(inputFiles);
+  robin_hood::unordered_flat_map<std::string, uint64_t>().swap(hashCount);
+  robin_hood::unordered_flat_map<std::string, uint64_t>().swap(bpCount);
+  std::vector<chimera::imcf::Group>().swap(groups);
+  hashFreqContext.sketch.reset();
+#if defined(__GLIBC__)
+  // Return free heap pages before QIMCF materialization to lower RSS peak.
+  ::malloc_trim(0);
+#endif
+  auto qidx_start = std::chrono::high_resolution_clock::now();
+  std::cout << "Building QIMCF..." << std::endl;
+  constexpr bool kQimcfVerify = false;
+  constexpr bool kQimcfLowPeak = true;
+  bool drop_classic_before_materialize = kQimcfLowPeak && !kQimcfVerify;
+  std::cout << "  QIMCF options: low_peak=on, verify=off (fixed)" << std::endl;
+  imcf.build_query_index(/*include_stash=*/true, kQimcfVerify, kQimcfLowPeak,
+                         drop_classic_before_materialize);
+  imcf.set_storage_mode(1);
+  imcf.release_classic_storage();
+  auto qidx_end = std::chrono::high_resolution_clock::now();
+  auto qidx_total_time =
+      std::chrono::duration_cast<std::chrono::milliseconds>(qidx_end -
+                                                            qidx_start)
+          .count();
+  if (config.verbose) {
+    std::cout << "QIMCF build time: ";
+    print_build_time(qidx_total_time);
+    std::cout << std::endl;
   }
   auto save_start = std::chrono::high_resolution_clock::now();
   std::cout << "Saving IMCF..." << std::endl;

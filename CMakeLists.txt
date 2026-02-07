@@ -90,6 +90,7 @@ list(FILTER SOURCES EXCLUDE REGEX "/libs/minions-master/")
 list(FILTER SOURCES EXCLUDE REGEX "/src/legacy/")
 list(FILTER SOURCES EXCLUDE REGEX "/libs/strobemers/")
 list(FILTER SOURCES EXCLUDE REGEX "/third_party/")
+list(FILTER SOURCES EXCLUDE REGEX "/Chimera_wt_base_20260206/")
 
 list(APPEND SOURCES "${PROJECT_SOURCE_DIR}/src/utils/FeatureHasher.cpp")
 list(REMOVE_DUPLICATES SOURCES)

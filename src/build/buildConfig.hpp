@@ -98,7 +98,7 @@ namespace ChimeraBuild {
 
 	struct IMCFConfig {
 		inline static constexpr uint64_t DefaultFingerprintSalt = 0xD1B54A32D192ED03ULL;
-		inline static constexpr uint8_t CurrentHashVersion = 2;
+		inline static constexpr uint8_t CurrentHashVersion = 5;
 
 		size_t binNum{};
 		size_t binSize{};
