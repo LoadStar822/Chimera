@@ -451,6 +451,18 @@ class InterleavedMergedCuckooFilter {
     return static_cast<bool>(qidx);
   }
 
+  template <class KeepFn>
+  static inline void collect_subset_bins(uint32_t n, size_t reserve_hint,
+                                         KeepFn &&keep,
+                                         std::vector<uint32_t> &out) {
+    out.clear();
+    out.reserve(reserve_hint);
+    for (uint32_t bin = 0; bin < n; ++bin) {
+      if (keep(bin)) {
+        out.push_back(bin);
+      }
+    }
+  }
 
   inline void fetchActiveBins(size_t bucket, uint16_t fingerprint,
                               std::vector<uint32_t> &out) const {
@@ -1220,6 +1232,42 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
   }
 
   template <class EmitFn>
+  inline void bulkContain_events_subset_mask(
+      uint64_t value, const std::vector<uint8_t> &binMask, EmitFn &&emit) {
+    if (has_qidx()) {
+      bulkContain_events_subset_qidx_mask(value, binMask,
+                                          std::forward<EmitFn>(emit));
+      return;
+    }
+    static thread_local std::vector<uint32_t> subsetBins;
+    collect_subset_bins(
+        static_cast<uint32_t>(binMask.size()), binMask.size(),
+        [&](uint32_t bin) { return binMask[bin] != 0u; }, subsetBins);
+    bulkContain_events_subset_scan(value, subsetBins, std::forward<EmitFn>(emit));
+  }
+
+  template <class EmitFn>
+  inline void bulkContain_events_subset_marked(
+      uint64_t value, const std::vector<uint32_t> &binMarks,
+      uint32_t activeMark, EmitFn &&emit) {
+    if (activeMark == 0u || binMarks.empty()) {
+      return;
+    }
+    if (has_qidx()) {
+      bulkContain_events_subset_qidx_marked(
+          value, binMarks, activeMark, std::forward<EmitFn>(emit));
+      return;
+    }
+    static thread_local std::vector<uint32_t> subsetBins;
+    const size_t reserve_hint = std::min<size_t>(binMarks.size(), 512);
+    collect_subset_bins(static_cast<uint32_t>(binMarks.size()), reserve_hint,
+                        [&](uint32_t bin) { return binMarks[bin] == activeMark; },
+                        subsetBins);
+    bulkContain_events_subset_scan(value, subsetBins,
+                                   std::forward<EmitFn>(emit));
+  }
+
+  template <class EmitFn>
 	inline void bulkContain_events_subset_scan(uint64_t value,
                                         const std::vector<uint32_t> &binSubset,
                                         EmitFn &&emit) {
@@ -1284,6 +1332,15 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
   template <class EmitFn>
   inline void bulkContain_events_subset_qidx(
       uint64_t value, const std::vector<uint32_t> &binSubset, EmitFn &&emit);
+
+  template <class EmitFn>
+  inline void bulkContain_events_subset_qidx_mask(
+      uint64_t value, const std::vector<uint8_t> &binMask, EmitFn &&emit);
+
+  template <class EmitFn>
+  inline void bulkContain_events_subset_qidx_marked(
+      uint64_t value, const std::vector<uint32_t> &binMarks,
+      uint32_t activeMark, EmitFn &&emit);
 
   template <std::ranges::range value_range_t, class CounterMatrix>
   inline void bulkCount_sparse(

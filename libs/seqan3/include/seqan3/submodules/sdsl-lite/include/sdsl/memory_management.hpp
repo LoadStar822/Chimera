@@ -903,7 +903,14 @@ public:
             // access to this padding to answer rank(size()) if capacity()%64 ==0.
             // Note that this padding is not counted in the serialize method!
             size_t allocated_bytes = (size_t)(((v.m_capacity + 64) >> 6) << 3);
-            v.m_data = memory_manager::realloc_mem(v.m_data, allocated_bytes);
+            if (v.m_data == nullptr)
+            {
+                v.m_data = memory_manager::alloc_mem(allocated_bytes);
+            }
+            else
+            {
+                v.m_data = memory_manager::realloc_mem(v.m_data, allocated_bytes);
+            }
             if (allocated_bytes != 0 && v.m_data == nullptr)
             {
                 throw std::bad_alloc();

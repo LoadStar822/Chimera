@@ -199,7 +199,13 @@ inline void InterleavedMergedCuckooFilter::build_query_index(
     qidx->bucketBase[hashSize] = acc;
 
     qidx->prefix_bits = bits_required_u64(maxBucketTotal);
-    qidx->prefix = sdsl::int_vector<0>(prefixSize, 0, qidx->prefix_bits);
+    const bool use_prefix_spool = low_peak_mode;
+    if (!use_prefix_spool) {
+      qidx->prefix = sdsl::int_vector<0>(prefixSize, 0, qidx->prefix_bits);
+    } else {
+      qidx->prefix =
+          sdsl::int_vector<0>(0, 0, std::max<uint8_t>(1, qidx->prefix_bits));
+    }
 
     uint8_t bin_bits = bits_required_u64(binNum > 0 ? (binNum - 1) : 0);
     qidx->entry_bits = static_cast<uint8_t>(bin_bits + qidx->fpHiBits + 4);
@@ -242,14 +248,18 @@ inline void InterleavedMergedCuckooFilter::build_query_index(
         }
       }
 
-      const uint64_t offset = static_cast<uint64_t>(bucket) * qidx->stride;
       uint32_t running = 0;
+      const uint64_t prefixOffset = static_cast<uint64_t>(bucket) * qidx->stride;
       localPrefix[0] = 0u;
-      qidx->prefix[offset] = 0u;
+      if (!use_prefix_spool) {
+        qidx->prefix[prefixOffset] = 0u;
+      }
       for (uint32_t lo = 0; lo < qidx->groupSize; ++lo) {
         running += counts[lo];
         localPrefix[lo + 1] = running;
-        qidx->prefix[offset + lo + 1] = running;
+        if (!use_prefix_spool) {
+          qidx->prefix[prefixOffset + lo + 1] = running;
+        }
       }
       if (running != bucketTotal[bucket]) {
         throw std::runtime_error(
@@ -326,86 +336,152 @@ inline void InterleavedMergedCuckooFilter::build_query_index(
       entriesSpoolPath =
           std::filesystem::path("/tmp") /
           ("chimera_qidx_entries_" + std::to_string(nonce) + ".bin");
+      std::filesystem::path prefixSpoolPath =
+          std::filesystem::path("/tmp") /
+          ("chimera_qidx_prefix_" + std::to_string(nonce) + ".bin");
 
       auto cleanup_spool = [&]() {
         if (!entriesSpoolPath.empty()) {
           std::error_code ec;
           std::filesystem::remove(entriesSpoolPath, ec);
         }
+        if (!prefixSpoolPath.empty()) {
+          std::error_code ec;
+          std::filesystem::remove(prefixSpoolPath, ec);
+        }
       };
 
       try {
         {
-          std::ofstream spool(entriesSpoolPath, std::ios::binary);
-          if (!spool.is_open()) {
+          std::ofstream entries_spool(entriesSpoolPath, std::ios::binary);
+          if (!entries_spool.is_open()) {
             throw std::runtime_error("QIMCF low-peak: failed to open spool file");
+          }
+          std::ofstream prefix_spool(prefixSpoolPath, std::ios::binary);
+          if (!prefix_spool.is_open()) {
+            throw std::runtime_error(
+                "QIMCF low-peak: failed to open prefix spool file");
           }
 
           for (size_t bucket = 0; bucket < hashSize; ++bucket) {
             build_bucket_payload(bucket);
+            prefix_spool.write(reinterpret_cast<const char *>(localPrefix.data()),
+                              static_cast<std::streamsize>(qidx->stride *
+                                                           sizeof(uint32_t)));
+            if (!prefix_spool.good()) {
+              throw std::runtime_error(
+                  "QIMCF low-peak: failed to write prefix spool");
+            }
             if (!bucketCodes.empty()) {
-              spool.write(reinterpret_cast<const char *>(bucketCodes.data()),
-                         static_cast<std::streamsize>(bucketCodes.size() *
-                                                      sizeof(uint32_t)));
-              if (!spool.good()) {
+              entries_spool.write(
+                  reinterpret_cast<const char *>(bucketCodes.data()),
+                  static_cast<std::streamsize>(bucketCodes.size() *
+                                               sizeof(uint32_t)));
+              if (!entries_spool.good()) {
                 throw std::runtime_error(
                     "QIMCF low-peak: failed to write entries spool");
               }
             }
           }
-          spool.flush();
-          if (!spool.good()) {
+          entries_spool.flush();
+          if (!entries_spool.good()) {
             throw std::runtime_error(
                 "QIMCF low-peak: failed to flush entries spool");
           }
-          spool.close();
-          if (!spool.good()) {
+          entries_spool.close();
+          if (!entries_spool.good()) {
             throw std::runtime_error(
                 "QIMCF low-peak: failed to close entries spool");
           }
+          prefix_spool.flush();
+          if (!prefix_spool.good()) {
+            throw std::runtime_error(
+                "QIMCF low-peak: failed to flush prefix spool");
+          }
+          prefix_spool.close();
+          if (!prefix_spool.good()) {
+            throw std::runtime_error(
+                "QIMCF low-peak: failed to close prefix spool");
+          }
         }
         const uint64_t expectedBytes = acc * sizeof(uint32_t);
-        const uint64_t spoolBytes = std::filesystem::file_size(entriesSpoolPath);
-        if (spoolBytes != expectedBytes) {
+        const uint64_t entries_spool_bytes =
+            std::filesystem::file_size(entriesSpoolPath);
+        if (entries_spool_bytes != expectedBytes) {
           throw std::runtime_error(
               "QIMCF low-peak: entries spool size mismatch (expected " +
               std::to_string(expectedBytes) + ", got " +
-              std::to_string(spoolBytes) + ")");
+              std::to_string(entries_spool_bytes) + ")");
+        }
+        const uint64_t expectedPrefixBytes = prefixSize * sizeof(uint32_t);
+        const uint64_t prefix_spool_bytes =
+            std::filesystem::file_size(prefixSpoolPath);
+        if (prefix_spool_bytes != expectedPrefixBytes) {
+          throw std::runtime_error(
+              "QIMCF low-peak: prefix spool size mismatch (expected " +
+              std::to_string(expectedPrefixBytes) + ", got " +
+              std::to_string(prefix_spool_bytes) + ")");
         }
 
         if (drop_classic_before_materialize && !verify) {
           release_classic_storage();
         }
+        std::vector<StashFlat>().swap(stashFlat);
+        std::vector<size_t>().swap(stashBucketStart);
+        std::vector<size_t>().swap(stashBucketEnd);
+        std::vector<uint32_t>().swap(bucketTotal);
+        std::vector<uint32_t>().swap(counts);
+        std::vector<uint32_t>().swap(pos);
+        std::vector<uint32_t>().swap(localPrefix);
+        std::vector<uint32_t>().swap(bucketCodes);
+        std::vector<uint64_t>().swap(payloadBucketWords);
+
+        constexpr size_t kSpoolChunkU32 = 1u << 20;
+        auto load_u32_spool =
+            [&](const std::filesystem::path &path, uint64_t totalCount,
+                const char *readError, const char *truncateError,
+                auto &&sink) {
+              if (totalCount == 0) {
+                return;
+              }
+              std::ifstream spool(path, std::ios::binary);
+              if (!spool.is_open()) {
+                throw std::runtime_error(readError);
+              }
+              std::vector<uint32_t> buf(kSpoolChunkU32, 0u);
+              uint64_t offset = 0;
+              while (offset < totalCount) {
+                uint64_t need =
+                    std::min<uint64_t>(kSpoolChunkU32, totalCount - offset);
+                auto needBytes =
+                    static_cast<std::streamsize>(need * sizeof(uint32_t));
+                spool.read(reinterpret_cast<char *>(buf.data()), needBytes);
+                if (spool.gcount() != needBytes) {
+                  throw std::runtime_error(truncateError);
+                }
+                for (uint64_t i = 0; i < need; ++i) {
+                  sink(offset + i, buf[i]);
+                }
+                offset += need;
+              }
+            };
 
         qidx->entries = sdsl::int_vector<0>(acc, 0, qidx->entry_bits);
-        if (acc > 0) {
-          std::ifstream spool(entriesSpoolPath, std::ios::binary);
-          if (!spool.is_open()) {
-            throw std::runtime_error("QIMCF low-peak: failed to read spool file");
-          }
-          constexpr size_t CHUNK = 1u << 20;
-          std::vector<uint32_t> buf(CHUNK, 0u);
-          uint64_t offset = 0;
-          while (offset < acc) {
-            uint64_t need = std::min<uint64_t>(CHUNK, acc - offset);
-            auto needBytes = static_cast<std::streamsize>(need * sizeof(uint32_t));
-            spool.read(reinterpret_cast<char *>(buf.data()), needBytes);
-            if (spool.gcount() != needBytes) {
-              throw std::runtime_error(
-                  "QIMCF low-peak: truncated entries spool");
-            }
-            for (uint64_t i = 0; i < need; ++i) {
-              qidx->entries[offset + i] = buf[i];
-            }
-            offset += need;
-          }
-        }
+        load_u32_spool(
+            entriesSpoolPath, acc, "QIMCF low-peak: failed to read spool file",
+            "QIMCF low-peak: truncated entries spool",
+            [&](uint64_t idx, uint32_t value) { qidx->entries[idx] = value; });
+
+        qidx->prefix = sdsl::int_vector<0>(prefixSize, 0, qidx->prefix_bits);
+        load_u32_spool(
+            prefixSpoolPath, prefixSize,
+            "QIMCF low-peak: failed to read prefix spool",
+            "QIMCF low-peak: truncated prefix spool",
+            [&](uint64_t idx, uint32_t value) { qidx->prefix[idx] = value; });
+
         cleanup_spool();
       } catch (...) {
-        std::error_code ec;
-        if (!entriesSpoolPath.empty()) {
-          std::filesystem::remove(entriesSpoolPath, ec);
-        }
+        cleanup_spool();
         throw;
       }
     }
@@ -548,6 +624,77 @@ inline void InterleavedMergedCuckooFilter::bulkContain_events_subset_qidx(
         uint16_t sp = static_cast<uint16_t>(code & 0xF);
         emit(bin, sp);
       }
+    }
+  };
+
+  process_bucket(state.hash1);
+  if (state.hash2 != state.hash1) {
+    process_bucket(state.hash2);
+  }
+}
+
+template <class EmitFn>
+inline void InterleavedMergedCuckooFilter::bulkContain_events_subset_qidx_mask(
+    uint64_t value, const std::vector<uint8_t> &binMask, EmitFn &&emit) {
+  if (!has_qidx() || binMask.empty()) {
+    return;
+  }
+  const QidxLookupState state = make_qidx_lookup_state(value);
+  const uint8_t *mask = binMask.data();
+  const uint32_t maskSize = static_cast<uint32_t>(binMask.size());
+
+  auto process_bucket = [&](size_t bucket) {
+    uint64_t s = 0;
+    uint64_t e = 0;
+    qidx_group_range(bucket, state.group, s, e);
+    for (uint64_t i = s; i < e; ++i) {
+      uint64_t code = qidx->entries[i];
+      uint32_t bin = static_cast<uint32_t>(code >> (qidx->fpHiBits + 4));
+      if (bin >= maskSize || mask[bin] == 0u) {
+        continue;
+      }
+      uint16_t hi2 = static_cast<uint16_t>((code >> 4) & state.hiMask);
+      if (hi2 != state.hi) {
+        continue;
+      }
+      uint16_t sp = static_cast<uint16_t>(code & 0xF);
+      emit(bin, sp);
+    }
+  };
+
+  process_bucket(state.hash1);
+  if (state.hash2 != state.hash1) {
+    process_bucket(state.hash2);
+  }
+}
+
+template <class EmitFn>
+inline void InterleavedMergedCuckooFilter::bulkContain_events_subset_qidx_marked(
+    uint64_t value, const std::vector<uint32_t> &binMarks, uint32_t activeMark,
+    EmitFn &&emit) {
+  if (!has_qidx() || binMarks.empty() || activeMark == 0u) {
+    return;
+  }
+  const QidxLookupState state = make_qidx_lookup_state(value);
+  const uint32_t *marks = binMarks.data();
+  const uint32_t marksSize = static_cast<uint32_t>(binMarks.size());
+
+  auto process_bucket = [&](size_t bucket) {
+    uint64_t s = 0;
+    uint64_t e = 0;
+    qidx_group_range(bucket, state.group, s, e);
+    for (uint64_t i = s; i < e; ++i) {
+      uint64_t code = qidx->entries[i];
+      uint32_t bin = static_cast<uint32_t>(code >> (qidx->fpHiBits + 4));
+      if (bin >= marksSize || marks[bin] != activeMark) {
+        continue;
+      }
+      uint16_t hi2 = static_cast<uint16_t>((code >> 4) & state.hiMask);
+      if (hi2 != state.hi) {
+        continue;
+      }
+      uint16_t sp = static_cast<uint16_t>(code & 0xF);
+      emit(bin, sp);
     }
   };
 

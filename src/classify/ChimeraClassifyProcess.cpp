@@ -230,8 +230,6 @@ void processSequence(
       if (routed.empty()) {
         continue;
       }
-      std::sort(routed.begin(), routed.end());
-      routed.erase(std::unique(routed.begin(), routed.end()), routed.end());
       if (routed.size() <= 2) {
         for (uint32_t b : routed) {
           if (b < binNumAll) {
@@ -321,7 +319,6 @@ void processSequence(
     topBins.erase(std::unique(topBins.begin(), topBins.end()), topBins.end());
   }
 
-  bool candidateEmpty = fallback_full || topBins.empty();
   if (!fallback_full) {
     for (auto bin : topBins) {
       uint32_t delta = 1;
@@ -333,11 +330,6 @@ void processSequence(
   }
   heat.decay_if_needed();
 
-  if (!fallback_full && topBins.size() != binNumAll) {
-    std::sort(topBins.begin(), topBins.end());
-    topBins.erase(std::unique(topBins.begin(), topBins.end()), topBins.end());
-  }
-
   robin_hood::unordered_flat_map<uint32_t, double> tidScore;
   robin_hood::unordered_flat_map<uint32_t, uint32_t> uniqueHits;
   tidScore.reserve(128);
@@ -347,15 +339,41 @@ void processSequence(
   binHitCount.reserve(128);
 
   std::vector<uint32_t> minimizerTids;
-  minimizerTids.reserve(16);
+  minimizerTids.reserve(64);
   std::vector<uint32_t> minimizerBins;
-  minimizerBins.reserve(16);
+  minimizerBins.reserve(64);
 
   double eff_eval = 0.0;
   size_t n_eval = 0;
 
   const std::vector<uint32_t> *activeSubset =
       (fallback_full || topBins.size() == binNumAll) ? nullptr : &topBins;
+  static thread_local std::vector<uint32_t> topBinMarks;
+  static thread_local uint32_t topBinMarkEpoch = 0u;
+  bool topBinMarksActive = false;
+  auto rebuild_top_bin_marks = [&]() {
+    topBinMarksActive = false;
+    if (fallback_full || topBins.size() == binNumAll) {
+      return;
+    }
+    if (topBinMarks.size() != binNumAll) {
+      topBinMarks.assign(binNumAll, 0u);
+      topBinMarkEpoch = 1u;
+    } else {
+      ++topBinMarkEpoch;
+      if (topBinMarkEpoch == 0u) {
+        std::fill(topBinMarks.begin(), topBinMarks.end(), 0u);
+        topBinMarkEpoch = 1u;
+      }
+    }
+    for (uint32_t bin : topBins) {
+      if (bin < topBinMarks.size()) {
+        topBinMarks[bin] = topBinMarkEpoch;
+      }
+    }
+    topBinMarksActive = true;
+  };
+  rebuild_top_bin_marks();
 
   double idf_power = 1.0;
 
@@ -408,6 +426,9 @@ void processSequence(
 
     if (!subset) {
       imcf.bulkContain_events(value, emit);
+    } else if (topBinMarksActive && subset == &topBins) {
+      imcf.bulkContain_events_subset_marked(value, topBinMarks, topBinMarkEpoch,
+                                            emit);
     } else {
       imcf.bulkContain_events_subset(value, *subset, emit);
     }
@@ -522,6 +543,7 @@ void processSequence(
     activeSubset = (fallback_full || topBins.size() == binNumAll)
                        ? nullptr
                        : &topBins;
+    rebuild_top_bin_marks();
   };
 
   robin_hood::unordered_flat_set<uint32_t> topBinSet;

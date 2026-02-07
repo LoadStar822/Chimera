@@ -82,90 +82,150 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 		return { results, pi };
 	}
 
-	auto normalize_distribution = [&](std::unordered_map<std::string, double>& dist) {
+	const size_t taxid_count = taxid_list.size();
+	std::unordered_map<std::string, size_t> taxid_to_idx;
+	taxid_to_idx.reserve(taxid_count);
+	for (size_t i = 0; i < taxid_count; ++i) {
+		taxid_to_idx.emplace(taxid_list[i], i);
+	}
+
+	struct PreparedCandidate {
+		size_t idx{0};
+		double log_likelihood{0.0};
+	};
+	struct PreparedRead {
+		double base_weight{1.0};
+		bool valid{false};
+		std::vector<PreparedCandidate> candidates;
+	};
+
+	auto normalize_distribution = [&](std::vector<double>& dist) {
 		double sum = 0.0;
-		for (const auto& kv : dist) {
-			sum += kv.second;
+		for (double v : dist) {
+			sum += v;
 		}
 		if (!(sum > 0.0)) {
-			double uniform = 1.0 / static_cast<double>(taxid_list.size());
-			for (auto& kv : dist) {
-				kv.second = uniform;
+			double uniform = 1.0 / static_cast<double>(taxid_count);
+			for (double& v : dist) {
+				v = uniform;
 			}
 			return;
 		}
 		double inv_sum = 1.0 / sum;
-		for (auto& kv : dist) {
-			kv.second *= inv_sum;
+		for (double& v : dist) {
+			v *= inv_sum;
 		}
 	};
 
-	// 使用加权证据初始化，让共享 reads 也能提供初始贡献
-	std::unordered_map<std::string, double> weighted_evidence;
-	weighted_evidence.reserve(taxid_list.size());
-	for (const auto& record : results) {
-		if (record.taxidCount.empty()) continue;
+	// 预处理每条 read 的候选集合（taxid->idx 映射、常量似然项）；
+	// 后续迭代只更新先验项，避免重复字符串哈希与重复分母计算。
+	std::vector<PreparedRead> prepared(results.size());
+	std::vector<double> weighted_evidence(taxid_count, 0.0);
+	for (size_t i = 0; i < input.size(); ++i) {
+		const auto& source = input[i];
+		auto& prep = prepared[i];
+		if (source.evaluated <= 0.0 || source.taxidCount.empty()) {
+			continue;
+		}
+
+		struct TempCandidate {
+			size_t idx{0};
+			double c{0.0}; // count / evaluated
+			double raw{0.0};
+		};
+		std::vector<TempCandidate> tmp;
+		tmp.reserve(source.taxidCount.size());
 
 		double total_count = 0.0;
-		for (const auto& kv : record.taxidCount) {
-			if (!detail::is_unclassified(kv.first)) {
-				total_count += kv.second;
+		double max_count = 0.0;
+		for (const auto& kv : source.taxidCount) {
+			if (detail::is_unclassified(kv.first)) {
+				continue;
+			}
+			auto it_idx = taxid_to_idx.find(kv.first);
+			if (it_idx == taxid_to_idx.end()) {
+				continue;
+			}
+			double c = kv.second / source.evaluated;
+			tmp.push_back(TempCandidate{it_idx->second, c, kv.second});
+			total_count += kv.second;
+			if (c > max_count) {
+				max_count = c;
+			}
+		}
+		if (tmp.empty()) {
+			continue;
+		}
+
+		if (total_count > 0.0) {
+			for (const auto& cand : tmp) {
+				weighted_evidence[cand.idx] += cand.raw / total_count;
 			}
 		}
 
-		if (total_count <= 0.0) continue;
-
-		// Soft assignment：按比例分配该 read 的权重
-		for (const auto& kv : record.taxidCount) {
-			if (detail::is_unclassified(kv.first)) continue;
-			weighted_evidence[kv.first] +=
-				kv.second / total_count;
+		double denom = max_count + options.eps * static_cast<double>(tmp.size());
+		if (denom <= 0.0) {
+			denom = options.eps * static_cast<double>(tmp.size());
 		}
+		prep.candidates.reserve(tmp.size());
+		for (const auto& cand : tmp) {
+			double likelihood = (cand.c + options.eps) / denom;
+			double log_likelihood =
+				options.temp * std::log(std::max(likelihood, options.eps));
+			prep.candidates.push_back(PreparedCandidate{cand.idx, log_likelihood});
+		}
+
+		prep.base_weight = (source.sample_weight > 0.0) ? source.sample_weight
+		                                               : source.evaluated;
+		if (!(prep.base_weight > 0.0)) {
+			prep.base_weight = 1.0;
+		}
+		prep.valid = !prep.candidates.empty();
 	}
 
-	auto get_scale = [&](const std::string& taxid) -> double {
-		if (!prior_scale) return 1.0;
-		auto it = prior_scale->find(taxid);
-		if (it == prior_scale->end() || !(it->second > 0.0)) return 1.0;
+	auto get_scale = [&](size_t idx) -> double {
+		if (!prior_scale) {
+			return 1.0;
+		}
+		auto it = prior_scale->find(taxid_list[idx]);
+		if (it == prior_scale->end() || !(it->second > 0.0)) {
+			return 1.0;
+		}
 		return std::sqrt(it->second);
 	};
 
-	std::unordered_map<std::string, double> pi;
-	pi.reserve(taxid_list.size());
+	std::vector<double> pi_vec(taxid_count, 0.0);
 	double background_prior = 1e-9;
-	for (const auto& taxid : taxid_list) {
-		double u = 0.0;
-		auto it_w = weighted_evidence.find(taxid);
-		if (it_w != weighted_evidence.end()) {
-			u = it_w->second;
-		}
-
-		double s = get_scale(taxid);
-		double init_val = u * s;
-
-		// 若没有 evidence 但 prior_scale>0，则给极小值兜底
-		if (init_val <= 0.0 && prior_scale && s > 0.0) {
+	for (size_t idx = 0; idx < taxid_count; ++idx) {
+		double scale = get_scale(idx);
+		double init_val = weighted_evidence[idx] * scale;
+		if (init_val <= 0.0 && prior_scale && scale > 0.0) {
 			init_val = 1e-5;
 		}
 		if (init_val <= 0.0) {
 			init_val = background_prior;
 		}
-
-		pi[taxid] = init_val;
+		pi_vec[idx] = init_val;
 	}
 
-	normalize_distribution(pi);
+	normalize_distribution(pi_vec);
+	std::vector<double> abundance_prior = pi_vec;
 
-	std::unordered_map<std::string, double> abundance_prior = pi;
+#ifdef _OPENMP
+	const int num_threads = omp_get_max_threads();
+#else
+	const int num_threads = 1;
+#endif
+	std::vector<std::vector<double>> thread_expected(
+		num_threads, std::vector<double>(taxid_count, 0.0));
+	std::vector<double> expected_counts(taxid_count, 0.0);
 
 	size_t iteration = 0;
 	while (iteration < max_iter) {
-#ifdef _OPENMP
-		int num_threads = omp_get_max_threads();
-#else
-		int num_threads = 1;
-#endif
-		std::vector<std::unordered_map<std::string, double>> thread_expected(num_threads);
+		const bool final_iter = (iteration + 1 == max_iter);
+		for (auto& local : thread_expected) {
+			std::fill(local.begin(), local.end(), 0.0);
+		}
 
 #ifdef _OPENMP
 #pragma omp parallel
@@ -177,140 +237,130 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 			int tid = 0;
 #endif
 			auto& local_expected = thread_expected[tid];
+			std::vector<std::pair<size_t, double>> log_components;
+			std::vector<double> q_values;
 
 #ifdef _OPENMP
 #pragma omp for schedule(static)
 #endif
 			for (size_t i = 0; i < results.size(); ++i) {
-				const auto& source = input[i];
-				if (source.evaluated <= 0.0) {
+				auto& destination = results[i];
+				if (final_iter) {
+					destination.posteriors.clear();
+				}
+
+				const auto& prep = prepared[i];
+				if (!prep.valid) {
 					continue;
 				}
-				auto& destination = results[i];
-				destination.posteriors.clear();
 
-				std::vector<std::pair<std::string, double>> candidates;
-				double max_count = 0.0;
-				for (const auto& [taxid, count] : source.taxidCount) {
-					if (detail::is_unclassified(taxid)) {
-						continue;
-					}
-					double c = count / source.evaluated;
-					candidates.emplace_back(taxid, c);
-					if (c > max_count) {
-						max_count = c;
-					}
-				}
-
-					if (candidates.empty()) {
-						continue;
-					}
-
-				double denom = max_count + options.eps * static_cast<double>(candidates.size());
-				if (denom <= 0.0) {
-					denom = options.eps * static_cast<double>(candidates.size());
-				}
-					std::vector<std::pair<std::string, double>> log_components;
-					log_components.reserve(candidates.size());
-				for (const auto& [taxid, c] : candidates) {
-					auto it = pi.find(taxid);
-					if (it == pi.end()) {
-						continue;
-					}
-					double likelihood = (c + options.eps) / denom;
-					double log_likelihood = options.temp * std::log(std::max(likelihood, options.eps));
-					double prior = std::max(it->second, options.eps);
+				log_components.clear();
+				log_components.reserve(prep.candidates.size());
+				for (const auto& cand : prep.candidates) {
+					size_t idx = cand.idx;
+					double prior = std::max(pi_vec[idx], options.eps);
 					double log_prior = std::log(prior);
-					log_components.emplace_back(taxid, log_prior + log_likelihood);
+					log_components.emplace_back(idx, log_prior + cand.log_likelihood);
 				}
-
 				if (log_components.empty()) {
 					continue;
 				}
 
-				std::vector<double> log_values;
-				log_values.reserve(log_components.size());
+				q_values.clear();
+				q_values.reserve(log_components.size());
+				double max_log = -std::numeric_limits<double>::infinity();
 				for (const auto& entry : log_components) {
-					log_values.emplace_back(entry.second);
+					if (entry.second > max_log) {
+						max_log = entry.second;
+					}
 				}
-
-				double normalizer = detail::log_sum_exp(log_values);
-				std::vector<std::pair<std::string, double>> posterior;
-				posterior.reserve(log_components.size());
-
+				if (!std::isfinite(max_log)) {
+					continue;
+				}
+				double sum_exp = 0.0;
+				for (const auto& entry : log_components) {
+					sum_exp += std::exp(entry.second - max_log);
+				}
+				double normalizer = max_log + std::log(sum_exp);
+				double max_post = 0.0;
 				for (const auto& entry : log_components) {
 					double q = std::exp(entry.second - normalizer);
-					posterior.emplace_back(entry.first, q);
+					q_values.emplace_back(q);
+					if (q > max_post) {
+						max_post = q;
+					}
 				}
 
-				// confidence-weighted expected counts
-				double max_post = 0.0;
-				for (const auto& p : posterior) {
-					if (p.second > max_post) max_post = p.second;
-				}
 				double conf_w = 1.0;
 				if (options.conf_power > 0.0 && max_post > 0.0) {
 					conf_w = std::pow(max_post, options.conf_power);
 				}
-					double base_w = (source.sample_weight > 0.0)
-					                     ? source.sample_weight
-					                     : ((source.evaluated > 0.0) ? source.evaluated : 1.0);
-					double weight = base_w * conf_w;
+				double weight = prep.base_weight * conf_w;
 
-				for (const auto& p : posterior) {
-					local_expected[p.first] += weight * p.second;
+				if (final_iter) {
+					auto& posterior = destination.posteriors;
+					posterior.reserve(log_components.size());
+					for (size_t k = 0; k < log_components.size(); ++k) {
+						size_t idx = log_components[k].first;
+						double q = q_values[k];
+						posterior.emplace_back(taxid_list[idx], q);
+						local_expected[idx] += weight * q;
+					}
+				} else {
+					for (size_t k = 0; k < log_components.size(); ++k) {
+						size_t idx = log_components[k].first;
+						double q = q_values[k];
+						local_expected[idx] += weight * q;
+					}
 				}
-
-				destination.posteriors = std::move(posterior);
 			}
 		}
 
-		std::unordered_map<std::string, double> expected_counts;
+		std::fill(expected_counts.begin(), expected_counts.end(), 0.0);
 		double sum_expected = 0.0;
-		for (auto& local : thread_expected) {
-			for (const auto& [taxid, value] : local) {
-				double& slot = expected_counts[taxid];
-				slot += value;
-				sum_expected += value;
+		for (const auto& local : thread_expected) {
+			for (size_t idx = 0; idx < taxid_count; ++idx) {
+				expected_counts[idx] += local[idx];
 			}
+		}
+		for (double v : expected_counts) {
+			sum_expected += v;
 		}
 
 		double prior_mass = std::max(0.0, options.prior_strength);
-		double uniform_mass = options.alpha * static_cast<double>(taxid_list.size());
+		double uniform_mass = options.alpha * static_cast<double>(taxid_count);
 		double pseudo_mass = (prior_mass > 0.0) ? prior_mass : uniform_mass;
 		double denominator = pseudo_mass + sum_expected;
 		if (denominator <= 0.0) {
 			denominator = 1.0;
 		}
 
-		// Sparsity: 相对剪枝，抑制低丰度噪声
 		double max_expected = 0.0;
-		for (const auto& kv : expected_counts) {
-			if (kv.second > max_expected) {
-				max_expected = kv.second;
+		for (double v : expected_counts) {
+			if (v > max_expected) {
+				max_expected = v;
 			}
 		}
-		double prune_thres = max_expected * options.prune_ratio; // 低于主导物种一定比例的视为噪声
-
-		for (const auto& taxid : taxid_list) {
-			double expected = 0.0;
-			auto it = expected_counts.find(taxid);
-			if (it != expected_counts.end()) {
-				expected = it->second;
-			}
+		double prune_thres = max_expected * options.prune_ratio;
+		for (size_t idx = 0; idx < taxid_count; ++idx) {
+			double expected = expected_counts[idx];
 			if (expected < prune_thres) {
 				expected = 0.0;
 			}
 			double prior_component = (prior_mass > 0.0)
-			                             ? prior_mass * abundance_prior[taxid]
+			                             ? prior_mass * abundance_prior[idx]
 			                             : options.alpha;
-			double updated = (expected + prior_component) / denominator;
-			pi[taxid] = updated;
+			pi_vec[idx] = (expected + prior_component) / denominator;
 		}
 
 		++iteration;
 	}
 
+	std::unordered_map<std::string, double> pi;
+	pi.reserve(taxid_count);
+	for (size_t idx = 0; idx < taxid_count; ++idx) {
+		pi.emplace(taxid_list[idx], pi_vec[idx]);
+	}
 	return { results, pi };
 }
 

@@ -489,7 +489,16 @@ public:
      */
     void assign(size_type size, value_type default_value)
     {
+        bool fresh_zero_allocation = (m_data == nullptr && m_capacity == 0 &&
+                                      default_value == static_cast<value_type>(0));
         bit_resize(size * m_width);
+        // For a brand-new zero-initialized vector, memory_manager::resize()
+        // allocates via calloc-backed pages. Skipping the explicit zero fill
+        // avoids touching the whole address range up-front.
+        if (fresh_zero_allocation)
+        {
+            return;
+        }
         util::set_to_value(*this, default_value); // new initialization
     }
 
