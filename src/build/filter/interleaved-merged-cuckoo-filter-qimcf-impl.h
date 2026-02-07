@@ -423,7 +423,9 @@ inline void InterleavedMergedCuckooFilter::build_query_index(
               std::to_string(prefix_spool_bytes) + ")");
         }
 
-        if (drop_classic_before_materialize && !verify) {
+        const bool keep_spool_backing =
+            drop_classic_before_materialize && !verify;
+        if (keep_spool_backing) {
           release_classic_storage();
         }
         std::vector<StashFlat>().swap(stashFlat);
@@ -436,50 +438,55 @@ inline void InterleavedMergedCuckooFilter::build_query_index(
         std::vector<uint32_t>().swap(bucketCodes);
         std::vector<uint64_t>().swap(payloadBucketWords);
 
-        constexpr size_t kSpoolChunkU32 = 1u << 20;
-        auto load_u32_spool =
-            [&](const std::filesystem::path &path, uint64_t totalCount,
-                const char *readError, const char *truncateError,
-                auto &&sink) {
-              if (totalCount == 0) {
-                return;
-              }
-              std::ifstream spool(path, std::ios::binary);
-              if (!spool.is_open()) {
-                throw std::runtime_error(readError);
-              }
-              std::vector<uint32_t> buf(kSpoolChunkU32, 0u);
-              uint64_t offset = 0;
-              while (offset < totalCount) {
-                uint64_t need =
-                    std::min<uint64_t>(kSpoolChunkU32, totalCount - offset);
-                auto needBytes =
-                    static_cast<std::streamsize>(need * sizeof(uint32_t));
-                spool.read(reinterpret_cast<char *>(buf.data()), needBytes);
-                if (spool.gcount() != needBytes) {
-                  throw std::runtime_error(truncateError);
+        if (keep_spool_backing) {
+          qidx->set_spool_backing(prefixSpoolPath, prefixSize, entriesSpoolPath,
+                                  acc);
+        } else {
+          constexpr size_t kSpoolChunkU32 = 1u << 20;
+          auto load_u32_spool =
+              [&](const std::filesystem::path &path, uint64_t totalCount,
+                  const char *readError, const char *truncateError,
+                  auto &&sink) {
+                if (totalCount == 0) {
+                  return;
                 }
-                for (uint64_t i = 0; i < need; ++i) {
-                  sink(offset + i, buf[i]);
+                std::ifstream spool(path, std::ios::binary);
+                if (!spool.is_open()) {
+                  throw std::runtime_error(readError);
                 }
-                offset += need;
-              }
-            };
+                std::vector<uint32_t> buf(kSpoolChunkU32, 0u);
+                uint64_t offset = 0;
+                while (offset < totalCount) {
+                  uint64_t need =
+                      std::min<uint64_t>(kSpoolChunkU32, totalCount - offset);
+                  auto needBytes =
+                      static_cast<std::streamsize>(need * sizeof(uint32_t));
+                  spool.read(reinterpret_cast<char *>(buf.data()), needBytes);
+                  if (spool.gcount() != needBytes) {
+                    throw std::runtime_error(truncateError);
+                  }
+                  for (uint64_t i = 0; i < need; ++i) {
+                    sink(offset + i, buf[i]);
+                  }
+                  offset += need;
+                }
+              };
 
-        qidx->entries = sdsl::int_vector<0>(acc, 0, qidx->entry_bits);
-        load_u32_spool(
-            entriesSpoolPath, acc, "QIMCF low-peak: failed to read spool file",
-            "QIMCF low-peak: truncated entries spool",
-            [&](uint64_t idx, uint32_t value) { qidx->entries[idx] = value; });
+          qidx->entries = sdsl::int_vector<0>(acc, 0, qidx->entry_bits);
+          load_u32_spool(
+              entriesSpoolPath, acc, "QIMCF low-peak: failed to read spool file",
+              "QIMCF low-peak: truncated entries spool",
+              [&](uint64_t idx, uint32_t value) { qidx->entries[idx] = value; });
 
-        qidx->prefix = sdsl::int_vector<0>(prefixSize, 0, qidx->prefix_bits);
-        load_u32_spool(
-            prefixSpoolPath, prefixSize,
-            "QIMCF low-peak: failed to read prefix spool",
-            "QIMCF low-peak: truncated prefix spool",
-            [&](uint64_t idx, uint32_t value) { qidx->prefix[idx] = value; });
+          qidx->prefix = sdsl::int_vector<0>(prefixSize, 0, qidx->prefix_bits);
+          load_u32_spool(
+              prefixSpoolPath, prefixSize,
+              "QIMCF low-peak: failed to read prefix spool",
+              "QIMCF low-peak: truncated prefix spool",
+              [&](uint64_t idx, uint32_t value) { qidx->prefix[idx] = value; });
 
-        cleanup_spool();
+          cleanup_spool();
+        }
       } catch (...) {
         cleanup_spool();
         throw;

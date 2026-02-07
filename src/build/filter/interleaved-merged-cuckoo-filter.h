@@ -335,6 +335,11 @@ class InterleavedMergedCuckooFilter {
     uint8_t fpHiBits{0};               // 12 - g
     uint8_t prefix_bits{0};
     uint8_t entry_bits{0};
+    std::filesystem::path prefixSpoolPath;
+    std::filesystem::path entriesSpoolPath;
+    uint64_t prefixSpoolCount{0};
+    uint64_t entriesSpoolCount{0};
+    bool spoolBacked{false};
 
     void refresh() {
       groupSize = 1u << g;
@@ -342,10 +347,42 @@ class InterleavedMergedCuckooFilter {
       fpHiBits = static_cast<uint8_t>(FP_BITS - g);
     }
 
+    void set_spool_backing(const std::filesystem::path &prefix_path,
+                           uint64_t prefix_count,
+                           const std::filesystem::path &entries_path,
+                           uint64_t entries_count) {
+      prefixSpoolPath = prefix_path;
+      entriesSpoolPath = entries_path;
+      prefixSpoolCount = prefix_count;
+      entriesSpoolCount = entries_count;
+      spoolBacked = true;
+    }
+
+    void clear_spool_backing(bool remove_files) {
+      if (remove_files) {
+        std::error_code ec;
+        if (!prefixSpoolPath.empty()) {
+          std::filesystem::remove(prefixSpoolPath, ec);
+          ec.clear();
+        }
+        if (!entriesSpoolPath.empty()) {
+          std::filesystem::remove(entriesSpoolPath, ec);
+        }
+      }
+      prefixSpoolPath.clear();
+      entriesSpoolPath.clear();
+      prefixSpoolCount = 0;
+      entriesSpoolCount = 0;
+      spoolBacked = false;
+    }
+
+    bool has_spool_backing() const { return spoolBacked; }
+
     template <class Archive> void serialize(Archive &ar) {
       ar(bucketBase, prefix, entries, g, prefix_bits, entry_bits);
       if constexpr (Archive::is_loading::value) {
         refresh();
+        clear_spool_backing(false);
       }
     }
   };
@@ -505,6 +542,129 @@ class InterleavedMergedCuckooFilter {
     return qidx->prefix[(uint64_t)bucket * qidx->stride + group];
   }
 
+  template <class Archive>
+  static inline void save_spooled_int_vector(Archive &ar,
+                                             const std::filesystem::path &path,
+                                             uint64_t valueCount,
+                                             uint8_t width,
+                                             const char *label) {
+    if (width == 0 || width > 64) {
+      throw std::runtime_error(std::string("QIMCF stream-save invalid width for ") +
+                               label);
+    }
+    const uint64_t expectedBytes = valueCount * sizeof(uint32_t);
+    const uint64_t actualBytes = std::filesystem::file_size(path);
+    if (actualBytes != expectedBytes) {
+      throw std::runtime_error(std::string("QIMCF stream-save spool size mismatch for ") +
+                               label + " (expected " +
+                               std::to_string(expectedBytes) + ", got " +
+                               std::to_string(actualBytes) + ")");
+    }
+
+    using dynamic_iv = sdsl::int_vector<0>;
+    using int_width_type = typename dynamic_iv::int_width_type;
+    const int_width_type widthTag = static_cast<int_width_type>(width);
+    ar(cereal::make_size_tag(widthTag));
+    float growthFactor = 1.5f;
+    ar(growthFactor);
+    const uint64_t bitSize = valueCount * static_cast<uint64_t>(width);
+    ar(cereal::make_size_tag(bitSize));
+    if (bitSize == 0) {
+      return;
+    }
+
+    constexpr size_t kValueChunkU32 = 1u << 20;
+    constexpr size_t kWordFlush = 1u << 18;
+    std::ifstream spool(path, std::ios::binary);
+    if (!spool.is_open()) {
+      throw std::runtime_error(std::string("QIMCF stream-save failed to open spool for ") +
+                               label);
+    }
+
+    std::vector<uint32_t> values(kValueChunkU32, 0u);
+    std::vector<uint64_t> words;
+    words.reserve(kWordFlush);
+    uint64_t currentWord = 0;
+    uint8_t bitsUsed = 0;
+    uint64_t readValues = 0;
+    uint64_t writtenWords = 0;
+    const uint64_t wordCount = (bitSize + 63u) >> 6;
+
+    auto flush_words = [&]() {
+      if (words.empty()) {
+        return;
+      }
+      ar(cereal::binary_data(words.data(), words.size() * sizeof(uint64_t)));
+      writtenWords += static_cast<uint64_t>(words.size());
+      words.clear();
+    };
+
+    while (readValues < valueCount) {
+      const uint64_t need =
+          std::min<uint64_t>(kValueChunkU32, valueCount - readValues);
+      const auto needBytes =
+          static_cast<std::streamsize>(need * sizeof(uint32_t));
+      spool.read(reinterpret_cast<char *>(values.data()), needBytes);
+      if (spool.gcount() != needBytes) {
+        throw std::runtime_error(std::string("QIMCF stream-save truncated spool for ") +
+                                 label);
+      }
+      for (uint64_t i = 0; i < need; ++i) {
+        uint64_t value = values[i];
+        uint8_t remaining = width;
+        while (remaining > 0) {
+          const uint8_t space = static_cast<uint8_t>(64 - bitsUsed);
+          const uint8_t take = std::min<uint8_t>(space, remaining);
+          const uint64_t mask =
+              (take == 64) ? std::numeric_limits<uint64_t>::max()
+                           : ((uint64_t{1} << take) - 1u);
+          currentWord |= (value & mask) << bitsUsed;
+          if (take == 64) {
+            value = 0;
+          } else {
+            value >>= take;
+          }
+          bitsUsed = static_cast<uint8_t>(bitsUsed + take);
+          remaining = static_cast<uint8_t>(remaining - take);
+          if (bitsUsed == 64) {
+            words.push_back(currentWord);
+            currentWord = 0;
+            bitsUsed = 0;
+            if (words.size() >= kWordFlush) {
+              flush_words();
+            }
+          }
+        }
+      }
+      readValues += need;
+    }
+
+    if (bitsUsed != 0) {
+      words.push_back(currentWord);
+    }
+    flush_words();
+    if (writtenWords != wordCount) {
+      throw std::runtime_error(std::string("QIMCF stream-save packed word mismatch for ") +
+                               label + " (expected " +
+                               std::to_string(wordCount) + ", got " +
+                               std::to_string(writtenWords) + ")");
+    }
+  }
+
+  template <class Archive>
+  inline void save_qidx_only_from_spool(Archive &ar) {
+    if (storageMode != 1 || !qidx || !qidx->has_spool_backing()) {
+      throw std::runtime_error("QIMCF stream-save requested without spool-backed qidx");
+    }
+    ar(storageMode, binNum, binSize, tagNum, MaxCuckooCount, hashSize);
+    ar(qidx->bucketBase);
+    save_spooled_int_vector(ar, qidx->prefixSpoolPath, qidx->prefixSpoolCount,
+                            qidx->prefix_bits, "prefix");
+    save_spooled_int_vector(ar, qidx->entriesSpoolPath, qidx->entriesSpoolCount,
+                            qidx->entry_bits, "entries");
+    ar(qidx->g, qidx->prefix_bits, qidx->entry_bits);
+  }
+
   struct QidxLookupState {
     size_t hash1{0};
     size_t hash2{0};
@@ -625,6 +785,26 @@ public:
           stash.resize(binNum);
         }
       }
+    }
+  }
+
+  template <class Archive> inline void save_for_archive(Archive &ar) {
+    if constexpr (Archive::is_saving::value) {
+      if (storageMode == 1 && qidx && qidx->has_spool_backing()) {
+        save_qidx_only_from_spool(ar);
+        return;
+      }
+    }
+    ar(*this);
+  }
+
+  inline bool has_spooled_qidx() const {
+    return qidx && qidx->has_spool_backing();
+  }
+
+  inline void cleanup_qidx_spool_files() {
+    if (qidx) {
+      qidx->clear_spool_backing(true);
     }
   }
 

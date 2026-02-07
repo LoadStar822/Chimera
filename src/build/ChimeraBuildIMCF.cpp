@@ -556,17 +556,24 @@ namespace ChimeraBuild {
 		return ok;
 	};
 
-	logStep("Writing filter archive (.imcf)", [&]() {
-		cereal::BinaryOutputArchive archive(os);
-		archive(imcf);
-		archive(indexToTaxid);
-		archive(imcfConfig);
-		if (presenceMeta) {
-			archive(*presenceMeta);
-		}
+	try {
+		logStep("Writing filter archive (.imcf)", [&]() {
+			cereal::BinaryOutputArchive archive(os);
+			imcf.save_for_archive(archive);
+			archive(indexToTaxid);
+			archive(imcfConfig);
+			if (presenceMeta) {
+				archive(*presenceMeta);
+			}
+			os.close();
+			return true;
+		});
+	} catch (...) {
+		imcf.cleanup_qidx_spool_files();
 		os.close();
-		return true;
-	});
+		throw;
+	}
+	imcf.cleanup_qidx_spool_files();
 
 		// Get the file size
 		std::uintmax_t fileSize = std::filesystem::file_size(output_file + ".imcf");
