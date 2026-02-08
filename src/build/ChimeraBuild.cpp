@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -20,8 +22,71 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#if defined(__linux__)
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
 
 namespace ChimeraBuild {
+
+namespace {
+
+struct MemorySnapshot {
+  uint64_t rss_kb{0};
+  uint64_t hwm_kb{0};
+};
+
+inline MemorySnapshot read_memory_snapshot_kb() {
+  MemorySnapshot out{};
+#if defined(__linux__)
+  std::ifstream status("/proc/self/status");
+  std::string line;
+  while (std::getline(status, line)) {
+    if (line.rfind("VmRSS:", 0) == 0) {
+      std::istringstream iss(line.substr(std::strlen("VmRSS:")));
+      uint64_t value = 0;
+      std::string unit;
+      if (iss >> value >> unit) {
+        out.rss_kb = value;
+      }
+    } else if (line.rfind("VmHWM:", 0) == 0) {
+      std::istringstream iss(line.substr(std::strlen("VmHWM:")));
+      uint64_t value = 0;
+      std::string unit;
+      if (iss >> value >> unit) {
+        out.hwm_kb = value;
+      }
+    }
+  }
+  if (out.hwm_kb == 0) {
+    struct rusage usage {};
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+      out.hwm_kb = static_cast<uint64_t>(usage.ru_maxrss);
+    }
+  }
+  if (out.rss_kb == 0) {
+    out.rss_kb = out.hwm_kb;
+  }
+#endif
+  return out;
+}
+
+inline void log_memory_checkpoint(const char *stage) {
+  const auto mem = read_memory_snapshot_kb();
+  if (mem.rss_kb == 0 && mem.hwm_kb == 0) {
+    return;
+  }
+  auto kb_to_mib = [](uint64_t kb) {
+    return static_cast<double>(kb) / 1024.0;
+  };
+  std::ostringstream oss;
+  oss << "  [mem] " << stage << ": rss=" << std::fixed << std::setprecision(1)
+      << kb_to_mib(mem.rss_kb) << " MiB, hwm=" << kb_to_mib(mem.hwm_kb)
+      << " MiB";
+  std::cout << oss.str() << std::endl;
+}
+
+} // namespace
 
 static std::vector<chimera::imcf::Group> partitionHashCountNoSplit(
     const robin_hood::unordered_flat_map<std::string, uint64_t> &hashCount,
@@ -211,11 +276,36 @@ void run(BuildConfig config) {
     std::cout << "Read time: ";
     print_build_time(read_total_time);
     std::cout << std::endl;
+    log_memory_checkpoint("after_read_inputs");
   }
   HashFrequencyContext hashFreqContext;
   build_hash_frequency_sketch(config, inputFiles, hashFreqContext);
-  std::filesystem::path dir = "tmp";
-  createOrResetDirectory(dir, config);
+  if (config.verbose) {
+    log_memory_checkpoint("after_hash_frequency_sketch");
+  }
+  std::filesystem::path tmpRoot = "tmp";
+  if (const char *envTmpRoot = std::getenv("CHIMERA_BUILD_TMP_ROOT")) {
+    std::string value(envTmpRoot);
+    if (!value.empty()) {
+      tmpRoot = value;
+    }
+  }
+#if defined(__linux__)
+  const auto pid_part = static_cast<long long>(::getpid());
+#else
+  const auto pid_part = static_cast<long long>(std::hash<std::thread::id>{}(
+      std::this_thread::get_id()));
+#endif
+  const auto tmpNonce = static_cast<unsigned long long>(
+      std::chrono::steady_clock::now().time_since_epoch().count());
+  std::filesystem::path dir =
+      tmpRoot / ("build_" + std::to_string(pid_part) + "_" +
+                 std::to_string(tmpNonce));
+  set_tmp_work_dir(dir);
+  createOrResetDirectory(dir.string(), config);
+  if (config.verbose) {
+    std::cout << "Build tmp directory: " << dir.string() << std::endl;
+  }
   auto calculate_start = std::chrono::high_resolution_clock::now();
   std::cout << "Calculating feature hashes..." << std::endl;
   syncmer_count(config, inputFiles, hashCount, fileInfo,
@@ -240,6 +330,7 @@ void run(BuildConfig config) {
               << std::endl;
     std::cout << "Total base pairs: " << fileInfo.bpLength << std::endl
               << std::endl;
+    log_memory_checkpoint("after_feature_hash_calculation");
   }
   if (hashFreqContext.enabled()) {
     const uint64_t total_checked =
@@ -269,6 +360,15 @@ void run(BuildConfig config) {
     std::cout << "Hash DF kept " << kept << " / " << total_checked << " ("
               << fmt_ratio(kept) << "%)" << std::endl;
   }
+  // Input path lists are only needed for feature extraction.
+  robin_hood::unordered_flat_map<std::string, std::vector<std::string>>()
+      .swap(inputFiles);
+#if defined(__GLIBC__)
+  ::malloc_trim(0);
+#endif
+  if (config.verbose) {
+    log_memory_checkpoint("after_release_input_paths");
+  }
   chimera::feature::Method imcf_feature_method{};
   uint64_t imcf_feature_seed = 0;
   auto imcf_feature_params =
@@ -289,7 +389,177 @@ void run(BuildConfig config) {
     groups = partitionHashCountNoSplit(hashCount, 16);
   } else {
     std::cout << "Partitioning hashcout..." << std::endl;
-    groups = chimera::imcf::partitionHashCount(hashCount, 16);
+    struct PartitionEval {
+      uint64_t area{std::numeric_limits<uint64_t>::max()};
+      size_t hashSize{std::numeric_limits<size_t>::max()};
+      uint64_t maxLoad{std::numeric_limits<uint64_t>::max()};
+      size_t groupCount{std::numeric_limits<size_t>::max()};
+      double imbalance{std::numeric_limits<double>::infinity()};
+      int maxTaxids{16};
+      long long elapsedMs{0};
+    };
+    auto next_pow2_local = [](size_t v) -> size_t {
+      if (v <= 1) {
+        return 1;
+      }
+      --v;
+      v |= v >> 1;
+      v |= v >> 2;
+      v |= v >> 4;
+      v |= v >> 8;
+      v |= v >> 16;
+#if SIZE_MAX > 0xFFFFFFFFu
+      v |= v >> 32;
+#endif
+      return v + 1;
+    };
+    const uint64_t effectiveLoadDen = std::max<uint64_t>(
+        1, static_cast<uint64_t>(config.load_factor * 4.0));
+    auto score_groups = [&](const std::vector<chimera::imcf::Group> &cand,
+                            int maxTaxids,
+                            long long elapsedMs) -> PartitionEval {
+      PartitionEval out;
+      out.maxTaxids = maxTaxids;
+      out.elapsedMs = elapsedMs;
+      out.groupCount = cand.size();
+      uint64_t totalHash = 0;
+      uint64_t maxLoad = 0;
+      for (const auto &g : cand) {
+        totalHash += g.totalHash;
+        if (g.totalHash > maxLoad) {
+          maxLoad = g.totalHash;
+        }
+      }
+      out.maxLoad = maxLoad;
+      const double needBinSize =
+          std::ceil(static_cast<double>(ceil_div_u64(maxLoad, effectiveLoadDen)) *
+                    1.05);
+      out.hashSize = next_pow2_local(
+          static_cast<size_t>(std::max<double>(1.0, needBinSize)));
+      out.area = static_cast<uint64_t>(out.groupCount) *
+                 static_cast<uint64_t>(out.hashSize);
+      if (out.groupCount > 0) {
+        const double avgLoad =
+            static_cast<double>(totalHash) / static_cast<double>(out.groupCount);
+        out.imbalance =
+            (avgLoad > 0.0) ? (static_cast<double>(maxLoad) / avgLoad) : 0.0;
+      } else {
+        out.imbalance = 0.0;
+      }
+      return out;
+    };
+    auto better = [](const PartitionEval &lhs, const PartitionEval &rhs) -> bool {
+      if (lhs.area != rhs.area) {
+        return lhs.area < rhs.area;
+      }
+      if (lhs.hashSize != rhs.hashSize) {
+        return lhs.hashSize < rhs.hashSize;
+      }
+      if (lhs.maxLoad != rhs.maxLoad) {
+        return lhs.maxLoad < rhs.maxLoad;
+      }
+      if (lhs.groupCount != rhs.groupCount) {
+        return lhs.groupCount < rhs.groupCount;
+      }
+      if (lhs.imbalance != rhs.imbalance) {
+        return lhs.imbalance < rhs.imbalance;
+      }
+      return lhs.elapsedMs < rhs.elapsedMs;
+    };
+
+    std::vector<int> candidateMaxTaxids = {12, 11, 10, 9};
+    if (const char *env = std::getenv("CHIMERA_PARTITION_MAXTAXIDS")) {
+      std::vector<int> parsed;
+      std::stringstream ss(env);
+      std::string token;
+      while (std::getline(ss, token, ',')) {
+        token.erase(std::remove_if(token.begin(), token.end(),
+                                   [](unsigned char c) { return std::isspace(c); }),
+                    token.end());
+        if (token.empty()) {
+          continue;
+        }
+        try {
+          int value = std::stoi(token);
+          if (value > 0) {
+            parsed.push_back(value);
+          }
+        } catch (...) {
+          // ignore invalid token
+        }
+      }
+      if (!parsed.empty()) {
+        std::sort(parsed.begin(), parsed.end(), std::greater<int>());
+        parsed.erase(std::unique(parsed.begin(), parsed.end()), parsed.end());
+        candidateMaxTaxids.swap(parsed);
+      }
+    }
+    const size_t candidateCount = candidateMaxTaxids.size();
+    std::vector<PartitionEval> evals(candidateCount);
+    std::vector<uint8_t> evalReady(candidateCount, 0u);
+    PartitionEval bestEval{};
+    size_t bestIdx = std::numeric_limits<size_t>::max();
+    bool hasBest = false;
+    auto better_or_earlier = [&](const PartitionEval &lhs, size_t lhsIdx,
+                                 const PartitionEval &rhs,
+                                 size_t rhsIdx) -> bool {
+      if (better(lhs, rhs)) {
+        return true;
+      }
+      if (better(rhs, lhs)) {
+        return false;
+      }
+      return lhsIdx < rhsIdx;
+    };
+
+#pragma omp parallel for schedule(dynamic, 1)
+    for (ptrdiff_t idx = 0; idx < static_cast<ptrdiff_t>(candidateCount); ++idx) {
+      const size_t candIdx = static_cast<size_t>(idx);
+      const int maxTaxids = candidateMaxTaxids[candIdx];
+      auto candStart = std::chrono::high_resolution_clock::now();
+      auto cand = chimera::imcf::partitionHashCount(hashCount, maxTaxids,
+                                                    config.load_factor);
+      auto candEnd = std::chrono::high_resolution_clock::now();
+      const auto candMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              candEnd - candStart)
+                              .count();
+      PartitionEval eval = score_groups(cand, maxTaxids, candMs);
+      evals[candIdx] = eval;
+      evalReady[candIdx] = 1u;
+#pragma omp critical(chimera_partition_pick_best)
+      {
+        if (!hasBest || better_or_earlier(eval, candIdx, bestEval, bestIdx)) {
+          bestEval = eval;
+          groups = std::move(cand);
+          bestIdx = candIdx;
+          hasBest = true;
+        }
+      }
+    }
+
+    for (size_t i = 0; i < candidateCount; ++i) {
+      if (evalReady[i] == 0u) {
+        continue;
+      }
+      const auto &eval = evals[i];
+      if (config.verbose) {
+        std::cout << "  partition candidate maxTaxids="
+                  << candidateMaxTaxids[i]
+                  << ": groups=" << eval.groupCount
+                  << ", hashSize=" << eval.hashSize
+                  << ", maxLoad=" << eval.maxLoad
+                  << ", area=" << eval.area
+                  << ", imbalance=" << eval.imbalance
+                  << ", time=" << eval.elapsedMs << " ms" << std::endl;
+      }
+    }
+    if (config.verbose && hasBest) {
+      std::cout << "  selected partition maxTaxids=" << bestEval.maxTaxids
+                << " (groups=" << bestEval.groupCount
+                << ", hashSize=" << bestEval.hashSize
+                << ", area=" << bestEval.area
+                << ", time=" << bestEval.elapsedMs << " ms)" << std::endl;
+    }
   }
   auto partition_end = std::chrono::high_resolution_clock::now();
   auto partition_total_time =
@@ -300,6 +570,7 @@ void run(BuildConfig config) {
     std::cout << "Partition time: ";
     print_build_time(partition_total_time);
     std::cout << std::endl;
+    log_memory_checkpoint("after_partition");
   }
   auto imcf_build_start = std::chrono::high_resolution_clock::now();
   std::cout << "Building IMCF..." << std::endl;
@@ -358,6 +629,7 @@ void run(BuildConfig config) {
     print_build_time(imcf_build_total_time);
     std::cout << std::endl;
     std::cout << imcf << std::endl;
+    log_memory_checkpoint("after_imcf_build");
   }
   if (config.verbose) {
     std::cout << "Releasing pre-QIMCF buffers..." << std::endl;
@@ -372,6 +644,9 @@ void run(BuildConfig config) {
   // Return free heap pages before QIMCF materialization to lower RSS peak.
   ::malloc_trim(0);
 #endif
+  if (config.verbose) {
+    log_memory_checkpoint("before_qimcf_build");
+  }
   auto qidx_start = std::chrono::high_resolution_clock::now();
   std::cout << "Building QIMCF..." << std::endl;
   constexpr bool kQimcfVerify = false;
@@ -391,6 +666,7 @@ void run(BuildConfig config) {
     std::cout << "QIMCF build time: ";
     print_build_time(qidx_total_time);
     std::cout << std::endl;
+    log_memory_checkpoint("after_qimcf_build");
   }
   auto save_start = std::chrono::high_resolution_clock::now();
   std::cout << "Saving IMCF..." << std::endl;
@@ -403,6 +679,7 @@ void run(BuildConfig config) {
     std::cout << "Save time: ";
     print_build_time(save_total_time);
     std::cout << std::endl;
+    log_memory_checkpoint("after_save_imcf");
   }
   auto build_end = std::chrono::high_resolution_clock::now();
   auto build_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(

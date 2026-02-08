@@ -5,6 +5,7 @@
 #include <seqan3/core/debug_stream.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -16,18 +17,35 @@
 
 namespace ChimeraBuild {
 
+namespace {
+std::filesystem::path g_tmp_work_dir = "tmp";
+}
+
 static inline bool file_is_compressed(const std::filesystem::path& filepath)
 	{
 		std::string extension = filepath.extension().string();
 		return extension == ".gz" || extension == ".bgzf" || extension == ".bz2";
 	}
 
+	void set_tmp_work_dir(const std::filesystem::path &dir)
+	{
+		if (dir.empty()) {
+			g_tmp_work_dir = "tmp";
+			return;
+		}
+		g_tmp_work_dir = dir;
+	}
+
+	const std::filesystem::path &tmp_work_dir()
+	{
+		return g_tmp_work_dir;
+	}
+
 	std::string tmp_hash_path(const std::string &taxid, std::string_view suffix)
 	{
-		std::string path = "tmp/";
-		path.append(taxid);
-		path.append(suffix);
-		return path;
+		std::filesystem::path path = tmp_work_dir();
+		path /= taxid + std::string(suffix);
+		return path.string();
 	}
 
 	std::string tmp_hash_thread_path(const std::string &taxid,
@@ -77,30 +95,58 @@ static inline bool file_is_compressed(const std::filesystem::path& filepath)
 		}
 	}
 
-		// Expand the pairs of taxid and files
-		std::vector<std::pair<std::string, std::string>> taxid_file_pairs;
-		robin_hood::unordered_flat_map<std::string, size_t> taxid_to_index;
+		// Flatten build tasks without duplicating path strings.
+		struct TaxidFileTask {
+			uint32_t taxidIndex;
+			const std::string* filePath;
+		};
+		size_t totalFiles = 0;
+		for (const auto& [taxid, files] : inputFiles) {
+			(void)taxid;
+			totalFiles += files.size();
+		}
+		std::vector<TaxidFileTask> taxid_file_tasks;
+		taxid_file_tasks.reserve(totalFiles);
 		std::vector<std::string> index_to_taxid;
-		size_t index = 0;
+		index_to_taxid.reserve(inputFiles.size());
 		for (auto& [taxid, files] : inputFiles)
 		{
+			const uint32_t taxid_index = static_cast<uint32_t>(index_to_taxid.size());
+			index_to_taxid.push_back(taxid);
 			for (auto& file : files)
 			{
-				taxid_file_pairs.emplace_back(taxid, file);
+				taxid_file_tasks.push_back({taxid_index, &file});
 			}
-			taxid_to_index[taxid] = index++;
-			index_to_taxid.push_back(taxid);
 		}
 		const size_t max_hashes = config.max_hashes_per_taxid;
-		constexpr size_t hash_buffer_flush_bytes = 4 * 1024 * 1024; // 4 MiB
+		constexpr size_t kMinThreadBufferFlushBytes = 1 * 1024 * 1024; // 1 MiB
+		constexpr size_t kMaxThreadBufferFlushBytes = 4 * 1024 * 1024; // 4 MiB
+		constexpr size_t kTargetTotalThreadBufferBytes = 384ull * 1024ull * 1024ull; // 384 MiB
+		size_t targetThreadBufferBytes = kTargetTotalThreadBufferBytes;
+		if (const char* envMb = std::getenv("CHIMERA_SYNCMER_TOTAL_BUFFER_MB")) {
+			try {
+				size_t mb = static_cast<size_t>(std::stoull(envMb));
+				if (mb > 0) {
+					targetThreadBufferBytes = mb * 1024ull * 1024ull;
+				}
+			} catch (...) {
+				// ignore invalid env value
+			}
+		}
+		const size_t worker_hint = std::max<size_t>(1, static_cast<size_t>(config.threads));
+		const size_t hash_buffer_flush_bytes = std::clamp(
+		    targetThreadBufferBytes / worker_hint,
+		    kMinThreadBufferFlushBytes,
+		    kMaxThreadBufferFlushBytes);
 
-		std::vector<std::mutex> taxidMutexes(index);
+		const size_t taxidCount = index_to_taxid.size();
+		std::vector<std::mutex> taxidMutexes(taxidCount);
 		// Track per-taxid buffered hashes so quota checks include pending data.
-		std::vector<std::atomic<size_t>> pendingHashCounts(index);
+		std::vector<std::atomic<size_t>> pendingHashCounts(taxidCount);
 		for (auto &pending : pendingHashCounts) {
 			pending.store(0, std::memory_order_relaxed);
 		}
-		std::vector<std::atomic<uint64_t>> bpCounters(index);
+		std::vector<std::atomic<uint64_t>> bpCounters(taxidCount);
 		for (auto &bp : bpCounters) {
 			bp.store(0, std::memory_order_relaxed);
 		}
@@ -224,11 +270,12 @@ static inline bool file_is_compressed(const std::filesystem::path& filepath)
 			};
 
 #pragma omp for schedule(dynamic)
-			for (size_t idx = 0; idx < taxid_file_pairs.size(); ++idx)
+			for (size_t idx = 0; idx < taxid_file_tasks.size(); ++idx)
 			{
-				const auto& [taxid, filename] = taxid_file_pairs[idx];
-
-				size_t taxid_index = taxid_to_index[taxid];
+				const TaxidFileTask& task = taxid_file_tasks[idx];
+				const size_t taxid_index = static_cast<size_t>(task.taxidIndex);
+				const std::string& taxid = index_to_taxid[taxid_index];
+				const std::string& filename = *(task.filePath);
 				if (last_taxid_index != taxid_index && !thread_buffer.empty())
 				{
 					flush_buffer(last_taxid_index, thread_buffer, tid);

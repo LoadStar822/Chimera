@@ -57,7 +57,7 @@ void createOrResetDirectory(const std::string &dir,
       }
     }
 
-    if (std::filesystem::create_directory(directoryPath)) {
+    if (std::filesystem::create_directories(directoryPath)) {
       if (config.verbose) {
         std::cout << "Directory '" << dir << "' created successfully."
                   << std::endl;

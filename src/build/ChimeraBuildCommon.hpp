@@ -4,6 +4,7 @@
 #include "ChimeraBuild.hpp"
 
 #include <atomic>
+#include <filesystem>
 #include <memory>
 #include <string_view>
 
@@ -65,6 +66,9 @@ void syncmer_count(
 
 std::string tmp_hash_path(const std::string &taxid,
                           std::string_view suffix);
+
+void set_tmp_work_dir(const std::filesystem::path &dir);
+const std::filesystem::path &tmp_work_dir();
 
 void saveIMCF(chimera::imcf::InterleavedMergedCuckooFilter &imcf,
               const std::string &output_file,
