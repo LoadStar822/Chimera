@@ -56,7 +56,7 @@ void parseInputFile(const std::string &filePath,
 
 void createOrResetDirectory(const std::string &dir, const BuildConfig &config);
 
-void syncmer_count(
+void feature_count(
     BuildConfig &config,
     robin_hood::unordered_flat_map<std::string, std::vector<std::string>>
         &inputFiles,

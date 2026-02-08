@@ -59,14 +59,14 @@ static inline bool file_is_compressed(const std::filesystem::path& filepath)
 	}
 
 	/**
-	 * Count syncmers for each taxid and its associated files.
+	 * Count feature hashes (syncmer or strobemer) for each taxid.
 	 *
 	 * @param config The build configuration.
 	 * @param inputFiles The map of input files.
 	 * @param hashCount The map to store the hash count.
 	 * @param fileInfo The struct to store file information.
 	 */
-	void syncmer_count(
+	void feature_count(
 		BuildConfig& config,
 		robin_hood::unordered_flat_map<std::string, std::vector<std::string>>& inputFiles,
 		robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
@@ -123,7 +123,9 @@ static inline bool file_is_compressed(const std::filesystem::path& filepath)
 		constexpr size_t kMaxThreadBufferFlushBytes = 4 * 1024 * 1024; // 4 MiB
 		constexpr size_t kTargetTotalThreadBufferBytes = 384ull * 1024ull * 1024ull; // 384 MiB
 		size_t targetThreadBufferBytes = kTargetTotalThreadBufferBytes;
-		if (const char* envMb = std::getenv("CHIMERA_SYNCMER_TOTAL_BUFFER_MB")) {
+		// Global buffer budget for per-thread feature hash write-back.
+		const char* envMb = std::getenv("CHIMERA_FEATURE_TOTAL_BUFFER_MB");
+		if (envMb != nullptr && envMb[0] != '\0') {
 			try {
 				size_t mb = static_cast<size_t>(std::stoull(envMb));
 				if (mb > 0) {

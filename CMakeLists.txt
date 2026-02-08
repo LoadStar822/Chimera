@@ -75,8 +75,6 @@ include_directories(
 file(GLOB_RECURSE SOURCES
     "${PROJECT_SOURCE_DIR}/src/*.cpp"
     "${PROJECT_SOURCE_DIR}/src/*.cc"
-    "${PROJECT_SOURCE_DIR}/*.cpp"
-    "${PROJECT_SOURCE_DIR}/*.cc"
 )
 
 # 移除 CMake 生成的文件
@@ -113,7 +111,7 @@ file(GLOB_RECURSE HEADERS
 )
 
 # 添加可执行文件
-add_executable(Chimera ${SOURCES} "src/build/ChimeraBuild.cpp" "libs/xxhash.c" "libs/klib/kthread.c")
+add_executable(Chimera ${SOURCES} "Chimera.cpp" "src/build/ChimeraBuild.cpp" "libs/xxhash.c" "libs/klib/kthread.c")
 
 
 # 链接库和 OpenSSL

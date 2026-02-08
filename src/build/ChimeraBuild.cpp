@@ -308,7 +308,7 @@ void run(BuildConfig config) {
   }
   auto calculate_start = std::chrono::high_resolution_clock::now();
   std::cout << "Calculating feature hashes..." << std::endl;
-  syncmer_count(config, inputFiles, hashCount, fileInfo,
+  feature_count(config, inputFiles, hashCount, fileInfo,
                 hashFreqContext.enabled() ? &hashFreqContext : nullptr,
                 &bpCount);
   auto calculate_end = std::chrono::high_resolution_clock::now();
