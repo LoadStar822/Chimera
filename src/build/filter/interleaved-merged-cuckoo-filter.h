@@ -151,24 +151,18 @@ inline std::vector<Group> partitionHashCount(
     throw std::invalid_argument(
         "IMCF partition: maxTaxidsPerGroup must be positive");
   }
+  // Keep behavior aligned with c060 baseline: this function optimizes
+  // load-balance ratio only and does not use loadFactor in partitioning.
+  (void)loadFactor;
   size_t maxTaxids = static_cast<size_t>(maxTaxidsPerGroup);
-  struct HashEntryRef {
-    const std::string *taxid{nullptr};
-    uint64_t count{0};
-  };
-  std::vector<HashEntryRef> hashEntries;
-  hashEntries.reserve(hashCount.size());
-  for (const auto &[taxid, count] : hashCount) {
-    hashEntries.push_back(HashEntryRef{&taxid, count});
-  }
 
   // 1) 计算全局统计量，用更小的阈值做细粒度切分
   std::vector<uint64_t> counts;
-  counts.reserve(hashEntries.size());
+  counts.reserve(hashCount.size());
   uint64_t totalHashes = 0;
-  for (const auto &entry : hashEntries) {
-    counts.push_back(entry.count);
-    totalHashes += entry.count;
+  for (const auto &[taxid, count] : hashCount) {
+    counts.push_back(count);
+    totalHashes += count;
   }
   std::sort(counts.begin(), counts.end());
   const uint64_t median = counts[counts.size() / 2];
@@ -184,49 +178,12 @@ inline std::vector<Group> partitionHashCount(
   uint64_t threshold =
       std::max<uint64_t>(1, std::min<uint64_t>(thresholdFromMedian,
                                                thresholdFromMean));
-
-  const uint64_t effectiveLoadDen =
-      std::max<uint64_t>(1, static_cast<uint64_t>(loadFactor * 4.0));
-  auto estimate_hash_size = [&](uint64_t maxLoad) -> size_t {
-    constexpr double kSafetyCoeff = 1.05;
-    size_t needBinSize = ceil_div_u64(maxLoad, effectiveLoadDen);
-    needBinSize = std::ceil(needBinSize * kSafetyCoeff);
-    return next_pow2(static_cast<size_t>(std::max<double>(1.0, needBinSize)));
-  };
-  struct PartitionScore {
-    uint64_t area{0};
-    size_t hashSize{1};
-    uint64_t maxLoad{0};
-    size_t groupCount{0};
-    double imbalance{0.0};
-  };
-  auto score_groups = [&](const std::vector<Group> &groups) -> PartitionScore {
-    PartitionScore s{};
-    s.groupCount = groups.size();
-    double avgLoad = 0.0;
-    if (!groups.empty()) {
-      avgLoad = static_cast<double>(totalHashes) /
-                static_cast<double>(groups.size());
-    }
-    for (const auto &g : groups) {
-      if (g.totalHash > s.maxLoad) {
-        s.maxLoad = g.totalHash;
-      }
-    }
-    s.hashSize = estimate_hash_size(s.maxLoad);
-    s.area = static_cast<uint64_t>(s.groupCount) * static_cast<uint64_t>(s.hashSize);
-    s.imbalance = (avgLoad == 0.0)
-                      ? 0.0
-                      : (static_cast<double>(s.maxLoad) / avgLoad);
-    return s;
-  };
+  const double kTargetImbalance = 1.05; // 目标 M/A
 
   auto makeChunks = [&](uint64_t splitThreshold) {
     std::vector<HashChunk> chunks;
-    chunks.reserve(hashEntries.size() * 2);
-    for (const auto &entry : hashEntries) {
-      const std::string &taxid = *entry.taxid;
-      uint64_t count = entry.count;
+    chunks.reserve(hashCount.size() * 2);
+    for (const auto &[taxid, count] : hashCount) {
       if (count == 0) {
         chunks.push_back({taxid, 0});
         continue;
@@ -317,194 +274,40 @@ inline std::vector<Group> partitionHashCount(
       std::max<size_t>(1, (hashCount.size() + maxTaxids - 1) / maxTaxids);
 
   std::vector<Group> bestGroups;
-  PartitionScore bestScore{};
-  bestScore.area = std::numeric_limits<uint64_t>::max();
-  bestScore.hashSize = std::numeric_limits<size_t>::max();
-  bestScore.maxLoad = std::numeric_limits<uint64_t>::max();
-  bestScore.groupCount = std::numeric_limits<size_t>::max();
-  bestScore.imbalance = std::numeric_limits<double>::infinity();
-  auto is_better_score = [&](const PartitionScore &lhs,
-                             const PartitionScore &rhs) -> bool {
-    if (lhs.area != rhs.area) {
-      return lhs.area < rhs.area;
-    }
-    if (lhs.hashSize != rhs.hashSize) {
-      return lhs.hashSize < rhs.hashSize;
-    }
-    if (lhs.maxLoad != rhs.maxLoad) {
-      return lhs.maxLoad < rhs.maxLoad;
-    }
-    if (lhs.groupCount != rhs.groupCount) {
-      return lhs.groupCount < rhs.groupCount;
-    }
-    return lhs.imbalance < rhs.imbalance;
-  };
-
-  std::vector<uint64_t> thresholds;
-  constexpr int kThresholdRounds = 6;
-  thresholds.reserve(static_cast<size_t>(kThresholdRounds));
+  double bestRatio = std::numeric_limits<double>::infinity();
   uint64_t currentThreshold = threshold;
-  for (int iter = 0; iter < kThresholdRounds; ++iter) {
-    thresholds.push_back(currentThreshold);
-    if (currentThreshold <= 1) {
+
+  for (int iter = 0; iter < 6; ++iter) {
+    auto hashChunks = makeChunks(currentThreshold);
+    auto groups = packChunks(seedGroups, hashChunks);
+    if (groups.empty()) {
+      return groups;
+    }
+    double maxLoad = 0.0;
+    for (const auto &g : groups) {
+      if (g.totalHash > maxLoad) {
+        maxLoad = static_cast<double>(g.totalHash);
+      }
+    }
+    double avgLoad =
+        groups.empty()
+            ? 0.0
+            : static_cast<double>(totalHashes) /
+                  static_cast<double>(groups.size());
+    double ratio = (avgLoad == 0.0) ? 0.0 : (maxLoad / avgLoad);
+    if (ratio < bestRatio) {
+      bestRatio = ratio;
+      bestGroups = groups;
+    }
+    if (ratio <= kTargetImbalance || currentThreshold <= 1) {
       break;
     }
     currentThreshold = std::max<uint64_t>(1, currentThreshold / 2);
   }
 
-  std::vector<std::vector<Group>> thresholdGroups(thresholds.size());
-  std::vector<PartitionScore> thresholdScores(thresholds.size());
-  std::vector<uint8_t> thresholdValid(thresholds.size(), 0u);
-
-  auto evaluate_threshold = [&](size_t idx) {
-    auto hashChunks = makeChunks(thresholds[idx]);
-    auto groups = packChunks(seedGroups, hashChunks);
-    if (groups.empty()) {
-      return;
-    }
-    thresholdScores[idx] = score_groups(groups);
-    thresholdGroups[idx] = std::move(groups);
-    thresholdValid[idx] = 1u;
-  };
-
-  bool run_task_parallel = false;
-  if (run_task_parallel) {
-#ifdef _OPENMP
-#pragma omp taskgroup
-    {
-      for (size_t idx = 0; idx < thresholds.size(); ++idx) {
-#pragma omp task firstprivate(idx) shared(thresholdGroups, thresholdScores, thresholdValid)
-        { evaluate_threshold(idx); }
-      }
-    }
-#endif
-  } else {
-#ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, 1) if (thresholds.size() > 1 && omp_in_parallel() == 0)
-    for (ptrdiff_t idx = 0; idx < static_cast<ptrdiff_t>(thresholds.size());
-         ++idx) {
-      evaluate_threshold(static_cast<size_t>(idx));
-    }
-#else
-    for (size_t idx = 0; idx < thresholds.size(); ++idx) {
-      evaluate_threshold(idx);
-    }
-#endif
-  }
-  bool hasBest = false;
-  for (size_t idx = 0; idx < thresholds.size(); ++idx) {
-    if (thresholdValid[idx] == 0u) {
-      continue;
-    }
-    const auto &score = thresholdScores[idx];
-    if (!hasBest || is_better_score(score, bestScore)) {
-      bestScore = score;
-      bestGroups = std::move(thresholdGroups[idx]);
-      hasBest = true;
-    }
-  }
-  if (!hasBest) {
+  if (bestGroups.empty()) {
     bestGroups = packChunks(seedGroups, makeChunks(threshold));
   }
-
-  // Heavy-group post refinement: split only bins above the next lower hash-size
-  // capacity. This is bounded and only accepted when global area decreases.
-  auto max_load_for_hash_size = [&](size_t hashSizeCandidate) -> uint64_t {
-    if (hashSizeCandidate == 0) {
-      return 0;
-    }
-    constexpr double kSafetyCoeff = 1.05;
-    double binCap = std::floor(static_cast<double>(hashSizeCandidate) / kSafetyCoeff);
-    if (!std::isfinite(binCap) || binCap <= 0.0) {
-      return 0;
-    }
-    double capLoad =
-        std::floor(binCap * static_cast<double>(effectiveLoadDen));
-    if (!std::isfinite(capLoad) || capLoad <= 0.0) {
-      return 0;
-    }
-    if (capLoad >= static_cast<double>(std::numeric_limits<uint64_t>::max())) {
-      return std::numeric_limits<uint64_t>::max();
-    }
-    return static_cast<uint64_t>(capLoad);
-  };
-
-  const auto baseScore = score_groups(bestGroups);
-  if (baseScore.hashSize > 1 && !bestGroups.empty()) {
-    const size_t targetHashSize = baseScore.hashSize >> 1;
-    const uint64_t allowedMaxLoad = max_load_for_hash_size(targetHashSize);
-    if (allowedMaxLoad > 0) {
-      const size_t maxGroupsAllowed =
-          static_cast<size_t>((baseScore.area - 1) / targetHashSize);
-      if (maxGroupsAllowed > bestGroups.size()) {
-        std::vector<Group> refined = bestGroups;
-        size_t splitCapacity = maxGroupsAllowed - refined.size();
-
-        std::vector<size_t> heavyGroups;
-        heavyGroups.reserve(refined.size());
-        for (size_t g = 0; g < refined.size(); ++g) {
-          if (refined[g].totalHash > allowedMaxLoad) {
-            heavyGroups.push_back(g);
-          }
-        }
-        std::sort(heavyGroups.begin(), heavyGroups.end(),
-                  [&](size_t lhs, size_t rhs) {
-                    return refined[lhs].totalHash > refined[rhs].totalHash;
-                  });
-
-        for (size_t g : heavyGroups) {
-          if (splitCapacity == 0) {
-            break;
-          }
-          auto &src = refined[g];
-          if (src.totalHash <= allowedMaxLoad ||
-              src.assignedHashes.empty() || src.taxids.empty()) {
-            continue;
-          }
-
-          std::vector<size_t> slots(src.assignedHashes.size());
-          std::iota(slots.begin(), slots.end(), 0);
-          std::sort(slots.begin(), slots.end(), [&](size_t lhs, size_t rhs) {
-            return src.assignedHashes[lhs] > src.assignedHashes[rhs];
-          });
-
-          uint64_t overflow = src.totalHash - allowedMaxLoad;
-          for (size_t slot : slots) {
-            if (overflow == 0 || splitCapacity == 0) {
-              break;
-            }
-            const uint64_t slotValue = src.assignedHashes[slot];
-            if (slotValue <= 1) {
-              continue;
-            }
-            uint64_t move = std::min<uint64_t>(slotValue - 1, overflow);
-            move = std::min<uint64_t>(move, allowedMaxLoad);
-            if (move == 0) {
-              continue;
-            }
-
-            Group dst;
-            dst.taxids.push_back(src.taxids[slot]);
-            dst.assignedHashes.push_back(move);
-            dst.totalHash = move;
-            src.assignedHashes[slot] -= move;
-            src.totalHash -= move;
-            overflow -= move;
-            refined.push_back(std::move(dst));
-            --splitCapacity;
-          }
-        }
-
-        const auto refinedScore = score_groups(refined);
-        if (refinedScore.area < baseScore.area ||
-            (refinedScore.area == baseScore.area &&
-             refinedScore.hashSize < baseScore.hashSize)) {
-          bestGroups = std::move(refined);
-        }
-      }
-    }
-  }
-
   return bestGroups;
 }
 

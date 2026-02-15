@@ -467,7 +467,9 @@ void run(BuildConfig config) {
       return lhs.elapsedMs < rhs.elapsedMs;
     };
 
-    std::vector<int> candidateMaxTaxids = {12, 11, 10, 9};
+    // Keep default partition topology aligned with the pre-perf baseline
+    // for CAMIRefseq stability; still allow env override for experiments.
+    std::vector<int> candidateMaxTaxids = {16};
     if (const char *env = std::getenv("CHIMERA_PARTITION_MAXTAXIDS")) {
       std::vector<int> parsed;
       std::stringstream ss(env);
