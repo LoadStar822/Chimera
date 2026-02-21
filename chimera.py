@@ -124,13 +124,6 @@ def parse_arguments():
         "--load-factor", type=float, default=0.85, help="IMCF 滤器的负载因子"
     )
     build_parser.add_argument(
-        "-M",
-        "--max-hashes",
-        type=int,
-        default=0,
-        help="Maximum number of hashes per taxid",
-    )
-    build_parser.add_argument(
         "--presence-unique-deg",
         type=int,
         default=1,
@@ -195,13 +188,6 @@ def parse_arguments():
     )
     download_build_parser.add_argument(
         "--load-factor", type=float, default=0.85, help="IMCF 滤器的负载因子"
-    )
-    download_build_parser.add_argument(
-        "-M",
-        "--max-hashes",
-        type=int,
-        default=0,
-        help="Maximum number of hashes per taxid",
     )
     download_build_parser.add_argument(
         "--presence-unique-deg",
@@ -471,7 +457,6 @@ def run_chimera(args, chimera_path=None):
             command.extend(["-l", str(args.min_length)])
         command.extend(["-t", str(args.threads)])
         command.extend(["--load-factor", str(args.load_factor)])
-        command.extend(["-M", str(args.max_hashes)])
         command.extend(
             ["--presence-unique-deg", str(args.presence_unique_deg)]
         )

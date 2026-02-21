@@ -171,10 +171,6 @@ int main(int argc, char **argv) {
                    "IMCF 滤器负载因子")
       ->default_val(0.85);
   build
-      ->add_option("-M,--max-hashes,--k-max", buildConfig.max_hashes_per_taxid,
-                   "每 taxid 最多写入的 hash 数 (0=>auto=2e6)")
-      ->default_val(0);
-  build
       ->add_option("--presence-unique-deg", buildConfig.presence_unique_deg,
                    "Degree cutoff (<=) treated as unique signature for coverage meta")
       ->default_val(1)

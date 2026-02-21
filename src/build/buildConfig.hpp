@@ -50,12 +50,11 @@ namespace ChimeraBuild {
 		uint16_t smer_size{ 16 };
 		uint16_t syncmer_position{ 7 };
 		uint64_t min_length{ 0 };
-		uint16_t threads;
-		bool verbose = true;
-		double load_factor{ 0.85 };
-		size_t max_hashes_per_taxid = 0;
-		uint32_t presence_unique_deg{ 1 };
-	};
+			uint16_t threads;
+			bool verbose = true;
+			double load_factor{ 0.85 };
+			uint32_t presence_unique_deg{ 1 };
+		};
 
 	inline std::ostream& operator<<(std::ostream& os, const BuildConfig& config) {
 		os << std::string(50, '=') << std::endl;
@@ -75,12 +74,11 @@ namespace ChimeraBuild {
 			<< std::setw(25) << "Kmer size:" << (int)config.kmer_size << std::endl
 			<< std::setw(25) << "Syncmer s-mer size:" << config.smer_size << std::endl
 			<< std::setw(25) << "Syncmer offset:" << config.syncmer_position << std::endl
-			<< std::setw(25) << "Minimum length:" << config.min_length << std::endl
-			<< std::setw(25) << "Threads:" << config.threads << std::endl
-			<< std::setw(25) << "Load factor:" << config.load_factor << std::endl
-			<< std::setw(25) << "K max per taxid:" << config.max_hashes_per_taxid << std::endl
-			<< std::setw(25) << "Presence unique deg:" << config.presence_unique_deg << std::endl
-			<< std::setw(25) << "Verbose:" << config.verbose << std::endl;
+				<< std::setw(25) << "Minimum length:" << config.min_length << std::endl
+				<< std::setw(25) << "Threads:" << config.threads << std::endl
+				<< std::setw(25) << "Load factor:" << config.load_factor << std::endl
+				<< std::setw(25) << "Presence unique deg:" << config.presence_unique_deg << std::endl
+				<< std::setw(25) << "Verbose:" << config.verbose << std::endl;
 
 		os << std::string(50, '=') << std::endl;
 

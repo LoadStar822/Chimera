@@ -118,7 +118,6 @@ static inline bool file_is_compressed(const std::filesystem::path& filepath)
 				taxid_file_tasks.push_back({taxid_index, &file});
 			}
 		}
-		const size_t max_hashes = config.max_hashes_per_taxid;
 		constexpr size_t kMinThreadBufferFlushBytes = 1 * 1024 * 1024; // 1 MiB
 		constexpr size_t kMaxThreadBufferFlushBytes = 4 * 1024 * 1024; // 4 MiB
 		constexpr size_t kTargetTotalThreadBufferBytes = 384ull * 1024ull * 1024ull; // 384 MiB
@@ -143,11 +142,6 @@ static inline bool file_is_compressed(const std::filesystem::path& filepath)
 
 		const size_t taxidCount = index_to_taxid.size();
 		std::vector<std::mutex> taxidMutexes(taxidCount);
-		// Track per-taxid buffered hashes so quota checks include pending data.
-		std::vector<std::atomic<size_t>> pendingHashCounts(taxidCount);
-		for (auto &pending : pendingHashCounts) {
-			pending.store(0, std::memory_order_relaxed);
-		}
 		std::vector<std::atomic<uint64_t>> bpCounters(taxidCount);
 		for (auto &bp : bpCounters) {
 			bp.store(0, std::memory_order_relaxed);
@@ -197,111 +191,66 @@ static inline bool file_is_compressed(const std::filesystem::path& filepath)
 			}
 #endif
 
-			auto flush_buffer = [&](size_t taxid_index_local, std::vector<uint64_t> &buffer, int thread_id) {
-				if (buffer.empty()) {
-					return;
-				}
-
-				const size_t buffer_size = buffer.size();
-				const std::string &taxid_ref = index_to_taxid[taxid_index_local];
-				size_t write_count = buffer_size;
-				bool should_write = true;
-
-			size_t reserved = 0;
-			{
-				std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index_local]);
-				size_t &current_count_ref = hashCount[taxid_ref];
-				if (max_hashes > 0)
-				{
-					if (current_count_ref >= max_hashes)
-					{
-						should_write = false;
+				auto flush_buffer = [&](size_t taxid_index_local, std::vector<uint64_t> &buffer, int thread_id) {
+					if (buffer.empty()) {
+						return;
 					}
-					else
+
+					const size_t buffer_size = buffer.size();
+					const std::string &taxid_ref = index_to_taxid[taxid_index_local];
+					size_t reserved = 0;
 					{
-						size_t remaining = max_hashes - current_count_ref;
-						if (write_count > remaining)
-							write_count = remaining;
-						should_write = (write_count > 0);
+						std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index_local]);
+						size_t &current_count_ref = hashCount[taxid_ref];
+						current_count_ref += buffer_size;
+						reserved = buffer_size;
 					}
-				}
-				else
-				{
-					should_write = true;
-				}
-				if (should_write)
-				{
-					current_count_ref += write_count;
-					reserved = write_count;
-				}
-			}
 
-			if (!should_write)
-			{
-				pendingHashCounts[taxid_index_local].fetch_sub(buffer_size, std::memory_order_relaxed);
-				buffer.clear();
-					return;
-				}
+					const std::string part_path = tmp_hash_thread_path(taxid_ref, feature_suffix, thread_id);
+					std::ofstream stream(part_path, std::ios::binary | std::ios::app);
+					stream.tie(nullptr);
+					if (!stream.is_open())
+					{
+						std::cerr << "Unable to open the feature hash file: "
+						          << part_path << std::endl;
+						if (reserved > 0)
+						{
+							std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index_local]);
+							hashCount[taxid_ref] -= reserved;
+						}
+						buffer.clear();
+						return;
+					}
 
-				const std::string part_path = tmp_hash_thread_path(taxid_ref, feature_suffix, thread_id);
-				std::ofstream stream(part_path, std::ios::binary | std::ios::app);
-				stream.tie(nullptr);
-				if (!stream.is_open())
-				{
-					std::cerr << "Unable to open the feature hash file: "
-					          << part_path << std::endl;
-					pendingHashCounts[taxid_index_local].fetch_sub(buffer_size, std::memory_order_relaxed);
-					buffer.clear();
-					return;
-				}
-
-				const auto bytes_to_write = static_cast<std::streamsize>(write_count * sizeof(uint64_t));
-				stream.write(reinterpret_cast<const char*>(buffer.data()), bytes_to_write);
-				if (!stream.good())
-				{
-					std::cerr << "Failed to write feature hashes for taxid " << taxid_ref << std::endl;
+					const auto bytes_to_write = static_cast<std::streamsize>(buffer_size * sizeof(uint64_t));
+					stream.write(reinterpret_cast<const char*>(buffer.data()), bytes_to_write);
+					if (!stream.good())
+					{
+						std::cerr << "Failed to write feature hashes for taxid " << taxid_ref << std::endl;
 					if (reserved > 0)
 					{
 						std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index_local]);
-						hashCount[taxid_ref] -= reserved;
+							hashCount[taxid_ref] -= reserved;
+						}
 					}
-				}
 
-				pendingHashCounts[taxid_index_local].fetch_sub(buffer_size, std::memory_order_relaxed);
-				buffer.clear();
-			};
+					buffer.clear();
+				};
 
 #pragma omp for schedule(dynamic)
-			for (size_t idx = 0; idx < taxid_file_tasks.size(); ++idx)
-			{
-				const TaxidFileTask& task = taxid_file_tasks[idx];
-				const size_t taxid_index = static_cast<size_t>(task.taxidIndex);
-				const std::string& taxid = index_to_taxid[taxid_index];
-				const std::string& filename = *(task.filePath);
-				if (last_taxid_index != taxid_index && !thread_buffer.empty())
+				for (size_t idx = 0; idx < taxid_file_tasks.size(); ++idx)
 				{
-					flush_buffer(last_taxid_index, thread_buffer, tid);
-				}
-				last_taxid_index = taxid_index;
-
-				bool skip_processing = false;
-				{
-					std::lock_guard<std::mutex> lock(taxidMutexes[taxid_index]);
-					size_t observed = hashCount[taxid] + pendingHashCounts[taxid_index].load(std::memory_order_relaxed);
-					if (max_hashes > 0 && observed >= max_hashes)
+					const TaxidFileTask& task = taxid_file_tasks[idx];
+					const size_t taxid_index = static_cast<size_t>(task.taxidIndex);
+					const std::string& filename = *(task.filePath);
+					if (last_taxid_index != taxid_index && !thread_buffer.empty())
 					{
-						skip_processing = true;
+						flush_buffer(last_taxid_index, thread_buffer, tid);
 					}
-				}
-				if (skip_processing)
-				{
-					std::lock_guard<std::mutex> lock(fileInfo_mutex);
-					fileInfo.skippedNum++;
-					continue;
-				}
+					last_taxid_index = taxid_index;
 
-				// Thread-local file information
-				FileInfo localFileInfo = {};
+					// Thread-local file information
+					FileInfo localFileInfo = {};
 
 			// Open the sequence file
 			seqan3::sequence_file_input<raptor::dna4_traits, seqan3::fields< seqan3::field::id, seqan3::field::seq >> fin{ filename };
@@ -344,14 +293,13 @@ static inline bool file_is_compressed(const std::filesystem::path& filepath)
 						thread_buffer.insert(thread_buffer.end(), hashes.begin(), hashes.end());
 						appended = hashes.size();
 					}
-					if (appended == 0)
-					{
-						continue;
-					}
-					pendingHashCounts[taxid_index].fetch_add(appended, std::memory_order_relaxed);
-					if (thread_buffer.size() * sizeof(uint64_t) >= hash_buffer_flush_bytes)
-					{
-						flush_buffer(taxid_index, thread_buffer, tid);
+						if (appended == 0)
+						{
+							continue;
+						}
+						if (thread_buffer.size() * sizeof(uint64_t) >= hash_buffer_flush_bytes)
+						{
+							flush_buffer(taxid_index, thread_buffer, tid);
 					}
 				}
 				// Update global hash count
