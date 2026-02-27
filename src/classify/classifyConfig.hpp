@@ -45,15 +45,16 @@ namespace ChimeraClassify {
 			uint16_t threads;
 			size_t batchSize;
 		size_t emIter;
-	double em_prune_ratio = 2e-4;   // relative to max_expected in EM sparsity
-	double em_conf_power = 2.0;     // confidence exponent for EM M-step (0 disables)
-		double post_pi_min = 5e-4;
-	// postEmDecision posterior tail controls (affect taxidCount sparsity; not POST_TOPK dump)
-	bool low_div_active = false;    // internal: set when low-div branch is enabled
-	size_t hash_sample_min = 16;
-	size_t hash_sample_max = 96;
-		double idf_max = 8.0;
-		};
+		double em_prune_ratio = 2e-4;   // relative to max_expected in EM sparsity
+		double em_conf_power = 2.0;     // confidence exponent for EM M-step (0 disables)
+			double post_pi_min = 5e-4;
+	// Unified tail-risk control in [0,1], where 0=head-heavy and 1=tail-rich.
+	double tail_risk_u = 1.0;
+	double tail_risk_s = 1.0;
+		size_t hash_sample_min = 16;
+		size_t hash_sample_max = 96;
+			double idf_max = 8.0;
+			};
 
 	struct FileInfo {
 		size_t fileNum{ 0 };
@@ -84,9 +85,10 @@ namespace ChimeraClassify {
 		};
 
 			struct DecisionConfig {
-				double min_class_weight = 1e-4;
-				bool allow_fallback_on_reject = false; // 高多样性：放宽拒绝，减少 unclassified
-				double fallback_gap_min = 0.10; // fallback 仅在 top1-top2 gap 足够大时触发（抑制 FP）
-			};
+					double min_class_weight = 1e-4;
+					double fallback_strength = 0.0; // 连续 fallback 强度（0=禁用，1=最积极）
+					double selective_reject_strength = 0.0; // 连续 selective reject 强度
+					double fallback_gap_min = 0.10; // fallback 仅在 top1-top2 gap 足够大时触发（抑制 FP）
+				};
 		}
 	#endif // !CLASSIFYCONFIG_HPP

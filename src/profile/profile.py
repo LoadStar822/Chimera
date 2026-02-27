@@ -17,35 +17,33 @@ from .taxonomy_utils import (
 
 UNCLASSIFIED = "unclassified"
 # 统一基底量：K（头部尺度）与 p（POST_TOPK 高置信概率门）
-LOW_DIVERSITY_TOP_K = 10
+TAIL_RISK_TOP_K = 10
 PROB_HI_BASE = 0.20
 
 # 最小 evidence：由 p 派生，减少 magic number
 MIN_EVIDENCE = int(math.ceil(2.0 / PROB_HI_BASE))
-# 低多样性样本（典型：MOCK）更激进的 species 截断：减少长尾假阳性。
-# 低多样性判定使用 top1 物种分布：头部质量高且有效物种数小。
-LOW_DIVERSITY_TOP_MASS = 0.75
-LOW_DIVERSITY_EFF_SPECIES_MAX = float((3 * LOW_DIVERSITY_TOP_K) + 2)
-LOW_DIVERSITY_R_ANCHOR = max(0.0, 1.0 - LOW_DIVERSITY_TOP_MASS)
-# 低多样性样本：在 species 层进一步用 head mass 裁剪极小尾巴，减少 presence FP。
-# 该裁剪在“已被判定为 low-div”后执行，并以 eff_total（排除 unclassified）为分母。
-LOW_DIVERSITY_SPECIES_HEAD_MASS = 100.0 - (
-    LOW_DIVERSITY_TOP_MASS * PROB_HI_BASE
+# Tail-risk 锚点：集中生态（head-heavy）下，top1 物种分布通常 head mass 高且有效物种数小。
+TAIL_RISK_TOP_MASS_ANCHOR = 0.75
+TAIL_RISK_EFF_SPECIES_ANCHOR = float((3 * TAIL_RISK_TOP_K) + 2)
+TAIL_RISK_R_ANCHOR = max(0.0, 1.0 - TAIL_RISK_TOP_MASS_ANCHOR)
+# 集中生态时更激进的 species 头部裁剪：减少长尾假阳性。
+HEAD_HEAVY_SPECIES_HEAD_MASS_BASE = 100.0 - (
+    TAIL_RISK_TOP_MASS_ANCHOR * PROB_HI_BASE
 )
-LOW_DIVERSITY_SPECIES_HEAD_MIN_KEEP = int(
-    math.ceil(0.8 * float(LOW_DIVERSITY_TOP_K))
+SPECIES_HEAD_MIN_KEEP = int(
+    math.ceil(0.8 * float(TAIL_RISK_TOP_K))
 )
-# 高多样性样本：最终写出时的 species 相对丰度硬阈值（%）。
-HIGH_DIVERSITY_FINAL_REL_CUTOFF = (
+# 尾部更丰富时：最终写出时的 species 相对丰度硬阈值上限（%）。
+TAIL_RICH_FINAL_REL_CUTOFF_MAX = (
     PROB_HI_BASE * PROB_HI_BASE
 ) / 2.0
-# 高多样性样本：散射型 top1 FP 往往是 singleton/doubleton。
+# 尾部更丰富时：散射型 top1 FP 往往是 singleton/doubleton。
 # 用 top1 的“出现次数”做第二信号：只要 support 足够（>=K）就保留，
 # 以便在提高 head mass（救 recall）时仍能压住 FP 物种种类数。
-HIGH_DIVERSITY_SPECIES_SUPPORT_MIN = 3
-# low-risk rescue support gate constants derived from {K, p}
-LOW_DIVERSITY_SUPPORT_MIN_FRAC = (PROB_HI_BASE**4) / (8.0 * float(LOW_DIVERSITY_TOP_K))
-LOW_DIVERSITY_SUPPORT_MIN_FLOOR = int(5 * MIN_EVIDENCE)
+TAIL_RICH_SPECIES_SUPPORT_MIN = 3
+# head-heavy rescue support gate constants derived from {K, p}
+HEAD_HEAVY_RESCUE_SUPPORT_MIN_FRAC = (PROB_HI_BASE**4) / (8.0 * float(TAIL_RISK_TOP_K))
+HEAD_HEAVY_RESCUE_SUPPORT_MIN_FLOOR = int(5 * MIN_EVIDENCE)
 
 
 def _clip01(value: float) -> float:
@@ -56,10 +54,17 @@ def _clip01(value: float) -> float:
     return value
 
 
+def _smoothstep(value: float, edge0: float, edge1: float) -> float:
+    if edge1 <= edge0:
+        return 1.0 if value >= edge1 else 0.0
+    t = _clip01((float(value) - float(edge0)) / (float(edge1) - float(edge0)))
+    return t * t * (3.0 - (2.0 * t))
+
+
 def _compute_top1_tail_metrics(
     detect_counter: Counter[str], detect_total: float
 ) -> Tuple[float, float, float, float]:
-    """Compute low/high-div detection metrics from top1 species distribution.
+    """Compute tail-risk probe metrics from top1 species distribution.
 
     Returns:
     - shannon_index
@@ -80,7 +85,7 @@ def _compute_top1_tail_metrics(
                 shannon_index -= p * math.log(p)
             rels.append(p)
     rels.sort(reverse=True)
-    top_mass = sum(rels[:LOW_DIVERSITY_TOP_K])
+    top_mass = sum(rels[:TAIL_RISK_TOP_K])
     eff_species = math.exp(shannon_index) if shannon_index > 0 else 0.0
     tail_risk_r = _clip01(1.0 - top_mass)
     return shannon_index, eff_species, top_mass, tail_risk_r
@@ -89,10 +94,10 @@ def _compute_top1_tail_metrics(
 def _compute_tail_risk_u(tail_risk_r: float, eff_species: float) -> float:
     """Unified risk intensity in [0,1] from tail mass and effective species."""
     r = _clip01(tail_risk_r)
-    anchor = max(float(LOW_DIVERSITY_R_ANCHOR), 1e-9)
+    anchor = max(float(TAIL_RISK_R_ANCHOR), 1e-9)
     u_r = _clip01(r / (r + anchor))
 
-    e0 = max(float(LOW_DIVERSITY_EFF_SPECIES_MAX), 1e-9)
+    e0 = max(float(TAIL_RISK_EFF_SPECIES_ANCHOR), 1e-9)
     e = max(0.0, float(eff_species))
     u_e = _clip01((e - e0) / (e + e0))
     # Soft-OR merge: high in either channel pushes risk up.
@@ -122,7 +127,7 @@ def _normalize_abundance_mode(abundance_mode: Optional[str]) -> str:
 def _infer_genus(species_name: str) -> Optional[str]:
     """Infer genus name from a species display string.
 
-    Intended for output-only post-processing in high-diversity species profiles.
+    Intended for output-only post-processing in tail-rich species profiles.
     If parsing fails, return None (caller should skip genus contraction).
     """
     if not species_name:
@@ -161,11 +166,11 @@ def _infer_genus(species_name: str) -> Optional[str]:
     return genus or None
 
 
-def _is_lowdiv_rescue_species_name_ok(species_name: str) -> bool:
-    """Heuristic filter for low-diversity POST_TOPK rescue candidates.
+def _is_rescue_species_name_ok(species_name: str) -> bool:
+    """Heuristic filter for head-heavy POST_TOPK rescue candidates.
 
     Goal: avoid adding generic/low-quality nodes like "X bacterium" or "Y sp."
-    that often act as FP sinks in low-div mixtures.
+    that often act as FP sinks in head-heavy mixtures.
     """
     if not species_name:
         return False
@@ -602,7 +607,7 @@ def process_file(
     detected_eff_species = float("inf")
     detected_top_mass = 0.0
     if species_counter and species_total > 0:
-        # Use top1 distribution for low-diversity detection to avoid soft_seq tail inflation.
+        # Use top1 distribution for tail-risk detection to avoid soft_seq tail inflation.
         detect_counter = species_counter
         detect_total = species_total
         try:
@@ -679,31 +684,31 @@ def process_file(
                         f"species_union={len(species_union)}"
                     )
 
-    # Optional: compute top1 support counts (sequence-level) for high-diversity species trimming.
+    # Optional: compute top1 support counts (sequence-level) for tail-rich species trimming.
     support_by_level: Optional[Dict[str, Counter[str]]] = None
-    if HIGH_DIVERSITY_SPECIES_SUPPORT_MIN and HIGH_DIVERSITY_SPECIES_SUPPORT_MIN > 1:
-        # If we already run top1 mode (e.g., low-diversity auto override), support is redundant.
+    if TAIL_RICH_SPECIES_SUPPORT_MIN and TAIL_RICH_SPECIES_SUPPORT_MIN > 1:
+        # If we already run top1 mode, support is redundant.
         if normalized_mode != "top1":
             support_by_level = get_top1_by_level()
 
-    # Low-diversity status used for species-level post-processing.
     # NOTE: detection is performed above using the top1 distribution to avoid soft_seq tail inflation.
     tail_risk_u = _compute_tail_risk_u(detected_tail_risk_r, detected_eff_species)
     tail_risk_s = _compute_tail_risk_s(tail_risk_u)
-    species_is_low_diversity = bool(tail_risk_u <= 0.5)
+    tail_rich_strength = _smoothstep(float(tail_risk_s), 0.60, 0.95)
+    head_heavy_strength = _clip01(1.0 - float(tail_rich_strength))
     policy_species_head_mass = None
     if hd_species_head_mass is not None:
-        low_head = float(LOW_DIVERSITY_SPECIES_HEAD_MASS)
+        low_head = float(HEAD_HEAVY_SPECIES_HEAD_MASS_BASE)
         high_head = float(hd_species_head_mass)
         policy_species_head_mass = (low_head * (1.0 - tail_risk_s)) + (
             high_head * tail_risk_s
         )
     species_rel_cutoff = (
-        float(HIGH_DIVERSITY_FINAL_REL_CUTOFF) * float(tail_risk_s)
-        if HIGH_DIVERSITY_FINAL_REL_CUTOFF and HIGH_DIVERSITY_FINAL_REL_CUTOFF > 0
+        float(TAIL_RICH_FINAL_REL_CUTOFF_MAX) * float(tail_rich_strength)
+        if TAIL_RICH_FINAL_REL_CUTOFF_MAX and TAIL_RICH_FINAL_REL_CUTOFF_MAX > 0
         else 0.0
     )
-    b_max = int(max(LOW_DIVERSITY_SPECIES_HEAD_MIN_KEEP, LOW_DIVERSITY_TOP_K - 1))
+    b_max = int(max(SPECIES_HEAD_MIN_KEEP, TAIL_RISK_TOP_K - 1))
     unified_rescue_budget = max(
         0,
         min(
@@ -711,23 +716,30 @@ def process_file(
             int(round(float(b_max) * max(0.0, 1.0 - tail_risk_u))),
         ),
     )
-    lowdiv_rescue_budget = (
-        unified_rescue_budget if species_is_low_diversity else 0
+    head_heavy_rescue_budget = max(
+        0,
+        min(
+            int(unified_rescue_budget),
+            int(round(float(unified_rescue_budget) * head_heavy_strength)),
+        ),
     )
-    # Cutoff-boundary mass swap budget (1-in-1-out), used only in high-risk.
-    highdiv_cutoff_swap_budget = (
-        min(4, int(unified_rescue_budget) * 2) if not species_is_low_diversity else 0
+    # Cutoff-boundary mass swap budget (1-in-1-out), activated continuously by tail-rich strength.
+    tail_rich_cutoff_swap_budget_max = min(4, int(unified_rescue_budget) * 2)
+    tail_rich_cutoff_swap_budget = max(
+        0,
+        int(round(float(tail_rich_cutoff_swap_budget_max) * tail_rich_strength)),
     )
     if species_counter and species_total > 0:
         print(
             "[profile][auto] tail-risk-policy="
             f"r={detected_tail_risk_r:.4f} top_mass={detected_top_mass * 100.0:.2f} "
             f"u={tail_risk_u:.4f} s={tail_risk_s:.4f} "
-            f"lowdiv={species_is_low_diversity} "
+            f"head_heavy_strength={head_heavy_strength:.4f} "
+            f"tail_rich_strength={tail_rich_strength:.4f} "
             f"head_mass={float(policy_species_head_mass) if policy_species_head_mass is not None else -1.0:.2f} "
             f"rel_cutoff={species_rel_cutoff:.4f} "
-            f"lowdiv_rescue_budget={lowdiv_rescue_budget} "
-            f"highdiv_cutoff_swap_budget={highdiv_cutoff_swap_budget}"
+            f"head_heavy_rescue_budget={head_heavy_rescue_budget} "
+            f"tail_rich_cutoff_swap_budget={tail_rich_cutoff_swap_budget}"
         )
 
     output_base = output_file
@@ -765,12 +777,12 @@ def process_file(
             uncls_count = taxon_counter.get(UNCLASSIFIED, 0)
             eff_total = max(0, total_count - uncls_count)
 
-            if species_is_low_diversity:
-                # Low-diversity: head-mass prune on species to drop tiny FP tails.
+            if head_heavy_rescue_budget > 0:
+                # Head-heavy rescue stage: prune tiny FP tails first.
                 # (Exclude UNCLASSIFIED from the denominator and keep at least K taxa.)
                 if (
-                    LOW_DIVERSITY_SPECIES_HEAD_MASS
-                    and float(LOW_DIVERSITY_SPECIES_HEAD_MASS) > 0
+                    policy_species_head_mass is not None
+                    and float(policy_species_head_mass) > 0
                     and eff_total > 0
                     and filtered_items
                 ):
@@ -790,8 +802,8 @@ def process_file(
 
                     kept: List[Tuple[str, float]] = []
                     cum = 0.0
-                    head_mass = float(LOW_DIVERSITY_SPECIES_HEAD_MASS)
-                    min_keep = int(LOW_DIVERSITY_SPECIES_HEAD_MIN_KEEP)
+                    head_mass = float(policy_species_head_mass)
+                    min_keep = int(SPECIES_HEAD_MIN_KEEP)
                     for i, (taxon, count) in enumerate(non_uncls):
                         kept.append((taxon, count))
                         cum += float(count)
@@ -803,7 +815,7 @@ def process_file(
                             break
                     filtered_items = kept + ([uncls_item] if uncls_item else [])
 
-                # Low-diversity: ultra-conservative presence-only rescue for NEW genera
+                # Head-heavy: ultra-conservative presence-only rescue for NEW genera
                 # using high-probability POST_TOPK evidence.
                 #
                 # Rationale: Some true low-abundance species may never win top1 but can
@@ -812,16 +824,16 @@ def process_file(
                 # and we add only a tiny pseudo-count (>=MIN_EVIDENCE) so abundance stays stable.
                 prob_hi = float(PROB_HI_BASE)
                 support_min = max(
-                    int(LOW_DIVERSITY_SUPPORT_MIN_FLOOR),
-                    int(float(eff_total) * float(LOW_DIVERSITY_SUPPORT_MIN_FRAC)),
+                    int(HEAD_HEAVY_RESCUE_SUPPORT_MIN_FLOOR),
+                    int(float(eff_total) * float(HEAD_HEAVY_RESCUE_SUPPORT_MIN_FRAC)),
                 )
                 # Guard against "hitchhiker" taxa that show up in many POST_TOPK lists
-                # with tiny probabilities (common in low-div samples, especially within
+                # with tiny probabilities (common in head-heavy samples, especially within
                 # Enterobacteriaceae-like families). This prevents spurious taxa from
                 # passing support_min and inflating presence FPs.
                 support_hi_frac_min = float(PROB_HI_BASE * PROB_HI_BASE) / 4.0
 
-                max_added = int(lowdiv_rescue_budget)
+                max_added = int(head_heavy_rescue_budget)
                 added: List[Tuple[str, int, int, float, float, float]] = []
                 if prob_hi > 0 and support_min > 0:
                     existing_species = {
@@ -857,7 +869,7 @@ def process_file(
                     for sp, hi in hi_support.items():
                         if not sp or sp == UNCLASSIFIED:
                             continue
-                        if not _is_lowdiv_rescue_species_name_ok(sp):
+                        if not _is_rescue_species_name_ok(sp):
                             continue
                         if sp in existing_species:
                             continue
@@ -872,7 +884,7 @@ def process_file(
                         if frac < float(support_hi_frac_min):
                             continue
                         # Guard: very concentrated (hi≈any) but narrow support often acts as
-                        # hitchhiker FP in low-div tails; prefer broader repeat evidence.
+                        # hitchhiker FP in head-heavy tails; prefer broader repeat evidence.
                         if frac >= float(concentrated_frac_max) and any_c <= int(narrow_any_max):
                             continue
                         g = _infer_genus(sp)
@@ -911,7 +923,7 @@ def process_file(
                         selected_new_genera: set[str] = set()
                         # Keep the first 3 additions behavior-compatible with the
                         # proven conservative baseline; use stricter gates only for
-                        # expansion slots (>3) to avoid low-div tail FP spread.
+                        # expansion slots (>3) to avoid head-heavy tail FP spread.
                         base_keep = min(int(max_added), 3)
                         first_score = max(float(candidates[0][7]), 1e-12)
                         knee_score_ratio = max(0.01, float(support_hi_frac_min))
@@ -975,7 +987,7 @@ def process_file(
                         filtered_items = kept_items + ([uncls_item] if uncls_item else [])
 
                 print(
-                    "[profile][auto] lowdiv_posttopk_newgenus_rescue="
+                    "[profile][auto] headheavy_posttopk_newgenus_rescue="
                     f"enabled=1 prob_hi={prob_hi:.2f} "
                     f"support_min={support_min} "
                     f"support_hi_frac_min={float(support_hi_frac_min):.4f} "
@@ -983,8 +995,8 @@ def process_file(
                     f"max_added={max_added} "
                     f"added={len(added)}"
                 )
-            else:
-                # High-diversity: trim long tail by head mass (exclude UNCLASSIFIED).
+            if tail_rich_strength > 1e-9:
+                # Tail-rich stage: trim long tail by head mass (exclude UNCLASSIFIED).
                 # This suppresses hundreds of tiny non-zero species that destroy
                 # presence precision, without affecting per-read assignments.
                 if policy_species_head_mass is not None:
@@ -1010,20 +1022,21 @@ def process_file(
 
                     count_by_species = {taxon: count for taxon, count in ranked_non_uncls}
                     support_species = support_by_level.get("species") if support_by_level else None
-                    support_k = int(max(1, int(HIGH_DIVERSITY_SPECIES_SUPPORT_MIN)))
+                    support_k = int(max(1, int(TAIL_RICH_SPECIES_SUPPORT_MIN)))
 
                     # Union with top1 support>=K to keep repeated low-abundance taxa
                     # while filtering scatter-type singletons.
                     if (
-                        HIGH_DIVERSITY_SPECIES_SUPPORT_MIN
-                        and HIGH_DIVERSITY_SPECIES_SUPPORT_MIN > 1
+                        TAIL_RICH_SPECIES_SUPPORT_MIN
+                        and TAIL_RICH_SPECIES_SUPPORT_MIN > 1
                         and support_species
                     ):
                         support_gate = max(0.0, float(support_k) - float(PROB_HI_BASE))
                         for taxon, sup in support_species.items():
                             if (
                                 taxon != UNCLASSIFIED
-                                and (float(sup) * float(tail_risk_s)) >= support_gate
+                                and (float(sup) * float(tail_rich_strength))
+                                >= support_gate
                             ):
                                 kept.add(taxon)
 
@@ -1061,7 +1074,7 @@ def process_file(
                         score = float(hi_mass) * math.sqrt(max(frac, 1e-9))
                         return score, post_hi, post_any, hi_mass
 
-                    # High-risk cutoff-boundary mass swap (1-in-1-out):
+                    # Tail-rich cutoff-boundary mass swap (1-in-1-out):
                     # move a limited mass from weak >=cutoff taxa to strong <cutoff taxa.
                     # Invariants:
                     # - final rel cutoff is unchanged
@@ -1069,7 +1082,7 @@ def process_file(
                     # - swap is mass-conservative and budgeted.
                     swap_pairs: List[Tuple[str, str, float, float, float, float, float, float]] = []
                     if (
-                        highdiv_cutoff_swap_budget > 0
+                        tail_rich_cutoff_swap_budget > 0
                         and species_rel_cutoff > 0
                         and ranked_non_uncls
                     ):
@@ -1225,7 +1238,7 @@ def process_file(
                                 rel_d,
                                 p_genus,
                             ) = pair
-                            if len(selected_pairs) >= int(highdiv_cutoff_swap_budget):
+                            if len(selected_pairs) >= int(tail_rich_cutoff_swap_budget):
                                 break
                             if p_taxon in used_promote or d_taxon in used_donor:
                                 continue
@@ -1285,15 +1298,15 @@ def process_file(
                             )
 
                         print(
-                            "[profile][auto] highdiv_cutoff_swap="
-                            f"enabled=1 budget={int(highdiv_cutoff_swap_budget)} "
+                            "[profile][auto] tailrich_cutoff_swap="
+                            f"enabled=1 budget={int(tail_rich_cutoff_swap_budget)} "
                             f"swaps={len(swap_pairs)}"
                         )
-                    elif highdiv_cutoff_swap_budget > 0 and species_rel_cutoff > 0:
+                    elif tail_rich_cutoff_swap_budget > 0 and species_rel_cutoff > 0:
                         print(
-                            "[profile][auto] highdiv_cutoff_swap="
+                            "[profile][auto] tailrich_cutoff_swap="
                             f"enabled=0 reason=no_candidates "
-                            f"budget={int(highdiv_cutoff_swap_budget)}"
+                            f"budget={int(tail_rich_cutoff_swap_budget)}"
                         )
 
                     if kept:
@@ -1315,7 +1328,7 @@ def process_file(
                         if rebuilt:
                             filtered_items = rebuilt
 
-                # Final hard cutoff on species relative abundance (high-diversity only).
+                # Final hard cutoff on species relative abundance (tail-rich weighted).
                 if species_rel_cutoff > 0 and filtered_items:
                     denom = eff_total if eff_total > 0 else total_count
                     final_items: List[Tuple[str, float]] = []

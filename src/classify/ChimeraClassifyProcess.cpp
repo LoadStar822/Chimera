@@ -67,6 +67,8 @@ void processSequence(
 
   const size_t binNumAll = indexToTaxid.size();
   heat.ensure(binNumAll);
+  const double tail_risk_s = clamp01(config.tail_risk_s);
+  const double tail_risk_hi = smoothstep(tail_risk_s, 0.60, 0.95);
   const bool presenceEnabled = (presenceAcc != nullptr);
   const uint32_t presenceSketchBits =
       presenceEnabled ? presenceAcc->sketchBits : 0;
@@ -174,8 +176,10 @@ void processSequence(
     for (uint64_t v : sampleVals) {
       scored.emplace_back(weightCtx.freqSketch->estimate(v), v);
     }
+    const double route_ratio = lerp(0.50, 0.50, tail_risk_hi);
     const size_t routeBudget =
-        std::max<size_t>(1, sampleVals.size() / 2);
+        std::max<size_t>(1, static_cast<size_t>(
+                                std::llround(route_ratio * sampleVals.size())));
     routeVals = select_rare_route_values(scored, routeBudget);
     if (routeVals.empty()) {
       routeVals = sampleVals;
@@ -207,10 +211,12 @@ void processSequence(
     }
   }
 
-  const size_t baseCandidateCap =
-      std::min<size_t>(binNumAll, static_cast<size_t>(256));
-  const size_t maxCandidateCap =
-      std::min<size_t>(binNumAll, static_cast<size_t>(512));
+  const size_t baseCandidateCap = std::min<size_t>(
+      binNumAll,
+      static_cast<size_t>(std::llround(lerp(256.0, 320.0, tail_risk_hi))));
+  const size_t maxCandidateCap = std::min<size_t>(
+      binNumAll,
+      static_cast<size_t>(std::llround(lerp(512.0, 640.0, tail_risk_hi))));
   size_t candidateCap = baseCandidateCap;
   constexpr double kHeadMassThresh = 0.5;
   std::vector<uint32_t> topBins;
@@ -331,7 +337,7 @@ void processSequence(
   heat.decay_if_needed();
 
   robin_hood::unordered_flat_map<uint32_t, double> tidScore;
-  robin_hood::unordered_flat_map<uint32_t, uint32_t> uniqueHits;
+  robin_hood::unordered_flat_map<uint32_t, double> uniqueHits;
   tidScore.reserve(128);
   uniqueHits.reserve(128);
 
@@ -375,7 +381,7 @@ void processSequence(
   };
   rebuild_top_bin_marks();
 
-  double idf_power = 1.0;
+  double idf_power = 1.0 + (0.25 * tail_risk_hi);
 
   auto bucket_degree = [](size_t d) -> size_t {
     if (d <= 1) {
@@ -458,8 +464,7 @@ void processSequence(
     if (df_bins == 0) {
       df_bins = deg_subset;
     }
-    const size_t df_eff = effective_df_bins(
-        deg_effective, df_bins, /*low_div_active=*/config.low_div_active);
+    const size_t df_eff = effective_df_bins(deg_effective, df_bins);
 
     double totalBins = subset ? static_cast<double>(subset->size())
                               : static_cast<double>(binNumAll);
@@ -471,11 +476,10 @@ void processSequence(
     // - short reads/contigs: allow df_eff (species-fragmentation correction)
     // - long reads: keep df_bins to avoid FP sensitivity under subset/topBins
     constexpr size_t kDfEffIdfMaxLen = 4096;
-    const size_t df_idf = df_for_idf(df_bins, df_eff, config.low_div_active,
-                                     readLen, kDfEffIdfMaxLen);
+    const double df_idf = df_for_idf(df_bins, df_eff, readLen, tail_risk_hi,
+                                     kDfEffIdfMaxLen);
     double idf_raw = idf_raw_from_df_bins(totalBins, df_idf);
-    double idf =
-        clamp_idf(idf_raw, config.low_div_active, config.idf_max, idf_power);
+    double idf = clamp_idf(idf_raw, tail_risk_hi, config.idf_max, idf_power);
 
     double freqFactor = 1.0;
     const bool has_freq = weightCtx.enabled();
@@ -493,20 +497,21 @@ void processSequence(
     }
 
     const bool uniqueEdge = allow_unique_edge(
-        deg_effective, df_eff, has_freq, weightCtx.freq_trusted, df_est,
+        deg_effective, df_bins, has_freq, weightCtx.freq_trusted, df_est,
         imcfConfig.presenceUniqueDeg);
+    const bool fragmentedUnique =
+        (!uniqueEdge && deg_effective == 1 && df_eff == 1 && df_bins > 1);
+    const double unique_strength =
+        uniqueEdge ? 1.0 : (fragmentedUnique ? tail_risk_hi : 0.0);
     const bool localUniqueEdge = is_local_unique_edge(deg_effective, df_bins);
     double denom = std::log2(2.0 + static_cast<double>(deg_effective));
     double weight = denom > 0.0 ? 1.0 / denom : 1.0;
     double base = weight * freqFactor;
     double bonus = 1.0;
-    if (uniqueEdge) {
-      if (!config.low_div_active && deg_effective == 1 && df_eff == 1 &&
-          df_bins > 1) {
-        bonus = unique_edge_bonus(kUniqueEdgeBonus, df_bins);
-      } else {
-        bonus = kUniqueEdgeBonus;
-      }
+    if (unique_strength > 0.0) {
+      const double target_bonus =
+          uniqueEdge ? kUniqueEdgeBonus : unique_edge_bonus(kUniqueEdgeBonus, df_bins);
+      bonus = 1.0 + unique_strength * (target_bonus - 1.0);
     }
     double contrib = idf * base * bonus;
 
@@ -527,13 +532,13 @@ void processSequence(
         }
       }
       for (uint32_t tid : minimizerTids) {
-        presenceAcc->add_target(tid, hit_weight, score_weight, uniqueEdge,
+        presenceAcc->add_target(tid, hit_weight, score_weight, unique_strength,
                                 localUniqueEdge, unique_bucket,
                                 breadth_bucket);
       }
     }
-    if (uniqueEdge && !minimizerTids.empty()) {
-      ++uniqueHits[minimizerTids.front()];
+    if (unique_strength > 0.0 && !minimizerTids.empty()) {
+      uniqueHits[minimizerTids.front()] += unique_strength;
     }
 
     return contrib;
@@ -590,7 +595,7 @@ void processSequence(
     double second = 0.0;
     double ratio = 0.0;
     double gap = 0.0;
-    size_t uniqueCount = 0;
+    double uniqueCount = 0.0;
     double uniqueRatio = 0.0;
   };
 
@@ -605,7 +610,7 @@ void processSequence(
       }
     }
     double denom = eff_eval > 0.0 ? eff_eval : 1.0;
-    stats.uniqueRatio = static_cast<double>(stats.uniqueCount) / denom;
+    stats.uniqueRatio = stats.uniqueCount / denom;
     return stats;
   };
 
@@ -623,8 +628,8 @@ void processSequence(
     double thr_conf_local = std::ceil(config.shotThreshold * eff_eval);
     double gap_need_local = std::max(0.5, eff_eval / 24.0);
     bool strong = (s.best >= thr_conf_local);
-    bool unique_ok = (s.uniqueCount >= 3) ||
-                     (s.uniqueCount >= 2 && s.uniqueRatio >= 0.12);
+    bool unique_ok = (s.uniqueCount >= 3.0) ||
+                     (s.uniqueCount >= 2.0 && s.uniqueRatio >= 0.12);
     bool stable = (s.gap >= gap_need_local) && (s.ratio >= 1.35);
     size_t bestRoundedLocal = static_cast<size_t>(
         std::max<double>(0.0, std::llround(s.best)));
@@ -677,7 +682,7 @@ void processSequence(
   double second = stats.second;
   double best_ratio = stats.ratio;
   double gap = stats.gap;
-  size_t uniqueCount = stats.uniqueCount;
+  double uniqueCount = stats.uniqueCount;
   double uniqueRatio = stats.uniqueRatio;
   std::string bestTaxidStr;
   if (bestTid != std::numeric_limits<uint32_t>::max() &&
@@ -774,12 +779,13 @@ void processSequence(
   double maxEvidence = std::min(best, eff_eval);
   double beta = config.firstFilterBeta;
   bool beta_user = config.firstFilterBeta_user;
-  if (beta <= 0.0) {
+  if (!(beta > 0.0)) {
     beta = 0.8;
-    beta_user = false;
   }
   if (!beta_user) {
-    beta = 0.45; // EM 模式放宽初筛门槛，确保真实物种不被挡在外
+    const double beta_em = lerp(0.50, 0.45, tail_risk_hi);
+    const double beta_no_em = lerp(0.50, 0.80, tail_risk_hi);
+    beta = use_em ? beta_em : beta_no_em;
   }
   beta = std::clamp(beta, 0.0, 1.0);
   size_t thr_beta =
@@ -829,59 +835,51 @@ void processSequence(
     maxCountValid = true;
 
   } else {
-    if (use_em && config.low_div_active && !tidScore.empty()) {
-      const size_t floorK = std::min<size_t>(128, tidScore.size());
-      const size_t poolK = tidScore.size();
+    if (use_em && !tidScore.empty()) {
       std::vector<std::pair<uint32_t, double>> ranked;
       ranked.reserve(tidScore.size());
       for (const auto &kv : tidScore) {
         ranked.emplace_back(kv.first, kv.second);
       }
-      size_t want = std::min(poolK, ranked.size());
-      if (want > 0) {
-        std::sort(ranked.begin(), ranked.end(),
-                  [](const auto &a, const auto &b) {
-                    return a.second > b.second;
-                  });
-        ranked.resize(want);
-      }
+      std::sort(ranked.begin(), ranked.end(),
+                [](const auto &a, const auto &b) { return a.second > b.second; });
 
-      size_t thr_min_eval_lowdiv = thr_min_eval;
+      size_t thr_min_eval_low = thr_min_eval;
       if (thr_min_eval > 0) {
-        thr_min_eval_lowdiv = std::max<size_t>(
-            1, static_cast<size_t>(std::floor(
-                   0.3 * static_cast<double>(thr_min_eval))));
+        thr_min_eval_low = std::max<size_t>(
+            1, static_cast<size_t>(
+                   std::floor(0.3 * static_cast<double>(thr_min_eval))));
       }
-      size_t thr_base = std::max(thr_eval, thr_min_eval_lowdiv);
+      const double thr_low =
+          static_cast<double>(std::max(thr_eval, thr_min_eval_low));
+      const double thr_high = static_cast<double>(thr_final_raw);
+      const double thr_base = lerp(thr_low, thr_high, tail_risk_hi);
 
-      std::vector<std::pair<std::string, double>> floor;
-      std::vector<std::pair<std::string, double>> tail;
-      floor.reserve(floorK);
-      tail.reserve(ranked.size());
-      const size_t floorCount = std::min(floorK, ranked.size());
+      const size_t floorK_max = std::min<size_t>(128, ranked.size());
+      const size_t floorCount = std::min<size_t>(
+          floorK_max,
+          static_cast<size_t>(std::llround((1.0 - tail_risk_hi) *
+                                           static_cast<double>(floorK_max))));
+
+      result.taxidCount.reserve(ranked.size());
       for (size_t i = 0; i < ranked.size(); ++i) {
         const uint32_t tid_id = ranked[i].first;
         if (tid_id >= tax.id2str.size()) {
           continue;
         }
-        const double countVal =
-            std::clamp(ranked[i].second, 0.0, effCap);
+        const double countVal = std::clamp(ranked[i].second, 0.0, effCap);
         if (countVal <= 0.0) {
           continue;
         }
-        const std::string &taxid = tax.id2str[tid_id];
-        if (i < floorCount) {
-          floor.emplace_back(taxid, countVal);
-        } else if (countVal >= static_cast<double>(thr_base)) {
-          tail.emplace_back(taxid, countVal);
+        if (i < floorCount || countVal >= thr_base) {
+          const std::string &taxid = tax.id2str[tid_id];
+          result.taxidCount.emplace_back(taxid, countVal);
+          if (tid_id == bestTid) {
+            maxCount = std::make_pair(taxid, countVal);
+            maxCountValid = true;
+          }
         }
       }
-
-      result.taxidCount.reserve(floor.size() + tail.size());
-      result.taxidCount.insert(result.taxidCount.end(), floor.begin(),
-                               floor.end());
-      result.taxidCount.insert(result.taxidCount.end(), tail.begin(),
-                               tail.end());
     } else {
       for (const auto &[tid_id, rawScore] : tidScore) {
         double countVal = std::clamp(rawScore, 0.0, effCap);
@@ -900,8 +898,8 @@ void processSequence(
 
   if (use_em && !highConfPre && result.taxidCount.size() == 1 &&
       !tidScore.empty()) {
-    const bool unique_ok = (uniqueCount >= 3) ||
-                           (uniqueCount >= 2 && uniqueRatio >= 0.12);
+    const bool unique_ok = (uniqueCount >= 3.0) ||
+                           (uniqueCount >= 2.0 && uniqueRatio >= 0.12);
     if (!unique_ok) {
       constexpr size_t kMinCand = 4;
       if (result.taxidCount.size() < kMinCand) {
@@ -958,8 +956,8 @@ void processSequence(
       if (top.first != "unclassified") {
         auto itid = tax.str2id.find(top.first);
         if (itid != tax.str2id.end()) {
-          bool unique_ok = (uniqueCount >= 3) ||
-                           (uniqueCount >= 2 && uniqueRatio >= 0.12);
+          bool unique_ok = (uniqueCount >= 3.0) ||
+                           (uniqueCount >= 2.0 && uniqueRatio >= 0.12);
           presenceAcc->add_read_support(itid->second, unique_ok);
         }
       }

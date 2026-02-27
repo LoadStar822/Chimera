@@ -361,16 +361,26 @@ void run(ClassifyConfig config) {
   PresenceSummary presenceSummary(config.presence_breadth_bits);
   PresenceSummary *presencePtr = &presenceSummary;
 
-  constexpr uint32_t kLowDivProbeReads = 200000;
-  if (kLowDivProbeReads > 0) {
+  config.tail_risk_u = 1.0;
+  config.tail_risk_s = 1.0;
+
+  constexpr uint32_t kTailRiskProbeReads = 200000;
+  constexpr std::size_t kTailRiskTopK = 10;
+  constexpr double kTailRiskTopMassAnchor = 0.75;
+  constexpr double kTailRiskEffSpeciesAnchor = 32.0;
+  constexpr double kTailRiskRAnchor = 1.0 - kTailRiskTopMassAnchor;
+  constexpr int kTailRiskBeta = 5; // align with profile ceil(1/PROB_HI_BASE)
+
+  TailRiskProbeStats probeStats;
+  if (kTailRiskProbeReads > 0) {
     FileInfo probeInfo;
     std::vector<moodycamel::ConcurrentQueue<batchReads>> probeQueues(
         static_cast<size_t>(std::max<uint16_t>(1, config.threads)));
-    std::vector<classifyResult> probeResults;
-    std::atomic<bool> probe_done{false};
-    std::thread probeProducer([&]() {
-      parseReads(probeQueues, config, probeInfo,
-                 kLowDivProbeReads);
+      std::vector<classifyResult> probeResults;
+      std::atomic<bool> probe_done{false};
+      std::thread probeProducer([&]() {
+        parseReads(probeQueues, config, probeInfo,
+                 kTailRiskProbeReads);
       probe_done.store(true, std::memory_order_release);
     });
 
@@ -451,19 +461,32 @@ void run(ClassifyConfig config) {
     for (const auto &kv : species_counts) {
       counts.push_back(kv.second);
     }
-    constexpr std::size_t kLowDivTopK = 10;
-    constexpr double kLowDivTopMass = 0.75;
-    constexpr double kLowDivEffSpeciesMax = 32.0;
     std::size_t unclassified_reads =
         static_cast<std::size_t>(std::llround(unclassified_weight));
-    LowDivStats stats =
-        compute_low_div_stats(counts, unclassified_reads, kLowDivTopK);
-    bool low_div = is_low_diversity(stats, kLowDivTopMass, kLowDivEffSpeciesMax);
-
-    if (low_div) {
-      apply_low_div_overrides(config);
-    }
+    probeStats =
+        compute_tail_risk_probe_stats(counts, unclassified_reads, kTailRiskTopK);
+    const double tail_risk_r = clamp01(1.0 - probeStats.top_mass);
+    config.tail_risk_u = compute_tail_risk_u(tail_risk_r, probeStats.eff_species,
+                                             kTailRiskRAnchor,
+                                             kTailRiskEffSpeciesAnchor);
+    config.tail_risk_s = compute_tail_risk_s(config.tail_risk_u, kTailRiskBeta);
   }
+
+  const double tail_risk_hi = smoothstep(config.tail_risk_s, 0.60, 0.95);
+  if (!config.firstFilterBeta_user) {
+    config.firstFilterBeta = lerp(0.5, 0.8, tail_risk_hi);
+  }
+  config.em_conf_power = lerp(1.0, 2.0, tail_risk_hi);
+  std::cout << "[classify][auto] tail-risk"
+            << " u=" << std::fixed << std::setprecision(4) << config.tail_risk_u
+            << " s=" << config.tail_risk_s
+            << " top_mass=" << probeStats.top_mass
+            << " eff_species=" << probeStats.eff_species
+            << " uncls=" << probeStats.unclassified << "\n";
+  std::cout << "[classify][auto] firstFilterBeta=" << config.firstFilterBeta
+            << " em_conf_power=" << config.em_conf_power
+            << " hi_gate=" << tail_risk_hi << "\n";
+  std::cout << std::defaultfloat;
 
   FileInfo fileInfo;
   seqan3::contrib::bgzf_thread_count = config.threads;
@@ -544,12 +567,11 @@ void run(ClassifyConfig config) {
   }
 
   // Optional: saturate per-read sample weights to avoid extreme long tails
-  // dominating EM in high-diversity datasets (e.g., CAMI-long).
+  // dominating EM in tail-rich datasets (e.g., CAMI-long).
   //
   // Default: auto (enabled only when weights are present and highly skewed).
   {
-    const bool low_div = config.low_div_active;
-    double scale = 1.0;
+    const double sat_strength = smoothstep(config.tail_risk_s, 0.60, 0.95);
 
     std::vector<double> raw;
     raw.reserve(classifyResults.size());
@@ -558,7 +580,7 @@ void run(ClassifyConfig config) {
         raw.push_back(res.sample_weight);
       }
     }
-    if (!low_div && !raw.empty()) {
+    if (!raw.empty()) {
       std::sort(raw.begin(), raw.end());
       auto pick = [&](double q) -> double {
         if (raw.empty()) {
@@ -582,11 +604,14 @@ void run(ClassifyConfig config) {
       // Auto guard: only apply when the tail is clearly extreme.
       const bool skewed =
           (ratio_p99 >= 16.0) || (ratio_max >= 256.0) || (mx >= 1e5);
-      if (skewed && (med > 0.0) && (std::log1p(med) > 0.0)) {
-        scale = med / std::log1p(med);
+      if (skewed && sat_strength > 0.0 && (med > 0.0) &&
+          (std::log1p(med) > 0.0)) {
+        const double scale = med / std::log1p(med);
         for (auto &res : classifyResults) {
           if (res.sample_weight > 0.0) {
-            res.sample_weight = scale * std::log1p(res.sample_weight);
+            const double sat = scale * std::log1p(res.sample_weight);
+            res.sample_weight =
+                ((1.0 - sat_strength) * res.sample_weight) + (sat_strength * sat);
           }
         }
       }
@@ -603,109 +628,124 @@ void run(ClassifyConfig config) {
   classifyResults = std::move(posterior);
   classWeights = std::move(weights);
   posteriorModelUsed = true;
-		  if (posteriorModelUsed) {
-		    DecisionConfig decisionConfig;
-		    // Auto-tune post_pi_min for high-diversity samples:
-		    // a fixed global pi cut (e.g., 5e-4) can hard-kill low-abundance true taxa,
-		    // causing massive unclassified reads on datasets like CAMI-long/short.
-		    // We only relax the threshold under conservative guards (low-div stays
-		    // untouched), and further apply an avgLen-driven smooth curve for short
-		    // samples to reduce posterior_weight/em_post rejects.
-		    double tuned_post_pi_min = config.post_pi_min;
-		    double tuned_post_pi_min_weights = tuned_post_pi_min;
-		    double top10_mass = 0.0;
-		    double top50_mass = 0.0;
-		    double tail_base = 0.0;
-		    bool head_heavy = false;
-		    if (!config.low_div_active && tuned_post_pi_min > 0.0 &&
-		        !classWeights.empty()) {
-		      std::vector<double> weights;
-		      weights.reserve(classWeights.size());
-		      double total_mass = 0.0;
-		      for (const auto &kv : classWeights) {
-		        double w = kv.second;
-		        if (w > 0.0) {
-		          weights.push_back(w);
-		          total_mass += w;
-		        }
-		      }
-		      if (total_mass > 0.0 && weights.size() > 1) {
-		        std::sort(weights.begin(), weights.end(),
-		                  [](double a, double b) { return a > b; });
-		        const size_t topK = std::min<size_t>(10, weights.size());
-		        for (size_t i = 0; i < topK; ++i) {
-		          top10_mass += weights[i];
-		        }
-		        top10_mass /= total_mass;
-		        const size_t topK50 = std::min<size_t>(50, weights.size());
-		        for (size_t i = 0; i < topK50; ++i) {
-		          top50_mass += weights[i];
-		        }
-		        top50_mass /= total_mass;
-		
-		        auto tail_mass = [&](double pi_min) -> double {
-		          if (!(pi_min > 0.0)) {
-		            return 0.0;
-		          }
-		          double tail = 0.0;
-		          // weights are sorted desc, so scan from the end.
-		          for (size_t i = weights.size(); i-- > 0;) {
-		            double w = weights[i];
-		            if (w >= pi_min) {
-		              break;
-		            }
-		            tail += w;
-		          }
-		          return tail / total_mass;
-		        };
-		
-		        const double base = tuned_post_pi_min;
-		        tail_base = tail_mass(base);
-		        const double tail_trigger = 0.02; // relax only when base kills >2% mass
-		        // Extra low-div guard: avoid relaxing global pi in head-heavy samples,
-		        // otherwise ambiguous reads can get forced into random taxa, exploding FPs.
-		        const double head_guard10 = 0.65;
-		        const double head_guard50 = 0.90;
-			        head_heavy =
-			            (top10_mass >= head_guard10) || (top50_mass >= head_guard50);
-			        if (tail_base > tail_trigger && !head_heavy) {
-			          double target_tail = 0.01; // aim to kill <=1% mass by global pi cut
-			          // For long-read, high-diversity samples we can be slightly more
-			          // permissive to avoid pruning true low-abundance taxa.
-			          if (fileInfo.avgLen >= 2000) {
-			            target_tail = 0.005; // kill <=0.5% mass
-			          }
-			          const std::array<double, 4> candidates = {5e-4, 2e-4, 1e-4, 5e-5};
-			          double tuned = base;
-			          for (double c : candidates) {
-			            if (c > base) {
-		              continue;
-		            }
-		            tuned = c;
-		            if (tail_mass(c) <= target_tail) {
-		              break;
-		            }
-		          }
-		          tuned_post_pi_min = tuned;
-		        }
-		      }
-		    }
-		    tuned_post_pi_min_weights = tuned_post_pi_min;
-		
-		    constexpr double kAutoPostPiMinLoDefault = 1e-4;
-		    constexpr size_t kAutoPostPiMinL0 = 2000;
-		    constexpr size_t kAutoPostPiMinL1 = 800;
-		    double auto_pi_lo = kAutoPostPiMinLoDefault;
-		
-		    auto len_tune = ChimeraClassify::tune_post_pi_min_by_avg_len(
-		        tuned_post_pi_min_weights, auto_pi_lo, fileInfo.avgLen,
-		        config.low_div_active || head_heavy, kAutoPostPiMinL0,
-		        kAutoPostPiMinL1);
-		    tuned_post_pi_min = len_tune.tuned;
-		
-		
+  if (posteriorModelUsed) {
+    DecisionConfig decisionConfig;
+    double tuned_post_pi_min = config.post_pi_min;
+    double tuned_post_pi_min_weights = tuned_post_pi_min;
+    double top10_mass = 0.0;
+    double top50_mass = 0.0;
+    double tail_base = 0.0;
+    double head_heavy_score = 0.0;
+    double relax_strength = 0.0;
+
+    if (tuned_post_pi_min > 0.0 && !classWeights.empty()) {
+      std::vector<double> weights;
+      weights.reserve(classWeights.size());
+      double total_mass = 0.0;
+      for (const auto &kv : classWeights) {
+        const double w = kv.second;
+        if (w > 0.0) {
+          weights.push_back(w);
+          total_mass += w;
+        }
+      }
+      if (total_mass > 0.0 && weights.size() > 1) {
+        std::sort(weights.begin(), weights.end(),
+                  [](double a, double b) { return a > b; });
+        const size_t topK = std::min<size_t>(10, weights.size());
+        for (size_t i = 0; i < topK; ++i) {
+          top10_mass += weights[i];
+        }
+        top10_mass /= total_mass;
+        const size_t topK50 = std::min<size_t>(50, weights.size());
+        for (size_t i = 0; i < topK50; ++i) {
+          top50_mass += weights[i];
+        }
+        top50_mass /= total_mass;
+
+        const double h10 = clamp01((top10_mass - 0.65) / (1.0 - 0.65));
+        const double h50 = clamp01((top50_mass - 0.90) / (1.0 - 0.90));
+        head_heavy_score = std::max(h10, h50);
+        relax_strength =
+            clamp01(config.tail_risk_s * (1.0 - head_heavy_score));
+
+        auto tail_mass = [&](double pi_min) -> double {
+          if (!(pi_min > 0.0)) {
+            return 0.0;
+          }
+          double tail = 0.0;
+          for (size_t i = weights.size(); i-- > 0;) {
+            const double w = weights[i];
+            if (w >= pi_min) {
+              break;
+            }
+            tail += w;
+          }
+          return tail / total_mass;
+        };
+
+        const double base = tuned_post_pi_min;
+        tail_base = tail_mass(base);
+        const double tail_trigger = 0.02;
+        if (tail_base > tail_trigger && relax_strength > 0.0) {
+          double target_tail = 0.01;
+          if (fileInfo.avgLen >= 2000) {
+            target_tail = 0.005;
+          }
+          const std::array<double, 4> candidates = {5e-4, 2e-4, 1e-4, 5e-5};
+          double tuned_candidate = base;
+          for (double c : candidates) {
+            if (c > base) {
+              continue;
+            }
+            tuned_candidate = c;
+            if (tail_mass(c) <= target_tail) {
+              break;
+            }
+          }
+          if (tuned_candidate < base) {
+            const double log_base = std::log10(base);
+            const double log_tuned = std::log10(tuned_candidate);
+            const double log_mix =
+                ((1.0 - relax_strength) * log_base) +
+                (relax_strength * log_tuned);
+            double tuned = std::pow(10.0, log_mix);
+            tuned = std::clamp(tuned, tuned_candidate, base);
+            tuned_post_pi_min = tuned;
+          }
+        }
+      }
+    }
+    tuned_post_pi_min_weights = tuned_post_pi_min;
+
+    constexpr double kAutoPostPiMinLoDefault = 1e-4;
+    constexpr size_t kAutoPostPiMinL0 = 2000;
+    constexpr size_t kAutoPostPiMinL1 = 800;
+    const double auto_pi_lo = kAutoPostPiMinLoDefault;
+
+    auto len_tune = ChimeraClassify::tune_post_pi_min_by_avg_len(
+        tuned_post_pi_min_weights, auto_pi_lo, fileInfo.avgLen, relax_strength,
+        kAutoPostPiMinL0, kAutoPostPiMinL1);
+    tuned_post_pi_min = len_tune.tuned;
+
     decisionConfig.min_class_weight = tuned_post_pi_min;
-    decisionConfig.allow_fallback_on_reject = !config.low_div_active;
+    decisionConfig.fallback_strength = relax_strength;
+    decisionConfig.selective_reject_strength = relax_strength;
+    decisionConfig.fallback_gap_min = 0.10;
+    std::cout << "[classify][auto] post-pi"
+              << " s=" << std::fixed << std::setprecision(4)
+              << config.tail_risk_s << " head_heavy=" << head_heavy_score
+              << " relax=" << relax_strength
+              << " base=" << config.post_pi_min
+              << " tail_base=" << tail_base
+              << " tuned=" << tuned_post_pi_min
+              << " len_t=" << len_tune.t
+              << " fallback_strength=" << decisionConfig.fallback_strength
+              << " selective_strength="
+              << decisionConfig.selective_reject_strength
+              << " fallback_gap_min=" << decisionConfig.fallback_gap_min
+              << "\n";
+    std::cout << std::defaultfloat;
 
     postEmDecision(classifyResults, decisionConfig, classWeights, tax,
                    &presenceDecision, weightCtx.ncbiTaxdump, fileInfo.avgLen);

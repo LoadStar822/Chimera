@@ -194,7 +194,7 @@ PresenceStats &PresenceAccumulator::touch(uint32_t tid) {
 }
 
 void PresenceAccumulator::add_target(uint32_t tid, double hit_weight,
-                                     double score_weight, bool uniqueEdge,
+                                     double score_weight, double unique_strength,
                                      bool localUniqueEdge,
                                      uint32_t unique_bucket,
                                      uint32_t breadth_bucket) {
@@ -203,9 +203,10 @@ void PresenceAccumulator::add_target(uint32_t tid, double hit_weight,
   const uint64_t score_inc = to_fixed(score_weight);
   entry.score += score_inc;
   entry.hits += hit_inc;
-  if (uniqueEdge) {
-    entry.uniqueHits += hit_inc;
-    entry.uniqueScore += score_inc;
+  const double u = std::clamp(unique_strength, 0.0, 1.0);
+  if (u > 0.0) {
+    entry.uniqueHits += to_fixed(hit_weight * u);
+    entry.uniqueScore += to_fixed(score_weight * u);
   }
   if (localUniqueEdge && sketchWords > 0) {
     ensure_sketch(entry, sketchWords);
@@ -609,10 +610,16 @@ void postEmDecision(
 
   constexpr double kPresencePiFloor = 1e-6;
   constexpr double kRejectFactor = 2.0;
-		  constexpr size_t kSelectiveRejectFullnMin = 10;
-		  constexpr size_t kSelectiveRejectFullnPrunedMax = 6;
-		  const bool selective_reject_fulln_enabled =
-		      decisionConfig.allow_fallback_on_reject && meanReadLen >= 1000;
+  const double fallback_strength =
+      std::clamp(decisionConfig.fallback_strength, 0.0, 1.0);
+  const double selective_strength =
+      std::clamp(decisionConfig.selective_reject_strength, 0.0, 1.0);
+  const bool selective_reject_fulln_enabled =
+      selective_strength > 1e-9 && meanReadLen >= 1000;
+  const size_t selective_fulln_min = static_cast<size_t>(
+      std::llround(lerp(18.0, 10.0, selective_strength)));
+  const size_t selective_pruned_max = static_cast<size_t>(
+      std::llround(lerp(4.0, 6.0, selective_strength)));
 
   double presence_tau = std::numeric_limits<double>::infinity();
   double presence_strict_tau = std::numeric_limits<double>::infinity();
@@ -655,8 +662,8 @@ void postEmDecision(
 	    if (lp >= presence_strict_tau) {
 	      return PresenceLevel::kAccepted;
 	    }
-	    // Use symmetric strong-negative rejection to avoid over-penalizing
-	    // mid-confidence taxa (especially in high-diversity samples).
+    // Use symmetric strong-negative rejection to avoid over-penalizing
+    // mid-confidence taxa (especially in tail-rich samples).
 	    // Accept: lp >= strict_tau (possibly raised by cap).
 	    // Reject:  lp <= -tau (strong evidence of absence).
 	    // Else:    Unknown (neutral).
@@ -691,7 +698,7 @@ void postEmDecision(
 	
 
 	    // Ensure POST_TOPK uses the same (pruned/renormalized) posterior view as the
-	    // final decision logic. This reduces long-tail noise in low-diversity
+    // final decision logic. This reduces long-tail noise in head-heavy
 	    // profile aggregation (e.g., avoids peaky-rescue picking hitchhiking taxa).
     result.posteriors = posterior;
 
@@ -746,9 +753,9 @@ void postEmDecision(
 			    if (pass) {
 			      const size_t full_n = posterior_full.size();
 			      const size_t pruned_n = posterior.size();
-			      if (selective_reject_fulln_enabled && pruned.audit.pruned_any &&
-			          full_n >= kSelectiveRejectFullnMin &&
-			          pruned_n <= kSelectiveRejectFullnPrunedMax) {
+          if (selective_reject_fulln_enabled && pruned.audit.pruned_any &&
+              full_n >= selective_fulln_min &&
+              pruned_n <= selective_pruned_max) {
 			        bool rescued = false;
 				        if (!result.best_taxid_hint.empty() &&
 				            result.best_taxid_hint != kUnclassified) {
@@ -850,20 +857,16 @@ void postEmDecision(
     //                    top_score >= 0.35 && second_score >= 0.25);
 	    // if (keep_multi) { ... }
 
-		    // High-diversity: allow a conservative fallback on reject to reduce
-		    // unclassified reads, but only when the posterior is clearly separated
-		    // (large top1-top2 gap). This avoids turning ambiguous reads into FP+FN.
-				    if (decisionConfig.allow_fallback_on_reject) {
-				      const double gap = top_score - second_score;
-				      const double base_gap_min =
-				          std::max(0.0, std::min(1.0, decisionConfig.fallback_gap_min));
-				      const bool reject_by_weight = !weight_ok;
-				      const bool reject_is_em_post = !reject_by_weight;
-					      const double gap_min = base_gap_min;
-
-			      if (gap < gap_min) {
-				        // keep rejected
-			      } else {
+        // Continuous fallback: strength=0 keeps reject, strength=1 behaves like
+        // previous tail-rich fallback.
+        if (fallback_strength > 1e-9) {
+          const double gap = top_score - second_score;
+          const double base_gap_min =
+              std::max(0.0, std::min(1.0, decisionConfig.fallback_gap_min));
+          const double gap_min = lerp(1.0, base_gap_min, fallback_strength);
+          if (gap < gap_min) {
+            // keep rejected
+          } else {
 			        bool genus_conflict_block = false;
 			        if (ncbiTaxdump && ncbiTaxdump->enabled() &&
 			            posterior.size() > 1 && gap < kFallbackGenusConflictGapMax) {
@@ -928,9 +931,9 @@ void postEmDecision(
 					            result.reject_reason.clear();
 					            continue;
 				          }
-				        }
-				      }
-				    }
+            }
+          }
+        }
 
 		    result.taxidCount.clear();
 	    result.taxidCount.emplace_back(kUnclassified, 1.0);
