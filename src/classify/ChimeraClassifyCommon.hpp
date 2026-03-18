@@ -126,6 +126,9 @@ struct WeightingContext {
   // species (collapsing strain/subspecies taxids). This avoids per-hit taxdump
   // lookups in hot loops.
   const std::vector<uint32_t> *tid2speciesRep{nullptr};
+  // Optional NCBI-only: map internal tid_id -> genus taxid for fast
+  // same-genus grouping in coarse candidate routing.
+  const std::vector<uint32_t> *tid2genus{nullptr};
   // Optional NCBI-only: map internal tid_id -> species group id (numeric NCBI
   // species taxid, or a stable synthetic id for non-numeric taxids). Used for
   // computing deg/exclusivity at the species level without changing output
@@ -523,7 +526,8 @@ void processSequence(
     const std::vector<uint64_t> &hashs1, size_t readLen,
     ChimeraBuild::IMCFConfig &imcfConfig,
     std::vector<std::vector<std::string>> &indexToTaxid, const TaxDict &tax,
-    ClassifyConfig &config, const WeightingContext &weightCtx, GroupHeat &heat,
+    ClassifyConfig &config, const WeightingContext &weightCtx,
+    const AutoClassifyPolicy &autoPolicy, GroupHeat &heat,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
     PresenceAccumulator *presenceAcc);
@@ -535,6 +539,7 @@ void processBatch(
     std::vector<classifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
+    const AutoClassifyPolicy &autoPolicy,
     PresenceAccumulator *presenceAcc);
 
 void classify_streaming(
@@ -546,7 +551,8 @@ void classify_streaming(
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
     std::atomic<bool> &producer_done,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
-    const WeightingContext &weightCtx, PresenceSummary *presenceSummary);
+    const WeightingContext &weightCtx, const AutoClassifyPolicy &autoPolicy,
+    PresenceSummary *presenceSummary);
 
 void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
@@ -556,6 +562,7 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               const TaxDict &tax, std::vector<classifyResult> &classifyResults,
               FileInfo &fileInfo,
               const chimera::feature::Params &feature_params,
-              size_t feature_min_len, const WeightingContext &weightCtx);
+              size_t feature_min_len, const WeightingContext &weightCtx,
+              const AutoClassifyPolicy &autoPolicy);
 
 } // namespace ChimeraClassify

@@ -603,7 +603,7 @@ void postEmDecision(
     std::vector<classifyResult> &results, const DecisionConfig &decisionConfig,
     const std::unordered_map<std::string, double> &classWeights,
     const TaxDict &tax, const PresenceDecision *presenceDecision,
-    const NcbiTaxdump *ncbiTaxdump, size_t meanReadLen) {
+    const NcbiTaxdump *ncbiTaxdump, const PostDecisionPolicy &postPolicy) {
   constexpr const char *kUnclassified = "unclassified";
 
 		  using PresenceLevel = PostEmPresenceLevel;
@@ -615,7 +615,7 @@ void postEmDecision(
   const double selective_strength =
       std::clamp(decisionConfig.selective_reject_strength, 0.0, 1.0);
   const bool selective_reject_fulln_enabled =
-      selective_strength > 1e-9 && meanReadLen >= 1000;
+      selective_strength > 1e-9 && postPolicy.enable_selective_reject;
   const size_t selective_fulln_min = static_cast<size_t>(
       std::llround(lerp(18.0, 10.0, selective_strength)));
   const size_t selective_pruned_max = static_cast<size_t>(

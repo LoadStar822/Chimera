@@ -1,10 +1,11 @@
 #include "ChimeraClassifyCommon.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <limits>
+#include <mutex>
 #include <numeric>
 #include <thread>
 #include <utility>
@@ -52,7 +53,8 @@ void processSequence(
     const std::vector<uint64_t> &hashs1, size_t readLen,
     ChimeraBuild::IMCFConfig &imcfConfig,
     std::vector<std::vector<std::string>> &indexToTaxid, const TaxDict &tax,
-    ClassifyConfig &config, const WeightingContext &weightCtx, GroupHeat &heat,
+    ClassifyConfig &config, const WeightingContext &weightCtx,
+    const AutoClassifyPolicy &autoPolicy, GroupHeat &heat,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
     PresenceAccumulator *presenceAcc) {
@@ -101,6 +103,23 @@ void processSequence(
   }
   double presence_weight = 1.0;
 
+  const bool taxpool_enabled = autoPolicy.candidate.enable_taxpool;
+  const char *dump_preem_env = std::getenv("CHIMERA_DUMP_PREEM_TSV");
+  const bool dump_preem_enabled = (dump_preem_env && dump_preem_env[0] != '\0');
+  const std::string dump_preem_path =
+      dump_preem_enabled ? std::string(dump_preem_env) : std::string();
+  auto map_species_rep = [&](uint32_t tid_id) -> uint32_t {
+    if (weightCtx.tid2speciesRep && tid_id < weightCtx.tid2speciesRep->size()) {
+      return (*weightCtx.tid2speciesRep)[tid_id];
+    }
+    return tid_id;
+  };
+  auto map_genus = [&](uint32_t tid_id) -> uint32_t {
+    if (weightCtx.tid2genus && tid_id < weightCtx.tid2genus->size()) {
+      return (*weightCtx.tid2genus)[tid_id];
+    }
+    return 0u;
+  };
 
   // Sample a subset of hashes for coarse candidate selection.
   size_t targetSample = hashNum / 2;
@@ -191,6 +210,11 @@ void processSequence(
   std::vector<std::pair<uint32_t, uint16_t>> touchedS;
   touchedS.reserve(64);
   robin_hood::unordered_flat_map<uint32_t, uint32_t> sampleBinScore;
+  robin_hood::unordered_flat_map<uint32_t, uint64_t> repCoarseScore;
+  robin_hood::unordered_flat_map<uint32_t, uint64_t> genusCoarseScore;
+  robin_hood::unordered_flat_map<uint32_t, uint32_t> repRareSupport;
+  robin_hood::unordered_flat_map<uint32_t, uint32_t> genusRareSupport;
+  std::vector<std::pair<uint32_t, uint32_t>> rankedBins;
   uint64_t coarseTotal = 0;
   uint64_t sampleCovered = 0;
   std::vector<size_t> deferredEval;
@@ -208,6 +232,15 @@ void processSequence(
       }
       coarseTotal += contrib;
       sampleBinScore[bi] += contrib;
+      if (bi < tax.idx2id.size() && sp < tax.idx2id[bi].size()) {
+        const uint32_t tid_id = tax.idx2id[bi][sp];
+        const uint32_t rep_id = map_species_rep(tid_id);
+        repCoarseScore[rep_id] += static_cast<uint64_t>(contrib);
+        const uint32_t genus_id = map_genus(rep_id);
+        if (genus_id != 0u) {
+          genusCoarseScore[genus_id] += static_cast<uint64_t>(contrib);
+        }
+      }
     }
   }
 
@@ -227,20 +260,72 @@ void processSequence(
   robin_hood::unordered_flat_set<uint32_t> lowDegPreserve;
   lowDegPreserve.reserve(64);
 
+  uint32_t rare_freq_threshold = 2u;
+  if (weightCtx.freqSketch) {
+    const uint32_t q = static_cast<uint32_t>(
+        std::llround(std::max(1.0, weightCtx.freqQuantile * 0.25)));
+    rare_freq_threshold = std::clamp<uint32_t>(q, 2u, 32u);
+  }
   if (!routeVals.empty()) {
     std::vector<uint32_t> routed;
+    std::vector<uint32_t> rareRepHits;
+    std::vector<uint32_t> rareGenusHits;
     routed.reserve(16);
+    rareRepHits.reserve(16);
+    rareGenusHits.reserve(16);
     for (auto v : routeVals) {
       routed.clear();
       imcf.route(v, routed);
       if (routed.empty()) {
         continue;
       }
-      if (routed.size() <= 2) {
+      const bool low_fanout = (routed.size() <= 2);
+      const bool low_freq =
+          (weightCtx.freqSketch &&
+           weightCtx.freqSketch->estimate(v) <= rare_freq_threshold);
+      if (low_fanout) {
         for (uint32_t b : routed) {
           if (b < binNumAll) {
             candidateSet.insert(b);
             lowDegPreserve.insert(b);
+          }
+        }
+      }
+      if (low_fanout || low_freq) {
+        rareRepHits.clear();
+        rareGenusHits.clear();
+        imcf.bulkContain_events_subset(
+            v, routed, [&](uint32_t bin, uint16_t sp) {
+              if (bin >= tax.idx2id.size()) {
+                return;
+              }
+              const auto &speciesVec = tax.idx2id[bin];
+              if (sp >= speciesVec.size()) {
+                return;
+              }
+              const uint32_t tid_id = speciesVec[sp];
+              const uint32_t rep_id = map_species_rep(tid_id);
+              rareRepHits.push_back(rep_id);
+              const uint32_t genus_id = map_genus(rep_id);
+              if (genus_id != 0u) {
+                rareGenusHits.push_back(genus_id);
+              }
+            });
+        if (!rareRepHits.empty()) {
+          std::sort(rareRepHits.begin(), rareRepHits.end());
+          rareRepHits.erase(std::unique(rareRepHits.begin(), rareRepHits.end()),
+                            rareRepHits.end());
+          for (uint32_t rep_id : rareRepHits) {
+            repRareSupport[rep_id] += 1u;
+          }
+        }
+        if (!rareGenusHits.empty()) {
+          std::sort(rareGenusHits.begin(), rareGenusHits.end());
+          rareGenusHits.erase(
+              std::unique(rareGenusHits.begin(), rareGenusHits.end()),
+              rareGenusHits.end());
+          for (uint32_t genus_id : rareGenusHits) {
+            genusRareSupport[genus_id] += 1u;
           }
         }
       }
@@ -249,23 +334,23 @@ void processSequence(
 
   constexpr double coverageTarget = 0.92;
   if (coarseTotal > 0 && !sampleBinScore.empty()) {
-    std::vector<std::pair<uint32_t, uint32_t>> ranked;
-    ranked.reserve(sampleBinScore.size());
+    rankedBins.clear();
+    rankedBins.reserve(sampleBinScore.size());
     for (const auto &kv : sampleBinScore) {
-      ranked.emplace_back(kv.first, kv.second);
+      rankedBins.emplace_back(kv.first, kv.second);
     }
-    std::sort(ranked.begin(), ranked.end(),
+    std::sort(rankedBins.begin(), rankedBins.end(),
               [](const auto &a, const auto &b) { return a.second > b.second; });
 
-    const double head_mass = compute_head_mass(ranked, 10, coarseTotal);
+    const double head_mass = compute_head_mass(rankedBins, 10, coarseTotal);
     candidateCap = compute_candidate_cap(baseCandidateCap, maxCandidateCap,
                                          head_mass, kHeadMassThresh,
-                                         ranked.size());
+                                         rankedBins.size());
 
     uint64_t goal = static_cast<uint64_t>(
         std::ceil(static_cast<double>(coarseTotal) * coverageTarget));
     uint64_t covered = 0;
-    for (const auto &[bin, score] : ranked) {
+    for (const auto &[bin, score] : rankedBins) {
       if (bin >= binNumAll) {
         continue;
       }
@@ -323,6 +408,219 @@ void processSequence(
   if (!fallback_full) {
     std::sort(topBins.begin(), topBins.end());
     topBins.erase(std::unique(topBins.begin(), topBins.end()), topBins.end());
+  }
+
+  bool taxpool_mode = false;
+  const bool short_like_read = (readLen <= 600);
+  const double taxpool_tail_gate = short_like_read ? 0.20 : 0.35;
+  if (taxpool_enabled && !fallback_full && tail_risk_hi > taxpool_tail_gate &&
+      coarseTotal > 0 && !repCoarseScore.empty() && !genusCoarseScore.empty() &&
+      weightCtx.tid2genus) {
+    std::vector<std::pair<uint32_t, uint64_t>> repRanked;
+    std::vector<std::pair<uint32_t, uint64_t>> genusRanked;
+    repRanked.reserve(repCoarseScore.size());
+    genusRanked.reserve(genusCoarseScore.size());
+    uint64_t repTotal = 0;
+    for (const auto &kv : repCoarseScore) {
+      if (kv.second == 0) {
+        continue;
+      }
+      repRanked.emplace_back(kv.first, kv.second);
+      repTotal += kv.second;
+    }
+    for (const auto &kv : genusCoarseScore) {
+      if (kv.second == 0 || kv.first == 0u) {
+        continue;
+      }
+      genusRanked.emplace_back(kv.first, kv.second);
+    }
+    std::sort(repRanked.begin(), repRanked.end(),
+              [](const auto &a, const auto &b) { return a.second > b.second; });
+    std::sort(genusRanked.begin(), genusRanked.end(),
+              [](const auto &a, const auto &b) { return a.second > b.second; });
+    if (!repRanked.empty() && !genusRanked.empty() && repTotal > 0) {
+      const uint32_t dominant_genus = genusRanked.front().first;
+      const double dominant_genus_share =
+          static_cast<double>(genusRanked.front().second) /
+          static_cast<double>(coarseTotal);
+      const size_t repTopN = std::min<size_t>(10, repRanked.size());
+      uint64_t repHeadSum = 0;
+      for (size_t i = 0; i < repTopN; ++i) {
+        repHeadSum += repRanked[i].second;
+      }
+      const double head_mass_rep =
+          static_cast<double>(repHeadSum) / static_cast<double>(repTotal);
+      const uint64_t top1_rep_score = repRanked.front().second;
+      size_t dominant_crowded = 0;
+      for (const auto &[rep_id, score] : repRanked) {
+        if (map_genus(rep_id) != dominant_genus) {
+          continue;
+        }
+        if (score * 10ull >= top1_rep_score * 4ull) {
+          ++dominant_crowded;
+        }
+      }
+      const bool short_like = short_like_read;
+      taxpool_mode =
+          (dominant_genus_share >= 0.72) ||
+          (short_like && dominant_genus_share >= 0.60) ||
+          (head_mass_rep >= 0.55 && dominant_genus_share >= 0.65) ||
+          (dominant_crowded >= 3);
+      if (taxpool_mode) {
+        const size_t rep_pool_target = short_like ? 16u : 6u;
+        const size_t dominant_limit = short_like ? 5u : 3u;
+        const size_t non_dominant_limit = short_like ? 5u : 2u;
+        std::vector<uint32_t> repPool;
+        repPool.reserve(rep_pool_target);
+        robin_hood::unordered_flat_set<uint32_t> repSeen;
+        repSeen.reserve(rep_pool_target * 2 + 4);
+        auto add_rep = [&](uint32_t rep_id) -> bool {
+          if (repSeen.find(rep_id) != repSeen.end()) {
+            return false;
+          }
+          repSeen.insert(rep_id);
+          repPool.push_back(rep_id);
+          return true;
+        };
+
+        add_rep(repRanked.front().first);
+        size_t dominant_added = 1;
+        std::vector<uint32_t> dominantCandidates;
+        dominantCandidates.reserve(repRanked.size());
+        for (const auto &[rep_id, _] : repRanked) {
+          if (map_genus(rep_id) != dominant_genus) {
+            continue;
+          }
+          if (rep_id == repRanked.front().first) {
+            continue;
+          }
+          dominantCandidates.push_back(rep_id);
+        }
+        std::sort(dominantCandidates.begin(), dominantCandidates.end(),
+                  [&](uint32_t a, uint32_t b) {
+                    const uint32_t ar = repRareSupport.count(a) ? repRareSupport[a] : 0u;
+                    const uint32_t br = repRareSupport.count(b) ? repRareSupport[b] : 0u;
+                    if (ar != br) {
+                      return ar > br;
+                    }
+                    const uint64_t as = repCoarseScore.count(a) ? repCoarseScore[a] : 0ull;
+                    const uint64_t bs = repCoarseScore.count(b) ? repCoarseScore[b] : 0ull;
+                    if (as != bs) {
+                      return as > bs;
+                    }
+                    return a < b;
+                  });
+        for (uint32_t rep_id : dominantCandidates) {
+          if (repPool.size() >= rep_pool_target || dominant_added >= dominant_limit) {
+            break;
+          }
+          if (add_rep(rep_id)) {
+            ++dominant_added;
+          }
+        }
+
+        size_t non_dominant_added = 0;
+        struct GenusPick {
+          uint32_t genus_id{0u};
+          uint32_t rep_id{0u};
+          uint32_t rare_support{0u};
+          uint64_t coarse_score{0u};
+        };
+        std::vector<GenusPick> nonDominantGenusPicks;
+        nonDominantGenusPicks.reserve(genusCoarseScore.size());
+        for (const auto &[genus_id, coarse_score] : genusCoarseScore) {
+          if (genus_id == 0u || genus_id == dominant_genus || coarse_score == 0u) {
+            continue;
+          }
+          uint32_t best_rep = 0u;
+          uint32_t best_rep_rare = 0u;
+          uint64_t best_rep_coarse = 0u;
+          bool have_best_rep = false;
+          for (const auto &[rep_id, rep_score] : repCoarseScore) {
+            if (rep_score == 0u || map_genus(rep_id) != genus_id) {
+              continue;
+            }
+            const uint32_t rep_rare =
+                repRareSupport.count(rep_id) ? repRareSupport[rep_id] : 0u;
+            if (!have_best_rep || rep_rare > best_rep_rare ||
+                (rep_rare == best_rep_rare && rep_score > best_rep_coarse) ||
+                (rep_rare == best_rep_rare && rep_score == best_rep_coarse &&
+                 rep_id < best_rep)) {
+              have_best_rep = true;
+              best_rep = rep_id;
+              best_rep_rare = rep_rare;
+              best_rep_coarse = rep_score;
+            }
+          }
+          if (!have_best_rep) {
+            continue;
+          }
+          const uint32_t g_rare =
+              genusRareSupport.count(genus_id) ? genusRareSupport[genus_id] : 0u;
+          nonDominantGenusPicks.push_back(
+              {genus_id, best_rep, g_rare, coarse_score});
+        }
+        std::sort(nonDominantGenusPicks.begin(), nonDominantGenusPicks.end(),
+                  [](const GenusPick &a, const GenusPick &b) {
+                    if (a.rare_support != b.rare_support) {
+                      return a.rare_support > b.rare_support;
+                    }
+                    if (a.coarse_score != b.coarse_score) {
+                      return a.coarse_score > b.coarse_score;
+                    }
+                    if (a.genus_id != b.genus_id) {
+                      return a.genus_id < b.genus_id;
+                    }
+                    return a.rep_id < b.rep_id;
+                  });
+        for (const auto &pick : nonDominantGenusPicks) {
+          if (repPool.size() >= rep_pool_target ||
+              non_dominant_added >= non_dominant_limit) {
+            break;
+          }
+          if (add_rep(pick.rep_id)) {
+            ++non_dominant_added;
+          }
+        }
+        for (const auto &[rep_id, _] : repRanked) {
+          if (repPool.size() >= rep_pool_target) {
+            break;
+          }
+          add_rep(rep_id);
+        }
+
+        robin_hood::unordered_flat_set<uint32_t> taxpoolBins;
+        taxpoolBins.reserve(512);
+        for (uint32_t rep_id : repPool) {
+          if (rep_id >= tax.tid2bin.size()) {
+            continue;
+          }
+          for (uint32_t bin : tax.tid2bin[rep_id]) {
+            if (bin < binNumAll) {
+              taxpoolBins.insert(bin);
+            }
+          }
+        }
+        for (uint32_t bin : lowDegPreserve) {
+          if (bin < binNumAll) {
+            taxpoolBins.insert(bin);
+          }
+        }
+        constexpr size_t kLegacyGlobalTopBins = 16;
+        for (size_t i = 0; i < rankedBins.size() && i < kLegacyGlobalTopBins; ++i) {
+          if (rankedBins[i].first < binNumAll) {
+            taxpoolBins.insert(rankedBins[i].first);
+          }
+        }
+        if (!taxpoolBins.empty()) {
+          topBins.assign(taxpoolBins.begin(), taxpoolBins.end());
+          std::sort(topBins.begin(), topBins.end());
+          topBins.erase(std::unique(topBins.begin(), topBins.end()),
+                        topBins.end());
+          fallback_full = (topBins.size() == binNumAll);
+        }
+      }
+    }
   }
 
   if (!fallback_full) {
@@ -691,7 +989,7 @@ void processSequence(
   }
 
   bool expanded = false;
-  if (!fallback_full && bestTid < tax.tid2bin.size()) {
+  if (!taxpool_mode && !fallback_full && bestTid < tax.tid2bin.size()) {
     const auto &shards = tax.tid2bin[bestTid];
     for (uint32_t bin : shards) {
       if (topBinSet.find(bin) == topBinSet.end()) {
@@ -861,6 +1159,40 @@ void processSequence(
           static_cast<size_t>(std::llround((1.0 - tail_risk_hi) *
                                            static_cast<double>(floorK_max))));
 
+      const uint32_t best_genus_id = map_genus(bestTid);
+
+      if (dump_preem_enabled) {
+        static std::mutex preem_dump_mu;
+        static bool preem_dump_header_written = false;
+        std::lock_guard<std::mutex> lock(preem_dump_mu);
+        std::ofstream dump_os(dump_preem_path,
+                              std::ios::out | std::ios::app);
+        if (dump_os.is_open()) {
+          if (!preem_dump_header_written) {
+            dump_os
+                << "read_id\ttid\trank\tscore\tthr_base\tfloor_count\tbest_tid\tbest_genus\tcand_genus\tbaseline_kept\n";
+            preem_dump_header_written = true;
+          }
+          for (size_t i = 0; i < ranked.size(); ++i) {
+            const uint32_t tid_id = ranked[i].first;
+            if (tid_id >= tax.id2str.size()) {
+              continue;
+            }
+            const double countVal = std::clamp(ranked[i].second, 0.0, effCap);
+            if (countVal <= 0.0) {
+              continue;
+            }
+            const bool baseline_kept = (i < floorCount || countVal >= thr_base);
+            const uint32_t cand_genus_id = map_genus(tid_id);
+            dump_os << id << '\t' << tax.id2str[tid_id] << '\t' << i << '\t'
+                    << countVal << '\t' << thr_base << '\t' << floorCount << '\t'
+                    << bestTaxidStr << '\t' << best_genus_id << '\t'
+                    << cand_genus_id << '\t' << (baseline_kept ? 1 : 0)
+                    << '\n';
+          }
+        }
+      }
+
       result.taxidCount.reserve(ranked.size());
       for (size_t i = 0; i < ranked.size(); ++i) {
         const uint32_t tid_id = ranked[i].first;
@@ -871,7 +1203,8 @@ void processSequence(
         if (countVal <= 0.0) {
           continue;
         }
-        if (i < floorCount || countVal >= thr_base) {
+        const bool keep = (i < floorCount || countVal >= thr_base);
+        if (keep) {
           const std::string &taxid = tax.id2str[tid_id];
           result.taxidCount.emplace_back(taxid, countVal);
           if (tid_id == bestTid) {
@@ -998,6 +1331,7 @@ void processBatch(
     std::vector<classifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
+    const AutoClassifyPolicy &autoPolicy,
     PresenceAccumulator *presenceAcc) {
   std::vector<uint64_t> hashs1;
   hashs1.reserve(2048);
@@ -1028,8 +1362,8 @@ void processBatch(
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
       processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
-                      weightCtx, heat, imcf, batch.ids[i], classifyResults,
-                      fileInfo, presenceAcc);
+                      weightCtx, autoPolicy, heat, imcf, batch.ids[i],
+                      classifyResults, fileInfo, presenceAcc);
     }
   } else {
     for (size_t i = 0; i < batch.seqs.size(); i++) {
@@ -1052,8 +1386,8 @@ void processBatch(
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
       processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
-                      weightCtx, heat, imcf, batch.ids[i], classifyResults,
-                      fileInfo, presenceAcc);
+                      weightCtx, autoPolicy, heat, imcf, batch.ids[i],
+                      classifyResults, fileInfo, presenceAcc);
     }
   }
 }
@@ -1067,7 +1401,8 @@ void classify_streaming(
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
     std::atomic<bool> &producer_done,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
-    const WeightingContext &weightCtx, PresenceSummary *presenceSummary) {
+    const WeightingContext &weightCtx, const AutoClassifyPolicy &autoPolicy,
+    PresenceSummary *presenceSummary) {
 
 #pragma omp parallel
   {
@@ -1099,7 +1434,7 @@ void classify_streaming(
       if (readQueue.try_dequeue(batch)) {
         processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
                      localClassifyResults, feature_params, feature_min_len,
-                     localFileInfo, heat, weightCtx, presencePtr);
+                     localFileInfo, heat, weightCtx, autoPolicy, presencePtr);
         continue;
       }
       if (producer_done.load(std::memory_order_acquire)) {
@@ -1146,7 +1481,7 @@ void classify(
     std::vector<std::vector<std::string>> &indexToTaxid, const TaxDict &tax,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
-    const WeightingContext &weightCtx) {
+    const WeightingContext &weightCtx, const AutoClassifyPolicy &autoPolicy) {
 
 #pragma omp parallel
   {
@@ -1172,7 +1507,7 @@ void classify(
     while (readQueue.try_dequeue(batch)) {
       processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
                    localClassifyResults, feature_params, feature_min_len,
-                   localFileInfo, heat, weightCtx, nullptr);
+                   localFileInfo, heat, weightCtx, autoPolicy, nullptr);
     }
 #pragma omp critical
     {

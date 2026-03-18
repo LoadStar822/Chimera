@@ -68,6 +68,45 @@ namespace ChimeraClassify {
 		std::unordered_set<std::string> uniqueTaxids;
 	};
 
+	enum class ReadRegime {
+		ShortLike,
+		LongLike,
+	};
+
+	struct CandidatePolicy {
+		bool enable_taxpool{ true };
+	};
+
+	struct PostDecisionPolicy {
+		bool disable_fallback{ false };
+		bool enable_selective_reject{ false };
+	};
+
+	struct AutoClassifyPolicy {
+		ReadRegime regime{ ReadRegime::LongLike };
+		CandidatePolicy candidate{};
+		PostDecisionPolicy post{};
+	};
+
+	inline AutoClassifyPolicy derive_auto_policy(const FileInfo &fi,
+	                                             const ClassifyConfig &cfg) {
+		(void)cfg;
+		AutoClassifyPolicy policy{};
+		const bool short_like = fi.avgLen < 1000;
+		policy.regime = short_like ? ReadRegime::ShortLike : ReadRegime::LongLike;
+		policy.candidate.enable_taxpool = true;
+		policy.post.disable_fallback = short_like;
+		policy.post.enable_selective_reject = !short_like;
+		return policy;
+	}
+
+	inline CandidatePolicy derive_candidate_policy(const ClassifyConfig &cfg) {
+		(void)cfg;
+		CandidatePolicy policy{};
+		policy.enable_taxpool = true;
+		return policy;
+	}
+
 	struct batchReads {
 		std::vector< std::string >                 ids;
 		std::vector< std::vector< seqan3::dna4 > > seqs;

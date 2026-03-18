@@ -56,5 +56,6 @@
 			    std::vector<classifyResult> &results, const DecisionConfig &decisionConfig,
 			    const std::unordered_map<std::string, double> &classWeights,
 			    const TaxDict &tax, const PresenceDecision *presenceDecision,
-			    const NcbiTaxdump *ncbiTaxdump, size_t meanReadLen);
+			    const NcbiTaxdump *ncbiTaxdump,
+			    const PostDecisionPolicy &postPolicy);
 		} // namespace ChimeraClassify

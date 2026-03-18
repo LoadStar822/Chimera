@@ -333,8 +333,10 @@ void run(ClassifyConfig config) {
 
   const TaxDict tax = build_tax_dict(indexToTaxid);
   std::vector<uint32_t> tid2speciesRep;
+  std::vector<uint32_t> tid2genus;
   if (weightCtx.ncbiTaxdump && weightCtx.ncbiTaxdump->enabled()) {
     tid2speciesRep.resize(tax.id2str.size());
+    tid2genus.resize(tax.id2str.size(), 0u);
     for (uint32_t i = 0; i < tid2speciesRep.size(); ++i) {
       tid2speciesRep[i] = i;
     }
@@ -348,6 +350,8 @@ void run(ClassifyConfig config) {
         continue;
       }
       uint32_t sid = weightCtx.ncbiTaxdump->to_species(tid);
+      uint32_t gid = weightCtx.ncbiTaxdump->to_genus(tid);
+      tid2genus[tid_id] = gid;
       auto it = species2rep.find(sid);
       if (it == species2rep.end()) {
         species2rep.emplace(sid, tid_id);
@@ -357,6 +361,7 @@ void run(ClassifyConfig config) {
       }
     }
     weightCtx.tid2speciesRep = &tid2speciesRep;
+    weightCtx.tid2genus = &tid2genus;
   }
   PresenceSummary presenceSummary(config.presence_breadth_bits);
   PresenceSummary *presencePtr = &presenceSummary;
@@ -374,6 +379,8 @@ void run(ClassifyConfig config) {
   TailRiskProbeStats probeStats;
   if (kTailRiskProbeReads > 0) {
     FileInfo probeInfo;
+    AutoClassifyPolicy probePolicy{};
+    probePolicy.candidate = derive_candidate_policy(config);
     std::vector<moodycamel::ConcurrentQueue<batchReads>> probeQueues(
         static_cast<size_t>(std::max<uint16_t>(1, config.threads)));
       std::vector<classifyResult> probeResults;
@@ -386,7 +393,7 @@ void run(ClassifyConfig config) {
 
     classify_streaming(imcfConfig, probeQueues, config, imcf, indexToTaxid,
                        tax, probeResults, probeInfo, probe_done, feature_params,
-                       feature_min_len, weightCtx, nullptr);
+                       feature_min_len, weightCtx, probePolicy, nullptr);
     probeProducer.join();
 
     if (!probeResults.empty()) {
@@ -495,6 +502,8 @@ void run(ClassifyConfig config) {
   std::vector<classifyResult> classifyResults;
   std::unordered_map<std::string, double> classWeights;
   bool posteriorModelUsed = false;
+  AutoClassifyPolicy classifyPolicy{};
+  classifyPolicy.candidate = derive_candidate_policy(config);
 
   std::atomic<bool> producer_done{false};
   std::thread producer([&]() {
@@ -504,7 +513,7 @@ void run(ClassifyConfig config) {
 
   classify_streaming(imcfConfig, readQueues, config, imcf, indexToTaxid, tax,
                      classifyResults, fileInfo, producer_done, feature_params,
-                     feature_min_len, weightCtx, presencePtr);
+                     feature_min_len, weightCtx, classifyPolicy, presencePtr);
   producer.join();
   // Determinism: classify_streaming merges thread-local batches in the order
   // threads finish, which is non-deterministic. Sort by read/contig id before
@@ -516,6 +525,7 @@ void run(ClassifyConfig config) {
   if (fileInfo.sequenceNum > 0) {
     fileInfo.avgLen = fileInfo.bpLength / fileInfo.sequenceNum;
   }
+  const AutoClassifyPolicy autoPolicy = derive_auto_policy(fileInfo, config);
 
   size_t presenceTotalReads = fileInfo.sequenceNum;
   size_t presenceMeanReadLen = fileInfo.avgLen;
@@ -728,9 +738,15 @@ void run(ClassifyConfig config) {
         kAutoPostPiMinL0, kAutoPostPiMinL1);
     tuned_post_pi_min = len_tune.tuned;
 
+    const bool short_like = (autoPolicy.regime == ReadRegime::ShortLike);
+    const bool fallback_enabled = !autoPolicy.post.disable_fallback;
+    const bool enable_selective_reject = autoPolicy.post.enable_selective_reject;
+
     decisionConfig.min_class_weight = tuned_post_pi_min;
-    decisionConfig.fallback_strength = relax_strength;
-    decisionConfig.selective_reject_strength = relax_strength;
+    decisionConfig.fallback_strength =
+        fallback_enabled ? relax_strength : 0.0;
+    decisionConfig.selective_reject_strength =
+        enable_selective_reject ? relax_strength : 0.0;
     decisionConfig.fallback_gap_min = 0.10;
     std::cout << "[classify][auto] post-pi"
               << " s=" << std::fixed << std::setprecision(4)
@@ -740,6 +756,11 @@ void run(ClassifyConfig config) {
               << " tail_base=" << tail_base
               << " tuned=" << tuned_post_pi_min
               << " len_t=" << len_tune.t
+              << " avg_len=" << fileInfo.avgLen
+              << " regime=" << (short_like ? "short_like" : "long_like")
+              << " fallback_enabled=" << (fallback_enabled ? 1 : 0)
+              << " enable_selective_reject="
+              << (enable_selective_reject ? 1 : 0)
               << " fallback_strength=" << decisionConfig.fallback_strength
               << " selective_strength="
               << decisionConfig.selective_reject_strength
@@ -748,7 +769,7 @@ void run(ClassifyConfig config) {
     std::cout << std::defaultfloat;
 
     postEmDecision(classifyResults, decisionConfig, classWeights, tax,
-                   &presenceDecision, weightCtx.ncbiTaxdump, fileInfo.avgLen);
+                   &presenceDecision, weightCtx.ncbiTaxdump, autoPolicy.post);
     fileInfo.classifiedNum = 0;
     fileInfo.unclassifiedNum = 0;
     for (const auto &result : classifyResults) {
