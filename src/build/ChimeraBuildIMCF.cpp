@@ -19,49 +19,83 @@
 
 namespace ChimeraBuild {
 
-	/**
-	 * @brief Constructs the Interleaved Merged Cuckoo Filter (IMCF) using provided groups and returns a mapping of indices to taxids.
-	 *
-	 * This function builds the IMCF by iterating over groups of taxids, reading feature-hash files, and inserting the hashes
-	 * into the IMCF. Each group represents a set of taxids that are processed together, with each hash being inserted
-	 * into the corresponding index in the filter.
-	 *
-	 * @param imcf A reference to the Interleaved Merged Cuckoo Filter object to be built.
-	 * @param groups A vector of Group objects, where each Group contains a collection of taxids.
-	 *
-	 * @return A vector of vectors, where each sub-vector maps the index in the IMCF to the corresponding taxid strings.
-	 *
-	 * @details
-	 * The function first resizes `indexToTaxid` to match the number of groups and resizes each sub-vector to the number of taxids
-	 * in the group. It then iterates over each group, reads the feature hashes from a file named in the format "tmp/{taxid}<suffix>",
-	 * and inserts each hash into the IMCF using the `insertTag` method.
-	 *
-	 * The function is parallelized using OpenMP to process each group concurrently, speeding up the construction process.
-	 *
-	 * If the feature file for a taxid cannot be opened, an error message is printed to `std::cerr`.
-	 *
-	 * @note
-	 * Ensure that the temporary files containing feature hashes ("tmp/{taxid}<suffix>") are pre-generated and accessible.
-	 * The function assumes that `imcf.insertTag` is implemented and capable of inserting 64-bit feature hashes into the filter.
-	 */
+	namespace {
+	struct SpoolSegmentRef {
+		uint16_t threadId{0};
+		uint64_t spoolOffset{0};
+		uint64_t count{0};
+	};
+
+	struct ShardEntry {
+		uint32_t taxidId{0};
+		size_t slotIndex{0};
+		uint64_t fileOffset{0};
+		uint64_t nHashes{0};
+		std::vector<SpoolSegmentRef> segments;
+	};
+
+	constexpr size_t kMinReadBlockBytes = 1 * 1024 * 1024;
+	constexpr size_t kMaxReadBlockBytes = 4 * 1024 * 1024;
+	constexpr size_t kTargetTotalReadBlockBytes =
+	    256ull * 1024ull * 1024ull;
+
+	static size_t resolve_read_block_bytes(size_t workerCount)
+	{
+		return std::clamp(
+		    kTargetTotalReadBlockBytes / std::max<size_t>(1, workerCount),
+		    kMinReadBlockBytes, kMaxReadBlockBytes);
+	}
+
+	static bool map_virtual_range_to_chunks(const TaxidFeatureLayout& layout,
+	                                       uint64_t virtualOffset,
+	                                       uint64_t count,
+	                                       std::vector<SpoolSegmentRef>& out)
+	{
+		out.clear();
+		uint64_t remaining = count;
+		uint64_t offset = virtualOffset;
+		for (const auto& chunk : layout.chunkRefs) {
+			if (remaining == 0) {
+				break;
+			}
+			if (offset >= chunk.count) {
+				offset -= chunk.count;
+				continue;
+			}
+			const uint64_t available = chunk.count - offset;
+			const uint64_t take = std::min<uint64_t>(remaining, available);
+			out.push_back(
+			    {chunk.threadId, chunk.spoolOffset + offset, take});
+			remaining -= take;
+			offset = 0;
+		}
+		return remaining == 0;
+	}
+	} // namespace
+
 	std::vector<std::vector<std::string>> buildIMCF(
 		chimera::imcf::InterleavedMergedCuckooFilter& imcf,
 		const std::vector<chimera::imcf::Group>& groups,
 		const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
-		std::string_view featureSuffix,
 		const HashFrequencyContext* hashFreqContext,
-		const robin_hood::unordered_flat_map<std::string, uint64_t>* bpCount,
+		const FeatureBuildLayout* featureLayout,
 		uint16_t effectiveSpan,
 		uint16_t refReadLen,
 		uint32_t uniqueDegThreshold,
 		chimera::presence::CoverageMeta* coverageMeta)
 	{
 		std::vector<std::vector<std::string>> indexToTaxid(groups.size());
-		const std::string suffix(featureSuffix);
 		robin_hood::unordered_flat_map<std::string, std::vector<TaxidShardPlan>> shardPlan;
 		shardPlan.reserve(hashCount.size());
 		robin_hood::unordered_flat_map<std::string, uint64_t> shardOffset;
 		shardOffset.reserve(hashCount.size());
+		robin_hood::unordered_flat_map<std::string, size_t> featureLayoutIndex;
+		if (featureLayout) {
+			featureLayoutIndex.reserve(featureLayout->taxids.size());
+			for (size_t idx = 0; idx < featureLayout->taxids.size(); ++idx) {
+				featureLayoutIndex.emplace(featureLayout->taxids[idx], idx);
+			}
+		}
 
 		const bool collectCoverage = coverageMeta != nullptr;
 		const uint32_t uniqueDeg =
@@ -71,8 +105,7 @@ namespace ChimeraBuild {
 		const uint16_t refLenUsed =
 		    (refReadLen == 0) ? static_cast<uint16_t>(150) : refReadLen;
 		const bool hasSketch =
-		    collectCoverage && hashFreqContext && hashFreqContext->enabled() &&
-		    static_cast<bool>(hashFreqContext->sketch);
+		    collectCoverage && hashFreqContext && hashFreqContext->enabled();
 		if (collectCoverage) {
 			coverageMeta->unique_deg_threshold = uniqueDeg;
 			coverageMeta->ref_read_length = refLenUsed;
@@ -102,7 +135,7 @@ namespace ChimeraBuild {
 			}
 		}
 
-		const double kShardToleranceRatio = 0.001; // 0.1%
+		const double kShardToleranceRatio = 0.001;
 		for (const auto& [taxid, plans] : shardPlan) {
 			uint64_t shardTotal = 0;
 			for (const auto& plan : plans) {
@@ -121,34 +154,24 @@ namespace ChimeraBuild {
 			uint64_t absDelta = delta >= 0 ? static_cast<uint64_t>(delta) : static_cast<uint64_t>(-delta);
 			double ratio = expected == 0 ? (delta == 0 ? 0.0 : std::numeric_limits<double>::infinity())
 				: static_cast<double>(absDelta) / static_cast<double>(expected);
-				if (ratio > kShardToleranceRatio) {
-					std::cerr << "Warning: feature count mismatch for taxid " << taxid
-						<< ": expected=" << expected << ", planned=" << shardTotal
-						<< ", delta=" << delta << " (" << std::fixed << std::setprecision(4)
-						<< ratio * 100.0 << "%)" << std::endl;
-				}
+			if (ratio > kShardToleranceRatio) {
+				std::cerr << "Warning: feature count mismatch for taxid " << taxid
+					<< ": expected=" << expected << ", planned=" << shardTotal
+					<< ", delta=" << delta << " (" << std::fixed << std::setprecision(4)
+					<< ratio * 100.0 << "%)" << std::endl;
+			}
 		}
 
-	struct ShardEntry {
-		uint32_t taxidId;
-		size_t slotIndex;
-		uint64_t fileOffset;
-		uint64_t nHashes;
-	};
-	std::vector<std::string> taxidNames;
-	taxidNames.reserve(shardPlan.size());
-	robin_hood::unordered_flat_map<std::string, uint32_t> taxidNameToId;
-	taxidNameToId.reserve(shardPlan.size());
-	for (const auto& kv : shardPlan) {
-		const uint32_t taxidId = static_cast<uint32_t>(taxidNames.size());
-		taxidNameToId.emplace(kv.first, taxidId);
-		taxidNames.push_back(kv.first);
-	}
-	std::vector<std::string> taxidHashPaths(taxidNames.size());
-	for (size_t i = 0; i < taxidNames.size(); ++i) {
-		taxidHashPaths[i] = tmp_hash_path(taxidNames[i], suffix);
-	}
-	std::vector<std::vector<ShardEntry>> groupShardEntries(groups.size());
+		std::vector<std::string> taxidNames;
+		taxidNames.reserve(shardPlan.size());
+		robin_hood::unordered_flat_map<std::string, uint32_t> taxidNameToId;
+		taxidNameToId.reserve(shardPlan.size());
+		for (const auto& kv : shardPlan) {
+			const uint32_t taxidId = static_cast<uint32_t>(taxidNames.size());
+			taxidNameToId.emplace(kv.first, taxidId);
+			taxidNames.push_back(kv.first);
+		}
+		std::vector<std::vector<ShardEntry>> groupShardEntries(groups.size());
 
 		for (const auto& kv : shardPlan) {
 			const std::string& taxid = kv.first;
@@ -162,18 +185,32 @@ namespace ChimeraBuild {
 			if (itTaxidId == taxidNameToId.end()) {
 				continue;
 			}
+			auto itLayout = featureLayoutIndex.find(taxid);
+			if (itLayout == featureLayoutIndex.end()) {
+				throw std::runtime_error("IMCF build: missing feature layout for taxid " + taxid);
+			}
+			const auto& layout = featureLayout->perTaxid[itLayout->second];
 			const uint32_t taxidId = itTaxidId->second;
 			for (const auto& plan : plans) {
 				if (plan.count == 0) {
 					continue;
 				}
-				if (plan.groupIndex < groupShardEntries.size()) {
-					groupShardEntries[plan.groupIndex].push_back(
-					    {taxidId, plan.slotIndex, plan.fileOffsetStart, plan.count});
-				}
+				ShardEntry entry;
+				entry.taxidId = taxidId;
+				entry.slotIndex = plan.slotIndex;
+				entry.fileOffset = plan.fileOffsetStart;
+				entry.nHashes = plan.count;
+					if (!map_virtual_range_to_chunks(layout, plan.fileOffsetStart, plan.count,
+					                                entry.segments)) {
+						throw std::runtime_error("IMCF build: chunk layout underflow for taxid " + taxid);
+					}
+					if (plan.groupIndex < groupShardEntries.size()) {
+						groupShardEntries[plan.groupIndex].push_back(std::move(entry));
+					}
 			}
 		}
-	bool hasAnyShards = false;
+
+		bool hasAnyShards = false;
 		for (auto &groupEntries : groupShardEntries) {
 			if (!groupEntries.empty()) {
 				hasAnyShards = true;
@@ -186,179 +223,148 @@ namespace ChimeraBuild {
 				          return a.fileOffset < b.fileOffset;
 			          });
 		}
-	if (!hasAnyShards) {
-		return indexToTaxid;
-	}
+		if (!hasAnyShards) {
+			return indexToTaxid;
+		}
 
 #ifdef _OPENMP
-	const size_t workerCount =
-	    std::max<size_t>(1, static_cast<size_t>(omp_get_max_threads()));
+		const size_t workerCount =
+		    std::max<size_t>(1, static_cast<size_t>(omp_get_max_threads()));
 #else
-	const size_t workerCount = std::max<size_t>(
-	    1, static_cast<size_t>(std::thread::hardware_concurrency()));
+		const size_t workerCount = std::max<size_t>(
+		    1, static_cast<size_t>(std::thread::hardware_concurrency()));
 #endif
-	constexpr size_t kMinReadBlockBytes = 1 * 1024 * 1024; // 1 MiB
-	constexpr size_t kMaxReadBlockBytes = 4 * 1024 * 1024; // 4 MiB
-	constexpr size_t kTargetTotalReadBlockBytes =
-	    256ull * 1024ull * 1024ull; // 256 MiB across workers
-	size_t targetReadBlockBytes = kTargetTotalReadBlockBytes;
-	if (const char* envMb = std::getenv("CHIMERA_IMCF_TOTAL_READ_BUFFER_MB")) {
-		try {
-			size_t mb = static_cast<size_t>(std::stoull(envMb));
-			if (mb > 0) {
-				targetReadBlockBytes = mb * 1024ull * 1024ull;
-			}
-		} catch (...) {
-			// ignore invalid env value
-		}
-	}
-	const size_t readBlockBytes = std::clamp(
-	    targetReadBlockBytes / workerCount, kMinReadBlockBytes,
-	    kMaxReadBlockBytes);
+		const size_t readBlockBytes = resolve_read_block_bytes(workerCount);
 
-	std::unique_ptr<std::atomic<uint64_t>[]> globalUnique;
-	std::unique_ptr<std::atomic<uint64_t>[]> globalTotal;
-	if (collectCoverage) {
-		size_t n = taxidNames.size();
-		globalUnique.reset(new std::atomic<uint64_t>[n]);
-		globalTotal.reset(new std::atomic<uint64_t>[n]);
-		for (size_t i = 0; i < n; ++i) {
-			globalUnique[i].store(0, std::memory_order_relaxed);
-			globalTotal[i].store(0, std::memory_order_relaxed);
+		std::vector<uint64_t> groupSuccess(groups.size(), 0);
+		std::vector<uint64_t> groupFailures(groups.size(), 0);
+		std::vector<std::vector<uint64_t>> slotSuccess(groups.size());
+		std::vector<std::vector<uint64_t>> slotFailures(groups.size());
+		for (size_t g = 0; g < groups.size(); ++g) {
+			size_t slotCount = groups[g].taxids.size();
+			slotSuccess[g].assign(slotCount, 0);
+			slotFailures[g].assign(slotCount, 0);
 		}
-	}
-
-	std::vector<uint64_t> groupSuccess(groups.size(), 0);
-	std::vector<uint64_t> groupFailures(groups.size(), 0);
-	std::vector<std::vector<uint64_t>> slotSuccess(groups.size());
-	std::vector<std::vector<uint64_t>> slotFailures(groups.size());
-	for (size_t g = 0; g < groups.size(); ++g) {
-		size_t slotCount = groups[g].taxids.size();
-		slotSuccess[g].assign(slotCount, 0);
-		slotFailures[g].assign(slotCount, 0);
-	}
 
 #pragma omp parallel
-	{
-		std::vector<uint64_t> readBlock(readBlockBytes / sizeof(uint64_t));
+		{
+			std::vector<uint64_t> readBlock(readBlockBytes / sizeof(uint64_t));
 
 #pragma omp for schedule(dynamic, 1)
-		for (size_t groupIdx = 0; groupIdx < groups.size(); ++groupIdx) {
-			const auto &entries = groupShardEntries[groupIdx];
-			if (entries.empty()) {
-				continue;
-			}
-			uint64_t localSuccess = 0;
-			uint64_t localFailure = 0;
-			auto &localSlotSuccess = slotSuccess[groupIdx];
-			auto &localSlotFailures = slotFailures[groupIdx];
-			uint32_t openedTaxidId = std::numeric_limits<uint32_t>::max();
-			std::ifstream ifile;
-
-			for (const auto &entry : entries) {
-				const uint32_t taxidId = entry.taxidId;
-				const std::string &taxid = taxidNames[taxidId];
-				if (openedTaxidId != taxidId) {
-					ifile.close();
-					ifile.clear();
-					ifile.open(taxidHashPaths[taxidId], std::ios::binary);
-					openedTaxidId = taxidId;
-					if (!ifile) {
-#pragma omp critical(imcf_log)
-						std::cerr << "Failed to open feature hash file: " << taxid
-						          << suffix << std::endl;
-						continue;
-					}
-				}
-				ifile.clear();
-				ifile.seekg(
-				    static_cast<std::streamoff>(entry.fileOffset * sizeof(uint64_t)),
-				    std::ios::beg);
-				if (!ifile.good()) {
-#pragma omp critical(imcf_log)
-					std::cerr << "Warning: failed to seek feature hash file for taxid "
-					          << taxid << std::endl;
+			for (size_t groupIdx = 0; groupIdx < groups.size(); ++groupIdx) {
+				const auto &entries = groupShardEntries[groupIdx];
+				if (entries.empty()) {
 					continue;
 				}
-				uint64_t remaining = entry.nHashes;
-				uint64_t uniqueCount = 0;
-				uint64_t totalCount = 0;
-				size_t coverageIndex = collectCoverage
-				                           ? static_cast<size_t>(taxidId)
-				                           : std::numeric_limits<size_t>::max();
+					uint64_t localSuccess = 0;
+					uint64_t localFailure = 0;
+					auto &localSlotSuccess = slotSuccess[groupIdx];
+					auto &localSlotFailures = slotFailures[groupIdx];
+					uint16_t openedThreadId = std::numeric_limits<uint16_t>::max();
+					std::ifstream ifile;
 
-				while (ifile && remaining > 0) {
-					uint64_t toRead = std::min<uint64_t>(
-					    remaining, static_cast<uint64_t>(readBlock.size()));
-					ifile.read(reinterpret_cast<char *>(readBlock.data()),
-					           static_cast<std::streamsize>(toRead * sizeof(uint64_t)));
-					std::streamsize bytesRead = ifile.gcount();
-					if (bytesRead <= 0) {
-						break;
-					}
-					size_t hashesRead =
-					    static_cast<size_t>(bytesRead) / sizeof(uint64_t);
-					if (hashesRead == 0) {
-						break;
-					}
-					for (size_t h = 0; h < hashesRead; ++h) {
-						uint64_t hash = readBlock[h];
-						if (collectCoverage) {
-							++totalCount;
-							uint32_t df_est = 1;
-							if (hasSketch) {
-								df_est = hashFreqContext->sketch->estimate(hash);
+					for (const auto &entry : entries) {
+						const uint32_t taxidId = entry.taxidId;
+					const std::string &taxid = taxidNames[taxidId];
+						uint64_t remainingEntry = entry.nHashes;
+						for (const auto& segment : entry.segments) {
+							if (openedThreadId != segment.threadId) {
+								ifile.close();
+								ifile.clear();
+								if (static_cast<size_t>(segment.threadId) >=
+								    featureLayout->threadSpoolPaths.size()) {
+#pragma omp critical(imcf_log)
+									std::cerr << "Missing feature spool path for thread "
+									          << segment.threadId << std::endl;
+									remainingEntry = 0;
+									break;
+								}
+								const std::string& spoolPath =
+								    featureLayout->threadSpoolPaths[segment.threadId];
+								ifile.open(spoolPath, std::ios::binary);
+								openedThreadId = segment.threadId;
+								if (!ifile) {
+#pragma omp critical(imcf_log)
+									std::cerr << "Failed to open feature spool file: "
+									          << spoolPath << std::endl;
+									remainingEntry = 0;
+									break;
+								}
 							}
-							if (df_est <= uniqueDeg) {
-								++uniqueCount;
+							ifile.clear();
+							ifile.seekg(
+							    static_cast<std::streamoff>(segment.spoolOffset * sizeof(uint64_t)),
+							    std::ios::beg);
+							if (!ifile.good()) {
+#pragma omp critical(imcf_log)
+								std::cerr << "Warning: failed to seek feature spool for taxid "
+								          << taxid << " thread " << segment.threadId << std::endl;
+								remainingEntry = 0;
+								break;
+							}
+							uint64_t remainingSegment = segment.count;
+						while (ifile && remainingSegment > 0) {
+							uint64_t toRead = std::min<uint64_t>(
+							    remainingSegment, static_cast<uint64_t>(readBlock.size()));
+							ifile.read(reinterpret_cast<char *>(readBlock.data()),
+							           static_cast<std::streamsize>(toRead * sizeof(uint64_t)));
+							std::streamsize bytesRead = ifile.gcount();
+							if (bytesRead <= 0) {
+								break;
+							}
+							size_t hashesRead =
+							    static_cast<size_t>(bytesRead) / sizeof(uint64_t);
+							if (hashesRead == 0) {
+								break;
+							}
+							for (size_t h = 0; h < hashesRead; ++h) {
+								const uint64_t hash = readBlock[h];
+								const size_t slotIndex = entry.slotIndex;
+								if (imcf.insertTag(groupIdx, hash, slotIndex)) {
+									++localSuccess;
+									if (slotIndex < localSlotSuccess.size()) {
+										++localSlotSuccess[slotIndex];
+									}
+								} else {
+									++localFailure;
+									if (slotIndex < localSlotFailures.size()) {
+										++localSlotFailures[slotIndex];
+									}
+								}
+							}
+							const uint64_t consumed = static_cast<uint64_t>(hashesRead);
+							remainingSegment = (consumed >= remainingSegment)
+							                       ? 0
+							                       : (remainingSegment - consumed);
+							remainingEntry = (consumed >= remainingEntry)
+							                     ? 0
+							                     : (remainingEntry - consumed);
+						}
+							if (remainingSegment != 0) {
+#pragma omp critical(imcf_log)
+								std::cerr << "Warning: spool read underflow for taxid " << taxid
+								          << " thread " << segment.threadId
+								          << ", expected " << segment.count << " hashes, missing "
+								          << remainingSegment << std::endl;
+								break;
+							}
+							if (!ifile.eof() && ifile.fail()) {
+#pragma omp critical(imcf_log)
+								std::cerr << "Warning: failed to read feature spool completely for taxid "
+								          << taxid << " thread " << segment.threadId << std::endl;
 							}
 						}
-
-						const size_t slotIndex = entry.slotIndex;
-						if (imcf.insertTag(groupIdx, hash, slotIndex)) {
-							++localSuccess;
-							if (slotIndex < localSlotSuccess.size()) {
-								++localSlotSuccess[slotIndex];
-							}
-						} else {
-							++localFailure;
-							if (slotIndex < localSlotFailures.size()) {
-								++localSlotFailures[slotIndex];
-							}
-						}
-					}
-					if (hashesRead > remaining) {
-						remaining = 0;
-					} else {
-						remaining -= hashesRead;
+					if (remainingEntry != 0) {
+#pragma omp critical(imcf_log)
+						std::cerr << "Warning: shard read underflow for taxid " << taxid
+						          << ", expected " << entry.nHashes << " hashes, missing "
+						          << remainingEntry << std::endl;
 					}
 				}
-
-				if (remaining != 0) {
-#pragma omp critical(imcf_log)
-					std::cerr << "Warning: shard read underflow for taxid " << taxid
-					          << ", expected " << entry.nHashes << " hashes, missing "
-					          << remaining << std::endl;
-				}
-				if (!ifile.eof() && ifile.fail()) {
-#pragma omp critical(imcf_log)
-					std::cerr
-					    << "Warning: failed to read syncmer file completely for taxid "
-					    << taxid << std::endl;
-				}
-
-				if (collectCoverage &&
-				    coverageIndex != std::numeric_limits<size_t>::max()) {
-					globalUnique[coverageIndex].fetch_add(uniqueCount,
-					                                      std::memory_order_relaxed);
-					globalTotal[coverageIndex].fetch_add(totalCount,
-					                                     std::memory_order_relaxed);
-				}
+				groupSuccess[groupIdx] = localSuccess;
+				groupFailures[groupIdx] = localFailure;
 			}
-			groupSuccess[groupIdx] = localSuccess;
-			groupFailures[groupIdx] = localFailure;
 		}
-	}
 
 		uint64_t totalInserted = 0;
 		uint64_t totalFailed = 0;
@@ -497,26 +503,22 @@ namespace ChimeraBuild {
 			}
 		}
 
-		if (collectCoverage) {
-			coverageMeta->entries.reserve(taxidNames.size());
-			for (size_t idx = 0; idx < taxidNames.size(); ++idx) {
-				const std::string& taxid = taxidNames[idx];
+		if (collectCoverage && featureLayout) {
+			coverageMeta->entries.reserve(featureLayout->taxids.size());
+			for (size_t layoutIdx = 0; layoutIdx < featureLayout->taxids.size();
+			     ++layoutIdx) {
+				const auto& taxid = featureLayout->taxids[layoutIdx];
+				const auto& layout = featureLayout->perTaxid[layoutIdx];
 				chimera::presence::CoverageEntry entry{};
 				entry.taxid = taxid;
-				entry.unique_signatures = globalUnique[idx].load(std::memory_order_relaxed);
-				entry.total_signatures = globalTotal[idx].load(std::memory_order_relaxed);
-				uint64_t genome_bp = 0;
-				if (bpCount) {
-					auto itbp = bpCount->find(taxid);
-					if (itbp != bpCount->end()) {
-						genome_bp = itbp->second;
-					}
-				}
-				entry.genome_length = genome_bp;
+				entry.unique_signatures = layout.uniqueSignatures;
+				entry.total_signatures = layout.totalSignatures;
+				entry.genome_length = layout.genomeBp;
 				const double window = std::max<int64_t>(
 				    1, static_cast<int64_t>(refLenUsed) - static_cast<int64_t>(spanUsed) + 1);
-				entry.unique_density = (genome_bp > 0 && entry.unique_signatures > 0)
-					? static_cast<double>(entry.unique_signatures) / static_cast<double>(genome_bp)
+				entry.unique_density = (layout.genomeBp > 0 && entry.unique_signatures > 0)
+					? static_cast<double>(entry.unique_signatures) /
+					      static_cast<double>(layout.genomeBp)
 					: 0.0;
 				entry.expected_unique_per_ref_read =
 					(entry.unique_density > 0.0) ? entry.unique_density * window : 0.0;

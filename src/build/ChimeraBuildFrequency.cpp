@@ -13,12 +13,12 @@
 namespace ChimeraBuild {
 
 static chimera::presence::HashFreqStats
-compute_hash_freq_stats(const CountMinSketch &cms, double quantile) {
+compute_hash_freq_stats(const std::vector<uint32_t> &counters, double quantile) {
   chimera::presence::HashFreqStats stats{};
   std::array<uint64_t, 32> histogram{};
-  cms.forEachCounter([&](uint32_t value) {
+  for (uint32_t value : counters) {
     if (value == 0) {
-      return;
+      continue;
     }
     ++stats.nonzero_counters;
     if (value > stats.df_max_observed) {
@@ -26,14 +26,13 @@ compute_hash_freq_stats(const CountMinSketch &cms, double quantile) {
     }
     int bucket = 0;
     if (value > 1) {
-      double dv = static_cast<double>(value);
-      bucket = static_cast<int>(std::log2(dv));
+      bucket = static_cast<int>(std::log2(static_cast<double>(value)));
       if (bucket > 31) {
         bucket = 31;
       }
     }
     histogram[static_cast<size_t>(bucket)]++;
-  });
+  }
   if (stats.nonzero_counters == 0) {
     stats.df_high_threshold = std::numeric_limits<uint32_t>::max();
     return stats;
@@ -59,6 +58,29 @@ compute_hash_freq_stats(const CountMinSketch &cms, double quantile) {
   return stats;
 }
 
+static void build_threshold_mask(const std::vector<uint32_t> &counters,
+                                 uint32_t depth, uint32_t width,
+                                 uint32_t threshold, bool strict_greater,
+                                 CmsThresholdBitmask &mask) {
+  if (threshold == std::numeric_limits<uint32_t>::max()) {
+    mask.clear();
+    return;
+  }
+  mask.reset(depth, width);
+  for (uint32_t row = 0; row < depth; ++row) {
+    const size_t row_base =
+        static_cast<size_t>(row) * static_cast<size_t>(width);
+    for (uint32_t column = 0; column < width; ++column) {
+      const uint32_t value = counters[row_base + column];
+      const bool set_bit =
+          strict_greater ? (value > threshold) : (value >= threshold);
+      if (set_bit) {
+        mask.set(row, column);
+      }
+    }
+  }
+}
+
 void build_hash_frequency_sketch(
     const BuildConfig &config,
     const robin_hood::unordered_flat_map<std::string, std::vector<std::string>>
@@ -71,6 +93,10 @@ void build_hash_frequency_sketch(
   context.passB_filtered_hashes.store(0, std::memory_order_relaxed);
   context.stats = {};
   context.quantile = 0.999;
+  context.unique_deg_threshold =
+      std::max<uint32_t>(1u, config.presence_unique_deg);
+  context.high_df_mask.clear();
+  context.gt_unique_mask.clear();
   std::cout << "Building hash frequency sketch (depth=" << kSketchDepth
             << ", width=" << kSketchWidth << ")..." << std::endl;
   context.sketch = std::make_unique<CountMinSketch>(kSketchDepth, kSketchWidth);
@@ -138,7 +164,16 @@ void build_hash_frequency_sketch(
   auto sketch_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                          sketch_end - sketch_start)
                          .count();
-  context.stats = compute_hash_freq_stats(*context.sketch, context.quantile);
+  context.sketch->freeze();
+  std::vector<uint32_t> sketch_counters;
+  context.sketch->exportCounts(sketch_counters);
+  context.stats = compute_hash_freq_stats(sketch_counters, context.quantile);
+  build_threshold_mask(sketch_counters, kSketchDepth, kSketchWidth,
+                       context.stats.df_high_threshold, false,
+                       context.high_df_mask);
+  build_threshold_mask(sketch_counters, kSketchDepth, kSketchWidth,
+                       context.unique_deg_threshold, true,
+                       context.gt_unique_mask);
   std::cout << "Hash frequency sketch time: " << sketch_time / 1000 << "s "
             << sketch_time % 1000 << "ms" << std::endl;
   const auto hashed =

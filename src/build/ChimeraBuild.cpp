@@ -177,6 +177,7 @@ void run(BuildConfig config) {
   }
   robin_hood::unordered_flat_map<std::string, uint64_t> hashCount;
   robin_hood::unordered_flat_map<std::string, uint64_t> bpCount;
+  FeatureBuildLayout featureLayout;
   robin_hood::unordered_flat_map<std::string, std::vector<std::string>>
       inputFiles;
   parseInputFile(config.input_file, inputFiles, hashCount, fileInfo);
@@ -222,7 +223,7 @@ void run(BuildConfig config) {
   std::cout << "Calculating feature hashes..." << std::endl;
   feature_count(config, inputFiles, hashCount, fileInfo,
                 hashFreqContext.enabled() ? &hashFreqContext : nullptr,
-                &bpCount);
+                &bpCount, &featureLayout);
   auto calculate_end = std::chrono::high_resolution_clock::now();
   auto calculate_total_time =
       std::chrono::duration_cast<std::chrono::milliseconds>(calculate_end -
@@ -285,9 +286,6 @@ void run(BuildConfig config) {
   uint64_t imcf_feature_seed = 0;
   auto imcf_feature_params =
       make_feature_params(config, imcf_feature_method, imcf_feature_seed);
-  const std::string feature_suffix =
-      (imcf_feature_method == chimera::feature::Method::Strobemer) ? ".strb"
-                                                                   : ".sync";
   const uint16_t effective_span = static_cast<uint16_t>(
       std::min<size_t>(std::numeric_limits<uint16_t>::max(),
                        chimera::feature::min_required_length(
@@ -295,180 +293,11 @@ void run(BuildConfig config) {
   constexpr uint16_t ref_read_len = 150;
   chimera::presence::CoverageMeta presence_meta;
   auto partition_start = std::chrono::high_resolution_clock::now();
-  std::vector<chimera::imcf::Group> groups;
+  constexpr int kDefaultMaxTaxidsPerGroup = 16;
   std::cout << "Partitioning hashcout..." << std::endl;
-  struct PartitionEval {
-    uint64_t area{std::numeric_limits<uint64_t>::max()};
-    size_t hashSize{std::numeric_limits<size_t>::max()};
-    uint64_t maxLoad{std::numeric_limits<uint64_t>::max()};
-    size_t groupCount{std::numeric_limits<size_t>::max()};
-    double imbalance{std::numeric_limits<double>::infinity()};
-    int maxTaxids{16};
-    long long elapsedMs{0};
-  };
-  auto next_pow2_local = [](size_t v) -> size_t {
-    if (v <= 1) {
-      return 1;
-    }
-    --v;
-    v |= v >> 1;
-    v |= v >> 2;
-    v |= v >> 4;
-    v |= v >> 8;
-    v |= v >> 16;
-#if SIZE_MAX > 0xFFFFFFFFu
-    v |= v >> 32;
-#endif
-    return v + 1;
-  };
-  const uint64_t effectiveLoadDen =
-      std::max<uint64_t>(1, static_cast<uint64_t>(config.load_factor * 4.0));
-  auto score_groups = [&](const std::vector<chimera::imcf::Group> &cand,
-                          int maxTaxids,
-                          long long elapsedMs) -> PartitionEval {
-    PartitionEval out;
-    out.maxTaxids = maxTaxids;
-    out.elapsedMs = elapsedMs;
-    out.groupCount = cand.size();
-    uint64_t totalHash = 0;
-    uint64_t maxLoad = 0;
-    for (const auto &g : cand) {
-      totalHash += g.totalHash;
-      if (g.totalHash > maxLoad) {
-        maxLoad = g.totalHash;
-      }
-    }
-    out.maxLoad = maxLoad;
-    const double needBinSize =
-        std::ceil(static_cast<double>(ceil_div_u64(maxLoad, effectiveLoadDen)) *
-                  1.05);
-    out.hashSize = next_pow2_local(
-        static_cast<size_t>(std::max<double>(1.0, needBinSize)));
-    out.area = static_cast<uint64_t>(out.groupCount) *
-               static_cast<uint64_t>(out.hashSize);
-    if (out.groupCount > 0) {
-      const double avgLoad =
-          static_cast<double>(totalHash) / static_cast<double>(out.groupCount);
-      out.imbalance =
-          (avgLoad > 0.0) ? (static_cast<double>(maxLoad) / avgLoad) : 0.0;
-    } else {
-      out.imbalance = 0.0;
-    }
-    return out;
-  };
-  auto better = [](const PartitionEval &lhs, const PartitionEval &rhs) -> bool {
-    if (lhs.area != rhs.area) {
-      return lhs.area < rhs.area;
-    }
-    if (lhs.hashSize != rhs.hashSize) {
-      return lhs.hashSize < rhs.hashSize;
-    }
-    if (lhs.maxLoad != rhs.maxLoad) {
-      return lhs.maxLoad < rhs.maxLoad;
-    }
-    if (lhs.groupCount != rhs.groupCount) {
-      return lhs.groupCount < rhs.groupCount;
-    }
-    if (lhs.imbalance != rhs.imbalance) {
-      return lhs.imbalance < rhs.imbalance;
-    }
-    return lhs.elapsedMs < rhs.elapsedMs;
-  };
-
-  // Keep default partition topology aligned with the pre-perf baseline
-  // for CAMIRefseq stability; still allow env override for experiments.
-  std::vector<int> candidateMaxTaxids = {16};
-  if (const char *env = std::getenv("CHIMERA_PARTITION_MAXTAXIDS")) {
-    std::vector<int> parsed;
-    std::stringstream ss(env);
-    std::string token;
-    while (std::getline(ss, token, ',')) {
-      token.erase(std::remove_if(token.begin(), token.end(),
-                                 [](unsigned char c) { return std::isspace(c); }),
-                  token.end());
-      if (token.empty()) {
-        continue;
-      }
-      try {
-        int value = std::stoi(token);
-        if (value > 0) {
-          parsed.push_back(value);
-        }
-      } catch (...) {
-        // ignore invalid token
-      }
-    }
-    if (!parsed.empty()) {
-      std::sort(parsed.begin(), parsed.end(), std::greater<int>());
-      parsed.erase(std::unique(parsed.begin(), parsed.end()), parsed.end());
-      candidateMaxTaxids.swap(parsed);
-    }
-  }
-  const size_t candidateCount = candidateMaxTaxids.size();
-  std::vector<PartitionEval> evals(candidateCount);
-  std::vector<uint8_t> evalReady(candidateCount, 0u);
-  PartitionEval bestEval{};
-  size_t bestIdx = std::numeric_limits<size_t>::max();
-  bool hasBest = false;
-  auto better_or_earlier = [&](const PartitionEval &lhs, size_t lhsIdx,
-                               const PartitionEval &rhs,
-                               size_t rhsIdx) -> bool {
-    if (better(lhs, rhs)) {
-      return true;
-    }
-    if (better(rhs, lhs)) {
-      return false;
-    }
-    return lhsIdx < rhsIdx;
-  };
-
-#pragma omp parallel for schedule(dynamic, 1)
-  for (ptrdiff_t idx = 0; idx < static_cast<ptrdiff_t>(candidateCount); ++idx) {
-    const size_t candIdx = static_cast<size_t>(idx);
-    const int maxTaxids = candidateMaxTaxids[candIdx];
-    auto candStart = std::chrono::high_resolution_clock::now();
-    auto cand =
-        chimera::imcf::partitionHashCount(hashCount, maxTaxids, config.load_factor);
-    auto candEnd = std::chrono::high_resolution_clock::now();
-    const auto candMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            candEnd - candStart)
-                            .count();
-    PartitionEval eval = score_groups(cand, maxTaxids, candMs);
-    evals[candIdx] = eval;
-    evalReady[candIdx] = 1u;
-#pragma omp critical(chimera_partition_pick_best)
-    {
-      if (!hasBest || better_or_earlier(eval, candIdx, bestEval, bestIdx)) {
-        bestEval = eval;
-        groups = std::move(cand);
-        bestIdx = candIdx;
-        hasBest = true;
-      }
-    }
-  }
-
-  for (size_t i = 0; i < candidateCount; ++i) {
-    if (evalReady[i] == 0u) {
-      continue;
-    }
-    const auto &eval = evals[i];
-    if (config.verbose) {
-      std::cout << "  partition candidate maxTaxids=" << candidateMaxTaxids[i]
-                << ": groups=" << eval.groupCount
-                << ", hashSize=" << eval.hashSize
-                << ", maxLoad=" << eval.maxLoad
-                << ", area=" << eval.area
-                << ", imbalance=" << eval.imbalance
-                << ", time=" << eval.elapsedMs << " ms" << std::endl;
-    }
-  }
-  if (config.verbose && hasBest) {
-    std::cout << "  selected partition maxTaxids=" << bestEval.maxTaxids
-              << " (groups=" << bestEval.groupCount
-              << ", hashSize=" << bestEval.hashSize
-              << ", area=" << bestEval.area
-              << ", time=" << bestEval.elapsedMs << " ms)" << std::endl;
-  }
+  std::vector<chimera::imcf::Group> groups =
+      chimera::imcf::partitionHashCount(hashCount, kDefaultMaxTaxidsPerGroup,
+                                        config.load_factor);
   auto partition_end = std::chrono::high_resolution_clock::now();
   auto partition_total_time =
       std::chrono::duration_cast<std::chrono::milliseconds>(partition_end -
@@ -516,9 +345,9 @@ void run(BuildConfig config) {
   }
   chimera::imcf::InterleavedMergedCuckooFilter imcf(groups, imcfConfig);
   std::vector<std::vector<std::string>> indexToTaxid =
-      buildIMCF(imcf, groups, hashCount, feature_suffix,
+      buildIMCF(imcf, groups, hashCount,
                 hashFreqContext.enabled() ? &hashFreqContext : nullptr,
-                &bpCount, effective_span, ref_read_len,
+                &featureLayout, effective_span, ref_read_len,
                 config.presence_unique_deg, &presence_meta);
   if (presence_meta.entries.empty()) {
     std::cout << "  coverage meta: empty (fallback to runtime heuristics)"
@@ -560,7 +389,6 @@ void run(BuildConfig config) {
   constexpr bool kQimcfVerify = false;
   constexpr bool kQimcfLowPeak = true;
   bool drop_classic_before_materialize = kQimcfLowPeak && !kQimcfVerify;
-  std::cout << "  QIMCF options: low_peak=on, verify=off (fixed)" << std::endl;
   imcf.build_query_index(/*include_stash=*/true, kQimcfVerify, kQimcfLowPeak,
                          drop_classic_before_materialize);
   imcf.set_storage_mode(1);

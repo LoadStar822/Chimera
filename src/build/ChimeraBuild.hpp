@@ -41,6 +41,7 @@ namespace fs = std::filesystem;
 
 namespace ChimeraBuild {
 	struct HashFrequencyContext;
+	struct FeatureBuildLayout;
 }
 
 namespace chimera::presence {
@@ -52,9 +53,8 @@ namespace ChimeraBuild {
 		chimera::imcf::InterleavedMergedCuckooFilter& imcf,
 		const std::vector<chimera::imcf::Group>& groups,
 		const robin_hood::unordered_flat_map<std::string, uint64_t>& hashCount,
-		std::string_view featureSuffix,
 		const HashFrequencyContext* hashFreqContext,
-		const robin_hood::unordered_flat_map<std::string, uint64_t>* bpCount,
+		const FeatureBuildLayout* featureLayout,
 		uint16_t effectiveSpan,
 		uint16_t refReadLen,
 		uint32_t uniqueDegThreshold,
