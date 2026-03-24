@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <span>
+#include <stdexcept>
 #include <string>
 
 #include <xxhash.h>
@@ -27,6 +29,28 @@ constexpr unsigned kDefaultAuxLen = 17;
 inline uint64_t mix64(const uint64_t * data, size_t count, uint64_t seed)
 {
     return XXH3_64bits_withSeed(data, static_cast<size_t>(count) * sizeof(uint64_t), seed);
+}
+
+inline uint64_t syncmer_packed_hash(uint64_t input) noexcept
+{
+    constexpr uint64_t prime1 = 0x9E3779B185EBCA87ULL;
+    constexpr uint64_t prime2 = 0xC2B2AE3D27D4EB4FULL;
+    constexpr uint64_t prime3 = 0x165667B19E3779F9ULL;
+    constexpr uint64_t prime4 = 0x85EBCA77C2B2AE63ULL;
+    constexpr uint64_t prime5 = 0x27D4EB2F165667C5ULL;
+
+    uint64_t result = prime5 + 8;
+    input *= prime2;
+    input = std::rotl(input, 31);
+    result ^= input * prime1;
+    result = std::rotl(result, 27);
+    result = result * prime1 + prime4;
+    result ^= result >> 33;
+    result *= prime2;
+    result ^= result >> 29;
+    result *= prime3;
+    result ^= result >> 32;
+    return result;
 }
 
 inline int derive_syncmer_s(int k)
@@ -72,6 +96,130 @@ inline uint64_t make_strobemer_hash(const Randstrobe & strobe,
                                  : strobe.hash;
     return mix64(&content, 1, params.seed);
 }
+
+void collect_syncmers_encoded(std::span<const uint8_t> seq,
+                              SyncmerParameters parameters,
+                              std::vector<Syncmer> & out)
+{
+    out.clear();
+    constexpr size_t kQueueCapacity = 64;
+    constexpr size_t kQueueMask = kQueueCapacity - 1;
+    const uint8_t * seq_ptr = seq.data();
+    const size_t seq_size = seq.size();
+
+    const size_t window_size = static_cast<size_t>(parameters.k - parameters.s + 1);
+    const size_t target_index = static_cast<size_t>(parameters.t_syncmer - 1);
+    if (window_size >= kQueueCapacity)
+    {
+        throw std::runtime_error("syncmer window exceeds encoded collector capacity");
+    }
+
+    const uint64_t kmask = (1ULL << (2 * parameters.k)) - 1;
+    const uint64_t smask = (1ULL << (2 * parameters.s)) - 1;
+    const uint64_t kshift = static_cast<uint64_t>(parameters.k - 1) * 2;
+    const uint64_t sshift = static_cast<uint64_t>(parameters.s - 1) * 2;
+
+    uint64_t qs[kQueueCapacity] = {};
+    uint64_t qs_min_candidates[kQueueCapacity] = {};
+    size_t qs_head = 0;
+    size_t qs_size = 0;
+    size_t qs_min_head = 0;
+    size_t qs_min_size = 0;
+    size_t l = 0;
+    uint64_t xk[2] = {0, 0};
+    uint64_t xs[2] = {0, 0};
+
+    for (size_t i = 0; i < seq_size; ++i)
+    {
+        const uint8_t base = seq_ptr[i];
+        if (base >= 4)
+        {
+            qs_head = 0;
+            qs_size = 0;
+            qs_min_head = 0;
+            qs_min_size = 0;
+            l = 0;
+            xk[0] = xk[1] = xs[0] = xs[1] = 0;
+            continue;
+        }
+
+        const uint64_t c = static_cast<uint64_t>(base);
+        const uint64_t rc = 3ULL - c;
+        xk[0] = (xk[0] << 2 | c) & kmask;
+        xk[1] = xk[1] >> 2 | rc << kshift;
+        xs[0] = (xs[0] << 2 | c) & smask;
+        xs[1] = xs[1] >> 2 | rc << sshift;
+        const bool has_smer = (++l >= static_cast<size_t>(parameters.s));
+        if (!has_smer)
+        {
+            continue;
+        }
+
+        const uint64_t ys = xs[0] < xs[1] ? xs[0] : xs[1];
+        const uint64_t hash_s = syncmer_packed_hash(ys);
+
+        const size_t qs_tail = (qs_head + qs_size) & kQueueMask;
+        qs[qs_tail] = hash_s;
+        ++qs_size;
+
+        while (qs_min_size != 0)
+        {
+            const size_t min_tail = (qs_min_head + qs_min_size - 1) & kQueueMask;
+            if (qs_min_candidates[min_tail] <= hash_s)
+            {
+                break;
+            }
+            --qs_min_size;
+        }
+        const size_t qs_min_tail = (qs_min_head + qs_min_size) & kQueueMask;
+        qs_min_candidates[qs_min_tail] = hash_s;
+        ++qs_min_size;
+
+        if (qs_size < window_size)
+        {
+            continue;
+        }
+        if (qs_size > window_size)
+        {
+            const uint64_t front = qs[qs_head];
+            qs_head = (qs_head + 1) & kQueueMask;
+            --qs_size;
+            if (qs_min_size != 0 && front == qs_min_candidates[qs_min_head])
+            {
+                qs_min_head = (qs_min_head + 1) & kQueueMask;
+                --qs_min_size;
+            }
+        }
+
+        const size_t target_slot = (qs_head + target_index) & kQueueMask;
+        if (qs[target_slot] == qs_min_candidates[qs_min_head])
+        {
+            const uint64_t yk = xk[0] < xk[1] ? xk[0] : xk[1];
+            out.push_back(
+                Syncmer{syncmer_packed_hash(yk), i - static_cast<size_t>(parameters.k) + 1});
+        }
+    }
+}
+
+bool append_randstrobes_from_syncmers(const std::vector<Syncmer> & syncmers,
+                                      RandstrobeParameters parameters,
+                                      const StrobemerParams & strobe_params,
+                                      std::vector<uint64_t> & out)
+{
+    if (syncmers.empty())
+        return false;
+
+    const size_t initial_size = out.size();
+    out.reserve(out.size() + syncmers.size());
+
+    RandstrobeIterator iterator(syncmers, parameters);
+    while (iterator.has_next())
+    {
+        out.push_back(make_strobemer_hash(iterator.next(), strobe_params));
+    }
+
+    return out.size() > initial_size;
+}
 #endif
 
 std::vector<uint64_t> compute_hashes_syncmer_(const std::vector<seqan3::dna4> & seq,
@@ -105,18 +253,17 @@ bool compute_hashes_strobemer_append_(const std::vector<seqan3::dna4> & seq,
 
     const std::span<const uint8_t> seq_span{
         reinterpret_cast<const uint8_t *>(seq.data()), seq.size()};
-
-    const int k = static_cast<int>(params.k);
-    const int s_value = derive_syncmer_s(k);
-
-    const unsigned w_min = std::max<unsigned>(params.w_min, 1u);
-    const unsigned w_max = std::max<unsigned>(params.w_max, w_min);
-    const int max_dist = derive_max_dist(k, w_max);
-    const uint64_t main_hash_mask = ~0ULL << (9 + kDefaultAuxLen);
-
     const size_t initial_size = out.size();
     try
     {
+        const int k = static_cast<int>(params.k);
+        const int s_value = derive_syncmer_s(k);
+
+        const unsigned w_min = std::max<unsigned>(params.w_min, 1u);
+        const unsigned w_max = std::max<unsigned>(params.w_max, w_min);
+        const int max_dist = derive_max_dist(k, w_max);
+        const uint64_t main_hash_mask = ~0ULL << (9 + kDefaultAuxLen);
+
         SyncmerParameters syncmer_params{k, s_value};
         RandstrobeParameters rand_params{kDefaultRandstrobeQ,
                                          max_dist,
@@ -124,24 +271,21 @@ bool compute_hashes_strobemer_append_(const std::vector<seqan3::dna4> & seq,
                                          w_max,
                                          main_hash_mask};
 
-        RandstrobeGenerator generator(seq_span, syncmer_params, rand_params);
-        const Randstrobe sentinel = generator.end();
+        std::vector<Syncmer> syncmers;
+        const size_t syncmer_reserve =
+            sequence_length / std::max<size_t>(1, static_cast<size_t>(k - s_value + 1));
+        if (syncmer_reserve > 0)
+            syncmers.reserve(syncmer_reserve);
 
-        const size_t expected = sequence_length / std::max<int>(1, k);
-        if (expected > 0)
-            out.reserve(out.size() + expected);
+        collect_syncmers_encoded(seq_span, syncmer_params, syncmers);
 
-        for (auto strobe = generator.next(); strobe != sentinel; strobe = generator.next())
-        {
-            if (strobe.hash == 0 && strobe.hash_revcomp == 0 &&
-                strobe.strobe1_pos == 0 && strobe.strobe2_pos == 0)
-            {
-                break;
-            }
-            out.push_back(make_strobemer_hash(strobe, params));
-        }
+        if (syncmers.empty())
+            return false;
 
-        return out.size() > initial_size;
+        const bool appended =
+            append_randstrobes_from_syncmers(syncmers, rand_params, params, out);
+
+        return appended;
     }
     catch (const std::exception &)
     {
