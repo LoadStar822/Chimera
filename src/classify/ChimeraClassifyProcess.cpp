@@ -1031,9 +1031,10 @@ void processSequence(
   bool marginAccept = (bestRounded >= thrConfNeed) && dc.accept;
   highConfPre = highConfPre && marginAccept;
 
-  // --- EM 模式下的模糊保护 ---
-  // 当使用 EM 时，如果 Top1/Top2 的分值比例不足 3 倍，视为不确定，让其进入 EM。
-  // 过低的比例容易被近缘物种抢占，需延后由 EM 全局推断。
+  // --- Ambiguity guard before EM ---
+  // When EM is enabled, send the read into EM unless Top1 is at least 3x Top2.
+  // Lower ratios are easily hijacked by near-neighbor species and are better
+  // resolved by the global EM pass.
   if (best_ratio < 3.0) {
     highConfPre = false;
   }

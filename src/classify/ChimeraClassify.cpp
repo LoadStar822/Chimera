@@ -190,12 +190,12 @@ void run(ClassifyConfig config) {
                                       : FeatureMethod::Syncmer;
   FeatureMethod final_method = db_method;
   if (final_method == FeatureMethod::Strobemer && imcfConfig.strobeK == 0) {
-    throw std::runtime_error("IMCF 数据库缺少 strobemer 参数，无法分类。");
+    throw std::runtime_error("The IMCF database is missing strobemer parameters and cannot be used for classification.");
   }
 
   if (final_method == FeatureMethod::Strobemer &&
       !chimera::feature::strobemer_available()) {
-    throw std::runtime_error("当前 Chimera 构建未启用 strobemer 支持，无法加载使用 strobemer 的数据库，请重新编译或改用 syncmer 数据库。");
+    throw std::runtime_error("This Chimera build does not include strobemer support and cannot load a strobemer database. Rebuild Chimera or use a syncmer database.");
   }
 
   size_t feature_min_len = 0;

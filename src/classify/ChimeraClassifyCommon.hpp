@@ -496,7 +496,6 @@ struct PresenceAccumulator {
                   uint32_t unique_bucket,
                   uint32_t breadth_bucket);
   void add_read_support(uint32_t tid, bool uniqueRead);
-  bool sketches_enabled() const { return sketchWords > 0; }
 };
 
 struct PresenceSummary {

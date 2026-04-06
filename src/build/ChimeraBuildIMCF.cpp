@@ -467,7 +467,7 @@ namespace ChimeraBuild {
 					line << "    group " << summary.index << ": " << summary.failures << "/" << summary.attempts
 						 << " failed (" << formatRate(summary.rate) << ")";
 					if (summary.rate > kFailureWarningThreshold) {
-						line << " — 建议降低 load_factor 或提高 MaxCuckooCount/扩大 binSize";
+						line << " - consider lowering load_factor or increasing MaxCuckooCount/binSize";
 					}
 					std::cout << line.str() << std::endl;
 					if (summary.worstSlot != std::numeric_limits<size_t>::max() && summary.worstSlot < indexToTaxid[summary.index].size() && summary.worstSlotFailures > 0 && summary.worstSlotRate > kFailureWarningThreshold) {

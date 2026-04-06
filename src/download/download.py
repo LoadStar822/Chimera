@@ -1903,35 +1903,6 @@ def ask_gtdb_release(default_release=None, cache_dir=None, mirror_keys=None):
         return sanitize_gtdb_release_input(manual) or manual
 
 
-def validate_input(prompt, valid_options, default=None, allow_empty=False):
-    """
-    Validate user input
-    
-    Parameters:
-    - prompt (str): Message to prompt user
-    - valid_options (list): List of valid options
-    - default (str): Default value
-    - allow_empty (bool): Whether to allow empty input
-    
-    Returns:
-    - str: Validated input value
-    """
-    while True:
-        user_input = _prompt_line_input(
-            prompt,
-            prompt,
-            default=default if default is not None else None,
-        ).strip()
-        if not user_input and default is not None:
-            return default
-        if allow_empty and not user_input:
-            return ""
-        entries = [entry.strip() for entry in user_input.split(",")]
-        if all(entry in valid_options for entry in entries):
-            return ",".join(entries)
-        print(f"\nInvalid input. Please choose from: {', '.join(valid_options)}")
-
-
 def prompt_user(options):
     """
     Interactively prompt user for download parameters

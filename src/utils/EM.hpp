@@ -36,21 +36,6 @@ namespace detail {
 	inline bool is_unclassified(const std::string& taxid) {
 		return taxid == kUnclassifiedTaxid;
 	}
-
-	inline double log_sum_exp(const std::vector<double>& values) {
-		double max_val = -std::numeric_limits<double>::infinity();
-		for (double v : values) {
-			max_val = std::max(max_val, v);
-		}
-		if (!std::isfinite(max_val)) {
-			return max_val;
-		}
-		double sum = 0.0;
-		for (double v : values) {
-			sum += std::exp(v - max_val);
-		}
-		return max_val + std::log(sum);
-	}
 }
 
 inline std::pair<std::vector<classifyResult>, std::unordered_map<std::string, double>>

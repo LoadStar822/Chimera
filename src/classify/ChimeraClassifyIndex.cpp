@@ -56,30 +56,30 @@ void loadFilter(
     archivePath = fs::path{input_file + ".imcf"};
   }
   if (!fs::exists(archivePath)) {
-    throw std::runtime_error("无法找到 IMCF 主档案: " + input_file);
+    throw std::runtime_error("Cannot find IMCF archive: " + input_file);
   }
 
 
   std::ifstream is(archivePath, std::ios::binary);
   if (!is.is_open()) {
-    throw std::runtime_error("无法打开 IMCF 主档案: " + archivePath.string());
+    throw std::runtime_error("Cannot open IMCF archive: " + archivePath.string());
   }
 
   cereal::BinaryInputArchive archive(is);
   try {
     archive(imcf);
   } catch (const cereal::Exception &exc) {
-    throw std::runtime_error(std::string("加载 IMCF 主档案失败: ") + exc.what());
+    throw std::runtime_error(std::string("Failed to load IMCF archive: ") + exc.what());
   }
   try {
     archive(indexToTaxid);
   } catch (const cereal::Exception &exc) {
-    throw std::runtime_error(std::string("加载 IMCF taxid 索引失败: ") + exc.what());
+    throw std::runtime_error(std::string("Failed to load IMCF taxid index: ") + exc.what());
   }
   try {
     archive(imcfConfig);
   } catch (const cereal::Exception &exc) {
-    throw std::runtime_error(std::string("加载 IMCF 配置失败: ") + exc.what());
+    throw std::runtime_error(std::string("Failed to load IMCF configuration: ") + exc.what());
   }
   if (coverageMeta) {
     try {
@@ -99,24 +99,24 @@ void loadFilter(
 
   if (imcfConfig.hashVersion != ChimeraBuild::IMCFConfig::CurrentHashVersion) {
     throw std::runtime_error(
-        "IMCF 数据库版本不兼容：hash_version=" +
+        "Incompatible IMCF database version: hash_version=" +
         std::to_string(imcfConfig.hashVersion) +
-        "，请使用当前 Chimera 重新构建数据库。");
+        ". Rebuild the database with the current Chimera.");
   }
   if (imcf.get_storage_mode() != 1) {
     throw std::runtime_error(
-        "IMCF 数据库存储模式不兼容：仅支持 qidx-only (storageMode=1)。"
-        "请使用当前 Chimera 重新构建数据库。");
+        "Incompatible IMCF storage mode: only qidx-only (storageMode=1) is supported. "
+        "Rebuild the database with the current Chimera.");
   }
   if (imcfConfig.seed64 == 0) {
     throw std::runtime_error(
-        "IMCF 数据库缺少 syncmer 种子信息，请重新执行 Chimera build。");
+        "The IMCF database is missing syncmer seed metadata. Please rerun Chimera build.");
   }
   if (imcfConfig.fpSalt != ChimeraBuild::IMCFConfig::DefaultFingerprintSalt) {
     throw std::runtime_error(
-        "IMCF 数据库指纹盐值与当前实现不一致，检测到 fp_salt=" +
+        "IMCF fingerprint salt does not match the current implementation, detected fp_salt=" +
         std::to_string(imcfConfig.fpSalt) +
-        "，请重新构建数据库或升级程序。");
+        ". Rebuild the database or upgrade the program.");
   }
 }
 

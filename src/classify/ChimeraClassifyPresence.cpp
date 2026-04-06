@@ -855,12 +855,6 @@ void postEmDecision(
       continue;
     }
 
-    // keep_multi 逻辑会把丰度拆给多个物种，EM 后期希望赢家通吃，故跳过。
-    // double gap = top_score - second_score;
-    // bool keep_multi = (second_score > 0.0 && gap < 0.10 &&
-    //                    top_score >= 0.35 && second_score >= 0.25);
-	    // if (keep_multi) { ... }
-
         // Continuous fallback: strength=0 keeps reject, strength=1 behaves like
         // previous tail-rich fallback.
         if (fallback_strength > 1e-9) {

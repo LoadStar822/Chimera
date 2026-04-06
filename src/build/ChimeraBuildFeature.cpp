@@ -2,7 +2,6 @@
 
 #include <dna4_traits.hpp>
 #include <seqan3/alphabet/nucleotide/dna4.hpp>
-#include <seqan3/core/debug_stream.hpp>
 
 #include <algorithm>
 #include <cerrno>
@@ -100,11 +99,6 @@ public:
   }
 
   bool failed() const { return failedFlag.load(std::memory_order_relaxed); }
-
-  std::string failure_message() const {
-    std::lock_guard<std::mutex> lock(mutex);
-    return failureMessage;
-  }
 
 private:
   void finalize_noexcept() {

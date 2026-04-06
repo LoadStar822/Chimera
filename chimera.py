@@ -53,7 +53,7 @@ def parse_arguments():
             description="Chimera - A versatile tool for metagenomic classification"
         )
         subparsers = parser.add_subparsers(dest="command", required=False)
-        download_parser = subparsers.add_parser(
+        subparsers.add_parser(
             "download", help="Download NCBI database sequences and resources"
         )
 
@@ -71,7 +71,7 @@ def parse_arguments():
     subparsers = parser.add_subparsers(dest="command", required=False)
 
     # Download subcommand
-    download_parser = subparsers.add_parser(
+    subparsers.add_parser(
         "download", help="Download NCBI database sequences and resources"
     )
 
@@ -121,7 +121,7 @@ def parse_arguments():
         help="Number of threads for building",
     )
     build_parser.add_argument(
-        "--load-factor", type=float, default=0.85, help="IMCF 滤器的负载因子"
+        "--load-factor", type=float, default=0.85, help="IMCF filter load factor"
     )
     build_parser.add_argument(
         "--presence-unique-deg",
@@ -134,13 +134,13 @@ def parse_arguments():
         dest="taxonomy_kind",
         default="auto",
         choices=["auto", "ncbi", "gtdb"],
-        help="taxonomy 数据源标识 (auto/ncbi/gtdb)",
+        help="Taxonomy source identifier (auto/ncbi/gtdb)",
     )
     build_parser.add_argument(
         "--taxonomy-version",
         dest="taxonomy_version",
         default="auto",
-        help="taxonomy 数据版本标识，例如 ncbi-taxdump-2025-09-15 或 gtdb-rs226",
+        help="Taxonomy version label, for example ncbi-taxdump-2025-09-15 or gtdb-rs226",
     )
 
     # Download and Build combined subcommand
@@ -187,7 +187,7 @@ def parse_arguments():
         help="Number of threads for building",
     )
     download_build_parser.add_argument(
-        "--load-factor", type=float, default=0.85, help="IMCF 滤器的负载因子"
+        "--load-factor", type=float, default=0.85, help="IMCF filter load factor"
     )
     download_build_parser.add_argument(
         "--presence-unique-deg",
@@ -200,13 +200,13 @@ def parse_arguments():
         dest="taxonomy_kind",
         default="auto",
         choices=["auto", "ncbi", "gtdb"],
-        help="taxonomy 数据源标识 (auto/ncbi/gtdb)",
+        help="Taxonomy source identifier (auto/ncbi/gtdb)",
     )
     download_build_parser.add_argument(
         "--taxonomy-version",
         dest="taxonomy_version",
         default="auto",
-        help="taxonomy 数据版本标识，例如 ncbi-taxdump-2025-09-15 或 gtdb-rs226",
+        help="Taxonomy version label, for example ncbi-taxdump-2025-09-15 or gtdb-rs226",
     )
 
     # Classify subcommand
@@ -263,7 +263,7 @@ def parse_arguments():
         default=None,
         help="Minimum global class weight (default 0.0005)",
     )
-    # NOTE: LCA 及后处理相关参数暂时废弃，内部逻辑继续沿用默认值
+    # NOTE: Deprecated LCA/post-processing knobs are intentionally not exposed.
     classify_parser.add_argument(
         "-t",
         "--threads",
@@ -290,32 +290,32 @@ def parse_arguments():
         dest="taxonomy_kind",
         default="auto",
         choices=["auto", "ncbi", "gtdb"],
-        help="Profile 使用的 taxonomy 数据源标识（auto 将尝试自动推断）",
+        help="Taxonomy source for profile generation (auto attempts inference)",
     )
     profile_parser.add_argument(
         "--taxonomy-info",
         dest="taxonomy_info",
         default=None,
-        help="指向构建阶段生成的 tax.info 文件，用于 GTDB 等自定义 taxonomy",
+        help="Path to the tax.info file produced during build, used by GTDB and other custom taxonomies",
     )
     profile_parser.add_argument(
         "--taxonomy-meta",
         dest="taxonomy_meta",
         default=None,
-        help="指向 taxonomy.meta 元数据文件（若未提供将尝试在输入文件同目录查找）",
+        help="Path to taxonomy.meta metadata; if omitted, the input directory will be probed",
     )
     profile_parser.add_argument(
         "--abundance-mode",
         dest="abundance_mode",
         default="soft_seq",
         choices=["soft_seq", "hard_seq", "top1", "soft_tax", "soft", "hard"],
-        help="丰度统计模式：soft_seq(默认，累加所有 taxid:count) / hard_seq(仅 top1 的 taxid:count) / top1(仅 top1，每条序列计 1)。",
+        help="Abundance mode: soft_seq (default, sum all taxid:count), hard_seq (top1 taxid:count only), or top1 (count each sequence once)",
     )
     profile_parser.add_argument(
         "--hd-species-head-mass",
         type=float,
         default=97.0,
-        help="高多样性样本：species 输出的 head mass（百分比），用于抑制非零长尾物种数（默认 97.0）",
+        help="Head-mass percentage for species output in high-diversity samples (default 97.0)",
     )
 
     if len(sys.argv) == 1:
@@ -339,22 +339,16 @@ def parse_arguments():
 def run_chimera(args, chimera_path=None):
     if args.command == "download":
         downloader = get_downloader()
-        # 获取原始命令行参数
         cmd_args = sys.argv
-        # 找到"download"在参数列表中的位置
         try:
             download_index = cmd_args.index("download")
-            # 提取"download"之后的所有参数
             download_args = cmd_args[download_index + 1 :]
 
-            # 如果有额外参数，则使用非交互模式
             if download_args:
                 downloader.download(interactive=False, raw_args=download_args)
             else:
-                # 无参数时使用交互模式
                 downloader.download(interactive=True)
         except ValueError:
-            # 找不到"download"参数，使用交互模式
             downloader.download(interactive=True)
         return 0
 
@@ -432,14 +426,8 @@ def run_chimera(args, chimera_path=None):
     if args.version:
         command.append("--version")
 
-    # Add subcommand
     if args.command:
         command.append(args.command)
-
-    # Add options and parameters based on parsed arguments
-    if args.command == "download":
-        if args.build:
-            command.append("-b")
 
     if args.command == "build":
         command.extend(["-i", args.input])

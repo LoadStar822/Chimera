@@ -29,7 +29,7 @@ chimera::feature::Params prepare_feature_params_for_classify(
   if (method == FeatureMethod::Strobemer) {
     if (imcfConfig.strobeK == 0) {
       throw std::runtime_error(
-          "IMCF 数据库缺少 strobemer 参数，无法以 strobemer 模式分类。");
+          "The IMCF database is missing strobemer parameters and cannot run in strobemer mode.");
     }
     params.method = FeatureMethod::Strobemer;
     params.strobe.k = imcfConfig.strobeK;

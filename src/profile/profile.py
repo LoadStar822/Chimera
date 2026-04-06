@@ -550,13 +550,13 @@ def process_file(
     gtdb_taxonomy: Optional[GtdbTaxonomy] = None
     if resolved_kind == "gtdb":
         if not taxonomy_info:
-            raise ValueError("GTDB 模式需要提供 --taxonomy-info (tax.info 文件路径)")
+            raise ValueError("GTDB mode requires --taxonomy-info (path to tax.info)")
         gtdb_taxonomy = load_gtdb_taxonomy(taxonomy_info)
     else:
         try:
             tax = NCBITaxa()
         except Exception as exc:  # pragma: no cover - 初始化失败极少发生
-            warnings.warn(f"无法初始化 NCBITaxa，所有条目将标记为未分类: {exc}")
+            warnings.warn(f"Failed to initialize NCBITaxa; all entries will be marked as unclassified: {exc}")
             tax = None
 
     def aggregate_levels_for_counts(

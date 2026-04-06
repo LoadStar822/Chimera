@@ -99,7 +99,7 @@ def convert_multiple_files_to_krona_format(
 
     if resolved_kind == "gtdb":
         if not taxonomy_info:
-            raise ValueError("GTDB Krona 转换需要提供 --taxonomy-info (tax.info)")
+            raise ValueError("GTDB Krona conversion requires --taxonomy-info (tax.info)")
         gtdb_taxonomy = load_gtdb_taxonomy(taxonomy_info)
 
     ncbi_tax = None

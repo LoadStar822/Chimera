@@ -168,7 +168,7 @@ int main(int argc, char **argv) {
       ->default_val(default_threads);
   build
       ->add_option("--load-factor", buildConfig.load_factor,
-                   "IMCF 滤器负载因子")
+                   "IMCF filter load factor")
       ->default_val(0.85);
   build
       ->add_option("--presence-unique-deg", buildConfig.presence_unique_deg,
@@ -177,31 +177,31 @@ int main(int argc, char **argv) {
       ->check(CLI::Range(1, 65535));
   build
       ->add_option("--feature", buildConfig.feature,
-                   "Feature 提取方式 (syncmer|strobemer|auto)")
+                   "Feature extraction method (syncmer|strobemer|auto)")
       ->default_val("strobemer");
   build
       ->add_option("--strobe-k", buildConfig.strobemer_k,
-                   "Strobemer k-mer 长度")
+                   "Strobemer k-mer length")
       ->default_val(28);
   build
       ->add_option("--strobe-order", buildConfig.strobemer_order,
-                   "Strobemer 阶数 (目前仅支持 2)")
+                   "Strobemer order (currently only 2 is supported)")
       ->default_val(2);
   build
       ->add_option("--strobe-w-min", buildConfig.strobemer_w_min,
-                   "Strobemer 最小窗口")
+                   "Strobemer minimum window")
       ->default_val(12);
   build
       ->add_option("--strobe-w-max", buildConfig.strobemer_w_max,
-                   "Strobemer 最大窗口")
+                   "Strobemer maximum window")
       ->default_val(32);
   build
       ->add_option("--taxonomy-kind", buildConfig.taxonomy_kind,
-                   "taxonomy 数据源标识 (auto|ncbi|gtdb)")
+                   "Taxonomy source identifier (auto|ncbi|gtdb)")
       ->default_val("auto");
   build
       ->add_option("--taxonomy-version", buildConfig.taxonomy_version,
-                   "taxonomy 数据版本标识，例如 ncbi-taxdump-2025-09-15 或 gtdb-rs226")
+                   "Taxonomy version label, for example ncbi-taxdump-2025-09-15 or gtdb-rs226")
       ->default_val("auto");
   build->add_flag("-q,--quiet", buildQuietRequested, "Quiet output");
 
@@ -249,7 +249,7 @@ int main(int argc, char **argv) {
       throw CLI::ValidationError("--strobe-k must be >= 8");
     }
     if (buildConfig.strobemer_order != 2) {
-      throw CLI::ValidationError("--strobe-order 当前仅支持取 2");
+      throw CLI::ValidationError("--strobe-order currently only supports value 2");
     }
     buildConfig.verbose = !buildQuietRequested;
   });
@@ -298,7 +298,7 @@ int main(int argc, char **argv) {
           ->default_val(0.80);
   classify
       ->add_option("--presence-pi", classifyConfig.presence_pi,
-                   "Presence prior P(z=1) for coverage模型 (0-1)")
+                   "Presence prior P(z=1) for the coverage model (0-1)")
       ->check(CLI::Range(1e-6, 0.5))
       ->default_val(1e-3);
   classify
@@ -349,7 +349,7 @@ int main(int argc, char **argv) {
       ->add_option("--post-pi-min", classifyConfig.post_pi_min,
                    "Minimum global class weight")
       ->default_val(5e-4);
-  // TODO: 后处理相关参数暂时废弃，内部逻辑维持默认行为
+  // TODO: Deprecated post-processing knobs remain fixed to internal defaults.
 
   if (argc == 1) {
     std::cout << app.help() << std::endl;

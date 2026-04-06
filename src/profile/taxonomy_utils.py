@@ -77,7 +77,7 @@ def load_gtdb_taxonomy(info_path: str) -> GtdbTaxonomy:
     name: Dict[str, str] = {}
     path = Path(info_path)
     if not path.exists():
-        raise FileNotFoundError(f"无法找到 GTDB taxonomy 信息文件: {info_path}")
+        raise FileNotFoundError(f"Cannot find GTDB taxonomy info file: {info_path}")
     with path.open("r", encoding="utf-8") as fh:
         for raw in fh:
             parts = raw.rstrip("\n").split("\t")
@@ -88,5 +88,5 @@ def load_gtdb_taxonomy(info_path: str) -> GtdbTaxonomy:
             rank[node] = node_rank.strip().lower()
             name[node] = node_name.strip()
     if not parent:
-        raise ValueError(f"GTDB taxonomy 信息文件中未解析到任何节点: {info_path}")
+        raise ValueError(f"No taxonomy nodes were parsed from the GTDB taxonomy info file: {info_path}")
     return GtdbTaxonomy(parent=parent, rank=rank, name=name)
