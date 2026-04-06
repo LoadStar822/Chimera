@@ -258,12 +258,6 @@ def parse_arguments():
         help="Sketch bits for presence breadth (power-of-two suggested)",
     )
     classify_parser.add_argument(
-        "--weight-map",
-        dest="weight_map",
-        default=None,
-        help="Optional contig/read weight map: id<TAB>weight or CAMI mapping.tsv",
-    )
-    classify_parser.add_argument(
         "--post-pi-min",
         type=float,
         default=None,
@@ -482,8 +476,6 @@ def run_chimera(args, chimera_path=None):
             command.extend(
                 ["--presence-breadth-bits", str(args.presence_breadth_bits)]
             )
-        if args.weight_map is not None:
-            command.extend(["--weight-map", str(args.weight_map)])
         if args.post_pi_min is not None:
             command.extend(["--post-pi-min", str(args.post_pi_min)])
         command.extend(["-t", str(args.threads)])

@@ -33,7 +33,6 @@ namespace ChimeraClassify {
 		struct ClassifyConfig {
 			std::vector<std::string> singleFiles;
 			std::vector<std::string> pairedFiles;
-			std::string weight_map_file; // optional contig/read weight map (CAMI mapping.tsv or id<TAB>weight)
 			std::string outputFile;
 			std::string dbFile;
 		double shotThreshold = 0.70;
@@ -118,7 +117,6 @@ namespace ChimeraClassify {
 			std::vector<std::pair<std::string, double>> taxidCount;
 			std::vector<std::pair<std::string, double>> posteriors;
 			double evaluated{ 0.0 }; // 实际参与判别的 syncmer 数，用于归一化
-			double sample_weight{ 0.0 }; // 可选样本权重（如 CAMI number_reads）；0 表示未提供
 			std::string reject_reason; // 为空表示未拒绝或接受
 			std::string best_taxid_hint; // 最佳候选 taxid（即使未被接受）
 		};

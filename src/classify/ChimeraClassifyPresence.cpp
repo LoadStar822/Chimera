@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -676,11 +677,17 @@ void postEmDecision(
 			  constexpr size_t kFallbackHintTopK = 16;
 			  constexpr double kFallbackGenusConflictGapMax = 0.20;
 
-		  for (auto &result : results) {
-		    // Keep the full posterior list (sorted) for dumping/analysis (POST_TOPK),
-		    // but use a pruned+renormalized view for final decisions and taxidCount
-		    // to avoid exploding long-tail allocations.
-		    auto posterior_full = std::move(result.posteriors);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+			  for (std::int64_t result_idx = 0;
+			       result_idx < static_cast<std::int64_t>(results.size());
+			       ++result_idx) {
+			    auto &result = results[static_cast<size_t>(result_idx)];
+			    // Keep the full posterior list (sorted) for dumping/analysis (POST_TOPK),
+			    // but use a pruned+renormalized view for final decisions and taxidCount
+			    // to avoid exploding long-tail allocations.
+			    auto posterior_full = std::move(result.posteriors);
 		    if (posterior_full.empty()) {
 		      result.taxidCount.clear();
 		      result.taxidCount.emplace_back(kUnclassified, 1.0);
@@ -765,9 +772,7 @@ void postEmDecision(
 				          // Empirically this bucket has much higher precision than "hint==top1"
 				          // and avoids leaking high-confidence wrong reads back into output.
 				          if (hint_hit.found && hint_hit.rank == 1) {
-				            double total_evidence =
-				                (result.sample_weight > 0.0) ? result.sample_weight
-				                                            : result.evaluated;
+					            double total_evidence = result.evaluated;
 				            if (!(total_evidence > 0.0)) {
 				              total_evidence = 1.0;
 				            }
@@ -791,8 +796,7 @@ void postEmDecision(
 
 	      result.taxidCount.clear();
 
-      double total_evidence =
-          (result.sample_weight > 0.0) ? result.sample_weight : result.evaluated;
+	      double total_evidence = result.evaluated;
       if (!(total_evidence > 0.0)) {
         total_evidence = 1.0;
       }
@@ -904,9 +908,7 @@ void postEmDecision(
 			            if (!hint_in_topk) {
 			              // keep rejected
 			            } else {
-			              double total_evidence =
-		                  (result.sample_weight > 0.0) ? result.sample_weight
-			                                              : result.evaluated;
+				              double total_evidence = result.evaluated;
 			              if (!(total_evidence > 0.0)) {
 			                total_evidence = 1.0;
 			              }
@@ -918,9 +920,7 @@ void postEmDecision(
 					              continue;
 				            }
 				          } else {
-			            double total_evidence = (result.sample_weight > 0.0)
-			                                        ? result.sample_weight
-			                                        : result.evaluated;
+				            double total_evidence = result.evaluated;
 			            if (!(total_evidence > 0.0)) {
 			              total_evidence = 1.0;
 			            }

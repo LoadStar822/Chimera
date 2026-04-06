@@ -54,12 +54,12 @@ namespace detail {
 }
 
 inline std::pair<std::vector<classifyResult>, std::unordered_map<std::string, double>>
-EMAlgorithm(const std::vector<classifyResult>& input,
+EMAlgorithm(std::vector<classifyResult> input,
 	size_t max_iter,
 	double tol,
 	const EMOptions& options,
 	const std::unordered_map<std::string, double>* prior_scale = nullptr) {
-	std::vector<classifyResult> results = input;
+	std::vector<classifyResult> results = std::move(input);
 	(void)tol;
 	std::unordered_set<std::string> taxid_set;
 	for (const auto& record : results) {
@@ -121,8 +121,8 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 	// 后续迭代只更新先验项，避免重复字符串哈希与重复分母计算。
 	std::vector<PreparedRead> prepared(results.size());
 	std::vector<double> weighted_evidence(taxid_count, 0.0);
-	for (size_t i = 0; i < input.size(); ++i) {
-		const auto& source = input[i];
+	for (size_t i = 0; i < results.size(); ++i) {
+		const auto& source = results[i];
 		auto& prep = prepared[i];
 		if (source.evaluated <= 0.0 || source.taxidCount.empty()) {
 			continue;
@@ -175,8 +175,7 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 			prep.candidates.push_back(PreparedCandidate{cand.idx, log_likelihood});
 		}
 
-		prep.base_weight = (source.sample_weight > 0.0) ? source.sample_weight
-		                                               : source.evaluated;
+		prep.base_weight = source.evaluated;
 		if (!(prep.base_weight > 0.0)) {
 			prep.base_weight = 1.0;
 		}
@@ -256,27 +255,24 @@ EMAlgorithm(const std::vector<classifyResult>& input,
 
 				log_components.clear();
 				log_components.reserve(prep.candidates.size());
+				q_values.clear();
+				q_values.reserve(prep.candidates.size());
+				double max_log = -std::numeric_limits<double>::infinity();
 				for (const auto& cand : prep.candidates) {
-					size_t idx = cand.idx;
-					double prior = std::max(pi_vec[idx], options.eps);
-					double log_prior = std::log(prior);
-					log_components.emplace_back(idx, log_prior + cand.log_likelihood);
+					double prior = std::max(pi_vec[cand.idx], options.eps);
+					double score = std::log(prior) + cand.log_likelihood;
+					log_components.emplace_back(cand.idx, score);
+					if (score > max_log) {
+						max_log = score;
+					}
 				}
 				if (log_components.empty()) {
 					continue;
 				}
-
-				q_values.clear();
-				q_values.reserve(log_components.size());
-				double max_log = -std::numeric_limits<double>::infinity();
-				for (const auto& entry : log_components) {
-					if (entry.second > max_log) {
-						max_log = entry.second;
-					}
-				}
 				if (!std::isfinite(max_log)) {
 					continue;
 				}
+
 				double sum_exp = 0.0;
 				for (const auto& entry : log_components) {
 					sum_exp += std::exp(entry.second - max_log);

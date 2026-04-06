@@ -4,7 +4,6 @@
 #include "ChimeraClassify.hpp"
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -118,7 +117,6 @@ struct WeightingContext {
   const CountMinSketch *freqSketch{nullptr};
   chimera::presence::HashFreqStats freqStats{};
   double freqQuantile{0.0};
-  const std::unordered_map<std::string, double> *sampleWeights{nullptr};
   bool freq_trusted{true};
   // Optional NCBI taxonomy helper (when available in current environment).
   const NcbiTaxdump *ncbiTaxdump{nullptr};
@@ -135,7 +133,6 @@ struct WeightingContext {
   // taxids or breaking presence coverage meta.
 
   bool enabled() const { return freqSketch != nullptr; }
-  bool has_sample_weights() const { return sampleWeights != nullptr; }
 };
 
 inline bool allow_unique_edge(std::size_t deg_effective, std::size_t df_bins,
@@ -462,8 +459,8 @@ void loadFilter(const std::string &input_file,
                 std::vector<std::vector<std::string>> &indexToTaxid,
                 chimera::presence::CoverageMeta *coverageMeta = nullptr);
 
-void saveResult(std::vector<classifyResult> classifyResults,
-                ClassifyConfig config);
+void saveResult(const std::vector<classifyResult> &classifyResults,
+                const ClassifyConfig &config);
 
 struct GroupHeat {
   std::vector<uint32_t> score;
@@ -517,6 +514,34 @@ struct PresenceDecision {
   double threshold{1.0};
 };
 
+struct TaxpoolGenusPick {
+  uint32_t genus_id{0u};
+  uint32_t rep_id{0u};
+  uint32_t rare_support{0u};
+  uint64_t coarse_score{0u};
+};
+
+struct ProcessScratch {
+  std::vector<uint64_t> hashs1;
+  std::vector<std::vector<uint32_t>> sampleCount;
+  std::vector<std::pair<uint32_t, uint16_t>> touchedS;
+  std::vector<std::pair<uint32_t, uint32_t>> rankedBins;
+  std::vector<size_t> deferredEval;
+  std::vector<std::pair<uint32_t, uint64_t>> weighted;
+  std::vector<uint32_t> topBins;
+  std::vector<std::pair<uint32_t, uint64_t>> repRanked;
+  std::vector<std::pair<uint32_t, uint64_t>> genusRanked;
+  std::vector<uint32_t> repPool;
+  std::vector<uint32_t> dominantCandidates;
+  std::vector<TaxpoolGenusPick> nonDominantGenusPicks;
+  std::vector<std::pair<uint32_t, double>> rankedTidScores;
+  std::vector<uint32_t> minimizerTids;
+  std::vector<uint32_t> minimizerBins;
+  std::vector<uint32_t> routed;
+  std::vector<uint32_t> rareRepHits;
+  std::vector<uint32_t> rareGenusHits;
+};
+
 PresenceDecision evaluate_presence_coverage(
     const PresenceSummary &summary, const TaxDict &tax,
     const ClassifyConfig &config, const chimera::presence::CoverageMeta &meta,
@@ -524,30 +549,28 @@ PresenceDecision evaluate_presence_coverage(
 
 void processSequence(
     const std::vector<uint64_t> &hashs1, size_t readLen,
-    ChimeraBuild::IMCFConfig &imcfConfig,
-    std::vector<std::vector<std::string>> &indexToTaxid, const TaxDict &tax,
+    ChimeraBuild::IMCFConfig &imcfConfig, const TaxDict &tax,
     ClassifyConfig &config, const WeightingContext &weightCtx,
     const AutoClassifyPolicy &autoPolicy, GroupHeat &heat,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
-    PresenceAccumulator *presenceAcc);
+    PresenceAccumulator *presenceAcc, ProcessScratch &scratch);
 
 void processBatch(
     batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
-    std::vector<std::vector<std::string>> &indexToTaxid, const TaxDict &tax,
-    ClassifyConfig &config, chimera::imcf::InterleavedMergedCuckooFilter &imcf,
+    const TaxDict &tax, ClassifyConfig &config,
+    chimera::imcf::InterleavedMergedCuckooFilter &imcf,
     std::vector<classifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
-    const AutoClassifyPolicy &autoPolicy,
-    PresenceAccumulator *presenceAcc);
+    const AutoClassifyPolicy &autoPolicy, PresenceAccumulator *presenceAcc,
+    ProcessScratch &scratch);
 
 void classify_streaming(
     ChimeraBuild::IMCFConfig &imcfConfig,
     std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
     ClassifyConfig &config,
-    chimera::imcf::InterleavedMergedCuckooFilter &imcf,
-    std::vector<std::vector<std::string>> &indexToTaxid, const TaxDict &tax,
+    chimera::imcf::InterleavedMergedCuckooFilter &imcf, const TaxDict &tax,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
     std::atomic<bool> &producer_done,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
@@ -558,7 +581,6 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
               ClassifyConfig &config,
               chimera::imcf::InterleavedMergedCuckooFilter &imcf,
-              std::vector<std::vector<std::string>> &indexToTaxid,
               const TaxDict &tax, std::vector<classifyResult> &classifyResults,
               FileInfo &fileInfo,
               const chimera::feature::Params &feature_params,

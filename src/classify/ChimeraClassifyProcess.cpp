@@ -51,13 +51,12 @@ static inline uint64_t splitmix64(uint64_t x) {
 
 void processSequence(
     const std::vector<uint64_t> &hashs1, size_t readLen,
-    ChimeraBuild::IMCFConfig &imcfConfig,
-    std::vector<std::vector<std::string>> &indexToTaxid, const TaxDict &tax,
+    ChimeraBuild::IMCFConfig &imcfConfig, const TaxDict &tax,
     ClassifyConfig &config, const WeightingContext &weightCtx,
     const AutoClassifyPolicy &autoPolicy, GroupHeat &heat,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
-    PresenceAccumulator *presenceAcc) {
+    PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
   size_t hashNum = hashs1.size();
   auto xor_reduce = [](const std::vector<uint64_t> &vals) {
     uint64_t acc = 0;
@@ -66,8 +65,7 @@ void processSequence(
     }
     return acc;
   };
-
-  const size_t binNumAll = indexToTaxid.size();
+  const size_t binNumAll = tax.idx2id.size();
   heat.ensure(binNumAll);
   const double tail_risk_s = clamp01(config.tail_risk_s);
   const double tail_risk_hi = smoothstep(tail_risk_s, 0.60, 0.95);
@@ -90,17 +88,6 @@ void processSequence(
     return static_cast<uint32_t>(mix % presenceSketchBits);
   };
   constexpr double kUniqueEdgeBonus = 3.0;
-  const bool has_sample_weight = weightCtx.has_sample_weights();
-  double sample_weight = 1.0;
-  if (has_sample_weight && weightCtx.sampleWeights) {
-    auto it_w = weightCtx.sampleWeights->find(id);
-    if (it_w != weightCtx.sampleWeights->end()) {
-      sample_weight = it_w->second;
-    }
-  }
-  if (!(sample_weight > 0.0)) {
-    sample_weight = 1.0;
-  }
   double presence_weight = 1.0;
 
   const bool taxpool_enabled = autoPolicy.candidate.enable_taxpool;
@@ -139,7 +126,8 @@ void processSequence(
       std::vector<std::pair<uint32_t, uint64_t>> scored;
       scored.reserve(over);
       size_t step = std::max<size_t>(1, hashs1.size() / over);
-      for (size_t i = 0; i < hashs1.size() && scored.size() < over; i += step) {
+      for (size_t i = 0; i < hashs1.size() && scored.size() < over;
+           i += step) {
         uint64_t v = hashs1[i];
         scored.emplace_back(weightCtx.freqSketch->estimate(v), v);
       }
@@ -190,34 +178,38 @@ void processSequence(
   std::vector<uint64_t> routeVals = sampleVals;
   bool used_rare_route = false;
   if (!sampleVals.empty() && weightCtx.freqSketch) {
-    std::vector<std::pair<uint32_t, uint64_t>> scored;
-    scored.reserve(sampleVals.size());
+    std::vector<std::pair<uint32_t, uint64_t>> routeScored;
+    routeScored.reserve(sampleVals.size());
     for (uint64_t v : sampleVals) {
-      scored.emplace_back(weightCtx.freqSketch->estimate(v), v);
+      routeScored.emplace_back(weightCtx.freqSketch->estimate(v), v);
     }
     const double route_ratio = lerp(0.50, 0.50, tail_risk_hi);
     const size_t routeBudget =
         std::max<size_t>(1, static_cast<size_t>(
                                 std::llround(route_ratio * sampleVals.size())));
-    routeVals = select_rare_route_values(scored, routeBudget);
+    routeVals = select_rare_route_values(routeScored, routeBudget);
     if (routeVals.empty()) {
       routeVals = sampleVals;
     }
     used_rare_route = (routeVals.size() < sampleVals.size());
   }
 
-  std::vector<std::vector<uint32_t>> sampleCount;
-  std::vector<std::pair<uint32_t, uint16_t>> touchedS;
+  auto &sampleCount = scratch.sampleCount;
+  sampleCount.clear();
+  auto &touchedS = scratch.touchedS;
+  touchedS.clear();
   touchedS.reserve(64);
   robin_hood::unordered_flat_map<uint32_t, uint32_t> sampleBinScore;
   robin_hood::unordered_flat_map<uint32_t, uint64_t> repCoarseScore;
   robin_hood::unordered_flat_map<uint32_t, uint64_t> genusCoarseScore;
   robin_hood::unordered_flat_map<uint32_t, uint32_t> repRareSupport;
   robin_hood::unordered_flat_map<uint32_t, uint32_t> genusRareSupport;
-  std::vector<std::pair<uint32_t, uint32_t>> rankedBins;
+  auto &rankedBins = scratch.rankedBins;
+  rankedBins.clear();
   uint64_t coarseTotal = 0;
   uint64_t sampleCovered = 0;
-  std::vector<size_t> deferredEval;
+  auto &deferredEval = scratch.deferredEval;
+  deferredEval.clear();
   if (hashs1.size() > 64) {
     deferredEval.reserve(hashs1.size() - 64);
   }
@@ -252,7 +244,8 @@ void processSequence(
       static_cast<size_t>(std::llround(lerp(512.0, 640.0, tail_risk_hi))));
   size_t candidateCap = baseCandidateCap;
   constexpr double kHeadMassThresh = 0.5;
-  std::vector<uint32_t> topBins;
+  auto &topBins = scratch.topBins;
+  topBins.clear();
   bool fallback_full = (coarseTotal == 0);
 
   robin_hood::unordered_flat_set<uint32_t> candidateSet;
@@ -267,9 +260,9 @@ void processSequence(
     rare_freq_threshold = std::clamp<uint32_t>(q, 2u, 32u);
   }
   if (!routeVals.empty()) {
-    std::vector<uint32_t> routed;
-    std::vector<uint32_t> rareRepHits;
-    std::vector<uint32_t> rareGenusHits;
+    auto &routed = scratch.routed;
+    auto &rareRepHits = scratch.rareRepHits;
+    auto &rareGenusHits = scratch.rareGenusHits;
     routed.reserve(16);
     rareRepHits.reserve(16);
     rareGenusHits.reserve(16);
@@ -373,7 +366,8 @@ void processSequence(
   }
 
   if (!candidateSet.empty()) {
-    std::vector<std::pair<uint32_t, uint64_t>> weighted;
+    auto &weighted = scratch.weighted;
+    weighted.clear();
     weighted.reserve(candidateSet.size());
     for (uint32_t bin : candidateSet) {
       uint64_t weight = 0;
@@ -416,8 +410,10 @@ void processSequence(
   if (taxpool_enabled && !fallback_full && tail_risk_hi > taxpool_tail_gate &&
       coarseTotal > 0 && !repCoarseScore.empty() && !genusCoarseScore.empty() &&
       weightCtx.tid2genus) {
-    std::vector<std::pair<uint32_t, uint64_t>> repRanked;
-    std::vector<std::pair<uint32_t, uint64_t>> genusRanked;
+    auto &repRanked = scratch.repRanked;
+    auto &genusRanked = scratch.genusRanked;
+    repRanked.clear();
+    genusRanked.clear();
     repRanked.reserve(repCoarseScore.size());
     genusRanked.reserve(genusCoarseScore.size());
     uint64_t repTotal = 0;
@@ -470,7 +466,8 @@ void processSequence(
         const size_t rep_pool_target = short_like ? 16u : 6u;
         const size_t dominant_limit = short_like ? 5u : 3u;
         const size_t non_dominant_limit = short_like ? 5u : 2u;
-        std::vector<uint32_t> repPool;
+        auto &repPool = scratch.repPool;
+        repPool.clear();
         repPool.reserve(rep_pool_target);
         robin_hood::unordered_flat_set<uint32_t> repSeen;
         repSeen.reserve(rep_pool_target * 2 + 4);
@@ -485,7 +482,8 @@ void processSequence(
 
         add_rep(repRanked.front().first);
         size_t dominant_added = 1;
-        std::vector<uint32_t> dominantCandidates;
+        auto &dominantCandidates = scratch.dominantCandidates;
+        dominantCandidates.clear();
         dominantCandidates.reserve(repRanked.size());
         for (const auto &[rep_id, _] : repRanked) {
           if (map_genus(rep_id) != dominant_genus) {
@@ -520,13 +518,8 @@ void processSequence(
         }
 
         size_t non_dominant_added = 0;
-        struct GenusPick {
-          uint32_t genus_id{0u};
-          uint32_t rep_id{0u};
-          uint32_t rare_support{0u};
-          uint64_t coarse_score{0u};
-        };
-        std::vector<GenusPick> nonDominantGenusPicks;
+        auto &nonDominantGenusPicks = scratch.nonDominantGenusPicks;
+        nonDominantGenusPicks.clear();
         nonDominantGenusPicks.reserve(genusCoarseScore.size());
         for (const auto &[genus_id, coarse_score] : genusCoarseScore) {
           if (genus_id == 0u || genus_id == dominant_genus || coarse_score == 0u) {
@@ -561,7 +554,7 @@ void processSequence(
               {genus_id, best_rep, g_rare, coarse_score});
         }
         std::sort(nonDominantGenusPicks.begin(), nonDominantGenusPicks.end(),
-                  [](const GenusPick &a, const GenusPick &b) {
+                  [](const TaxpoolGenusPick &a, const TaxpoolGenusPick &b) {
                     if (a.rare_support != b.rare_support) {
                       return a.rare_support > b.rare_support;
                     }
@@ -622,7 +615,6 @@ void processSequence(
       }
     }
   }
-
   if (!fallback_full) {
     for (auto bin : topBins) {
       uint32_t delta = 1;
@@ -639,12 +631,11 @@ void processSequence(
   tidScore.reserve(128);
   uniqueHits.reserve(128);
 
-  robin_hood::unordered_flat_map<uint32_t, uint32_t> binHitCount;
-  binHitCount.reserve(128);
-
-  std::vector<uint32_t> minimizerTids;
+  auto &minimizerTids = scratch.minimizerTids;
+  minimizerTids.clear();
   minimizerTids.reserve(64);
-  std::vector<uint32_t> minimizerBins;
+  auto &minimizerBins = scratch.minimizerBins;
+  minimizerBins.clear();
   minimizerBins.reserve(64);
 
   double eff_eval = 0.0;
@@ -725,7 +716,6 @@ void processSequence(
         minimizerBins.push_back(bin);
         last_hit_bin = bin;
       }
-      ++binHitCount[bin];
     };
 
     if (!subset) {
@@ -1007,7 +997,6 @@ void processSequence(
     recompute_subset_state();
 
     tidScore.clear();
-    binHitCount.clear();
     uniqueHits.clear();
     eff_eval = 0.0;
     n_eval = 0;
@@ -1053,12 +1042,6 @@ void processSequence(
   classifyResult result;
   result.evaluated = eff_eval;
   result.id = id;
-  if (weightCtx.has_sample_weights()) {
-    auto it_w = weightCtx.sampleWeights->find(id);
-    result.sample_weight = (it_w != weightCtx.sampleWeights->end())
-                               ? it_w->second
-                               : 1.0;
-  }
   result.best_taxid_hint = bestTaxidStr;
   const double effCap = std::max(1.0, eff_eval);
   std::pair<std::string, double> maxCount;
@@ -1134,7 +1117,8 @@ void processSequence(
 
   } else {
     if (use_em && !tidScore.empty()) {
-      std::vector<std::pair<uint32_t, double>> ranked;
+      auto &ranked = scratch.rankedTidScores;
+      ranked.clear();
       ranked.reserve(tidScore.size());
       for (const auto &kv : tidScore) {
         ranked.emplace_back(kv.first, kv.second);
@@ -1244,7 +1228,8 @@ void processSequence(
             seen.insert(it->second);
           }
         }
-        std::vector<std::pair<uint32_t, double>> ranked;
+        auto &ranked = scratch.rankedTidScores;
+        ranked.clear();
         ranked.reserve(tidScore.size());
         for (const auto &kv : tidScore) {
           ranked.emplace_back(kv.first, kv.second);
@@ -1326,14 +1311,15 @@ void processSequence(
 
 void processBatch(
     batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
-    std::vector<std::vector<std::string>> &indexToTaxid, const TaxDict &tax,
-    ClassifyConfig &config, chimera::imcf::InterleavedMergedCuckooFilter &imcf,
+    const TaxDict &tax, ClassifyConfig &config,
+    chimera::imcf::InterleavedMergedCuckooFilter &imcf,
     std::vector<classifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
-    const AutoClassifyPolicy &autoPolicy,
-    PresenceAccumulator *presenceAcc) {
-  std::vector<uint64_t> hashs1;
+    const AutoClassifyPolicy &autoPolicy, PresenceAccumulator *presenceAcc,
+    ProcessScratch &scratch) {
+  auto &hashs1 = scratch.hashs1;
+  hashs1.clear();
   hashs1.reserve(2048);
   if (!batch.seqs2.empty()) {
     for (size_t i = 0; i < batch.ids.size(); ++i) {
@@ -1361,9 +1347,9 @@ void processBatch(
         std::sort(hashs1.begin(), hashs1.end());
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
-      processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
-                      weightCtx, autoPolicy, heat, imcf, batch.ids[i],
-                      classifyResults, fileInfo, presenceAcc);
+      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
+                      autoPolicy, heat, imcf, batch.ids[i], classifyResults,
+                      fileInfo, presenceAcc, scratch);
     }
   } else {
     for (size_t i = 0; i < batch.seqs.size(); i++) {
@@ -1385,9 +1371,9 @@ void processBatch(
         std::sort(hashs1.begin(), hashs1.end());
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
-      processSequence(hashs1, readLen, imcfConfig, indexToTaxid, tax, config,
-                      weightCtx, autoPolicy, heat, imcf, batch.ids[i],
-                      classifyResults, fileInfo, presenceAcc);
+      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
+                      autoPolicy, heat, imcf, batch.ids[i], classifyResults,
+                      fileInfo, presenceAcc, scratch);
     }
   }
 }
@@ -1396,8 +1382,7 @@ void classify_streaming(
     ChimeraBuild::IMCFConfig &imcfConfig,
     std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
     ClassifyConfig &config,
-    chimera::imcf::InterleavedMergedCuckooFilter &imcf,
-    std::vector<std::vector<std::string>> &indexToTaxid, const TaxDict &tax,
+    chimera::imcf::InterleavedMergedCuckooFilter &imcf, const TaxDict &tax,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
     std::atomic<bool> &producer_done,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
@@ -1424,7 +1409,8 @@ void classify_streaming(
     localFileInfo.maxLen = 0;
     localFileInfo.bpLength = 0;
     GroupHeat heat;
-    heat.ensure(indexToTaxid.size());
+    heat.ensure(tax.idx2id.size());
+    ProcessScratch scratch;
     PresenceAccumulator presenceLocal(
         presenceSummary ? presenceSummary->sketchBits : 0);
     PresenceAccumulator *presencePtr =
@@ -1432,9 +1418,10 @@ void classify_streaming(
 
     for (;;) {
       if (readQueue.try_dequeue(batch)) {
-        processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
+        processBatch(batch, imcfConfig, tax, config, imcf,
                      localClassifyResults, feature_params, feature_min_len,
-                     localFileInfo, heat, weightCtx, autoPolicy, presencePtr);
+                     localFileInfo, heat, weightCtx, autoPolicy, presencePtr,
+                     scratch);
         continue;
       }
       if (producer_done.load(std::memory_order_acquire)) {
@@ -1477,8 +1464,7 @@ void classify(
     ChimeraBuild::IMCFConfig &imcfConfig,
     std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
     ClassifyConfig &config,
-    chimera::imcf::InterleavedMergedCuckooFilter &imcf,
-    std::vector<std::vector<std::string>> &indexToTaxid, const TaxDict &tax,
+    chimera::imcf::InterleavedMergedCuckooFilter &imcf, const TaxDict &tax,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     const WeightingContext &weightCtx, const AutoClassifyPolicy &autoPolicy) {
@@ -1503,11 +1489,12 @@ void classify(
     localFileInfo.maxLen = 0;
     localFileInfo.bpLength = 0;
     GroupHeat heat;
-    heat.ensure(indexToTaxid.size());
+    heat.ensure(tax.idx2id.size());
+    ProcessScratch scratch;
     while (readQueue.try_dequeue(batch)) {
-      processBatch(batch, imcfConfig, indexToTaxid, tax, config, imcf,
-                   localClassifyResults, feature_params, feature_min_len,
-                   localFileInfo, heat, weightCtx, autoPolicy, nullptr);
+      processBatch(batch, imcfConfig, tax, config, imcf, localClassifyResults,
+                   feature_params, feature_min_len, localFileInfo, heat,
+                   weightCtx, autoPolicy, nullptr, scratch);
     }
 #pragma omp critical
     {

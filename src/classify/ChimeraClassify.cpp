@@ -16,7 +16,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -28,129 +27,7 @@
 #include <sstream>
 #include <thread>
 
-#include <unistd.h>
-
 namespace {
-
-uint64_t current_rss_kb() {
-  std::ifstream in("/proc/self/statm");
-  uint64_t size_pages = 0;
-  uint64_t resident_pages = 0;
-  if (!(in >> size_pages >> resident_pages)) {
-    return 0;
-  }
-  long page_size = sysconf(_SC_PAGESIZE);
-  if (page_size <= 0) {
-    return 0;
-  }
-  return resident_pages * static_cast<uint64_t>(page_size / 1024);
-}
-
-double kb_to_gib(uint64_t kb) { return static_cast<double>(kb) / 1024.0 / 1024.0; }
-
-static std::vector<std::string> split_tab(const std::string &line) {
-  std::vector<std::string> parts;
-  std::string field;
-  std::stringstream ss(line);
-  while (std::getline(ss, field, '\t')) {
-    parts.push_back(field);
-  }
-  return parts;
-}
-
-static bool try_parse_double(const std::string &s, double &out) {
-  try {
-    size_t idx = 0;
-    out = std::stod(s, &idx);
-    return idx > 0;
-  } catch (...) {
-    return false;
-  }
-}
-
-static std::unordered_map<std::string, double>
-load_weight_map_file(const std::string &path) {
-  std::unordered_map<std::string, double> weights;
-  std::ifstream is(path);
-  if (!is.is_open()) {
-    throw std::runtime_error("Failed to open weight map file: " + path);
-  }
-
-  std::string line;
-  if (!std::getline(is, line)) {
-    return weights;
-  }
-
-  auto header_cols = split_tab(line);
-  auto find_col = [&](const std::string &name) -> int {
-    for (size_t i = 0; i < header_cols.size(); ++i) {
-      if (header_cols[i] == name) {
-        return static_cast<int>(i);
-      }
-    }
-    return -1;
-  };
-
-  int w_idx = find_col("number_reads");
-  int id_idx = -1;
-  const std::vector<std::string> id_candidates = {
-      "#anonymous_contig_id", "anonymous_contig_id", "contig_id", "read_id", "id"};
-  for (const auto &cand : id_candidates) {
-    id_idx = find_col(cand);
-    if (id_idx >= 0) {
-      break;
-    }
-  }
-
-  auto add_weight = [&](const std::string &id, double w) {
-    if (id.empty()) {
-      return;
-    }
-    if (!(w > 0.0)) {
-      w = 1.0;
-    }
-    weights[id] = w;
-  };
-
-  if (w_idx >= 0 && id_idx >= 0) {
-    // CAMI-style mapping.tsv with header.
-    while (std::getline(is, line)) {
-      if (line.empty() || line[0] == '#') {
-        continue;
-      }
-      auto cols = split_tab(line);
-      if (static_cast<int>(cols.size()) <= std::max(w_idx, id_idx)) {
-        continue;
-      }
-      double w = 1.0;
-      try_parse_double(cols[w_idx], w);
-      add_weight(cols[id_idx], w);
-    }
-    return weights;
-  }
-
-  // Fallback: plain id<TAB>weight (no header). Try to parse the first line too.
-  auto parse_two_col = [&](const std::string &ln) {
-    if (ln.empty() || ln[0] == '#') {
-      return;
-    }
-    auto cols = split_tab(ln);
-    if (cols.size() < 2) {
-      return;
-    }
-    double w = 0.0;
-    if (!try_parse_double(cols[1], w)) {
-      return;
-    }
-    add_weight(cols[0], w);
-  };
-
-  parse_two_col(line);
-  while (std::getline(is, line)) {
-    parse_two_col(line);
-  }
-  return weights;
-}
 
 static inline std::string trim_copy(std::string s) {
   auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
@@ -257,10 +134,11 @@ void run(ClassifyConfig config) {
   ChimeraBuild::IMCFConfig imcfConfig;
   chimera::presence::CoverageMeta coverageMeta;
   loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid, &coverageMeta);
+  const bool freq_model_enabled = coverageMeta.freq_model.enabled();
   WeightingContext weightCtx;
   std::unique_ptr<CountMinSketch> freqSketch;
   std::unique_ptr<NcbiTaxdump> ncbiTaxdump;
-  if (coverageMeta.freq_model.enabled()) {
+  if (freq_model_enabled) {
     try {
       freqSketch = std::make_unique<CountMinSketch>(
           coverageMeta.freq_model.depth, coverageMeta.freq_model.width,
@@ -270,6 +148,9 @@ void run(ClassifyConfig config) {
       weightCtx.freqQuantile = coverageMeta.freq_model.quantile;
     } catch (const std::exception &) {
     }
+  }
+  if (freq_model_enabled) {
+    std::vector<uint32_t>().swap(coverageMeta.freq_model.counters);
   }
   size_t uniq_nonzero = 0;
   if (!coverageMeta.entries.empty()) {
@@ -281,19 +162,10 @@ void run(ClassifyConfig config) {
   }
 
   bool freq_trusted = true;
-  if (coverageMeta.freq_model.enabled() && !coverageMeta.entries.empty() &&
-      uniq_nonzero == 0) {
+  if (freq_model_enabled && !coverageMeta.entries.empty() && uniq_nonzero == 0) {
     freq_trusted = false;
   }
   weightCtx.freq_trusted = freq_trusted;
-
-  std::unordered_map<std::string, double> sampleWeights;
-  if (!config.weight_map_file.empty()) {
-    sampleWeights = load_weight_map_file(config.weight_map_file);
-    if (!sampleWeights.empty()) {
-      weightCtx.sampleWeights = &sampleWeights;
-    }
-  }
   auto normalize_kind = [](std::string &value) {
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char ch) {
@@ -331,7 +203,7 @@ void run(ClassifyConfig config) {
       prepare_feature_params_for_classify(imcfConfig, final_method,
                                           feature_min_len);
 
-  const TaxDict tax = build_tax_dict(indexToTaxid);
+  TaxDict tax = build_tax_dict(indexToTaxid);
   std::vector<uint32_t> tid2speciesRep;
   std::vector<uint32_t> tid2genus;
   if (weightCtx.ncbiTaxdump && weightCtx.ncbiTaxdump->enabled()) {
@@ -363,6 +235,7 @@ void run(ClassifyConfig config) {
     weightCtx.tid2speciesRep = &tid2speciesRep;
     weightCtx.tid2genus = &tid2genus;
   }
+  std::vector<std::vector<std::string>>().swap(indexToTaxid);
   PresenceSummary presenceSummary(config.presence_breadth_bits);
   PresenceSummary *presencePtr = &presenceSummary;
 
@@ -383,17 +256,16 @@ void run(ClassifyConfig config) {
     probePolicy.candidate = derive_candidate_policy(config);
     std::vector<moodycamel::ConcurrentQueue<batchReads>> probeQueues(
         static_cast<size_t>(std::max<uint16_t>(1, config.threads)));
-      std::vector<classifyResult> probeResults;
-      std::atomic<bool> probe_done{false};
-      std::thread probeProducer([&]() {
-        parseReads(probeQueues, config, probeInfo,
-                 kTailRiskProbeReads);
+    std::vector<classifyResult> probeResults;
+    std::atomic<bool> probe_done{false};
+    std::thread probeProducer([&]() {
+      parseReads(probeQueues, config, probeInfo, kTailRiskProbeReads);
       probe_done.store(true, std::memory_order_release);
     });
 
-    classify_streaming(imcfConfig, probeQueues, config, imcf, indexToTaxid,
-                       tax, probeResults, probeInfo, probe_done, feature_params,
-                       feature_min_len, weightCtx, probePolicy, nullptr);
+    classify_streaming(imcfConfig, probeQueues, config, imcf, tax, probeResults,
+                       probeInfo, probe_done, feature_params, feature_min_len,
+                       weightCtx, probePolicy, nullptr);
     probeProducer.join();
 
     if (!probeResults.empty()) {
@@ -410,17 +282,17 @@ void run(ClassifyConfig config) {
       options.prune_ratio = config.em_prune_ratio;
       options.conf_power = config.em_conf_power;
       auto [posterior, weights] =
-          EMAlgorithm(probeResults, config.emIter, 0.0, options, nullptr);
+          EMAlgorithm(std::move(probeResults), config.emIter, 0.0, options,
+                      nullptr);
       probeResults = std::move(posterior);
       probe_em = true;
     }
 
     std::unordered_map<std::string, double> species_counts;
     species_counts.reserve(probeResults.size() / 4 + 8);
-    double unclassified_weight = 0.0;
+    std::size_t unclassified_reads = 0;
 
     for (const auto &res : probeResults) {
-      double weight = (res.sample_weight > 0.0) ? res.sample_weight : 1.0;
       std::string top;
       if (probe_em && !res.posteriors.empty()) {
         double best_prob = -1.0;
@@ -446,7 +318,7 @@ void run(ClassifyConfig config) {
         }
       }
       if (top.empty() || top == "unclassified") {
-        unclassified_weight += weight;
+        ++unclassified_reads;
         continue;
       }
 
@@ -460,7 +332,7 @@ void run(ClassifyConfig config) {
           }
         }
       }
-      species_counts[key] += weight;
+      species_counts[key] += 1.0;
     }
 
     std::vector<double> counts;
@@ -468,15 +340,15 @@ void run(ClassifyConfig config) {
     for (const auto &kv : species_counts) {
       counts.push_back(kv.second);
     }
-    std::size_t unclassified_reads =
-        static_cast<std::size_t>(std::llround(unclassified_weight));
-    probeStats =
-        compute_tail_risk_probe_stats(counts, unclassified_reads, kTailRiskTopK);
+    probeStats = compute_tail_risk_probe_stats(counts, unclassified_reads,
+                                               kTailRiskTopK);
     const double tail_risk_r = clamp01(1.0 - probeStats.top_mass);
-    config.tail_risk_u = compute_tail_risk_u(tail_risk_r, probeStats.eff_species,
-                                             kTailRiskRAnchor,
-                                             kTailRiskEffSpeciesAnchor);
+    config.tail_risk_u = compute_tail_risk_u(
+        tail_risk_r, probeStats.eff_species, kTailRiskRAnchor,
+        kTailRiskEffSpeciesAnchor);
     config.tail_risk_s = compute_tail_risk_s(config.tail_risk_u, kTailRiskBeta);
+    std::vector<classifyResult>().swap(probeResults);
+    std::vector<moodycamel::ConcurrentQueue<batchReads>>().swap(probeQueues);
   }
 
   const double tail_risk_hi = smoothstep(config.tail_risk_s, 0.60, 0.95);
@@ -511,10 +383,11 @@ void run(ClassifyConfig config) {
     producer_done.store(true, std::memory_order_release);
   });
 
-  classify_streaming(imcfConfig, readQueues, config, imcf, indexToTaxid, tax,
-                     classifyResults, fileInfo, producer_done, feature_params,
-                     feature_min_len, weightCtx, classifyPolicy, presencePtr);
+  classify_streaming(imcfConfig, readQueues, config, imcf, tax, classifyResults,
+                     fileInfo, producer_done, feature_params, feature_min_len,
+                     weightCtx, classifyPolicy, presencePtr);
   producer.join();
+  std::vector<moodycamel::ConcurrentQueue<batchReads>>().swap(readQueues);
   // Determinism: classify_streaming merges thread-local batches in the order
   // threads finish, which is non-deterministic. Sort by read/contig id before
   // downstream EM/post-processing so repeated runs are stable.
@@ -533,6 +406,10 @@ void run(ClassifyConfig config) {
   PresenceDecision presenceDecision = evaluate_presence_coverage(
       presenceSummary, tax, config, coverageMeta, presenceTotalReads,
       presenceMeanReadLen);
+  PresenceSummary().stats.swap(presenceSummary.stats);
+  presenceSummary.sketchBits = 0;
+  presenceSummary.sketchWords = 0;
+  presencePtr = nullptr;
 
   std::unordered_map<std::string, double> emPriorScale;
   if (!coverageMeta.entries.empty()) {
@@ -540,8 +417,9 @@ void run(ClassifyConfig config) {
         (coverageMeta.effective_span > 0) ? coverageMeta.effective_span
                                           : static_cast<uint16_t>(1);
     const size_t read_len_for_prior =
-        (fileInfo.avgLen > 0) ? fileInfo.avgLen
-                              : static_cast<size_t>(coverageMeta.ref_read_length);
+        (fileInfo.avgLen > 0)
+            ? fileInfo.avgLen
+            : static_cast<size_t>(coverageMeta.ref_read_length);
     const double window_current =
         std::max<int64_t>(1, static_cast<int64_t>(read_len_for_prior) -
                                  static_cast<int64_t>(span) + 1);
@@ -575,65 +453,14 @@ void run(ClassifyConfig config) {
       }
     }
   }
-
-  // Optional: saturate per-read sample weights to avoid extreme long tails
-  // dominating EM in tail-rich datasets (e.g., CAMI-long).
-  //
-  // Default: auto (enabled only when weights are present and highly skewed).
-  {
-    const double sat_strength = smoothstep(config.tail_risk_s, 0.60, 0.95);
-
-    std::vector<double> raw;
-    raw.reserve(classifyResults.size());
-    for (const auto &res : classifyResults) {
-      if (res.sample_weight > 0.0) {
-        raw.push_back(res.sample_weight);
-      }
-    }
-    if (!raw.empty()) {
-      std::sort(raw.begin(), raw.end());
-      auto pick = [&](double q) -> double {
-        if (raw.empty()) {
-          return 0.0;
-        }
-        q = std::clamp(q, 0.0, 1.0);
-        size_t idx = static_cast<size_t>(
-            std::floor(q * static_cast<double>(raw.size() - 1)));
-        if (idx >= raw.size()) {
-          idx = raw.size() - 1;
-        }
-        return raw[idx];
-      };
-      const double med = pick(0.50);
-      const double p90 = pick(0.90);
-      const double p99 = pick(0.99);
-      const double mx = raw.back();
-      const double denom = std::max(1e-12, med);
-      const double ratio_max = mx / denom;
-      const double ratio_p99 = p99 / denom;
-      // Auto guard: only apply when the tail is clearly extreme.
-      const bool skewed =
-          (ratio_p99 >= 16.0) || (ratio_max >= 256.0) || (mx >= 1e5);
-      if (skewed && sat_strength > 0.0 && (med > 0.0) &&
-          (std::log1p(med) > 0.0)) {
-        const double scale = med / std::log1p(med);
-        for (auto &res : classifyResults) {
-          if (res.sample_weight > 0.0) {
-            const double sat = scale * std::log1p(res.sample_weight);
-            res.sample_weight =
-                ((1.0 - sat_strength) * res.sample_weight) + (sat_strength * sat);
-          }
-        }
-      }
-    }
-  }
+  std::vector<chimera::presence::CoverageEntry>().swap(coverageMeta.entries);
 
   EMOptions options;
   options.temp = 1.05;
   options.prune_ratio = config.em_prune_ratio;
   options.conf_power = config.em_conf_power;
   auto [posterior, weights] =
-      EMAlgorithm(classifyResults, config.emIter, 0.0, options,
+      EMAlgorithm(std::move(classifyResults), config.emIter, 0.0, options,
                   emPriorScale.empty() ? nullptr : &emPriorScale);
   classifyResults = std::move(posterior);
   classWeights = std::move(weights);

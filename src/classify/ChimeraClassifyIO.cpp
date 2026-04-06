@@ -141,8 +141,8 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
 
 }
 
-void saveResult(std::vector<classifyResult> classifyResults,
-                ClassifyConfig config) {
+void saveResult(const std::vector<classifyResult> &classifyResults,
+                const ClassifyConfig &config) {
   constexpr size_t kDumpPostTopK = 16;
   std::string outputFile = config.outputFile;
   if (std::filesystem::path(outputFile).extension() != ".tsv") {
@@ -153,6 +153,10 @@ void saveResult(std::vector<classifyResult> classifyResults,
   if (!os.is_open()) {
     throw std::runtime_error("Failed to open file: " + config.outputFile);
   }
+  std::vector<char> outputBuffer(1 << 20, '\0');
+  os.rdbuf()->pubsetbuf(outputBuffer.data(),
+                        static_cast<std::streamsize>(outputBuffer.size()));
+  std::ostringstream postTopkOss;
 
   for (const auto &result : classifyResults) {
     os << result.id << '\t';
@@ -182,17 +186,19 @@ void saveResult(std::vector<classifyResult> classifyResults,
         os << '\t';
       }
       const size_t k = std::min(kDumpPostTopK, result.posteriors.size());
-      std::ostringstream oss;
-      oss.setf(std::ios::fixed);
-      oss << std::setprecision(6);
-      oss << "POST_TOPK=";
+      postTopkOss.str("");
+      postTopkOss.clear();
+      postTopkOss.setf(std::ios::fixed);
+      postTopkOss << std::setprecision(6);
+      postTopkOss << "POST_TOPK=";
       for (size_t i = 0; i < k; ++i) {
         if (i) {
-          oss << ',';
+          postTopkOss << ',';
         }
-        oss << result.posteriors[i].first << ':' << result.posteriors[i].second;
+        postTopkOss << result.posteriors[i].first << ':'
+                    << result.posteriors[i].second;
       }
-      os << oss.str() << '\t';
+      os << postTopkOss.str() << '\t';
     }
     os << '\n';
   }

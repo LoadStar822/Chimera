@@ -268,10 +268,6 @@ int main(int argc, char **argv) {
       ->check(CLI::ExistingFile)
       ->excludes(singleOpt); // Ensure that single and paired are mutually exclusive
 
-  classify->add_option("--weight-map", classifyConfig.weight_map_file,
-                       "Optional contig/read weight map: id<TAB>weight or CAMI mapping.tsv")
-      ->check(CLI::ExistingFile);
-
   // Custom validation function to ensure that the --paired option must have an
   // even number of files
   classify->callback([&classifyConfig]() {
