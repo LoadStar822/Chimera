@@ -259,7 +259,7 @@ std::string tmp_hash_spool_path(std::string_view suffix, int thread_id)
 }
 
 	/**
-	 * Count feature hashes (syncmer or strobemer) for each taxid.
+	 * Count strobemer feature hashes for each taxid.
 	 *
 	 * @param config The build configuration.
 	 * @param inputFiles The map of input files.
@@ -275,25 +275,16 @@ std::string tmp_hash_spool_path(std::string_view suffix, int thread_id)
 		robin_hood::unordered_flat_map<std::string, uint64_t>* bpCount,
 		FeatureBuildLayout* featureLayout)
 	{
-	chimera::feature::Method feature_method{};
 	uint64_t feature_seed = 0;
-	chimera::feature::Params feature_params = make_feature_params(config, feature_method, feature_seed);
-	const std::string feature_suffix = (feature_method == chimera::feature::Method::Strobemer) ? ".strb" : ".sync";
+	chimera::feature::Params feature_params = make_feature_params(config, feature_seed);
+	const std::string feature_suffix = ".strb";
 	if (config.verbose) {
-		if (feature_method == chimera::feature::Method::Strobemer) {
-			std::cout << "Feature method: strobemer (k="
-			          << static_cast<int>(feature_params.strobe.k)
-			          << ", order=" << static_cast<int>(feature_params.strobe.order)
-			          << ", w=[" << feature_params.strobe.w_min << ',' << feature_params.strobe.w_max
-			          << "], seed=" << static_cast<unsigned long long>(feature_params.strobe.seed)
-			          << ")" << std::endl;
-		} else {
-			std::cout << "Feature method: syncmer (k=" << static_cast<int>(feature_params.sync.k)
-			          << ", s=" << feature_params.sync.s
-			          << ", pos=" << feature_params.sync.pos
-			          << ", seed=" << static_cast<unsigned long long>(feature_params.sync.seed)
-			          << ")" << std::endl;
-		}
+		std::cout << "Feature method: strobemer (k="
+		          << static_cast<int>(feature_params.strobe.k)
+		          << ", order=" << static_cast<int>(feature_params.strobe.order)
+		          << ", w=[" << feature_params.strobe.w_min << ',' << feature_params.strobe.w_max
+		          << "], seed=" << static_cast<unsigned long long>(feature_params.strobe.seed)
+		          << ")" << std::endl;
 	}
 
 		struct TaxidFileTask {

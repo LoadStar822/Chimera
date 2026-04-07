@@ -9,7 +9,9 @@ from src.profile import profile
 
 def default_threads():
     cpu = os.cpu_count()
-    return cpu if cpu and cpu > 0 else 1
+    if not cpu or cpu <= 0:
+        return 1
+    return min(cpu, 192)
 
 
 def get_downloader():
@@ -25,13 +27,6 @@ def get_chimera_path():
             "Cannot find 'Chimera' executable. Please ensure it is installed and in your PATH."
         )
     return chimera_path
-
-
-def kmer_type(x):
-    x = int(x)
-    if x < 1 or x > 50:
-        raise argparse.ArgumentTypeError("Kmer size must be between 1 and 50")
-    return x
 
 
 def min_length_type(value: str):
@@ -86,32 +81,35 @@ def parse_arguments():
         "-o", "--output", default="ChimeraDB", help="Output file for building"
     )
     build_parser.add_argument(
-        "-k",
-        "--kmer",
-        type=kmer_type,
-        default=31,
-        help="Kmer size for building (must be between 1 and 50)",
+        "--strobe-k",
+        type=int,
+        default=28,
+        help="Strobemer k-mer length",
     )
     build_parser.add_argument(
-        "-s",
-        "--syncmer-s",
+        "--strobe-order",
         type=int,
-        default=16,
-        help="Syncmer s-mer size (must be positive and smaller than k)",
+        default=2,
+        help="Strobemer order (currently only 2 is supported)",
     )
     build_parser.add_argument(
-        "-P",
-        "--syncmer-pos",
+        "--strobe-w-min",
         type=int,
-        default=7,
-        help="Syncmer minimal s-mer offset (0-based)",
+        default=12,
+        help="Strobemer minimum window",
+    )
+    build_parser.add_argument(
+        "--strobe-w-max",
+        type=int,
+        default=32,
+        help="Strobemer maximum window",
     )
     build_parser.add_argument(
         "-l",
         "--min-length",
         type=min_length_type,
         default="auto",
-        help="Minimum sequence length for building (auto => k-mer size)",
+        help="Minimum sequence length for building (auto => strobemer minimum span)",
     )
     build_parser.add_argument(
         "-t",
@@ -152,32 +150,35 @@ def parse_arguments():
         "-o", "--output", default="ChimeraDB", help="Output file for building"
     )
     download_build_parser.add_argument(
-        "-k",
-        "--kmer",
-        type=kmer_type,
-        default=31,
-        help="Kmer size for building (must be between 1 and 50)",
+        "--strobe-k",
+        type=int,
+        default=28,
+        help="Strobemer k-mer length",
     )
     download_build_parser.add_argument(
-        "-s",
-        "--syncmer-s",
+        "--strobe-order",
         type=int,
-        default=16,
-        help="Syncmer s-mer size (must be positive and smaller than k)",
+        default=2,
+        help="Strobemer order (currently only 2 is supported)",
     )
     download_build_parser.add_argument(
-        "-P",
-        "--syncmer-pos",
+        "--strobe-w-min",
         type=int,
-        default=7,
-        help="Syncmer minimal s-mer offset (0-based)",
+        default=12,
+        help="Strobemer minimum window",
+    )
+    download_build_parser.add_argument(
+        "--strobe-w-max",
+        type=int,
+        default=32,
+        help="Strobemer maximum window",
     )
     download_build_parser.add_argument(
         "-l",
         "--min-length",
         type=min_length_type,
         default="auto",
-        help="Minimum sequence length for building (auto => k-mer size)",
+        help="Minimum sequence length for building (auto => strobemer minimum span)",
     )
     download_build_parser.add_argument(
         "-t",
@@ -324,15 +325,6 @@ def parse_arguments():
 
     args = parser.parse_args()
 
-    if args.command in {"build", "download_and_build"}:
-        if args.syncmer_s < 1:
-            parser.error("--syncmer-s must be greater than 0")
-        if args.syncmer_s >= args.kmer:
-            parser.error("--syncmer-s must be smaller than k-mer size")
-        window_span = args.kmer - args.syncmer_s + 1
-        if args.syncmer_pos < 0 or args.syncmer_pos >= window_span:
-            parser.error("--syncmer-pos must satisfy 0 <= pos < k - s + 1")
-
     return args
 
 
@@ -432,9 +424,10 @@ def run_chimera(args, chimera_path=None):
     if args.command == "build":
         command.extend(["-i", args.input])
         command.extend(["-o", args.output])
-        command.extend(["-k", str(args.kmer)])
-        command.extend(["-s", str(args.syncmer_s)])
-        command.extend(["-P", str(args.syncmer_pos)])
+        command.extend(["--strobe-k", str(args.strobe_k)])
+        command.extend(["--strobe-order", str(args.strobe_order)])
+        command.extend(["--strobe-w-min", str(args.strobe_w_min)])
+        command.extend(["--strobe-w-max", str(args.strobe_w_max)])
         if args.min_length != "auto":
             command.extend(["-l", str(args.min_length)])
         command.extend(["-t", str(args.threads)])

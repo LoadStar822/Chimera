@@ -159,22 +159,6 @@ void run(BuildConfig config) {
   auto read_start = std::chrono::high_resolution_clock::now();
   std::cout << "Reading input files..." << std::endl;
   FileInfo fileInfo;
-  if (config.smer_size == 0) {
-    std::cerr << "Syncmer s-mer size must be greater than 0." << std::endl;
-    return;
-  }
-  if (config.smer_size >= config.kmer_size) {
-    std::cerr << "Syncmer s-mer size must be smaller than k-mer size."
-              << std::endl;
-    return;
-  }
-  const uint16_t syncmer_span =
-      static_cast<uint16_t>(config.kmer_size - config.smer_size + 1);
-  if (config.syncmer_position >= syncmer_span) {
-    std::cerr << "Syncmer offset must satisfy 0 <= pos < k - s + 1."
-              << std::endl;
-    return;
-  }
   robin_hood::unordered_flat_map<std::string, uint64_t> hashCount;
   robin_hood::unordered_flat_map<std::string, uint64_t> bpCount;
   FeatureBuildLayout featureLayout;
@@ -282,10 +266,8 @@ void run(BuildConfig config) {
   if (config.verbose) {
     log_memory_checkpoint("after_release_input_paths");
   }
-  chimera::feature::Method imcf_feature_method{};
   uint64_t imcf_feature_seed = 0;
-  auto imcf_feature_params =
-      make_feature_params(config, imcf_feature_method, imcf_feature_seed);
+  auto imcf_feature_params = make_feature_params(config, imcf_feature_seed);
   const uint16_t effective_span = static_cast<uint16_t>(
       std::min<size_t>(std::numeric_limits<uint16_t>::max(),
                        chimera::feature::min_required_length(
@@ -313,26 +295,18 @@ void run(BuildConfig config) {
   std::cout << "Building IMCF..." << std::endl;
   IMCFConfig imcfConfig;
   imcfConfig.loadFactor = config.load_factor;
-  imcfConfig.kmerSize = config.kmer_size;
-  imcfConfig.smerSize = config.smer_size;
-  imcfConfig.syncmerPosition = config.syncmer_position;
+  imcfConfig.kmerSize = config.strobemer_k;
+  imcfConfig.smerSize = 0;
+  imcfConfig.syncmerPosition = 0;
   imcfConfig.seed64 = imcf_feature_seed;
   imcfConfig.fpSalt = IMCFConfig::DefaultFingerprintSalt;
   imcfConfig.hashVersion = IMCFConfig::CurrentHashVersion;
   imcfConfig.presenceUniqueDeg = config.presence_unique_deg;
-  if (imcf_feature_method == chimera::feature::Method::Strobemer) {
-    imcfConfig.featureMethod = 1;
-    imcfConfig.strobeOrder = config.strobemer_order;
-    imcfConfig.strobeWmin = config.strobemer_w_min;
-    imcfConfig.strobeWmax = config.strobemer_w_max;
-    imcfConfig.strobeK = config.strobemer_k;
-  } else {
-    imcfConfig.featureMethod = 0;
-    imcfConfig.strobeOrder = 0;
-    imcfConfig.strobeWmin = 0;
-    imcfConfig.strobeWmax = 0;
-    imcfConfig.strobeK = 0;
-  }
+  imcfConfig.featureMethod = 1;
+  imcfConfig.strobeOrder = config.strobemer_order;
+  imcfConfig.strobeWmin = config.strobemer_w_min;
+  imcfConfig.strobeWmax = config.strobemer_w_max;
+  imcfConfig.strobeK = config.strobemer_k;
   if (config.taxonomy_kind == "auto" || config.taxonomy_kind.empty()) {
     imcfConfig.taxonomyKind = "ncbi";
   } else {

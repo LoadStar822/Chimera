@@ -85,6 +85,10 @@ std::string detect_os() {
 #endif
 }
 
+std::string normalize_auto_min_length_help() {
+  return "Minimum length sequence for building (auto => strobemer minimum span)";
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -124,20 +128,24 @@ int main(int argc, char **argv) {
                    "Output file for building")
       ->default_val("ChimeraDB");
   build
-      ->add_option("-k,--kmer", buildConfig.kmer_size, "Kmer size for building")
-      ->default_val(31)
-      ->check(CLI::Range(1, 50));
+      ->add_option("--strobe-k", buildConfig.strobemer_k,
+                   "Strobemer k-mer length")
+      ->default_val(28);
   build
-      ->add_option("-s,--syncmer-s", buildConfig.smer_size,
-                   "Syncmer s-mer size (must be < k)")
-      ->default_val(16);
+      ->add_option("--strobe-order", buildConfig.strobemer_order,
+                   "Strobemer order (currently only 2 is supported)")
+      ->default_val(2);
   build
-      ->add_option("-P,--syncmer-pos", buildConfig.syncmer_position,
-                   "Syncmer minimal s-mer offset (0-based)")
-      ->default_val(7);
+      ->add_option("--strobe-w-min", buildConfig.strobemer_w_min,
+                   "Strobemer minimum window")
+      ->default_val(12);
+  build
+      ->add_option("--strobe-w-max", buildConfig.strobemer_w_max,
+                   "Strobemer maximum window")
+      ->default_val(32);
   auto *min_length_option = build
       ->add_option("-l,--min-length", buildConfig.min_length,
-                   "Minimum length sequence for building (auto => k-mer size)");
+                   normalize_auto_min_length_help());
   min_length_option->default_val(0);
   min_length_option->default_str("auto");
   CLI::Validator min_length_validator;
@@ -176,26 +184,6 @@ int main(int argc, char **argv) {
       ->default_val(1)
       ->check(CLI::Range(1, 65535));
   build
-      ->add_option("--feature", buildConfig.feature,
-                   "Feature extraction method (syncmer|strobemer|auto)")
-      ->default_val("strobemer");
-  build
-      ->add_option("--strobe-k", buildConfig.strobemer_k,
-                   "Strobemer k-mer length")
-      ->default_val(28);
-  build
-      ->add_option("--strobe-order", buildConfig.strobemer_order,
-                   "Strobemer order (currently only 2 is supported)")
-      ->default_val(2);
-  build
-      ->add_option("--strobe-w-min", buildConfig.strobemer_w_min,
-                   "Strobemer minimum window")
-      ->default_val(12);
-  build
-      ->add_option("--strobe-w-max", buildConfig.strobemer_w_max,
-                   "Strobemer maximum window")
-      ->default_val(32);
-  build
       ->add_option("--taxonomy-kind", buildConfig.taxonomy_kind,
                    "Taxonomy source identifier (auto|ncbi|gtdb)")
       ->default_val("auto");
@@ -206,16 +194,6 @@ int main(int argc, char **argv) {
   build->add_flag("-q,--quiet", buildQuietRequested, "Quiet output");
 
   build->callback([&buildConfig, min_length_option, &buildQuietRequested]() {
-    if (buildConfig.smer_size == 0) {
-      throw CLI::ValidationError("--syncmer-s must be greater than 0");
-    }
-    if (buildConfig.smer_size >= buildConfig.kmer_size) {
-      throw CLI::ValidationError("--syncmer-s must be smaller than k-mer size");
-    }
-    const uint16_t window_span = static_cast<uint16_t>(buildConfig.kmer_size - buildConfig.smer_size + 1);
-    if (buildConfig.syncmer_position >= window_span) {
-      throw CLI::ValidationError("--syncmer-pos must be < k - s + 1");
-    }
     auto normalize_kind = [](std::string &value) {
       std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
         return static_cast<char>(std::tolower(ch));
@@ -224,21 +202,9 @@ int main(int argc, char **argv) {
         value = "auto";
       }
     };
-    auto normalize_feature = [](std::string &value) {
-      std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-      });
-      if (value.empty()) {
-        value = "auto";
-      }
-    };
     normalize_kind(buildConfig.taxonomy_kind);
-    normalize_feature(buildConfig.feature);
-    buildConfig.min_length = std::max<uint64_t>(buildConfig.min_length, buildConfig.kmer_size);
-    if (!(buildConfig.feature == "auto" || buildConfig.feature == "syncmer" ||
-          buildConfig.feature == "strobemer")) {
-      throw CLI::ValidationError("--feature must be one of auto|syncmer|strobemer");
-    }
+    buildConfig.min_length =
+        std::max<uint64_t>(buildConfig.min_length, buildConfig.strobemer_k);
     if (buildConfig.strobemer_w_min == 0 || buildConfig.strobemer_w_max == 0) {
       throw CLI::ValidationError("--strobe-w-min/w-max must be greater than 0");
     }

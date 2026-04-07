@@ -109,10 +109,8 @@ void build_hash_frequency_sketch(
     context.stats = {};
     return;
   }
-  chimera::feature::Method feature_method{};
   uint64_t feature_seed = 0;
-  auto feature_params =
-      make_feature_params(config, feature_method, feature_seed);
+  auto feature_params = make_feature_params(config, feature_seed);
   const size_t feature_min_length =
       chimera::feature::min_required_length(feature_params);
   const size_t min_required =

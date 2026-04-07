@@ -120,9 +120,7 @@ struct HashFrequencyContext {
 
 void print_build_time(long long milliseconds);
 
-chimera::feature::Method resolve_feature_method(const BuildConfig &config);
 chimera::feature::Params make_feature_params(const BuildConfig &config,
-                                             chimera::feature::Method &selected,
                                              uint64_t &seed_out);
 
 void build_hash_frequency_sketch(

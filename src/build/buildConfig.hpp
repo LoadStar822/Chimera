@@ -41,14 +41,10 @@ namespace ChimeraBuild {
 		std::string taxonomy_version{ "auto" };
 		std::string input_file;
 		std::string output_file;
-		std::string feature{ "strobemer" }; // syncmer | strobemer | auto
 		uint8_t strobemer_k{ 28 };
 		uint8_t strobemer_order{ 2 };
 		uint16_t strobemer_w_min{ 12 };
 		uint16_t strobemer_w_max{ 32 };
-		uint8_t kmer_size{ 31 };
-		uint16_t smer_size{ 16 };
-		uint16_t syncmer_position{ 7 };
 		uint64_t min_length{ 0 };
 			uint16_t threads;
 			bool verbose = true;
@@ -64,16 +60,13 @@ namespace ChimeraBuild {
 		os << std::left
 			<< std::setw(25) << "Input file:" << config.input_file << std::endl
 			<< std::setw(25) << "Output file:" << config.output_file << std::endl
-			<< std::setw(25) << "Feature method:" << config.feature << std::endl
+			<< std::setw(25) << "Feature method:" << "strobemer" << std::endl
 			<< std::setw(25) << "Strobemer k:" << static_cast<int>(config.strobemer_k) << std::endl
 			<< std::setw(25) << "Strobemer order:" << static_cast<int>(config.strobemer_order) << std::endl
 			<< std::setw(25) << "Strobemer w_min:" << config.strobemer_w_min << std::endl
 			<< std::setw(25) << "Strobemer w_max:" << config.strobemer_w_max << std::endl
 			<< std::setw(25) << "Taxonomy kind:" << config.taxonomy_kind << std::endl
 			<< std::setw(25) << "Taxonomy version:" << config.taxonomy_version << std::endl
-			<< std::setw(25) << "Kmer size:" << (int)config.kmer_size << std::endl
-			<< std::setw(25) << "Syncmer s-mer size:" << config.smer_size << std::endl
-			<< std::setw(25) << "Syncmer offset:" << config.syncmer_position << std::endl
 				<< std::setw(25) << "Minimum length:" << config.min_length << std::endl
 				<< std::setw(25) << "Threads:" << config.threads << std::endl
 				<< std::setw(25) << "Load factor:" << config.load_factor << std::endl
@@ -110,7 +103,7 @@ namespace ChimeraBuild {
 		uint8_t hashVersion{ 0 };
 		std::string taxonomyKind{ "ncbi" };
 		std::string taxonomyVersion{ "ncbi-taxdump" };
-		uint8_t featureMethod{ 0 }; // 0=syncmer, 1=strobemer
+		uint8_t featureMethod{ 1 }; // 0=legacy syncmer (unsupported), 1=strobemer
 	uint8_t strobeOrder{ 0 };
 	uint16_t strobeWmin{ 0 };
 	uint16_t strobeWmax{ 0 };

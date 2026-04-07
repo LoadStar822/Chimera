@@ -185,23 +185,21 @@ void run(ClassifyConfig config) {
   if (ncbiTaxdump && ncbiTaxdump->enabled()) {
     weightCtx.ncbiTaxdump = ncbiTaxdump.get();
   }
-  FeatureMethod db_method =
-      (imcfConfig.featureMethod == 1) ? FeatureMethod::Strobemer
-                                      : FeatureMethod::Syncmer;
-  FeatureMethod final_method = db_method;
-  if (final_method == FeatureMethod::Strobemer && imcfConfig.strobeK == 0) {
+  if (imcfConfig.featureMethod != 1) {
+    throw std::runtime_error(
+        "This Chimera version no longer supports syncmer databases. Rebuild the database with strobemer.");
+  }
+  if (imcfConfig.strobeK == 0) {
     throw std::runtime_error("The IMCF database is missing strobemer parameters and cannot be used for classification.");
   }
 
-  if (final_method == FeatureMethod::Strobemer &&
-      !chimera::feature::strobemer_available()) {
-    throw std::runtime_error("This Chimera build does not include strobemer support and cannot load a strobemer database. Rebuild Chimera or use a syncmer database.");
+  if (!chimera::feature::strobemer_available()) {
+    throw std::runtime_error("This Chimera build does not include strobemer support and cannot load a strobemer database.");
   }
 
   size_t feature_min_len = 0;
   chimera::feature::Params feature_params =
-      prepare_feature_params_for_classify(imcfConfig, final_method,
-                                          feature_min_len);
+      prepare_feature_params_for_classify(imcfConfig, feature_min_len);
 
   TaxDict tax = build_tax_dict(indexToTaxid);
   std::vector<uint32_t> tid2speciesRep;

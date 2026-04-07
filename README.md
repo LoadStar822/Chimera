@@ -261,28 +261,16 @@ The `build` function is used to construct a classification database from the dow
 **Available Parameters:** 
 - `-i` or `--input` (required): Input file (e.g., `target.tsv`). This file specifies the sequences and their corresponding taxonomic identifiers for building the database.
 - `-o` or `--output`: Output database file name (default: `ChimeraDB`). The resulting database will be saved as a binary file with this name.
-- `-m` or `--mode`: Building mode, with two options:
-  - **fast**: 
-    - **For IMCF**: Constructs an **Interleaved Merged Cuckoo Filter** without splitting large species data as much as possible, reducing the number of CFs to improve both database construction speed and classification speed. However, this mode may result in larger database sizes if the dataset is unbalanced.
-    - **For ICF**: Constructs an 8-bit **interleaved cuckoo filter**, prioritizing speed and reducing both memory and disk space usage by approximately half compared to the 16-bit filter. This mode is suitable for large-scale analyses where processing time and resource efficiency are key concerns but may have a lower classification accuracy.
-  - **normal** (default): 
-    - **For IMCF**: Splits data of large species into multiple CFs to prevent the database from becoming excessively large, although this might increase the number of CFs and affect speed.
-    - **For ICF**: Constructs a 16-bit **interleaved cuckoo filter**, offering significantly higher accuracy but requiring more memory and disk space. This mode is recommended for applications where precision is critical.
-  
-**Note**: The difference between the `fast` and `normal` modes is significant. The `fast` mode is optimized for speed and resource efficiency but may lead to larger databases with unbalanced datasets, while the `normal` mode ensures a more balanced database size at the potential cost of speed due to a higher number of CFs.
-
-- `-k` or `--kmer`: K-mer size for building the database (default: `31`). This parameter defines the length of k-mers used in the construction process, and it must be a value between 1 and 50. Adjusting the k-mer size can influence the sensitivity of the database.
-- `-s` or `--syncmer-s`: Syncmer s-mer size (default: `16`). This parameter must be smaller than the chosen k-mer size and controls the length of the sub-k-mers used when computing syncmers.
-- `-P` or `--syncmer-pos`: Syncmer minimal offset (default: `7`). This is the 0-based position inside the k-mer where the minimal s-mer must appear to emit a syncmer.
-  The default (`k=31`, `s=16`, `pos=7`) forms an open canonical syncmer with expected density 1/(k−s+1) ≈ 6.25%, balancing sensitivity and robustness.
-- `-l` or `--min-length`: Minimum sequence length (default: `0`). Sequences shorter than this value will be excluded from the database construction. Adjusting this can be useful for filtering out very short or low-quality sequences.
-- `-t` or `--threads`: Number of threads for parallel processing (default: `32`). Increasing the number of threads can significantly speed up the database construction process, especially on multi-core systems.
-- `--load-factor`: Loading ratio of the cuckoo filter (default: `0.58`). This parameter mainly affects the **false positive rate**. Lowering the load factor reduces the filter's capacity utilization, which can decrease the false positive rate but will slightly increase the size of the database. 
-- `-M` or `--max-hashes`: Maximum number of hashes per taxid (default: `2000000`). This parameter limits the number of hashes stored for each taxid, which can help control memory usage.
-- `-a` or `--alpha`: The weight parameters for building HICF have a default value of `1.2`. Please do not modify them unless there are special circumstances
-- `--relaxed-load-factor`: The relaxed load factor for the hierarchical interleaved cuckoo filter. The default value is `0.95`. This parameter can be used to adjust the load factor for
-- `--adaptive-cutoff`: 启用基于文件大小估算的 syncmer cutoff；默认关闭时保留所有 syncmer。
-- `-f` or `--filter`: Select the type of filter to use (ICF, HICF, IMCF) and default to `IMCF`
+- `--strobe-k`: Randstrobe-based strobemer k-mer length (default: `28`).
+- `--strobe-order`: Strobemer order (default: `2`). Only order `2` is currently supported.
+- `--strobe-w-min`: Minimum strobe window (default: `12`).
+- `--strobe-w-max`: Maximum strobe window (default: `32`).
+- `-l` or `--min-length`: Minimum sequence length. `auto` uses the minimum span required by the selected strobemer configuration.
+- `-t` or `--threads`: Number of threads for parallel processing.
+- `--load-factor`: Load factor for the interleaved merged cuckoo filter (IMCF).
+- `--presence-unique-deg`: Degree cutoff treated as unique signature evidence in coverage metadata.
+- `--taxonomy-kind`: Taxonomy source identifier (`auto|ncbi|gtdb`).
+- `--taxonomy-version`: Taxonomy version label carried into the built database metadata.
 - `-q` or `--quiet`: Suppresses verbose output. Use this option to minimize output during the building process.
 
 **Example:**
@@ -656,7 +644,7 @@ terminate called after throwing an instance of 'std::runtime_error'
 what(): Filter is full. Cannot insert more tags.
 ```
 
-This error occurs when the cuckoo filter reaches its capacity and fails to insert a syncmer hash within the allowed number of relocation attempts, potentially causing an infinite loop. This situation often arises when the load factor is too high for the dataset being used.
+This error occurs when the cuckoo filter reaches its capacity and fails to insert a feature hash within the allowed number of relocation attempts. This situation often arises when the load factor is too high for the dataset being used.
 
 **Solution**:
 - **Lower the Load Factor**: Adjust the `--load-factor` parameter to a lower value when constructing your database. This change increases the space available for new entries, helping to avoid the filter becoming full and preventing infinite relocation attempts.
@@ -688,11 +676,9 @@ We would like to acknowledge the following repositories and libraries that contr
 
 - **[klib](https://github.com/attractivechaos/klib)**: This lightweight library was used for its highly efficient implementations of `khash` (a fast hash table) and `kvector` (a dynamic array). These data structures were integral in handling sequence data and managing the large volumes of information necessary for metagenomic classification.
 
-- **[seqan3](https://github.com/seqan/seqan3)**: SeqAn3 supplies the modern C++ sequence-analysis infrastructure (alphabets, range adaptors, I/O, etc.) that lets Chimera stand up a stable k-mer/syncmer feature pipeline quickly.
+- **[seqan3](https://github.com/seqan/seqan3)**: SeqAn3 supplies the modern C++ sequence-analysis infrastructure (alphabets, range adaptors, I/O, etc.) that lets Chimera stand up a stable strobemer-based feature pipeline quickly.
 
-- **[seqan/minions](https://github.com/seqan/minions)**: Chimera follows the seqan3 syncmer implementation showcased here so that our syncmer filtering stays aligned with the upstream reference behavior and remains easy to maintain.
-
-- **[strobealign](https://github.com/ksahlin/strobealign)**: Chimera’s strobemer/randstrobe module borrows the sampling strategy from strobealign, yielding high-quality k-mer subsampling and hash features in `Method::Strobemer` mode.
+- **[strobealign](https://github.com/ksahlin/strobealign)**: Chimera’s strobemer/randstrobe module borrows the sampling strategy from strobealign, yielding high-quality k-mer subsampling and hash features in the current strobemer pipeline.
 
 - **[CLI11](https://github.com/CLIUtils/CLI11)**: This header-only library was used to provide Chimera's flexible and intuitive command-line interface. CLI11 allows users to easily specify options, input files, and configurations, enabling the tool to handle complex workflows with minimal user friction.
 

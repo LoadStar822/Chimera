@@ -24,7 +24,6 @@
 
 namespace ChimeraClassify {
 
-using FeatureMethod = chimera::feature::Method;
 inline constexpr size_t kInvalidLength = std::numeric_limits<size_t>::max();
 
 inline double clamp01(double x) { return std::clamp(x, 0.0, 1.0); }
@@ -435,8 +434,7 @@ inline double compute_tail_risk_s(double tail_risk_u, int beta) {
 }
 
 chimera::feature::Params prepare_feature_params_for_classify(
-    const ChimeraBuild::IMCFConfig &imcfConfig,
-    FeatureMethod method, size_t &feature_min_len);
+    const ChimeraBuild::IMCFConfig &imcfConfig, size_t &feature_min_len);
 
 // --- fast taxid dictionary ---
 struct TaxDict {

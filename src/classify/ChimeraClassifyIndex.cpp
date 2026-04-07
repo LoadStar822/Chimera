@@ -110,7 +110,7 @@ void loadFilter(
   }
   if (imcfConfig.seed64 == 0) {
     throw std::runtime_error(
-        "The IMCF database is missing syncmer seed metadata. Please rerun Chimera build.");
+        "The IMCF database is missing feature seed metadata. Please rerun Chimera build.");
   }
   if (imcfConfig.fpSalt != ChimeraBuild::IMCFConfig::DefaultFingerprintSalt) {
     throw std::runtime_error(

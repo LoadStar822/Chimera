@@ -820,10 +820,23 @@ public:
    * 的幂这一前提直接按位掩码。
    * 相比重型哈希大幅减少运算量，同时仍保持良好的分布特性。
    */
-inline size_t hashIndex(uint64_t value) const {
+  inline size_t hashIndex(uint64_t value) const {
   uint64_t hashed = mix64(value);
   return (size_t)hashed & (hashSize - 1);
 }
+
+  inline size_t deterministicKickLane(size_t binIndex, size_t bucket,
+                                      uint64_t value, uint16_t currentTag,
+                                      uint64_t bucketValue,
+                                      uint32_t iteration) const {
+    uint64_t laneSeed = value;
+    laneSeed ^= static_cast<uint64_t>(binIndex) * 0x9E3779B185EBCA87ULL;
+    laneSeed ^= static_cast<uint64_t>(bucket) * 0xC2B2AE3D27D4EB4FULL;
+    laneSeed ^= static_cast<uint64_t>(currentTag) * 0x165667B19E3779F9ULL;
+    laneSeed ^= bucketValue * 0x85EBCA77C2B2AE63ULL;
+    laneSeed ^= static_cast<uint64_t>(iteration + 1) * 0x27D4EB2F165667C5ULL;
+    return static_cast<size_t>(mix64(laneSeed) % static_cast<uint64_t>(tagNum));
+  }
 
   /**
    * @brief 可逆备桶哈希。
@@ -1115,19 +1128,16 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
   /**
    * @brief 踢出流程，只在两桶之间往返。
    *
-   * 随机逐出当前桶一项换入新项，再借助可逆哈希跳往另一桶继续尝试，最多迭代
-   * `MaxCuckooCount` 次。
+   * 按当前状态确定性地选择逐出槽位，再借助可逆哈希跳往另一桶继续尝试，最多
+   * 迭代 `MaxCuckooCount` 次。
    */
-	inline bool kickOut(size_t binIndex, uint64_t value, uint16_t tag) {
-    uint16_t cur = tag;
-    uint16_t fp = (uint16_t)(cur & 0x0FFFu);
-    size_t b = hashIndex(value);
+		inline bool kickOut(size_t binIndex, uint64_t value, uint16_t tag) {
+	    uint16_t cur = tag;
+	    uint16_t fp = (uint16_t)(cur & 0x0FFFu);
+	    size_t b = hashIndex(value);
 
-    static thread_local std::mt19937_64 gen{std::random_device{}()};
-    std::uniform_int_distribution<int> dis(0, (int)tagNum - 1);
-
-    for (int cnt = 0; cnt < MaxCuckooCount; ++cnt) {
-      uint64_t q = readBucket64(b, binIndex);
+	    for (int cnt = 0; cnt < MaxCuckooCount; ++cnt) {
+	      uint64_t q = readBucket64(b, binIndex);
 
       for (int i = 0; i < 4; ++i) {
         uint16_t chunk = (uint16_t)((q >> (i * 16)) & 0xFFFFu);
@@ -1141,10 +1151,12 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
           return true;
       }
 
-      int rp = dis(gen);
-      uint16_t victim = (uint16_t)((q >> (rp * 16)) & 0xFFFFu);
-      q &= ~((uint64_t)0xFFFFu << (rp * 16));
-      q |= ((uint64_t)cur << (rp * 16));
+	      int rp = static_cast<int>(
+	          deterministicKickLane(binIndex, b, value, cur, q,
+	                                static_cast<uint32_t>(cnt)));
+	      uint16_t victim = (uint16_t)((q >> (rp * 16)) & 0xFFFFu);
+	      q &= ~((uint64_t)0xFFFFu << (rp * 16));
+	      q |= ((uint64_t)cur << (rp * 16));
       writeBucket64(b, binIndex, q);
 
       cur = victim;
