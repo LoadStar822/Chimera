@@ -109,6 +109,468 @@ maybe_load_ncbi_taxdump(const std::string &taxonomyKind) {
   return tax;
 }
 
+struct SpoolPreparedCandidate {
+  size_t idx{0};
+  double log_likelihood{0.0};
+};
+
+struct SpoolEMFit {
+  std::vector<uint32_t> taxid_list;
+  std::unordered_map<uint32_t, size_t> taxid_to_idx;
+  std::vector<double> class_pi_vec;
+  std::vector<double> posterior_pi_vec;
+  std::unordered_map<std::string, double> class_weights;
+  size_t read_count{0};
+  size_t candidate_count{0};
+};
+
+static std::string spool_taxid_to_string(
+    uint32_t tid, const ChimeraClassify::TaxDict &tax) {
+  if (tid == ChimeraClassify::kSpoolUnclassifiedTid ||
+      tid >= tax.id2str.size()) {
+    return "unclassified";
+  }
+  return tax.id2str[tid];
+}
+
+static void normalize_distribution(std::vector<double> &dist) {
+  double sum = 0.0;
+  for (double v : dist) {
+    sum += v;
+  }
+  if (!(sum > 0.0)) {
+    const double uniform = dist.empty() ? 0.0 : 1.0 / static_cast<double>(dist.size());
+    for (double &v : dist) {
+      v = uniform;
+    }
+    return;
+  }
+  const double inv_sum = 1.0 / sum;
+  for (double &v : dist) {
+    v *= inv_sum;
+  }
+}
+
+static bool prepare_spool_candidates(
+    const ChimeraClassify::SpoolReadRecord &record,
+    const std::unordered_map<uint32_t, size_t> &taxid_to_idx,
+    const ChimeraClassify::EMOptions &options,
+    std::vector<SpoolPreparedCandidate> &prepared) {
+  prepared.clear();
+  if (record.evaluated <= 0.0 || record.candidates.empty()) {
+    return false;
+  }
+
+  struct TempCandidate {
+    size_t idx{0};
+    double c{0.0};
+  };
+  std::vector<TempCandidate> tmp;
+  tmp.reserve(record.candidates.size());
+  double max_count = 0.0;
+  for (const auto &cand : record.candidates) {
+    if (cand.tid == ChimeraClassify::kSpoolUnclassifiedTid ||
+        !(cand.score > 0.0)) {
+      continue;
+    }
+    auto it = taxid_to_idx.find(cand.tid);
+    if (it == taxid_to_idx.end()) {
+      continue;
+    }
+    const double c = cand.score / record.evaluated;
+    tmp.push_back(TempCandidate{it->second, c});
+    if (c > max_count) {
+      max_count = c;
+    }
+  }
+  if (tmp.empty()) {
+    return false;
+  }
+
+  double denom = max_count + options.eps * static_cast<double>(tmp.size());
+  if (denom <= 0.0) {
+    denom = options.eps * static_cast<double>(tmp.size());
+  }
+  prepared.reserve(tmp.size());
+  for (const auto &cand : tmp) {
+    const double likelihood = (cand.c + options.eps) / denom;
+    const double log_likelihood =
+        options.temp * std::log(std::max(likelihood, options.eps));
+    prepared.push_back(SpoolPreparedCandidate{cand.idx, log_likelihood});
+  }
+  return !prepared.empty();
+}
+
+static SpoolEMFit fit_spool_em(
+    const std::vector<std::string> &spoolPaths, const ChimeraClassify::TaxDict &tax,
+    size_t maxIter, const ChimeraClassify::EMOptions &options,
+    const std::unordered_map<std::string, double> *prior_scale) {
+  SpoolEMFit fit;
+  std::unordered_set<uint32_t> taxid_set;
+  std::unordered_map<uint32_t, double> weighted_evidence_by_tid;
+
+  for (const auto &path : spoolPaths) {
+    std::ifstream is(path, std::ios::binary);
+    if (!is.is_open()) {
+      throw std::runtime_error("Failed to open classify spool: " + path);
+    }
+    ChimeraClassify::read_spool_header(is, path);
+    ChimeraClassify::SpoolReadRecord record;
+    while (ChimeraClassify::read_spool_record(is, record)) {
+      ++fit.read_count;
+      fit.candidate_count += record.candidates.size();
+      if (record.evaluated <= 0.0 || record.candidates.empty()) {
+        continue;
+      }
+      double total_count = 0.0;
+      for (const auto &cand : record.candidates) {
+        if (cand.tid == ChimeraClassify::kSpoolUnclassifiedTid ||
+            !(cand.score > 0.0)) {
+          continue;
+        }
+        taxid_set.insert(cand.tid);
+        total_count += cand.score;
+      }
+      if (total_count > 0.0) {
+        for (const auto &cand : record.candidates) {
+          if (cand.tid != ChimeraClassify::kSpoolUnclassifiedTid &&
+              cand.score > 0.0) {
+            weighted_evidence_by_tid[cand.tid] += cand.score / total_count;
+          }
+        }
+      }
+    }
+  }
+
+  fit.taxid_list.reserve(taxid_set.size());
+  for (uint32_t tid : taxid_set) {
+    fit.taxid_list.push_back(tid);
+  }
+  if (fit.taxid_list.empty()) {
+    return fit;
+  }
+
+  const size_t taxid_count = fit.taxid_list.size();
+  fit.taxid_to_idx.reserve(taxid_count);
+  for (size_t idx = 0; idx < taxid_count; ++idx) {
+    fit.taxid_to_idx.emplace(fit.taxid_list[idx], idx);
+  }
+
+  std::vector<double> weighted_evidence(taxid_count, 0.0);
+  for (size_t idx = 0; idx < taxid_count; ++idx) {
+    auto it = weighted_evidence_by_tid.find(fit.taxid_list[idx]);
+    if (it != weighted_evidence_by_tid.end()) {
+      weighted_evidence[idx] = it->second;
+    }
+  }
+
+  auto get_scale = [&](size_t idx) -> double {
+    if (!prior_scale) {
+      return 1.0;
+    }
+    const std::string taxid = spool_taxid_to_string(fit.taxid_list[idx], tax);
+    auto it = prior_scale->find(taxid);
+    if (it == prior_scale->end() || !(it->second > 0.0)) {
+      return 1.0;
+    }
+    return std::sqrt(it->second);
+  };
+
+  fit.class_pi_vec.assign(taxid_count, 0.0);
+  constexpr double kBackgroundPrior = 1e-9;
+  for (size_t idx = 0; idx < taxid_count; ++idx) {
+    const double scale = get_scale(idx);
+    double init_val = weighted_evidence[idx] * scale;
+    if (init_val <= 0.0 && prior_scale && scale > 0.0) {
+      init_val = 1e-5;
+    }
+    if (init_val <= 0.0) {
+      init_val = kBackgroundPrior;
+    }
+    fit.class_pi_vec[idx] = init_val;
+  }
+  normalize_distribution(fit.class_pi_vec);
+  const std::vector<double> abundance_prior = fit.class_pi_vec;
+
+#ifdef _OPENMP
+  const int num_threads = omp_get_max_threads();
+#else
+  const int num_threads = 1;
+#endif
+  std::vector<std::vector<double>> thread_expected(
+      num_threads, std::vector<double>(taxid_count, 0.0));
+  std::vector<double> expected_counts(taxid_count, 0.0);
+
+  for (size_t iteration = 0; iteration < maxIter; ++iteration) {
+    const bool final_iter = (iteration + 1 == maxIter);
+    if (final_iter) {
+      fit.posterior_pi_vec = fit.class_pi_vec;
+    }
+    for (auto &local : thread_expected) {
+      std::fill(local.begin(), local.end(), 0.0);
+    }
+
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+    {
+#ifdef _OPENMP
+      const int tid = omp_get_thread_num();
+#else
+      const int tid = 0;
+#endif
+      auto &local_expected = thread_expected[tid];
+      std::vector<SpoolPreparedCandidate> prepared;
+      std::vector<std::pair<size_t, double>> log_components;
+      std::vector<double> q_values;
+
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic)
+#endif
+      for (size_t path_idx = 0; path_idx < spoolPaths.size(); ++path_idx) {
+        const auto &path = spoolPaths[path_idx];
+        std::ifstream is(path, std::ios::binary);
+        if (!is.is_open()) {
+          throw std::runtime_error("Failed to open classify spool: " + path);
+        }
+        ChimeraClassify::read_spool_header(is, path);
+        ChimeraClassify::SpoolReadRecord record;
+        while (ChimeraClassify::read_spool_record(is, record)) {
+          if (!prepare_spool_candidates(record, fit.taxid_to_idx, options,
+                                        prepared)) {
+            continue;
+          }
+          log_components.clear();
+          q_values.clear();
+          log_components.reserve(prepared.size());
+          q_values.reserve(prepared.size());
+          double max_log = -std::numeric_limits<double>::infinity();
+          for (const auto &cand : prepared) {
+            const double prior = std::max(fit.class_pi_vec[cand.idx],
+                                          options.eps);
+            const double score = std::log(prior) + cand.log_likelihood;
+            log_components.emplace_back(cand.idx, score);
+            if (score > max_log) {
+              max_log = score;
+            }
+          }
+          if (log_components.empty() || !std::isfinite(max_log)) {
+            continue;
+          }
+          double sum_exp = 0.0;
+          for (const auto &entry : log_components) {
+            sum_exp += std::exp(entry.second - max_log);
+          }
+          const double normalizer = max_log + std::log(sum_exp);
+          double max_post = 0.0;
+          for (const auto &entry : log_components) {
+            const double q = std::exp(entry.second - normalizer);
+            q_values.push_back(q);
+            if (q > max_post) {
+              max_post = q;
+            }
+          }
+          double conf_w = 1.0;
+          if (options.conf_power > 0.0 && max_post > 0.0) {
+            conf_w = std::pow(max_post, options.conf_power);
+          }
+          const double weight =
+              (record.evaluated > 0.0 ? record.evaluated : 1.0) * conf_w;
+          for (size_t k = 0; k < log_components.size(); ++k) {
+            local_expected[log_components[k].first] += weight * q_values[k];
+          }
+        }
+      }
+    }
+
+    std::fill(expected_counts.begin(), expected_counts.end(), 0.0);
+    double sum_expected = 0.0;
+    for (const auto &local : thread_expected) {
+      for (size_t idx = 0; idx < taxid_count; ++idx) {
+        expected_counts[idx] += local[idx];
+      }
+    }
+    for (double v : expected_counts) {
+      sum_expected += v;
+    }
+
+    const double prior_mass = std::max(0.0, options.prior_strength);
+    const double uniform_mass = options.alpha * static_cast<double>(taxid_count);
+    const double pseudo_mass = (prior_mass > 0.0) ? prior_mass : uniform_mass;
+    double denominator = pseudo_mass + sum_expected;
+    if (denominator <= 0.0) {
+      denominator = 1.0;
+    }
+
+    double max_expected = 0.0;
+    for (double v : expected_counts) {
+      if (v > max_expected) {
+        max_expected = v;
+      }
+    }
+    const double prune_thres = max_expected * options.prune_ratio;
+    for (size_t idx = 0; idx < taxid_count; ++idx) {
+      double expected = expected_counts[idx];
+      if (expected < prune_thres) {
+        expected = 0.0;
+      }
+      const double prior_component =
+          (prior_mass > 0.0) ? prior_mass * abundance_prior[idx]
+                             : options.alpha;
+      fit.class_pi_vec[idx] = (expected + prior_component) / denominator;
+    }
+  }
+
+  if (fit.posterior_pi_vec.empty()) {
+    fit.posterior_pi_vec = fit.class_pi_vec;
+  }
+  fit.class_weights.reserve(taxid_count);
+  for (size_t idx = 0; idx < taxid_count; ++idx) {
+    fit.class_weights.emplace(spool_taxid_to_string(fit.taxid_list[idx], tax),
+                              fit.class_pi_vec[idx]);
+  }
+  return fit;
+}
+
+static std::vector<std::pair<std::string, double>>
+materialize_spool_posterior(const ChimeraClassify::SpoolReadRecord &record,
+                            const SpoolEMFit &fit,
+                            const ChimeraClassify::TaxDict &tax,
+                            const ChimeraClassify::EMOptions &options) {
+  std::vector<std::pair<std::string, double>> posterior;
+  std::vector<SpoolPreparedCandidate> prepared;
+  if (!prepare_spool_candidates(record, fit.taxid_to_idx, options, prepared)) {
+    return posterior;
+  }
+
+  std::vector<std::pair<size_t, double>> log_components;
+  log_components.reserve(prepared.size());
+  double max_log = -std::numeric_limits<double>::infinity();
+  for (const auto &cand : prepared) {
+    const double prior = std::max(fit.posterior_pi_vec[cand.idx], options.eps);
+    const double score = std::log(prior) + cand.log_likelihood;
+    log_components.emplace_back(cand.idx, score);
+    if (score > max_log) {
+      max_log = score;
+    }
+  }
+  if (log_components.empty() || !std::isfinite(max_log)) {
+    return posterior;
+  }
+  double sum_exp = 0.0;
+  for (const auto &entry : log_components) {
+    sum_exp += std::exp(entry.second - max_log);
+  }
+  const double normalizer = max_log + std::log(sum_exp);
+  posterior.reserve(log_components.size());
+  for (const auto &entry : log_components) {
+    const double q = std::exp(entry.second - normalizer);
+    posterior.emplace_back(
+        spool_taxid_to_string(fit.taxid_list[entry.first], tax), q);
+  }
+  return posterior;
+}
+
+static ChimeraClassify::classifyResult
+materialize_spool_result(const ChimeraClassify::SpoolReadRecord &record,
+                         const SpoolEMFit &fit,
+                         const ChimeraClassify::TaxDict &tax,
+                         const ChimeraClassify::EMOptions &options) {
+  ChimeraClassify::classifyResult result;
+  result.id = record.id;
+  result.evaluated = record.evaluated;
+  result.reject_reason = record.reject_reason;
+  if (record.best_taxid_hint != ChimeraClassify::kSpoolUnclassifiedTid) {
+    result.best_taxid_hint = spool_taxid_to_string(record.best_taxid_hint, tax);
+  }
+  result.posteriors = materialize_spool_posterior(record, fit, tax, options);
+  return result;
+}
+
+static std::string resolve_tsv_output_path(const std::string &path) {
+  if (std::filesystem::path(path).extension() == ".tsv") {
+    return path;
+  }
+  return path + ".tsv";
+}
+
+static void write_spool_em_results(
+    const std::vector<std::string> &spoolPaths, const SpoolEMFit &fit,
+    const ChimeraClassify::EMOptions &options,
+    const ChimeraClassify::DecisionConfig &decisionConfig,
+    const ChimeraClassify::TaxDict &tax,
+    const ChimeraClassify::PresenceDecision *presenceDecision,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
+    const ChimeraClassify::PostDecisionPolicy &postPolicy,
+    const ChimeraClassify::ClassifyConfig &config,
+    ChimeraClassify::FileInfo &fileInfo) {
+  const std::string outputFile = resolve_tsv_output_path(config.outputFile);
+  std::ofstream os(outputFile, std::ios::out);
+  if (!os.is_open()) {
+    throw std::runtime_error("Failed to open file: " + outputFile);
+  }
+  std::vector<char> outputBuffer(1 << 20, '\0');
+  os.rdbuf()->pubsetbuf(outputBuffer.data(),
+                        static_cast<std::streamsize>(outputBuffer.size()));
+  std::ostringstream postTopkOss;
+
+  fileInfo.classifiedNum = 0;
+  fileInfo.unclassifiedNum = 0;
+  std::vector<ChimeraClassify::classifyResult> chunk;
+  chunk.reserve(4096);
+
+  auto flush_chunk = [&]() {
+    if (chunk.empty()) {
+      return;
+    }
+    ChimeraClassify::postEmDecision(chunk, decisionConfig, fit.class_weights,
+                                    tax, presenceDecision, ncbiTaxdump,
+                                    postPolicy);
+    for (const auto &result : chunk) {
+      if (!result.taxidCount.empty() &&
+          result.taxidCount.front().first == "unclassified") {
+        ++fileInfo.unclassifiedNum;
+      } else {
+        ++fileInfo.classifiedNum;
+      }
+      ChimeraClassify::writeResultRecord(os, result, postTopkOss);
+    }
+    chunk.clear();
+  };
+
+  for (const auto &path : spoolPaths) {
+    std::ifstream is(path, std::ios::binary);
+    if (!is.is_open()) {
+      throw std::runtime_error("Failed to open classify spool: " + path);
+    }
+    ChimeraClassify::read_spool_header(is, path);
+    ChimeraClassify::SpoolReadRecord record;
+    while (ChimeraClassify::read_spool_record(is, record)) {
+      chunk.push_back(materialize_spool_result(record, fit, tax, options));
+      if (chunk.size() >= 4096) {
+        flush_chunk();
+      }
+    }
+  }
+  flush_chunk();
+  os.close();
+}
+
+static std::filesystem::path make_spool_dir(const std::string &outputFile) {
+  return std::filesystem::path(outputFile + ".spool");
+}
+
+static std::vector<std::string>
+make_spool_paths(const std::filesystem::path &spoolDir, size_t workerCount) {
+  std::vector<std::string> paths;
+  paths.reserve(workerCount);
+  for (size_t i = 0; i < workerCount; ++i) {
+    paths.push_back((spoolDir / ("worker_" + std::to_string(i) + ".cspool"))
+                        .string());
+  }
+  return paths;
+}
+
 } // namespace
 
 namespace ChimeraClassify {
@@ -254,16 +716,18 @@ void run(ClassifyConfig config) {
     probePolicy.candidate = derive_candidate_policy(config);
     std::vector<moodycamel::ConcurrentQueue<batchReads>> probeQueues(
         static_cast<size_t>(std::max<uint16_t>(1, config.threads)));
+    std::vector<QueueThrottle> probeThrottles(probeQueues.size());
     std::vector<classifyResult> probeResults;
     std::atomic<bool> probe_done{false};
     std::thread probeProducer([&]() {
-      parseReads(probeQueues, config, probeInfo, kTailRiskProbeReads);
+      parseReads(probeQueues, config, probeInfo, kTailRiskProbeReads,
+                 &probeThrottles);
       probe_done.store(true, std::memory_order_release);
     });
 
     classify_streaming(imcfConfig, probeQueues, config, imcf, tax, probeResults,
                        probeInfo, probe_done, feature_params, feature_min_len,
-                       weightCtx, probePolicy, nullptr);
+                       weightCtx, probePolicy, nullptr, &probeThrottles);
     probeProducer.join();
 
     if (!probeResults.empty()) {
@@ -369,30 +833,29 @@ void run(ClassifyConfig config) {
   seqan3::contrib::bgzf_thread_count = config.threads;
   std::vector<moodycamel::ConcurrentQueue<batchReads>> readQueues(
       static_cast<size_t>(std::max<uint16_t>(1, config.threads)));
-  std::vector<classifyResult> classifyResults;
+  std::vector<QueueThrottle> queueThrottles(readQueues.size());
   std::unordered_map<std::string, double> classWeights;
   bool posteriorModelUsed = false;
   AutoClassifyPolicy classifyPolicy{};
   classifyPolicy.candidate = derive_candidate_policy(config);
+  const std::filesystem::path spoolDir = make_spool_dir(config.outputFile);
+  std::filesystem::remove_all(spoolDir);
+  std::filesystem::create_directories(spoolDir);
+  const std::vector<std::string> spoolPaths =
+      make_spool_paths(spoolDir, readQueues.size());
 
   std::atomic<bool> producer_done{false};
   std::thread producer([&]() {
-    parseReads(readQueues, config, fileInfo);
+    parseReads(readQueues, config, fileInfo, 0, &queueThrottles);
     producer_done.store(true, std::memory_order_release);
   });
 
-  classify_streaming(imcfConfig, readQueues, config, imcf, tax, classifyResults,
-                     fileInfo, producer_done, feature_params, feature_min_len,
-                     weightCtx, classifyPolicy, presencePtr);
+  classify_streaming_spool(imcfConfig, readQueues, config, imcf, tax,
+                           spoolPaths, fileInfo, producer_done, feature_params,
+                           feature_min_len, weightCtx, classifyPolicy,
+                           presencePtr, &queueThrottles);
   producer.join();
   std::vector<moodycamel::ConcurrentQueue<batchReads>>().swap(readQueues);
-  // Determinism: classify_streaming merges thread-local batches in the order
-  // threads finish, which is non-deterministic. Sort by read/contig id before
-  // downstream EM/post-processing so repeated runs are stable.
-  std::sort(classifyResults.begin(), classifyResults.end(),
-            [](const classifyResult &a, const classifyResult &b) {
-              return a.id < b.id;
-            });
   if (fileInfo.sequenceNum > 0) {
     fileInfo.avgLen = fileInfo.bpLength / fileInfo.sequenceNum;
   }
@@ -457,11 +920,10 @@ void run(ClassifyConfig config) {
   options.temp = 1.05;
   options.prune_ratio = config.em_prune_ratio;
   options.conf_power = config.em_conf_power;
-  auto [posterior, weights] =
-      EMAlgorithm(std::move(classifyResults), config.emIter, 0.0, options,
-                  emPriorScale.empty() ? nullptr : &emPriorScale);
-  classifyResults = std::move(posterior);
-  classWeights = std::move(weights);
+  SpoolEMFit speciesFit =
+      fit_spool_em(spoolPaths, tax, config.emIter, options,
+                   emPriorScale.empty() ? nullptr : &emPriorScale);
+  classWeights = speciesFit.class_weights;
   posteriorModelUsed = true;
   if (posteriorModelUsed) {
     DecisionConfig decisionConfig;
@@ -593,21 +1055,11 @@ void run(ClassifyConfig config) {
               << "\n";
     std::cout << std::defaultfloat;
 
-    postEmDecision(classifyResults, decisionConfig, classWeights, tax,
-                   &presenceDecision, weightCtx.ncbiTaxdump, autoPolicy.post);
-    fileInfo.classifiedNum = 0;
-    fileInfo.unclassifiedNum = 0;
-    for (const auto &result : classifyResults) {
-      if (!result.taxidCount.empty() &&
-          result.taxidCount.front().first == "unclassified") {
-        ++fileInfo.unclassifiedNum;
-      } else {
-        ++fileInfo.classifiedNum;
-      }
-    }
+    write_spool_em_results(spoolPaths, speciesFit, options, decisionConfig,
+                           tax, &presenceDecision, weightCtx.ncbiTaxdump,
+                           autoPolicy.post, config, fileInfo);
   }
-
-  saveResult(classifyResults, config);
+  std::filesystem::remove_all(spoolDir);
 }
 
 } // namespace ChimeraClassify

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <numeric>
@@ -1388,7 +1389,8 @@ void classify_streaming(
     std::atomic<bool> &producer_done,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     const WeightingContext &weightCtx, const AutoClassifyPolicy &autoPolicy,
-    PresenceSummary *presenceSummary) {
+    PresenceSummary *presenceSummary,
+    std::vector<QueueThrottle> *queueThrottles) {
 
 #pragma omp parallel
   {
@@ -1397,10 +1399,14 @@ void classify_streaming(
 #else
     const int thread_id = 0;
 #endif
+    const size_t queue_index = static_cast<size_t>(
+        std::clamp<int>(thread_id, 0, static_cast<int>(readQueues.size() - 1)));
     moodycamel::ConcurrentQueue<batchReads> &readQueue =
-        readQueues[static_cast<size_t>(
-            std::clamp<int>(thread_id, 0,
-                            static_cast<int>(readQueues.size() - 1)))];
+        readQueues[queue_index];
+    QueueThrottle *queueThrottle =
+        (queueThrottles != nullptr && queue_index < queueThrottles->size())
+            ? &(*queueThrottles)[queue_index]
+            : nullptr;
 
     batchReads batch;
     std::vector<classifyResult> localClassifyResults;
@@ -1419,6 +1425,7 @@ void classify_streaming(
 
     for (;;) {
       if (readQueue.try_dequeue(batch)) {
+        release_queue_slot(queueThrottle, estimate_batch_bytes(batch));
         processBatch(batch, imcfConfig, tax, config, imcf,
                      localClassifyResults, feature_params, feature_min_len,
                      localFileInfo, heat, weightCtx, autoPolicy, presencePtr,
@@ -1434,9 +1441,137 @@ void classify_streaming(
 #pragma omp critical
     {
       classifyResults.insert(classifyResults.end(),
-                             localClassifyResults.begin(),
-                             localClassifyResults.end());
+                             std::make_move_iterator(
+                                 localClassifyResults.begin()),
+                             std::make_move_iterator(
+                                 localClassifyResults.end()));
+      std::vector<classifyResult>().swap(localClassifyResults);
 
+      fileInfo.classifiedNum += localFileInfo.classifiedNum;
+      fileInfo.unclassifiedNum += localFileInfo.unclassifiedNum;
+
+      fileInfo.uniqueTaxids.insert(localFileInfo.uniqueTaxids.begin(),
+                                   localFileInfo.uniqueTaxids.end());
+
+      size_t localMin =
+          (localFileInfo.minLen == kInvalidLength) ? 0 : localFileInfo.minLen;
+      if (localMin > 0 &&
+          (fileInfo.minLen == 0 || fileInfo.minLen == kInvalidLength ||
+           localMin < fileInfo.minLen)) {
+        fileInfo.minLen = localMin;
+      }
+      if (localFileInfo.maxLen > fileInfo.maxLen) {
+        fileInfo.maxLen = localFileInfo.maxLen;
+      }
+      fileInfo.bpLength += localFileInfo.bpLength;
+      if (presenceSummary) {
+        presenceSummary->merge(presenceLocal);
+      }
+    }
+  }
+}
+
+namespace {
+
+uint32_t spool_tid_for_taxid(const TaxDict &tax, const std::string &taxid) {
+  if (taxid.empty() || taxid == "unclassified") {
+    return kSpoolUnclassifiedTid;
+  }
+  auto it = tax.str2id.find(taxid);
+  return (it == tax.str2id.end()) ? kSpoolUnclassifiedTid : it->second;
+}
+
+void write_spool_results(const std::vector<classifyResult> &results,
+                         const TaxDict &tax, std::ostream &os) {
+  SpoolReadRecord record;
+  for (const auto &result : results) {
+    record.id = result.id;
+    record.evaluated = result.evaluated;
+    record.best_taxid_hint = spool_tid_for_taxid(tax, result.best_taxid_hint);
+    record.reject_reason = result.reject_reason;
+    record.candidates.clear();
+    record.candidates.reserve(result.taxidCount.size());
+    for (const auto &[taxid, score] : result.taxidCount) {
+      record.candidates.push_back(SpoolCandidate{
+          spool_tid_for_taxid(tax, taxid), score});
+    }
+    write_spool_record(os, record);
+  }
+}
+
+} // namespace
+
+void classify_streaming_spool(
+    ChimeraBuild::IMCFConfig &imcfConfig,
+    std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
+    ClassifyConfig &config,
+    chimera::imcf::InterleavedMergedCuckooFilter &imcf, const TaxDict &tax,
+    const std::vector<std::string> &spoolPaths, FileInfo &fileInfo,
+    std::atomic<bool> &producer_done,
+    const chimera::feature::Params &feature_params, size_t feature_min_len,
+    const WeightingContext &weightCtx, const AutoClassifyPolicy &autoPolicy,
+    PresenceSummary *presenceSummary,
+    std::vector<QueueThrottle> *queueThrottles) {
+
+#pragma omp parallel
+  {
+#ifdef _OPENMP
+    const int thread_id = omp_get_thread_num();
+#else
+    const int thread_id = 0;
+#endif
+    const size_t queue_index = static_cast<size_t>(
+        std::clamp<int>(thread_id, 0, static_cast<int>(readQueues.size() - 1)));
+    moodycamel::ConcurrentQueue<batchReads> &readQueue =
+        readQueues[queue_index];
+    QueueThrottle *queueThrottle =
+        (queueThrottles != nullptr && queue_index < queueThrottles->size())
+            ? &(*queueThrottles)[queue_index]
+            : nullptr;
+
+    const size_t spool_index = static_cast<size_t>(std::clamp<int>(
+        thread_id, 0, static_cast<int>(spoolPaths.size() - 1)));
+    std::ofstream spool(spoolPaths[spool_index], std::ios::binary);
+    if (!spool.is_open()) {
+      throw std::runtime_error("Failed to open classify spool: " +
+                               spoolPaths[spool_index]);
+    }
+    write_spool_header(spool);
+
+    batchReads batch;
+    std::vector<classifyResult> localClassifyResults;
+    FileInfo localFileInfo;
+    localFileInfo.avgLen = fileInfo.avgLen;
+    localFileInfo.minLen = kInvalidLength;
+    localFileInfo.maxLen = 0;
+    localFileInfo.bpLength = 0;
+    GroupHeat heat;
+    heat.ensure(tax.idx2id.size());
+    ProcessScratch scratch;
+    PresenceAccumulator presenceLocal(
+        presenceSummary ? presenceSummary->sketchBits : 0);
+    PresenceAccumulator *presencePtr =
+        presenceSummary ? &presenceLocal : nullptr;
+
+    for (;;) {
+      if (readQueue.try_dequeue(batch)) {
+        release_queue_slot(queueThrottle, estimate_batch_bytes(batch));
+        processBatch(batch, imcfConfig, tax, config, imcf,
+                     localClassifyResults, feature_params, feature_min_len,
+                     localFileInfo, heat, weightCtx, autoPolicy, presencePtr,
+                     scratch);
+        write_spool_results(localClassifyResults, tax, spool);
+        localClassifyResults.clear();
+        continue;
+      }
+      if (producer_done.load(std::memory_order_acquire)) {
+        break;
+      }
+      std::this_thread::yield();
+    }
+
+#pragma omp critical
+    {
       fileInfo.classifiedNum += localFileInfo.classifiedNum;
       fileInfo.unclassifiedNum += localFileInfo.unclassifiedNum;
 
@@ -1500,8 +1635,11 @@ void classify(
 #pragma omp critical
     {
       classifyResults.insert(classifyResults.end(),
-                             localClassifyResults.begin(),
-                             localClassifyResults.end());
+                             std::make_move_iterator(
+                                 localClassifyResults.begin()),
+                             std::make_move_iterator(
+                                 localClassifyResults.end()));
+      std::vector<classifyResult>().swap(localClassifyResults);
 
       fileInfo.classifiedNum += localFileInfo.classifiedNum;
       fileInfo.unclassifiedNum += localFileInfo.unclassifiedNum;

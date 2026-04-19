@@ -5,10 +5,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cmath>
 #include <cstdint>
+#include <iosfwd>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -25,6 +28,59 @@
 namespace ChimeraClassify {
 
 inline constexpr size_t kInvalidLength = std::numeric_limits<size_t>::max();
+inline constexpr size_t kClassifyQueueMaxPendingBytes =
+    64ull * 1024ull * 1024ull;
+
+struct QueueThrottle {
+  std::mutex mutex;
+  std::condition_variable cv;
+  size_t pending_bytes{0};
+  size_t peak_pending_bytes{0};
+  size_t max_pending_bytes{kClassifyQueueMaxPendingBytes};
+};
+
+inline size_t estimate_batch_bytes(const batchReads &batch) {
+  size_t total = sizeof(batchReads);
+  for (const auto &id : batch.ids) {
+    total += id.size();
+  }
+  for (const auto &seq : batch.seqs) {
+    total += seq.size() * sizeof(seqan3::dna4);
+  }
+  for (const auto &seq : batch.seqs2) {
+    total += seq.size() * sizeof(seqan3::dna4);
+  }
+  return total;
+}
+
+inline void acquire_queue_slot(QueueThrottle *throttle, size_t bytes) {
+  if (throttle == nullptr) {
+    return;
+  }
+  bytes = std::max<size_t>(bytes, 1);
+  std::unique_lock<std::mutex> lock(throttle->mutex);
+  throttle->cv.wait(lock, [&]() {
+    return throttle->pending_bytes == 0 ||
+           throttle->pending_bytes + bytes <= throttle->max_pending_bytes;
+  });
+  throttle->pending_bytes += bytes;
+  throttle->peak_pending_bytes =
+      std::max(throttle->peak_pending_bytes, throttle->pending_bytes);
+}
+
+inline void release_queue_slot(QueueThrottle *throttle, size_t bytes) {
+  if (throttle == nullptr) {
+    return;
+  }
+  bytes = std::max<size_t>(bytes, 1);
+  {
+    std::lock_guard<std::mutex> lock(throttle->mutex);
+    throttle->pending_bytes =
+        (bytes >= throttle->pending_bytes) ? 0
+                                           : throttle->pending_bytes - bytes;
+  }
+  throttle->cv.notify_one();
+}
 
 inline double clamp01(double x) { return std::clamp(x, 0.0, 1.0); }
 
@@ -446,10 +502,31 @@ struct TaxDict {
 
 TaxDict build_tax_dict(const std::vector<std::vector<std::string>> &idx2tax);
 
+struct SpoolCandidate {
+  uint32_t tid{0};
+  double score{0.0};
+};
+
+struct SpoolReadRecord {
+  std::string id;
+  double evaluated{0.0};
+  uint32_t best_taxid_hint{0};
+  std::string reject_reason;
+  std::vector<SpoolCandidate> candidates;
+};
+
+inline constexpr uint32_t kSpoolUnclassifiedTid =
+    std::numeric_limits<uint32_t>::max();
+
+void write_spool_header(std::ostream &os);
+void read_spool_header(std::istream &is, const std::string &path);
+void write_spool_record(std::ostream &os, const SpoolReadRecord &record);
+bool read_spool_record(std::istream &is, SpoolReadRecord &record);
 
 void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
                 ClassifyConfig config, FileInfo &fileInfo,
-                size_t max_reads = 0);
+                size_t max_reads = 0,
+                std::vector<QueueThrottle> *queueThrottles = nullptr);
 
 void loadFilter(const std::string &input_file,
                 chimera::imcf::InterleavedMergedCuckooFilter &imcf,
@@ -459,6 +536,9 @@ void loadFilter(const std::string &input_file,
 
 void saveResult(const std::vector<classifyResult> &classifyResults,
                 const ClassifyConfig &config);
+
+void writeResultRecord(std::ostream &os, const classifyResult &result,
+                       std::ostringstream &postTopkOss);
 
 struct GroupHeat {
   std::vector<uint32_t> score;
@@ -572,7 +652,20 @@ void classify_streaming(
     std::atomic<bool> &producer_done,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     const WeightingContext &weightCtx, const AutoClassifyPolicy &autoPolicy,
-    PresenceSummary *presenceSummary);
+    PresenceSummary *presenceSummary,
+    std::vector<QueueThrottle> *queueThrottles = nullptr);
+
+void classify_streaming_spool(
+    ChimeraBuild::IMCFConfig &imcfConfig,
+    std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
+    ClassifyConfig &config,
+    chimera::imcf::InterleavedMergedCuckooFilter &imcf, const TaxDict &tax,
+    const std::vector<std::string> &spoolPaths, FileInfo &fileInfo,
+    std::atomic<bool> &producer_done,
+    const chimera::feature::Params &feature_params, size_t feature_min_len,
+    const WeightingContext &weightCtx, const AutoClassifyPolicy &autoPolicy,
+    PresenceSummary *presenceSummary,
+    std::vector<QueueThrottle> *queueThrottles = nullptr);
 
 void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
