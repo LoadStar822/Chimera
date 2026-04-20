@@ -82,13 +82,24 @@ namespace ChimeraBuild {
 		uint16_t effectiveSpan,
 		uint16_t refReadLen,
 		uint32_t uniqueDegThreshold,
-		chimera::presence::CoverageMeta* coverageMeta)
+		chimera::presence::CoverageMeta* coverageMeta,
+		size_t groupIndexOffset,
+		bool verifyShardTotals,
+		const robin_hood::unordered_flat_map<std::string, uint64_t>*
+		    shardOffsetBase)
 	{
 		std::vector<std::vector<std::string>> indexToTaxid(groups.size());
 		robin_hood::unordered_flat_map<std::string, std::vector<TaxidShardPlan>> shardPlan;
 		shardPlan.reserve(hashCount.size());
 		robin_hood::unordered_flat_map<std::string, uint64_t> shardOffset;
 		shardOffset.reserve(hashCount.size());
+		if (shardOffsetBase != nullptr) {
+			for (const auto& [taxid, offset] : *shardOffsetBase) {
+				if (offset != 0) {
+					shardOffset.emplace(taxid, offset);
+				}
+			}
+		}
 		robin_hood::unordered_flat_map<std::string, size_t> featureLayoutIndex;
 		if (featureLayout) {
 			featureLayoutIndex.reserve(featureLayout->taxids.size());
@@ -135,30 +146,39 @@ namespace ChimeraBuild {
 			}
 		}
 
-		const double kShardToleranceRatio = 0.001;
-		for (const auto& [taxid, plans] : shardPlan) {
-			uint64_t shardTotal = 0;
-			for (const auto& plan : plans) {
-				shardTotal += plan.count;
-			}
-			auto it = hashCount.find(taxid);
-			if (it == hashCount.end()) {
-				std::cerr << "Warning: shard plan references unknown taxid " << taxid << std::endl;
-				continue;
-			}
-			uint64_t expected = it->second;
-			if (expected == 0 && shardTotal == 0) {
-				continue;
-			}
-			int64_t delta = static_cast<int64_t>(shardTotal) - static_cast<int64_t>(expected);
-			uint64_t absDelta = delta >= 0 ? static_cast<uint64_t>(delta) : static_cast<uint64_t>(-delta);
-			double ratio = expected == 0 ? (delta == 0 ? 0.0 : std::numeric_limits<double>::infinity())
-				: static_cast<double>(absDelta) / static_cast<double>(expected);
-			if (ratio > kShardToleranceRatio) {
-				std::cerr << "Warning: feature count mismatch for taxid " << taxid
-					<< ": expected=" << expected << ", planned=" << shardTotal
-					<< ", delta=" << delta << " (" << std::fixed << std::setprecision(4)
-					<< ratio * 100.0 << "%)" << std::endl;
+		if (verifyShardTotals) {
+			const double kShardToleranceRatio = 0.001;
+			for (const auto& [taxid, plans] : shardPlan) {
+				uint64_t shardTotal = 0;
+				for (const auto& plan : plans) {
+					shardTotal += plan.count;
+				}
+				auto it = hashCount.find(taxid);
+				if (it == hashCount.end()) {
+					std::cerr << "Warning: shard plan references unknown taxid " << taxid << std::endl;
+					continue;
+				}
+				uint64_t expected = it->second;
+				if (expected == 0 && shardTotal == 0) {
+					continue;
+				}
+				int64_t delta = static_cast<int64_t>(shardTotal) -
+				                static_cast<int64_t>(expected);
+				uint64_t absDelta =
+				    delta >= 0 ? static_cast<uint64_t>(delta)
+				               : static_cast<uint64_t>(-delta);
+				double ratio =
+				    expected == 0
+				        ? (delta == 0 ? 0.0 : std::numeric_limits<double>::infinity())
+				        : static_cast<double>(absDelta) /
+				              static_cast<double>(expected);
+				if (ratio > kShardToleranceRatio) {
+					std::cerr << "Warning: feature count mismatch for taxid " << taxid
+					          << ": expected=" << expected << ", planned=" << shardTotal
+					          << ", delta=" << delta << " (" << std::fixed
+					          << std::setprecision(4) << ratio * 100.0 << "%)"
+					          << std::endl;
+				}
 			}
 		}
 
@@ -320,7 +340,8 @@ namespace ChimeraBuild {
 							for (size_t h = 0; h < hashesRead; ++h) {
 								const uint64_t hash = readBlock[h];
 								const size_t slotIndex = entry.slotIndex;
-								if (imcf.insertTag(groupIdx, hash, slotIndex)) {
+								if (imcf.insertTag(groupIdx, groupIndexOffset + groupIdx,
+								                   hash, slotIndex)) {
 									++localSuccess;
 									if (slotIndex < localSlotSuccess.size()) {
 										++localSlotSuccess[slotIndex];
@@ -539,6 +560,60 @@ namespace ChimeraBuild {
 		}
 
 		return indexToTaxid;
+	}
+
+	void populateCoverageMeta(const HashFrequencyContext* hashFreqContext,
+	                          const FeatureBuildLayout* featureLayout,
+	                          uint16_t effectiveSpan,
+	                          uint16_t refReadLen,
+	                          uint32_t uniqueDegThreshold,
+	                          chimera::presence::CoverageMeta& coverageMeta)
+	{
+		if (!featureLayout) {
+			coverageMeta.entries.clear();
+			return;
+		}
+		const uint32_t uniqueDeg = std::max<uint32_t>(1, uniqueDegThreshold);
+		const uint16_t spanUsed =
+		    (effectiveSpan > 0) ? effectiveSpan : static_cast<uint16_t>(1);
+		const uint16_t refLenUsed =
+		    (refReadLen == 0) ? static_cast<uint16_t>(150) : refReadLen;
+		const bool hasSketch = hashFreqContext && hashFreqContext->enabled();
+		coverageMeta.unique_deg_threshold = uniqueDeg;
+		coverageMeta.ref_read_length = refLenUsed;
+		coverageMeta.effective_span = spanUsed;
+		coverageMeta.entries.clear();
+		coverageMeta.entries.reserve(featureLayout->taxids.size());
+		for (size_t layoutIdx = 0; layoutIdx < featureLayout->taxids.size();
+		     ++layoutIdx) {
+			const auto& taxid = featureLayout->taxids[layoutIdx];
+			const auto& layout = featureLayout->perTaxid[layoutIdx];
+			chimera::presence::CoverageEntry entry{};
+			entry.taxid = taxid;
+			entry.unique_signatures = layout.uniqueSignatures;
+			entry.total_signatures = layout.totalSignatures;
+			entry.genome_length = layout.genomeBp;
+			const double window = std::max<int64_t>(
+			    1, static_cast<int64_t>(refLenUsed) - static_cast<int64_t>(spanUsed) + 1);
+			entry.unique_density = (layout.genomeBp > 0 && entry.unique_signatures > 0)
+			                           ? static_cast<double>(entry.unique_signatures) /
+			                                 static_cast<double>(layout.genomeBp)
+			                           : 0.0;
+			entry.expected_unique_per_ref_read =
+			    (entry.unique_density > 0.0) ? entry.unique_density * window : 0.0;
+			coverageMeta.entries.push_back(entry);
+		}
+		if (hasSketch) {
+			coverageMeta.freq_model.depth = hashFreqContext->sketch->depth();
+			coverageMeta.freq_model.width = hashFreqContext->sketch->width();
+			coverageMeta.freq_model.quantile = hashFreqContext->quantile;
+			coverageMeta.freq_model.stats = hashFreqContext->stats;
+			coverageMeta.freq_model.total_hashes =
+			    hashFreqContext->passA_total_hashes.load(std::memory_order_relaxed);
+			coverageMeta.freq_model.filtered_hashes =
+			    hashFreqContext->passB_filtered_hashes.load(std::memory_order_relaxed);
+			hashFreqContext->sketch->exportCounts(coverageMeta.freq_model.counters);
+		}
 	}
 
 	void saveIMCF(chimera::imcf::InterleavedMergedCuckooFilter& imcf,

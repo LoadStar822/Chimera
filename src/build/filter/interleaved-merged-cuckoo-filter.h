@@ -27,6 +27,7 @@
 #include <bit>
 #include <bitset>
 #include <buildConfig.hpp>
+#include <cerrno>
 #include <cassert>
 #include <cereal/archives/binary.hpp>
 #include <cereal/details/helpers.hpp>
@@ -37,6 +38,7 @@
 #include <cstring>
 #include <cstdint>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
 #include <iterator>
 #include <kvec.h>
@@ -52,6 +54,7 @@
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
+#include <unistd.h>
 #include <vector>
 #include <xxhash.h>
 #include <memory>
@@ -179,7 +182,6 @@ inline std::vector<Group> partitionHashCount(
       std::max<uint64_t>(1, std::min<uint64_t>(thresholdFromMedian,
                                                thresholdFromMean));
   const double kTargetImbalance = 1.05; // 目标 M/A
-
   auto makeChunks = [&](uint64_t splitThreshold) {
     std::vector<HashChunk> chunks;
     chunks.reserve(hashCount.size() * 2);
@@ -670,6 +672,52 @@ class InterleavedMergedCuckooFilter {
     ar(qidx->g, qidx->prefix_bits, qidx->entry_bits);
   }
 
+  inline void flatten_stash_by_bucket(std::vector<StashFlat> &stashFlat,
+                                      std::vector<size_t> &stashBucketStart,
+                                      std::vector<size_t> &stashBucketEnd) const {
+    size_t totalStash = 0;
+    for (const auto &entries : stash) {
+      totalStash += entries.size();
+    }
+    stashFlat.clear();
+    stashFlat.reserve(totalStash);
+    for (size_t bin = 0; bin < binNum; ++bin) {
+      if (bin >= stash.size()) {
+        break;
+      }
+      for (const auto &entry : stash[bin]) {
+        if (entry.bucket >= hashSize) {
+          continue;
+        }
+        StashFlat flat;
+        flat.bucket = static_cast<uint32_t>(entry.bucket);
+        flat.fp = entry.fingerprint;
+        flat.mask = entry.speciesMask;
+        flat.bin = static_cast<uint32_t>(bin);
+        stashFlat.push_back(flat);
+      }
+    }
+    std::sort(stashFlat.begin(), stashFlat.end(),
+              [](const StashFlat &a, const StashFlat &b) {
+                if (a.bucket != b.bucket) {
+                  return a.bucket < b.bucket;
+                }
+                return a.bin < b.bin;
+              });
+    stashBucketStart.assign(hashSize + 1, 0);
+    stashBucketEnd.assign(hashSize + 1, 0);
+    size_t idx = 0;
+    for (size_t b = 0; b < hashSize; ++b) {
+      stashBucketStart[b] = idx;
+      while (idx < stashFlat.size() && stashFlat[idx].bucket == b) {
+        ++idx;
+      }
+      stashBucketEnd[b] = idx;
+    }
+    stashBucketStart[hashSize] = stashFlat.size();
+    stashBucketEnd[hashSize] = stashFlat.size();
+  }
+
   struct QidxLookupState {
     size_t hash1{0};
     size_t hash2{0};
@@ -761,6 +809,22 @@ public:
     stash.assign(binNum, {});
   }
 
+  inline void initialize_classic_storage(size_t localBinNum,
+                                         size_t binSizeIn) {
+    storageMode = 0;
+    binNum = localBinNum;
+    binSize = binSizeIn;
+    hashSize = binSizeIn;
+    data = sdsl::bit_vector(static_cast<uint64_t>(binNum) *
+                                static_cast<uint64_t>(binSize) *
+                                static_cast<uint64_t>(tagNum) * 16ull,
+                            0);
+    stash.assign(binNum, {});
+    qidx.reset();
+    insertFailureTotal.store(0, std::memory_order_relaxed);
+    insertFailureSaturated.store(0, std::memory_order_relaxed);
+  }
+
   template <class Archive> void serialize(Archive &ar) {
     ar(storageMode, binNum, binSize, tagNum, MaxCuckooCount, hashSize);
     if (storageMode == 0) {
@@ -807,10 +871,273 @@ public:
     return qidx && qidx->has_spool_backing();
   }
 
+  inline void initialize_qidx_spool_only(
+      size_t globalBinNum, size_t globalBinSize,
+      std::vector<uint64_t> bucketBaseIn, uint8_t prefixBits,
+      uint8_t entryBits, const std::filesystem::path &prefixSpoolPath,
+      uint64_t prefixSpoolCount,
+      const std::filesystem::path &entriesSpoolPath,
+      uint64_t entriesSpoolCount) {
+    storageMode = 1;
+    binNum = globalBinNum;
+    binSize = globalBinSize;
+    hashSize = globalBinSize;
+    data = sdsl::bit_vector();
+    stash.clear();
+    qidx = std::make_unique<QueryIndex>();
+    qidx->g = 8;
+    qidx->refresh();
+    qidx->bucketBase = std::move(bucketBaseIn);
+    qidx->prefix_bits = prefixBits;
+    qidx->entry_bits = entryBits;
+    qidx->prefix =
+        sdsl::int_vector<0>(0, 0, std::max<uint8_t>(1, prefixBits));
+    qidx->entries =
+        sdsl::int_vector<0>(0, 0, std::max<uint8_t>(1, entryBits));
+    qidx->set_spool_backing(prefixSpoolPath, prefixSpoolCount,
+                            entriesSpoolPath, entriesSpoolCount);
+  }
+
   inline void cleanup_qidx_spool_files() {
     if (qidx) {
       qidx->clear_spool_backing(true);
     }
+  }
+
+  inline void accumulate_qidx_group_counts(
+      std::vector<uint32_t> &groupCounts,
+      bool include_stash = true) const {
+    constexpr uint8_t kQidxGroupBits = 8;
+    constexpr uint32_t kGroupSize = 1u << kQidxGroupBits;
+    const uint32_t groupMask = kGroupSize - 1;
+    const uint64_t expectedSize =
+        static_cast<uint64_t>(hashSize) * static_cast<uint64_t>(kGroupSize);
+    if (groupCounts.size() != expectedSize) {
+      throw std::runtime_error("QIMCF block count buffer has invalid size");
+    }
+
+#pragma omp parallel
+    {
+      std::vector<uint32_t> counts(kGroupSize, 0);
+#pragma omp for schedule(dynamic, 4)
+      for (int64_t bucket_i = 0; bucket_i < static_cast<int64_t>(hashSize);
+           ++bucket_i) {
+        const size_t bucket = static_cast<size_t>(bucket_i);
+        std::fill(counts.begin(), counts.end(), 0u);
+        for (size_t bin = 0; bin < binNum; ++bin) {
+          uint64_t q = readBucket64(bucket, bin);
+          if (q == 0) {
+            continue;
+          }
+          for (int lane = 0; lane < static_cast<int>(tagNum); ++lane) {
+            uint16_t tag =
+                static_cast<uint16_t>((q >> (lane * 16)) & 0xFFFFu);
+            if (tag == 0u) {
+              continue;
+            }
+            uint16_t fp = static_cast<uint16_t>(tag & 0x0FFFu);
+            ++counts[static_cast<uint32_t>(fp & groupMask)];
+          }
+        }
+        const uint64_t offset =
+            static_cast<uint64_t>(bucket) * static_cast<uint64_t>(kGroupSize);
+        for (uint32_t lo = 0; lo < kGroupSize; ++lo) {
+          groupCounts[offset + lo] += counts[lo];
+        }
+      }
+    }
+
+    if (!include_stash) {
+      return;
+    }
+    for (size_t bin = 0; bin < stash.size(); ++bin) {
+      for (const auto &entry : stash[bin]) {
+        if (entry.bucket >= hashSize) {
+          continue;
+        }
+        uint32_t lo = static_cast<uint32_t>(entry.fingerprint & groupMask);
+        groupCounts[entry.bucket * static_cast<uint64_t>(kGroupSize) + lo] +=
+            popcount16(entry.speciesMask);
+      }
+    }
+  }
+
+  inline uint64_t write_qidx_block_entries_by_bucket(
+      int entriesFd, const std::vector<uint64_t> &bucketBase,
+      size_t globalBinOffset, bool include_stash = true) const {
+    constexpr uint8_t kQidxGroupBits = 8;
+    constexpr uint32_t kGroupSize = 1u << kQidxGroupBits;
+    constexpr uint8_t kFpHiBits = QueryIndex::FP_BITS - kQidxGroupBits;
+    constexpr uint32_t kStride = kGroupSize + 1;
+    const uint32_t groupMask = kGroupSize - 1;
+    if (bucketBase.size() != hashSize + 1) {
+      throw std::runtime_error("QIMCF block bucket base has invalid size");
+    }
+
+    std::vector<StashFlat> stashFlat;
+    std::vector<size_t> stashBucketStart;
+    std::vector<size_t> stashBucketEnd;
+    if (include_stash) {
+      flatten_stash_by_bucket(stashFlat, stashBucketStart, stashBucketEnd);
+    } else {
+      stashBucketStart.assign(hashSize + 1, 0);
+      stashBucketEnd.assign(hashSize + 1, 0);
+    }
+
+    std::atomic<bool> failed{false};
+    std::mutex failureMutex;
+    std::string failureMessage;
+    auto set_failure = [&](std::string message) {
+      std::lock_guard<std::mutex> lock(failureMutex);
+      if (failureMessage.empty()) {
+        failureMessage = std::move(message);
+      }
+      failed.store(true, std::memory_order_relaxed);
+    };
+    auto pwrite_values = [&](const uint32_t *values, uint64_t count,
+                             uint64_t valueOffset) {
+      const char *data = reinterpret_cast<const char *>(values);
+      uint64_t bytesRemaining = count * sizeof(uint32_t);
+      uint64_t byteOffset = valueOffset * sizeof(uint32_t);
+      while (bytesRemaining > 0) {
+        ssize_t rc =
+            ::pwrite(entriesFd, data, static_cast<size_t>(bytesRemaining),
+                     static_cast<off_t>(byteOffset));
+        if (rc < 0) {
+          if (errno == EINTR) {
+            continue;
+          }
+          set_failure("QIMCF block bucket pwrite failed: " +
+                      std::string(std::strerror(errno)));
+          return;
+        }
+        if (rc == 0) {
+          set_failure("QIMCF block bucket pwrite returned zero bytes");
+          return;
+        }
+        data += rc;
+        byteOffset += static_cast<uint64_t>(rc);
+        bytesRemaining -= static_cast<uint64_t>(rc);
+      }
+    };
+
+#pragma omp parallel
+    {
+      std::vector<uint32_t> counts(kGroupSize, 0);
+      std::vector<uint32_t> pos(kGroupSize, 0);
+      std::vector<uint32_t> localPrefix(kStride, 0);
+      std::vector<uint32_t> bucketCodes;
+      bucketCodes.reserve(1u << 16);
+
+#pragma omp for schedule(dynamic, 4)
+      for (int64_t bucket_i = 0; bucket_i < static_cast<int64_t>(hashSize);
+           ++bucket_i) {
+        if (failed.load(std::memory_order_relaxed)) {
+          continue;
+        }
+        const size_t bucket = static_cast<size_t>(bucket_i);
+        const uint64_t expected = bucketBase[bucket + 1] - bucketBase[bucket];
+        std::fill(counts.begin(), counts.end(), 0u);
+        for (size_t bin = 0; bin < binNum; ++bin) {
+          uint64_t q = readBucket64(bucket, bin);
+          if (q == 0) {
+            continue;
+          }
+          for (int lane = 0; lane < static_cast<int>(tagNum); ++lane) {
+            uint16_t tag =
+                static_cast<uint16_t>((q >> (lane * 16)) & 0xFFFFu);
+            if (tag == 0u) {
+              continue;
+            }
+            uint16_t fp = static_cast<uint16_t>(tag & 0x0FFFu);
+            ++counts[static_cast<uint32_t>(fp & groupMask)];
+          }
+        }
+        if (include_stash) {
+          for (size_t idx = stashBucketStart[bucket];
+               idx < stashBucketEnd[bucket]; ++idx) {
+            uint16_t fp = stashFlat[idx].fp;
+            counts[static_cast<uint32_t>(fp & groupMask)] +=
+                popcount16(stashFlat[idx].mask);
+          }
+        }
+
+        uint32_t running = 0;
+        localPrefix[0] = 0;
+        for (uint32_t lo = 0; lo < kGroupSize; ++lo) {
+          running += counts[lo];
+          localPrefix[lo + 1] = running;
+          pos[lo] = localPrefix[lo];
+        }
+        if (static_cast<uint64_t>(running) != expected) {
+          set_failure("QIMCF block bucket count mismatch");
+          continue;
+        }
+        if (running == 0) {
+          continue;
+        }
+        bucketCodes.assign(running, 0u);
+
+        size_t stashIdx = include_stash ? stashBucketStart[bucket] : 0;
+        const size_t stashEnd = include_stash ? stashBucketEnd[bucket] : 0;
+        for (size_t localBin = 0; localBin < binNum; ++localBin) {
+          uint64_t q = readBucket64(bucket, localBin);
+          const uint32_t globalBin =
+              static_cast<uint32_t>(globalBinOffset + localBin);
+          if (q != 0) {
+            for (int lane = 0; lane < static_cast<int>(tagNum); ++lane) {
+              uint16_t tag =
+                  static_cast<uint16_t>((q >> (lane * 16)) & 0xFFFFu);
+              if (tag == 0u) {
+                continue;
+              }
+              uint16_t fp = static_cast<uint16_t>(tag & 0x0FFFu);
+              uint32_t lo = static_cast<uint32_t>(fp & groupMask);
+              uint16_t hi = static_cast<uint16_t>(fp >> kQidxGroupBits);
+              uint16_t sp = static_cast<uint16_t>(tag >> 12);
+              uint32_t code =
+                  (globalBin << (kFpHiBits + 4)) |
+                  (static_cast<uint32_t>(hi) << 4) | sp;
+              bucketCodes[pos[lo]++] = code;
+            }
+          }
+          if (include_stash) {
+            while (stashIdx < stashEnd && stashFlat[stashIdx].bin == localBin) {
+              uint16_t fp = stashFlat[stashIdx].fp;
+              uint32_t lo = static_cast<uint32_t>(fp & groupMask);
+              uint16_t hi = static_cast<uint16_t>(fp >> kQidxGroupBits);
+              uint16_t mask = stashFlat[stashIdx].mask;
+              while (mask) {
+                uint16_t sp = static_cast<uint16_t>(std::countr_zero(mask));
+                mask &= static_cast<uint16_t>(mask - 1);
+                uint32_t code =
+                    (globalBin << (kFpHiBits + 4)) |
+                    (static_cast<uint32_t>(hi) << 4) | sp;
+                bucketCodes[pos[lo]++] = code;
+              }
+              ++stashIdx;
+            }
+          }
+        }
+        for (uint32_t lo = 0; lo < kGroupSize; ++lo) {
+          if (pos[lo] != localPrefix[lo + 1]) {
+            set_failure("QIMCF block bucket payload count mismatch");
+            break;
+          }
+        }
+        if (failed.load(std::memory_order_relaxed)) {
+          continue;
+        }
+        pwrite_values(bucketCodes.data(), running, bucketBase[bucket]);
+      }
+    }
+
+    if (failed.load(std::memory_order_relaxed)) {
+      throw std::runtime_error(failureMessage.empty()
+                                   ? "QIMCF block bucket write failed"
+                                   : failureMessage);
+    }
+    return bucketBase.back();
   }
 
   /**
@@ -942,7 +1269,12 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
    * 构造标签后先命中主桶，再跳到可逆备桶，两桶任意存在空位或已有指纹即视为成功；
    * 若均告满载则进入踢出流程。
    */
-	inline bool insertTag(size_t binIndex, uint64_t value, size_t index) {
+  inline bool insertTag(size_t binIndex, uint64_t value, size_t index) {
+    return insertTag(binIndex, binIndex, value, index);
+  }
+
+  inline bool insertTag(size_t localBinIndex, size_t globalBinIndex,
+                        uint64_t value, size_t index) {
     if (index >= 16) {
       assert(false &&
              "IMCF group index overflow (taxids per group must be <=16)");
@@ -955,13 +1287,13 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
     size_t b2 = altHash(b1, fp);
 
     auto try_insert_bucket = [&](size_t b) -> bool {
-      uint64_t q = readBucket64(b, binIndex);
+      uint64_t q = readBucket64(b, localBinIndex);
       for (int i = 0; i < 4; ++i) {
         uint16_t chunk = (uint16_t)((q >> (i * 16)) & 0xFFFFu);
         if (chunk == 0u) {
           q &= ~((uint64_t)0xFFFFu << (i * 16));
           q |= ((uint64_t)tag << (i * 16));
-          writeBucket64(b, binIndex, q);
+          writeBucket64(b, localBinIndex, q);
           return true;
         }
         if (chunk == tag)
@@ -985,12 +1317,12 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
       }
       return matches;
     };
-    int sameFingerprint = countMatching(readBucket64(b1, binIndex)) +
-                          countMatching(readBucket64(b2, binIndex));
+    int sameFingerprint = countMatching(readBucket64(b1, localBinIndex)) +
+                          countMatching(readBucket64(b2, localBinIndex));
     if (sameFingerprint >= 8) {
-      bool stored = insertIntoStash(binIndex, b1, fp, index);
+      bool stored = insertIntoStash(localBinIndex, b1, fp, index);
       if (!stored && b2 != b1) {
-        stored = insertIntoStash(binIndex, b2, fp, index);
+        stored = insertIntoStash(localBinIndex, b2, fp, index);
       }
       if (stored) {
         return true;
@@ -1000,7 +1332,7 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
       return false;
     }
 
-    bool kicked = kickOut(binIndex, value, tag);
+    bool kicked = kickOut(localBinIndex, globalBinIndex, value, tag);
     if (!kicked) {
       insertFailureTotal.fetch_add(1, std::memory_order_relaxed);
     }
@@ -1131,33 +1463,38 @@ inline size_t altHash(size_t b, uint16_t fingerprint) const {
    * 按当前状态确定性地选择逐出槽位，再借助可逆哈希跳往另一桶继续尝试，最多
    * 迭代 `MaxCuckooCount` 次。
    */
-		inline bool kickOut(size_t binIndex, uint64_t value, uint16_t tag) {
-	    uint16_t cur = tag;
-	    uint16_t fp = (uint16_t)(cur & 0x0FFFu);
-	    size_t b = hashIndex(value);
+  inline bool kickOut(size_t localBinIndex, uint64_t value, uint16_t tag) {
+    return kickOut(localBinIndex, localBinIndex, value, tag);
+  }
 
-	    for (int cnt = 0; cnt < MaxCuckooCount; ++cnt) {
-	      uint64_t q = readBucket64(b, binIndex);
+  inline bool kickOut(size_t localBinIndex, size_t globalBinIndex,
+                      uint64_t value, uint16_t tag) {
+    uint16_t cur = tag;
+    uint16_t fp = (uint16_t)(cur & 0x0FFFu);
+    size_t b = hashIndex(value);
+
+    for (int cnt = 0; cnt < MaxCuckooCount; ++cnt) {
+      uint64_t q = readBucket64(b, localBinIndex);
 
       for (int i = 0; i < 4; ++i) {
         uint16_t chunk = (uint16_t)((q >> (i * 16)) & 0xFFFFu);
         if (chunk == 0u) {
           q &= ~((uint64_t)0xFFFFu << (i * 16));
           q |= ((uint64_t)cur << (i * 16));
-          writeBucket64(b, binIndex, q);
+          writeBucket64(b, localBinIndex, q);
           return true;
         }
         if (chunk == cur)
           return true;
       }
 
-	      int rp = static_cast<int>(
-	          deterministicKickLane(binIndex, b, value, cur, q,
-	                                static_cast<uint32_t>(cnt)));
-	      uint16_t victim = (uint16_t)((q >> (rp * 16)) & 0xFFFFu);
-	      q &= ~((uint64_t)0xFFFFu << (rp * 16));
-	      q |= ((uint64_t)cur << (rp * 16));
-      writeBucket64(b, binIndex, q);
+      int rp = static_cast<int>(
+          deterministicKickLane(globalBinIndex, b, value, cur, q,
+                                static_cast<uint32_t>(cnt)));
+      uint16_t victim = (uint16_t)((q >> (rp * 16)) & 0xFFFFu);
+      q &= ~((uint64_t)0xFFFFu << (rp * 16));
+      q |= ((uint64_t)cur << (rp * 16));
+      writeBucket64(b, localBinIndex, q);
 
       cur = victim;
       fp = (uint16_t)(cur & 0x0FFFu);

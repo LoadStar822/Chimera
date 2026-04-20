@@ -58,6 +58,9 @@ namespace ChimeraBuild {
 		uint16_t effectiveSpan,
 		uint16_t refReadLen,
 		uint32_t uniqueDegThreshold,
-		chimera::presence::CoverageMeta* coverageMeta);
+		chimera::presence::CoverageMeta* coverageMeta,
+		size_t groupIndexOffset,
+		bool verifyShardTotals,
+		const robin_hood::unordered_flat_map<std::string, uint64_t>* shardOffsetBase);
 	void run(BuildConfig config);
 }

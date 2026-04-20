@@ -5,10 +5,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <utils/CountMinSketch.hpp>
 #include <utils/FeatureHasher.hpp>
@@ -165,6 +167,16 @@ std::vector<std::vector<std::string>> buildIMCF(
     const HashFrequencyContext *hashFreqContext,
     const FeatureBuildLayout *featureLayout,
     uint16_t effectiveSpan, uint16_t refReadLen, uint32_t uniqueDegThreshold,
-    chimera::presence::CoverageMeta *coverageMeta);
+    chimera::presence::CoverageMeta *coverageMeta,
+    size_t groupIndexOffset = 0,
+    bool verifyShardTotals = true,
+    const robin_hood::unordered_flat_map<std::string, uint64_t>
+        *shardOffsetBase = nullptr);
+
+void populateCoverageMeta(const HashFrequencyContext *hashFreqContext,
+                          const FeatureBuildLayout *featureLayout,
+                          uint16_t effectiveSpan, uint16_t refReadLen,
+                          uint32_t uniqueDegThreshold,
+                          chimera::presence::CoverageMeta &coverageMeta);
 
 } // namespace ChimeraBuild
