@@ -222,11 +222,13 @@ void processSequence(
     }
     used_rare_route = (routeVals.size() < sampleVals.size());
   }
-  auto &sampleCount = scratch.sampleCount;
-  sampleCount.clear();
-  auto &touchedS = scratch.touchedS;
-  touchedS.clear();
-  touchedS.reserve(64);
+  auto &coarsePairCodes = scratch.coarsePairCodes;
+  coarsePairCodes.clear();
+  coarsePairCodes.reserve(64);
+  auto &coarsePairCounts = scratch.coarsePairCounts;
+  coarsePairCounts.clear();
+  auto &coarseTouchedPairs = scratch.coarseTouchedPairs;
+  coarseTouchedPairs.clear();
   robin_hood::unordered_flat_map<uint32_t, uint32_t> sampleBinScore;
   robin_hood::unordered_flat_map<uint32_t, uint64_t> repCoarseScore;
   robin_hood::unordered_flat_map<uint32_t, uint64_t> genusCoarseScore;
@@ -243,13 +245,38 @@ void processSequence(
   }
 
   if (sampleBudget > 0) {
-    imcf.bulkCount_sparse(sampleVals, sampleCount, &touchedS);
-    sampleBinScore.reserve(touchedS.size());
-    for (auto [bi, sp] : touchedS) {
-      uint32_t contrib = sampleCount[bi][sp];
-      if (contrib == 0) {
+    using PairCode = uint64_t;
+    for (uint64_t value : sampleVals) {
+      coarsePairCodes.clear();
+      imcf.bulkContain_events(value, [&](uint32_t bin, uint16_t sp) {
+        coarsePairCodes.push_back((PairCode(bin) << 16) | PairCode(sp));
+      });
+      if (coarsePairCodes.empty()) {
         continue;
       }
+      std::sort(coarsePairCodes.begin(), coarsePairCodes.end());
+      coarsePairCodes.erase(
+          std::unique(coarsePairCodes.begin(), coarsePairCodes.end()),
+          coarsePairCodes.end());
+      for (PairCode code : coarsePairCodes) {
+        auto [it, inserted] = coarsePairCounts.try_emplace(code, 0u);
+        if (inserted) {
+          coarseTouchedPairs.push_back(code);
+        }
+        if (it->second < std::numeric_limits<uint32_t>::max()) {
+          ++it->second;
+        }
+      }
+    }
+    sampleBinScore.reserve(coarseTouchedPairs.size());
+    for (PairCode code : coarseTouchedPairs) {
+      auto countIt = coarsePairCounts.find(code);
+      if (countIt == coarsePairCounts.end() || countIt->second == 0u) {
+        continue;
+      }
+      const uint32_t bi = static_cast<uint32_t>(code >> 16);
+      const uint16_t sp = static_cast<uint16_t>(code & 0xFFFFu);
+      const uint32_t contrib = countIt->second;
       coarseTotal += contrib;
       sampleBinScore[bi] += contrib;
       if (bi < tax.idx2id.size() && sp < tax.idx2id[bi].size()) {

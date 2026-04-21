@@ -618,8 +618,9 @@ struct ProcessScratch {
   std::vector<uint64_t> routeVals;
   std::vector<std::pair<uint32_t, uint64_t>> sampleScored;
   std::vector<std::pair<uint32_t, uint64_t>> routeScored;
-  std::vector<std::vector<uint32_t>> sampleCount;
-  std::vector<std::pair<uint32_t, uint16_t>> touchedS;
+  std::vector<uint64_t> coarsePairCodes;
+  robin_hood::unordered_flat_map<uint64_t, uint32_t> coarsePairCounts;
+  std::vector<uint64_t> coarseTouchedPairs;
   std::vector<std::pair<uint32_t, uint32_t>> rankedBins;
   std::vector<size_t> deferredEval;
   std::vector<std::pair<uint32_t, uint64_t>> weighted;
