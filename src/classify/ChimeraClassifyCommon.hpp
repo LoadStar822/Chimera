@@ -518,9 +518,19 @@ struct SpoolReadRecord {
 inline constexpr uint32_t kSpoolUnclassifiedTid =
     std::numeric_limits<uint32_t>::max();
 
+struct CompactClassifyResult {
+  std::string id;
+  double evaluated{0.0};
+  uint32_t best_taxid_hint{kSpoolUnclassifiedTid};
+  std::string reject_reason;
+  std::vector<SpoolCandidate> candidates;
+};
+
 void write_spool_header(std::ostream &os);
 void read_spool_header(std::istream &is, const std::string &path);
 void write_spool_record(std::ostream &os, const SpoolReadRecord &record);
+void write_spool_record(std::ostream &os,
+                        const CompactClassifyResult &record);
 bool read_spool_record(std::istream &is, SpoolReadRecord &record);
 
 void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
@@ -573,6 +583,10 @@ struct PresenceAccumulator {
                   double unique_strength, bool localUniqueEdge,
                   uint32_t unique_bucket,
                   uint32_t breadth_bucket);
+  void add_targets(const std::vector<uint32_t> &tids, double hit_weight,
+                   double score_weight, double unique_strength,
+                   bool localUniqueEdge, uint32_t unique_bucket,
+                   uint32_t breadth_bucket);
   void add_read_support(uint32_t tid, bool uniqueRead);
 };
 
@@ -600,6 +614,10 @@ struct TaxpoolGenusPick {
 
 struct ProcessScratch {
   std::vector<uint64_t> hashs1;
+  std::vector<uint64_t> sampleVals;
+  std::vector<uint64_t> routeVals;
+  std::vector<std::pair<uint32_t, uint64_t>> sampleScored;
+  std::vector<std::pair<uint32_t, uint64_t>> routeScored;
   std::vector<std::vector<uint32_t>> sampleCount;
   std::vector<std::pair<uint32_t, uint16_t>> touchedS;
   std::vector<std::pair<uint32_t, uint32_t>> rankedBins;
@@ -614,6 +632,18 @@ struct ProcessScratch {
   std::vector<std::pair<uint32_t, double>> rankedTidScores;
   std::vector<uint32_t> minimizerTids;
   std::vector<uint32_t> minimizerBins;
+  std::vector<uint32_t> minimizerTidEpoch;
+  uint32_t minimizerTidEpochValue{0};
+  std::vector<uint32_t> minimizerBinEpoch;
+  uint32_t minimizerBinEpochValue{0};
+  std::vector<double> tidScoreDense;
+  std::vector<uint32_t> tidScoreEpoch;
+  std::vector<uint32_t> activeTidScores;
+  uint32_t tidScoreEpochValue{0};
+  std::vector<double> uniqueHitsDense;
+  std::vector<uint32_t> uniqueHitsEpoch;
+  std::vector<uint32_t> activeUniqueHits;
+  uint32_t uniqueHitsEpochValue{0};
   std::vector<uint32_t> routed;
   std::vector<uint32_t> rareRepHits;
   std::vector<uint32_t> rareGenusHits;
@@ -630,7 +660,8 @@ void processSequence(
     ClassifyConfig &config, const WeightingContext &weightCtx,
     const AutoClassifyPolicy &autoPolicy, GroupHeat &heat,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
-    std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
+    std::vector<classifyResult> *classifyResults,
+    std::vector<CompactClassifyResult> *compactResults, FileInfo &fileInfo,
     PresenceAccumulator *presenceAcc, ProcessScratch &scratch);
 
 void processBatch(
@@ -638,6 +669,16 @@ void processBatch(
     const TaxDict &tax, ClassifyConfig &config,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf,
     std::vector<classifyResult> &classifyResults,
+    const chimera::feature::Params &feature_params, size_t feature_min_len,
+    FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
+    const AutoClassifyPolicy &autoPolicy, PresenceAccumulator *presenceAcc,
+    ProcessScratch &scratch);
+
+void processBatchCompact(
+    batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
+    const TaxDict &tax, ClassifyConfig &config,
+    chimera::imcf::InterleavedMergedCuckooFilter &imcf,
+    std::vector<CompactClassifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
     const AutoClassifyPolicy &autoPolicy, PresenceAccumulator *presenceAcc,

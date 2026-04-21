@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -505,55 +506,123 @@ static void write_spool_em_results(
     const ChimeraClassify::ClassifyConfig &config,
     ChimeraClassify::FileInfo &fileInfo) {
   const std::string outputFile = resolve_tsv_output_path(config.outputFile);
-  std::ofstream os(outputFile, std::ios::out);
+  struct PartStats {
+    uint64_t classified{0};
+    uint64_t unclassified{0};
+  };
+
+  const size_t part_count = spoolPaths.size();
+  std::vector<std::string> partPaths(part_count);
+  for (size_t i = 0; i < part_count; ++i) {
+    partPaths[i] = outputFile + ".part." + std::to_string(i) + ".tmp";
+  }
+  std::vector<PartStats> partStats(part_count);
+  std::vector<std::exception_ptr> partErrors(part_count);
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+  for (std::int64_t part_i = 0;
+       part_i < static_cast<std::int64_t>(part_count); ++part_i) {
+    const size_t part_idx = static_cast<size_t>(part_i);
+    try {
+      std::ofstream partOs(partPaths[part_idx],
+                           std::ios::out | std::ios::binary);
+      if (!partOs.is_open()) {
+        throw std::runtime_error("Failed to open classify output part: " +
+                                 partPaths[part_idx]);
+      }
+      std::vector<char> partBuffer(1 << 20, '\0');
+      partOs.rdbuf()->pubsetbuf(
+          partBuffer.data(), static_cast<std::streamsize>(partBuffer.size()));
+      std::ostringstream postTopkOss;
+      std::vector<ChimeraClassify::classifyResult> chunk;
+      chunk.reserve(4096);
+
+      auto flush_chunk = [&]() {
+        if (chunk.empty()) {
+          return;
+        }
+        ChimeraClassify::postEmDecision(chunk, decisionConfig,
+                                        fit.class_weights, tax, presenceDecision,
+                                        ncbiTaxdump, postPolicy);
+        for (const auto &result : chunk) {
+          if (!result.taxidCount.empty() &&
+              result.taxidCount.front().first == "unclassified") {
+            ++partStats[part_idx].unclassified;
+          } else {
+            ++partStats[part_idx].classified;
+          }
+          ChimeraClassify::writeResultRecord(partOs, result, postTopkOss);
+        }
+        chunk.clear();
+      };
+
+      std::ifstream is(spoolPaths[part_idx], std::ios::binary);
+      if (!is.is_open()) {
+        throw std::runtime_error("Failed to open classify spool: " +
+                                 spoolPaths[part_idx]);
+      }
+      ChimeraClassify::read_spool_header(is, spoolPaths[part_idx]);
+      ChimeraClassify::SpoolReadRecord record;
+      while (ChimeraClassify::read_spool_record(is, record)) {
+        chunk.push_back(materialize_spool_result(record, fit, tax, options));
+        if (chunk.size() >= 4096) {
+          flush_chunk();
+        }
+      }
+      flush_chunk();
+      partOs.close();
+      if (!partOs.good()) {
+        throw std::runtime_error("Failed to close classify output part: " +
+                                 partPaths[part_idx]);
+      }
+    } catch (...) {
+      partErrors[part_idx] = std::current_exception();
+    }
+  }
+
+  auto cleanup_parts = [&]() {
+    for (const auto &path : partPaths) {
+      std::error_code ec;
+      std::filesystem::remove(path, ec);
+    }
+  };
+  for (const auto &error : partErrors) {
+    if (error) {
+      cleanup_parts();
+      std::rethrow_exception(error);
+    }
+  }
+
+  std::ofstream os(outputFile, std::ios::out | std::ios::binary);
   if (!os.is_open()) {
+    cleanup_parts();
     throw std::runtime_error("Failed to open file: " + outputFile);
   }
   std::vector<char> outputBuffer(1 << 20, '\0');
   os.rdbuf()->pubsetbuf(outputBuffer.data(),
                         static_cast<std::streamsize>(outputBuffer.size()));
-  std::ostringstream postTopkOss;
-
   fileInfo.classifiedNum = 0;
   fileInfo.unclassifiedNum = 0;
-  std::vector<ChimeraClassify::classifyResult> chunk;
-  chunk.reserve(4096);
-
-  auto flush_chunk = [&]() {
-    if (chunk.empty()) {
-      return;
+  for (size_t i = 0; i < part_count; ++i) {
+    std::ifstream partIs(partPaths[i], std::ios::in | std::ios::binary);
+    if (!partIs.is_open()) {
+      cleanup_parts();
+      throw std::runtime_error("Failed to open classify output part: " +
+                               partPaths[i]);
     }
-    ChimeraClassify::postEmDecision(chunk, decisionConfig, fit.class_weights,
-                                    tax, presenceDecision, ncbiTaxdump,
-                                    postPolicy);
-    for (const auto &result : chunk) {
-      if (!result.taxidCount.empty() &&
-          result.taxidCount.front().first == "unclassified") {
-        ++fileInfo.unclassifiedNum;
-      } else {
-        ++fileInfo.classifiedNum;
-      }
-      ChimeraClassify::writeResultRecord(os, result, postTopkOss);
+    os << partIs.rdbuf();
+    if (!os.good()) {
+      cleanup_parts();
+      throw std::runtime_error("Failed to append classify output part: " +
+                               partPaths[i]);
     }
-    chunk.clear();
-  };
-
-  for (const auto &path : spoolPaths) {
-    std::ifstream is(path, std::ios::binary);
-    if (!is.is_open()) {
-      throw std::runtime_error("Failed to open classify spool: " + path);
-    }
-    ChimeraClassify::read_spool_header(is, path);
-    ChimeraClassify::SpoolReadRecord record;
-    while (ChimeraClassify::read_spool_record(is, record)) {
-      chunk.push_back(materialize_spool_result(record, fit, tax, options));
-      if (chunk.size() >= 4096) {
-        flush_chunk();
-      }
-    }
+    fileInfo.classifiedNum += partStats[i].classified;
+    fileInfo.unclassifiedNum += partStats[i].unclassified;
   }
-  flush_chunk();
   os.close();
+  cleanup_parts();
 }
 
 static std::filesystem::path make_spool_dir(const std::string &outputFile) {

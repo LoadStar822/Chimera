@@ -1,13 +1,18 @@
 #include "ChimeraClassifyCommon.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <mutex>
 #include <numeric>
+#include <sstream>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -56,7 +61,8 @@ void processSequence(
     ClassifyConfig &config, const WeightingContext &weightCtx,
     const AutoClassifyPolicy &autoPolicy, GroupHeat &heat,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
-    std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
+    std::vector<classifyResult> *classifyResults,
+    std::vector<CompactClassifyResult> *compactResults, FileInfo &fileInfo,
     PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
   size_t hashNum = hashs1.size();
   auto xor_reduce = [](const std::vector<uint64_t> &vals) {
@@ -67,6 +73,25 @@ void processSequence(
     return acc;
   };
   const size_t binNumAll = tax.idx2id.size();
+  auto ensure_epoch_vector = [](std::vector<uint32_t> &epochs, size_t size) {
+    if (epochs.size() < size) {
+      epochs.resize(size, 0);
+    }
+  };
+  auto ensure_double_vector = [](std::vector<double> &values, size_t size) {
+    if (values.size() < size) {
+      values.resize(size, 0.0);
+    }
+  };
+  auto next_epoch = [](std::vector<uint32_t> &epochs,
+                       uint32_t &epoch) -> uint32_t {
+    ++epoch;
+    if (epoch == 0u) {
+      std::fill(epochs.begin(), epochs.end(), 0u);
+      epoch = 1u;
+    }
+    return epoch;
+  };
   heat.ensure(binNumAll);
   const double tail_risk_s = clamp01(config.tail_risk_s);
   const double tail_risk_hi = smoothstep(tail_risk_s, 0.60, 0.95);
@@ -113,7 +138,8 @@ void processSequence(
   size_t targetSample = hashNum / 2;
   targetSample = std::clamp<size_t>(targetSample, config.hash_sample_min, config.hash_sample_max);
   const size_t sampleBudget = std::min<size_t>(targetSample, hashs1.size());
-  std::vector<uint64_t> sampleVals;
+  auto &sampleVals = scratch.sampleVals;
+  sampleVals.clear();
   if (sampleBudget > 0) {
     sampleVals.reserve(sampleBudget);
     if (hashs1.size() <= sampleBudget) {
@@ -124,7 +150,8 @@ void processSequence(
       const size_t rareQuota = std::max<size_t>(1, sampleBudget / 2);
       const size_t over =
           std::min<size_t>(hashs1.size(), std::max<size_t>(sampleBudget * 8, sampleBudget));
-      std::vector<std::pair<uint32_t, uint64_t>> scored;
+      auto &scored = scratch.sampleScored;
+      scored.clear();
       scored.reserve(over);
       size_t step = std::max<size_t>(1, hashs1.size() / over);
       for (size_t i = 0; i < hashs1.size() && scored.size() < over;
@@ -175,11 +202,12 @@ void processSequence(
       }
     }
   }
-
-  std::vector<uint64_t> routeVals = sampleVals;
+  auto &routeVals = scratch.routeVals;
+  routeVals = sampleVals;
   bool used_rare_route = false;
   if (!sampleVals.empty() && weightCtx.freqSketch) {
-    std::vector<std::pair<uint32_t, uint64_t>> routeScored;
+    auto &routeScored = scratch.routeScored;
+    routeScored.clear();
     routeScored.reserve(sampleVals.size());
     for (uint64_t v : sampleVals) {
       routeScored.emplace_back(weightCtx.freqSketch->estimate(v), v);
@@ -194,7 +222,6 @@ void processSequence(
     }
     used_rare_route = (routeVals.size() < sampleVals.size());
   }
-
   auto &sampleCount = scratch.sampleCount;
   sampleCount.clear();
   auto &touchedS = scratch.touchedS;
@@ -236,7 +263,6 @@ void processSequence(
       }
     }
   }
-
   const size_t baseCandidateCap = std::min<size_t>(
       binNumAll,
       static_cast<size_t>(std::llround(lerp(256.0, 320.0, tail_risk_hi))));
@@ -627,17 +653,71 @@ void processSequence(
   }
   heat.decay_if_needed();
 
-  robin_hood::unordered_flat_map<uint32_t, double> tidScore;
-  robin_hood::unordered_flat_map<uint32_t, double> uniqueHits;
-  tidScore.reserve(128);
-  uniqueHits.reserve(128);
-
   auto &minimizerTids = scratch.minimizerTids;
   minimizerTids.clear();
   minimizerTids.reserve(64);
   auto &minimizerBins = scratch.minimizerBins;
   minimizerBins.clear();
   minimizerBins.reserve(64);
+  robin_hood::unordered_flat_map<uint32_t, double> tidScore;
+  robin_hood::unordered_flat_map<uint32_t, double> uniqueHits;
+  tidScore.reserve(128);
+  uniqueHits.reserve(128);
+  const size_t tidCountAll = tax.id2str.size();
+  ensure_epoch_vector(scratch.minimizerTidEpoch, tidCountAll);
+  ensure_epoch_vector(scratch.minimizerBinEpoch, binNumAll);
+  ensure_epoch_vector(scratch.tidScoreEpoch, tidCountAll);
+  ensure_double_vector(scratch.tidScoreDense, tidCountAll);
+  ensure_epoch_vector(scratch.uniqueHitsEpoch, tidCountAll);
+  ensure_double_vector(scratch.uniqueHitsDense, tidCountAll);
+  scratch.activeTidScores.clear();
+  scratch.activeUniqueHits.clear();
+  uint32_t tidScoreEpoch =
+      next_epoch(scratch.tidScoreEpoch, scratch.tidScoreEpochValue);
+  uint32_t uniqueHitsEpoch =
+      next_epoch(scratch.uniqueHitsEpoch, scratch.uniqueHitsEpochValue);
+  auto add_tid_score = [&](uint32_t tid, double contrib) {
+    if (tid >= tidCountAll) {
+      return;
+    }
+    if (scratch.tidScoreEpoch[tid] != tidScoreEpoch) {
+      scratch.tidScoreEpoch[tid] = tidScoreEpoch;
+      scratch.tidScoreDense[tid] = 0.0;
+      scratch.activeTidScores.push_back(tid);
+    }
+    scratch.tidScoreDense[tid] += contrib;
+  };
+  auto add_unique_hit = [&](uint32_t tid, double value) {
+    if (tid >= tidCountAll) {
+      return;
+    }
+    if (scratch.uniqueHitsEpoch[tid] != uniqueHitsEpoch) {
+      scratch.uniqueHitsEpoch[tid] = uniqueHitsEpoch;
+      scratch.uniqueHitsDense[tid] = 0.0;
+      scratch.activeUniqueHits.push_back(tid);
+    }
+    scratch.uniqueHitsDense[tid] += value;
+  };
+  auto reset_dense_scores = [&]() {
+    tidScore.clear();
+    uniqueHits.clear();
+    scratch.activeTidScores.clear();
+    scratch.activeUniqueHits.clear();
+    tidScoreEpoch =
+        next_epoch(scratch.tidScoreEpoch, scratch.tidScoreEpochValue);
+    uniqueHitsEpoch =
+        next_epoch(scratch.uniqueHitsEpoch, scratch.uniqueHitsEpochValue);
+  };
+  auto materialize_score_maps = [&]() {
+    tidScore.clear();
+    for (uint32_t tid : scratch.activeTidScores) {
+      tidScore[tid] = scratch.tidScoreDense[tid];
+    }
+    uniqueHits.clear();
+    for (uint32_t tid : scratch.activeUniqueHits) {
+      uniqueHits[tid] = scratch.uniqueHitsDense[tid];
+    }
+  };
 
   double eff_eval = 0.0;
   size_t n_eval = 0;
@@ -694,9 +774,14 @@ void processSequence(
 
   auto evaluate_minimizer = [&](uint64_t value,
                                 const std::vector<uint32_t> *subset) -> double {
+    const uint32_t minimizerEpoch = next_epoch(
+        scratch.minimizerTidEpoch, scratch.minimizerTidEpochValue);
+    const uint32_t minimizerBinEpoch = next_epoch(
+        scratch.minimizerBinEpoch, scratch.minimizerBinEpochValue);
     minimizerTids.clear();
     minimizerBins.clear();
     uint32_t last_hit_bin = std::numeric_limits<uint32_t>::max();
+    uint32_t min_hit_bin = std::numeric_limits<uint32_t>::max();
     auto emit = [&](uint32_t bin, uint16_t sp) {
       if (bin >= tax.idx2id.size()) {
         return;
@@ -712,10 +797,17 @@ void processSequence(
       if (weightCtx.tid2speciesRep && tid < weightCtx.tid2speciesRep->size()) {
         tid = (*weightCtx.tid2speciesRep)[tid];
       }
-      minimizerTids.push_back(tid);
+      if (scratch.minimizerTidEpoch[tid] != minimizerEpoch) {
+        scratch.minimizerTidEpoch[tid] = minimizerEpoch;
+        minimizerTids.push_back(tid);
+      }
       if (bin != last_hit_bin) {
-        minimizerBins.push_back(bin);
         last_hit_bin = bin;
+        if (scratch.minimizerBinEpoch[bin] != minimizerBinEpoch) {
+          scratch.minimizerBinEpoch[bin] = minimizerBinEpoch;
+          minimizerBins.push_back(bin);
+          min_hit_bin = std::min(min_hit_bin, bin);
+        }
       }
     };
 
@@ -731,11 +823,7 @@ void processSequence(
     if (minimizerTids.empty()) {
       return 0.0;
     }
-
     std::sort(minimizerTids.begin(), minimizerTids.end());
-    minimizerTids.erase(
-        std::unique(minimizerTids.begin(), minimizerTids.end()),
-        minimizerTids.end());
 
     const size_t deg_subset = minimizerTids.size();
     if (deg_subset == 0) {
@@ -745,9 +833,6 @@ void processSequence(
 
     size_t df_bins = 0;
     if (!minimizerBins.empty()) {
-      std::sort(minimizerBins.begin(), minimizerBins.end());
-      minimizerBins.erase(std::unique(minimizerBins.begin(), minimizerBins.end()),
-                          minimizerBins.end());
       df_bins = minimizerBins.size();
     }
     if (df_bins == 0) {
@@ -805,7 +890,7 @@ void processSequence(
     double contrib = idf * base * bonus;
 
     for (uint32_t tid : minimizerTids) {
-      tidScore[tid] += contrib;
+      add_tid_score(tid, contrib);
     }
     if (presenceEnabled && !minimizerTids.empty()) {
       const double hit_weight = presence_weight;
@@ -814,20 +899,18 @@ void processSequence(
       uint32_t breadth_bucket = std::numeric_limits<uint32_t>::max();
       if (localUniqueEdge && presenceSketchBits > 0) {
         unique_bucket = sketch_index(value ^ 0x9e3779b97f4a7c15ULL);
-        if (!minimizerBins.empty()) {
+        if (min_hit_bin != std::numeric_limits<uint32_t>::max()) {
           breadth_bucket = sketch_index(
-              static_cast<uint64_t>(minimizerBins.front()) ^
+              static_cast<uint64_t>(min_hit_bin) ^
               0xd1b54a32d192ed03ULL);
         }
       }
-      for (uint32_t tid : minimizerTids) {
-        presenceAcc->add_target(tid, hit_weight, score_weight, unique_strength,
-                                localUniqueEdge, unique_bucket,
-                                breadth_bucket);
-      }
+      presenceAcc->add_targets(minimizerTids, hit_weight, score_weight,
+                               unique_strength, localUniqueEdge, unique_bucket,
+                               breadth_bucket);
     }
     if (unique_strength > 0.0 && !minimizerTids.empty()) {
-      uniqueHits[minimizerTids.front()] += unique_strength;
+      add_unique_hit(minimizerTids.front(), unique_strength);
     }
 
     return contrib;
@@ -840,13 +923,17 @@ void processSequence(
     rebuild_top_bin_marks();
   };
 
-  robin_hood::unordered_flat_set<uint32_t> topBinSet;
-  if (!fallback_full) {
-    topBinSet.reserve(topBins.size());
-    for (auto bin : topBins) {
-      topBinSet.insert(bin);
+  auto top_bin_marked = [&](uint32_t bin) {
+    if (topBinMarksActive && bin < topBinMarks.size()) {
+      return topBinMarks[bin] == topBinMarkEpoch;
     }
-  }
+    return std::binary_search(topBins.begin(), topBins.end(), bin);
+  };
+  auto mark_top_bin = [&](uint32_t bin) {
+    if (topBinMarksActive && bin < topBinMarks.size()) {
+      topBinMarks[bin] = topBinMarkEpoch;
+    }
+  };
 
   auto compute_top = [&](uint32_t &bestTid, uint32_t &secondTid, double &best,
                          double &second) {
@@ -889,6 +976,7 @@ void processSequence(
   };
 
   auto collect_stats = [&]() -> EvidenceStats {
+    materialize_score_maps();
     EvidenceStats stats;
     compute_top(stats.bestTid, stats.secondTid, stats.best, stats.second);
     stats.ratio = compute_ratio(stats.best, stats.second);
@@ -978,14 +1066,16 @@ void processSequence(
       bestTid < tax.id2str.size()) {
     bestTaxidStr = tax.id2str[bestTid];
   }
+  const uint32_t bestTaxidHintTid =
+      bestTaxidStr.empty() ? kSpoolUnclassifiedTid : bestTid;
 
   bool expanded = false;
   if (!taxpool_mode && !fallback_full && bestTid < tax.tid2bin.size()) {
     const auto &shards = tax.tid2bin[bestTid];
     for (uint32_t bin : shards) {
-      if (topBinSet.find(bin) == topBinSet.end()) {
+      if (!top_bin_marked(bin)) {
         topBins.push_back(bin);
-        topBinSet.insert(bin);
+        mark_top_bin(bin);
         expanded = true;
       }
     }
@@ -997,8 +1087,7 @@ void processSequence(
     fallback_full = (topBins.size() == binNumAll);
     recompute_subset_state();
 
-    tidScore.clear();
-    uniqueHits.clear();
+    reset_dense_scores();
     eff_eval = 0.0;
     n_eval = 0;
     for (size_t i = 0; i < hashs1.size(); ++i) {
@@ -1020,7 +1109,6 @@ void processSequence(
     uniqueRatio = stats.uniqueRatio;
   }
 
-
   // Optional: dump raw tidScore (pre-EM candidates before thresholds).
 
   size_t bestRounded =
@@ -1041,18 +1129,23 @@ void processSequence(
   }
   // --------------------------------
 
-  classifyResult result;
-  result.evaluated = eff_eval;
-  result.id = id;
-  result.best_taxid_hint = bestTaxidStr;
   const double effCap = std::max(1.0, eff_eval);
-  std::pair<std::string, double> maxCount;
+  std::vector<SpoolCandidate> resultCandidates;
+  uint32_t maxCountTid = kSpoolUnclassifiedTid;
+  double maxCountScore = 0.0;
   bool maxCountValid = false;
+  std::string rejectReason;
+  auto add_candidate = [&](uint32_t tid_id, double score) {
+    if (tid_id < tax.id2str.size() && score > 0.0) {
+      resultCandidates.push_back(SpoolCandidate{tid_id, score});
+    }
+  };
 
   if (!maxCountValid && bestTid < tax.id2str.size()) {
     double bestEvidence = std::clamp(best, 0.0, effCap);
     if (bestEvidence > 0.0) {
-      maxCount = std::make_pair(tax.id2str[bestTid], bestEvidence);
+      maxCountTid = bestTid;
+      maxCountScore = bestEvidence;
       maxCountValid = true;
     }
   }
@@ -1112,9 +1205,9 @@ void processSequence(
   const size_t thr_final_raw = thr_final;
   if (highConfPre && bestTid < tax.id2str.size()) {
     double bestEvidence = std::clamp(best, 0.0, effCap);
-    const std::string &taxid = tax.id2str[bestTid];
-    result.taxidCount.emplace_back(taxid, bestEvidence);
-    maxCount = std::make_pair(taxid, bestEvidence);
+    add_candidate(bestTid, bestEvidence);
+    maxCountTid = bestTid;
+    maxCountScore = bestEvidence;
     maxCountValid = true;
 
   } else {
@@ -1179,7 +1272,7 @@ void processSequence(
         }
       }
 
-      result.taxidCount.reserve(ranked.size());
+      resultCandidates.reserve(ranked.size());
       for (size_t i = 0; i < ranked.size(); ++i) {
         const uint32_t tid_id = ranked[i].first;
         if (tid_id >= tax.id2str.size()) {
@@ -1191,10 +1284,10 @@ void processSequence(
         }
         const bool keep = (i < floorCount || countVal >= thr_base);
         if (keep) {
-          const std::string &taxid = tax.id2str[tid_id];
-          result.taxidCount.emplace_back(taxid, countVal);
+          add_candidate(tid_id, countVal);
           if (tid_id == bestTid) {
-            maxCount = std::make_pair(taxid, countVal);
+            maxCountTid = tid_id;
+            maxCountScore = countVal;
             maxCountValid = true;
           }
         }
@@ -1203,10 +1296,10 @@ void processSequence(
       for (const auto &[tid_id, rawScore] : tidScore) {
         double countVal = std::clamp(rawScore, 0.0, effCap);
         if (countVal >= static_cast<double>(thr_final_raw)) {
-          const std::string &taxid = tax.id2str[tid_id];
-          result.taxidCount.emplace_back(taxid, countVal);
+          add_candidate(tid_id, countVal);
           if (tid_id == bestTid) {
-            maxCount = std::make_pair(taxid, countVal);
+            maxCountTid = tid_id;
+            maxCountScore = countVal;
             maxCountValid = true;
           }
         }
@@ -1215,20 +1308,17 @@ void processSequence(
     }
   }
 
-  if (use_em && !highConfPre && result.taxidCount.size() == 1 &&
+  if (use_em && !highConfPre && resultCandidates.size() == 1 &&
       !tidScore.empty()) {
     const bool unique_ok = (uniqueCount >= 3.0) ||
                            (uniqueCount >= 2.0 && uniqueRatio >= 0.12);
     if (!unique_ok) {
       constexpr size_t kMinCand = 4;
-      if (result.taxidCount.size() < kMinCand) {
+      if (resultCandidates.size() < kMinCand) {
         robin_hood::unordered_flat_set<uint32_t> seen;
         seen.reserve(kMinCand + 2);
-        for (const auto &kv : result.taxidCount) {
-          auto it = tax.str2id.find(kv.first);
-          if (it != tax.str2id.end()) {
-            seen.insert(it->second);
-          }
+        for (const auto &kv : resultCandidates) {
+          seen.insert(kv.tid);
         }
         auto &ranked = scratch.rankedTidScores;
         ranked.clear();
@@ -1243,7 +1333,7 @@ void processSequence(
               ranked.begin(), ranked.begin() + want, ranked.end(),
               [](const auto &a, const auto &b) { return a.second > b.second; });
           for (size_t i = 0;
-               i < want && result.taxidCount.size() < kMinCand; ++i) {
+               i < want && resultCandidates.size() < kMinCand; ++i) {
             const uint32_t tid_id = ranked[i].first;
             if (seen.find(tid_id) != seen.end()) {
               continue;
@@ -1251,13 +1341,12 @@ void processSequence(
             if (tid_id >= tax.id2str.size()) {
               continue;
             }
-            const std::string &taxid = tax.id2str[tid_id];
             const double countVal =
                 std::clamp(ranked[i].second, 0.0, effCap);
             if (countVal <= 0.0) {
               continue;
             }
-            result.taxidCount.emplace_back(taxid, countVal);
+            resultCandidates.push_back(SpoolCandidate{tid_id, countVal});
             seen.insert(tid_id);
           }
         }
@@ -1265,50 +1354,72 @@ void processSequence(
     }
   }
 
-  if (result.taxidCount.empty() && use_em && maxCountValid &&
-      maxCount.second > 0.0) {
-    result.taxidCount.emplace_back(maxCount);
+  if (resultCandidates.empty() && use_em && maxCountValid &&
+      maxCountScore > 0.0) {
+    resultCandidates.push_back(SpoolCandidate{maxCountTid, maxCountScore});
   }
 
-  if (!result.taxidCount.empty()) {
+  if (!resultCandidates.empty()) {
     if (presenceEnabled && presenceAcc) {
-      const auto &top = result.taxidCount.front();
-      if (top.first != "unclassified") {
-        auto itid = tax.str2id.find(top.first);
-        if (itid != tax.str2id.end()) {
-          bool unique_ok = (uniqueCount >= 3.0) ||
-                           (uniqueCount >= 2.0 && uniqueRatio >= 0.12);
-          presenceAcc->add_read_support(itid->second, unique_ok);
-        }
+      const auto &top = resultCandidates.front();
+      if (top.tid != kSpoolUnclassifiedTid) {
+        bool unique_ok = (uniqueCount >= 3.0) ||
+                         (uniqueCount >= 2.0 && uniqueRatio >= 0.12);
+        presenceAcc->add_read_support(top.tid, unique_ok);
       }
     }
-    bool isUniqueMapping = (result.taxidCount.size() == 1);
-    if (isUniqueMapping) {
-      fileInfo.uniqueTaxids.insert(result.taxidCount.front().first);
+    bool isUniqueMapping = (resultCandidates.size() == 1);
+    if (isUniqueMapping && resultCandidates.front().tid < tax.id2str.size()) {
+      fileInfo.uniqueTaxids.insert(tax.id2str[resultCandidates.front().tid]);
     }
 
     fileInfo.classifiedNum++;
-    if (result.taxidCount.size() == 1) {
+    if (resultCandidates.size() == 1) {
       if (!maxCountValid) {
-        maxCount = result.taxidCount.front();
+        maxCountTid = resultCandidates.front().tid;
+        maxCountScore = resultCandidates.front().score;
         maxCountValid = true;
       }
-      result.taxidCount.clear();
-      result.taxidCount.emplace_back(maxCount);
+      resultCandidates.clear();
+      resultCandidates.push_back(SpoolCandidate{maxCountTid, maxCountScore});
     }
   } else {
     fileInfo.unclassifiedNum++;
-    result.taxidCount.emplace_back("unclassified", 1.0);
-    if (result.reject_reason.empty()) {
+    resultCandidates.push_back(SpoolCandidate{kSpoolUnclassifiedTid, 1.0});
+    if (rejectReason.empty()) {
       if (!maxCountValid && tidScore.empty()) {
-        result.reject_reason = "no_candidate";
+        rejectReason = "no_candidate";
       } else {
-        result.reject_reason = "low_eval";
+        rejectReason = "low_eval";
       }
     }
   }
 
-  classifyResults.emplace_back(std::move(result));
+  if (compactResults != nullptr) {
+    CompactClassifyResult result;
+    result.evaluated = eff_eval;
+    result.id = id;
+    result.best_taxid_hint = bestTaxidHintTid;
+    result.reject_reason = std::move(rejectReason);
+    result.candidates = std::move(resultCandidates);
+    compactResults->emplace_back(std::move(result));
+  } else if (classifyResults != nullptr) {
+    classifyResult result;
+    result.evaluated = eff_eval;
+    result.id = id;
+    result.best_taxid_hint = bestTaxidStr;
+    result.reject_reason = std::move(rejectReason);
+    result.taxidCount.reserve(resultCandidates.size());
+    for (const auto &candidate : resultCandidates) {
+      if (candidate.tid == kSpoolUnclassifiedTid) {
+        result.taxidCount.emplace_back("unclassified", candidate.score);
+      } else if (candidate.tid < tax.id2str.size()) {
+        result.taxidCount.emplace_back(tax.id2str[candidate.tid],
+                                       candidate.score);
+      }
+    }
+    classifyResults->emplace_back(std::move(result));
+  }
 }
 
 void processBatch(
@@ -1350,8 +1461,8 @@ void processBatch(
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
       processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
-                      autoPolicy, heat, imcf, batch.ids[i], classifyResults,
-                      fileInfo, presenceAcc, scratch);
+                      autoPolicy, heat, imcf, batch.ids[i], &classifyResults,
+                      nullptr, fileInfo, presenceAcc, scratch);
     }
   } else {
     for (size_t i = 0; i < batch.seqs.size(); i++) {
@@ -1374,8 +1485,77 @@ void processBatch(
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
       processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
-                      autoPolicy, heat, imcf, batch.ids[i], classifyResults,
-                      fileInfo, presenceAcc, scratch);
+                      autoPolicy, heat, imcf, batch.ids[i], &classifyResults,
+                      nullptr, fileInfo, presenceAcc, scratch);
+    }
+  }
+}
+
+void processBatchCompact(
+    batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
+    const TaxDict &tax, ClassifyConfig &config,
+    chimera::imcf::InterleavedMergedCuckooFilter &imcf,
+    std::vector<CompactClassifyResult> &classifyResults,
+    const chimera::feature::Params &feature_params, size_t feature_min_len,
+    FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
+    const AutoClassifyPolicy &autoPolicy, PresenceAccumulator *presenceAcc,
+    ProcessScratch &scratch) {
+  auto &hashs1 = scratch.hashs1;
+  hashs1.clear();
+  hashs1.reserve(2048);
+  if (!batch.seqs2.empty()) {
+    for (size_t i = 0; i < batch.ids.size(); ++i) {
+      hashs1.clear();
+      size_t len1 = (i < batch.seqs.size()) ? batch.seqs[i].size() : 0;
+      size_t len2 = (i < batch.seqs2.size()) ? batch.seqs2[i].size() : 0;
+      size_t readLen = len1 + len2;
+      if (readLen > 0) {
+        if (fileInfo.minLen == 0 || fileInfo.minLen == kInvalidLength ||
+            readLen < fileInfo.minLen)
+          fileInfo.minLen = readLen;
+        if (readLen > fileInfo.maxLen)
+          fileInfo.maxLen = readLen;
+        fileInfo.bpLength += readLen;
+      }
+      if (i < batch.seqs.size() && batch.seqs[i].size() >= feature_min_len) {
+        chimera::feature::compute_hashes_append(batch.seqs[i], feature_params,
+                                                hashs1);
+      }
+      if (i < batch.seqs2.size() && batch.seqs2[i].size() >= feature_min_len) {
+        chimera::feature::compute_hashes_append(batch.seqs2[i], feature_params,
+                                                hashs1);
+      }
+      if (hashs1.size() > 2048) {
+        std::sort(hashs1.begin(), hashs1.end());
+        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
+      }
+      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
+                      autoPolicy, heat, imcf, batch.ids[i], nullptr,
+                      &classifyResults, fileInfo, presenceAcc, scratch);
+    }
+  } else {
+    for (size_t i = 0; i < batch.seqs.size(); i++) {
+      hashs1.clear();
+      size_t readLen = batch.seqs[i].size();
+      if (readLen > 0) {
+        if (fileInfo.minLen == 0 || fileInfo.minLen == kInvalidLength ||
+            readLen < fileInfo.minLen)
+          fileInfo.minLen = readLen;
+        if (readLen > fileInfo.maxLen)
+          fileInfo.maxLen = readLen;
+        fileInfo.bpLength += readLen;
+      }
+      if (batch.seqs[i].size() >= feature_min_len) {
+        chimera::feature::compute_hashes_append(batch.seqs[i], feature_params,
+                                                hashs1);
+      }
+      if (hashs1.size() > 2048) {
+        std::sort(hashs1.begin(), hashs1.end());
+        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
+      }
+      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
+                      autoPolicy, heat, imcf, batch.ids[i], nullptr,
+                      &classifyResults, fileInfo, presenceAcc, scratch);
     }
   }
 }
@@ -1473,29 +1653,10 @@ void classify_streaming(
 
 namespace {
 
-uint32_t spool_tid_for_taxid(const TaxDict &tax, const std::string &taxid) {
-  if (taxid.empty() || taxid == "unclassified") {
-    return kSpoolUnclassifiedTid;
-  }
-  auto it = tax.str2id.find(taxid);
-  return (it == tax.str2id.end()) ? kSpoolUnclassifiedTid : it->second;
-}
-
-void write_spool_results(const std::vector<classifyResult> &results,
-                         const TaxDict &tax, std::ostream &os) {
-  SpoolReadRecord record;
+void write_spool_results(const std::vector<CompactClassifyResult> &results,
+                         std::ostream &os) {
   for (const auto &result : results) {
-    record.id = result.id;
-    record.evaluated = result.evaluated;
-    record.best_taxid_hint = spool_tid_for_taxid(tax, result.best_taxid_hint);
-    record.reject_reason = result.reject_reason;
-    record.candidates.clear();
-    record.candidates.reserve(result.taxidCount.size());
-    for (const auto &[taxid, score] : result.taxidCount) {
-      record.candidates.push_back(SpoolCandidate{
-          spool_tid_for_taxid(tax, taxid), score});
-    }
-    write_spool_record(os, record);
+    write_spool_record(os, result);
   }
 }
 
@@ -1531,7 +1692,11 @@ void classify_streaming_spool(
 
     const size_t spool_index = static_cast<size_t>(std::clamp<int>(
         thread_id, 0, static_cast<int>(spoolPaths.size() - 1)));
-    std::ofstream spool(spoolPaths[spool_index], std::ios::binary);
+    std::vector<char> spoolBuffer(1 << 20);
+    std::ofstream spool;
+    spool.rdbuf()->pubsetbuf(spoolBuffer.data(),
+                             static_cast<std::streamsize>(spoolBuffer.size()));
+    spool.open(spoolPaths[spool_index], std::ios::binary);
     if (!spool.is_open()) {
       throw std::runtime_error("Failed to open classify spool: " +
                                spoolPaths[spool_index]);
@@ -1539,7 +1704,6 @@ void classify_streaming_spool(
     write_spool_header(spool);
 
     batchReads batch;
-    std::vector<classifyResult> localClassifyResults;
     FileInfo localFileInfo;
     localFileInfo.avgLen = fileInfo.avgLen;
     localFileInfo.minLen = kInvalidLength;
@@ -1552,15 +1716,16 @@ void classify_streaming_spool(
         presenceSummary ? presenceSummary->sketchBits : 0);
     PresenceAccumulator *presencePtr =
         presenceSummary ? &presenceLocal : nullptr;
+    std::vector<CompactClassifyResult> localClassifyResults;
 
     for (;;) {
       if (readQueue.try_dequeue(batch)) {
         release_queue_slot(queueThrottle, estimate_batch_bytes(batch));
-        processBatch(batch, imcfConfig, tax, config, imcf,
-                     localClassifyResults, feature_params, feature_min_len,
-                     localFileInfo, heat, weightCtx, autoPolicy, presencePtr,
-                     scratch);
-        write_spool_results(localClassifyResults, tax, spool);
+        processBatchCompact(batch, imcfConfig, tax, config, imcf,
+                            localClassifyResults, feature_params,
+                            feature_min_len, localFileInfo, heat, weightCtx,
+                            autoPolicy, presencePtr, scratch);
+        write_spool_results(localClassifyResults, spool);
         localClassifyResults.clear();
         continue;
       }

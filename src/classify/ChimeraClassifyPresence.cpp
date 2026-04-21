@@ -199,20 +199,49 @@ void PresenceAccumulator::add_target(uint32_t tid, double hit_weight,
                                      bool localUniqueEdge,
                                      uint32_t unique_bucket,
                                      uint32_t breadth_bucket) {
-  PresenceStats &entry = touch(tid);
   const uint64_t hit_inc = to_fixed(hit_weight);
   const uint64_t score_inc = to_fixed(score_weight);
+  const double u = std::clamp(unique_strength, 0.0, 1.0);
+  const uint64_t unique_hit_inc = u > 0.0 ? to_fixed(hit_weight * u) : 0u;
+  const uint64_t unique_score_inc = u > 0.0 ? to_fixed(score_weight * u) : 0u;
+  PresenceStats &entry = touch(tid);
   entry.score += score_inc;
   entry.hits += hit_inc;
-  const double u = std::clamp(unique_strength, 0.0, 1.0);
-  if (u > 0.0) {
-    entry.uniqueHits += to_fixed(hit_weight * u);
-    entry.uniqueScore += to_fixed(score_weight * u);
-  }
+  entry.uniqueHits += unique_hit_inc;
+  entry.uniqueScore += unique_score_inc;
   if (localUniqueEdge && sketchWords > 0) {
     ensure_sketch(entry, sketchWords);
     set_sketch_bit(entry.uniqueSketch, sketchWords, unique_bucket);
     set_sketch_bit(entry.breadthSketch, sketchWords, breadth_bucket);
+  }
+}
+
+void PresenceAccumulator::add_targets(const std::vector<uint32_t> &tids,
+                                      double hit_weight, double score_weight,
+                                      double unique_strength,
+                                      bool localUniqueEdge,
+                                      uint32_t unique_bucket,
+                                      uint32_t breadth_bucket) {
+  if (tids.empty()) {
+    return;
+  }
+  const uint64_t hit_inc = to_fixed(hit_weight);
+  const uint64_t score_inc = to_fixed(score_weight);
+  const double u = std::clamp(unique_strength, 0.0, 1.0);
+  const uint64_t unique_hit_inc = u > 0.0 ? to_fixed(hit_weight * u) : 0u;
+  const uint64_t unique_score_inc = u > 0.0 ? to_fixed(score_weight * u) : 0u;
+  const bool update_sketch = localUniqueEdge && sketchWords > 0;
+  for (uint32_t tid : tids) {
+    PresenceStats &entry = touch(tid);
+    entry.score += score_inc;
+    entry.hits += hit_inc;
+    entry.uniqueHits += unique_hit_inc;
+    entry.uniqueScore += unique_score_inc;
+    if (update_sketch) {
+      ensure_sketch(entry, sketchWords);
+      set_sketch_bit(entry.uniqueSketch, sketchWords, unique_bucket);
+      set_sketch_bit(entry.breadthSketch, sketchWords, breadth_bucket);
+    }
   }
 }
 
@@ -228,7 +257,7 @@ PresenceSummary::PresenceSummary(uint32_t breadthBits)
     : sketchBits(breadthBits), sketchWords(sketch_words(breadthBits)) {}
 
 void PresenceSummary::merge(const PresenceAccumulator &acc) {
-  for (const auto &[tid, entry] : acc.stats) {
+  auto merge_entry = [&](uint32_t tid, const PresenceStats &entry) {
     auto &dst = stats[tid];
     dst.score += entry.score;
     dst.uniqueScore += entry.uniqueScore;
@@ -252,6 +281,9 @@ void PresenceSummary::merge(const PresenceAccumulator &acc) {
         }
       }
     }
+  };
+  for (const auto &[tid, entry] : acc.stats) {
+    merge_entry(tid, entry);
   }
 }
 

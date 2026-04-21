@@ -92,6 +92,23 @@ void write_spool_record(std::ostream &os, const SpoolReadRecord &record) {
   }
 }
 
+void write_spool_record(std::ostream &os,
+                        const CompactClassifyResult &record) {
+  write_string(os, record.id);
+  write_pod(os, record.evaluated);
+  write_pod(os, record.best_taxid_hint);
+  write_string(os, record.reject_reason);
+  const uint32_t cand_len = static_cast<uint32_t>(record.candidates.size());
+  write_pod(os, cand_len);
+  if (cand_len > 0) {
+    os.write(reinterpret_cast<const char *>(record.candidates.data()),
+             static_cast<std::streamsize>(cand_len * sizeof(SpoolCandidate)));
+    if (!os) {
+      throw std::runtime_error("Failed to write classify spool candidates");
+    }
+  }
+}
+
 bool read_spool_record(std::istream &is, SpoolReadRecord &record) {
   uint32_t id_len = 0;
   is.read(reinterpret_cast<char *>(&id_len), sizeof(id_len));

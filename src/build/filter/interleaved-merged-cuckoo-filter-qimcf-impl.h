@@ -656,12 +656,12 @@ inline void InterleavedMergedCuckooFilter::bulkContain_events_subset_qidx_mask(
     qidx_group_range(bucket, state.group, s, e);
     for (uint64_t i = s; i < e; ++i) {
       uint64_t code = qidx->entries[i];
-      uint32_t bin = static_cast<uint32_t>(code >> (qidx->fpHiBits + 4));
-      if (bin >= maskSize || mask[bin] == 0u) {
-        continue;
-      }
       uint16_t hi2 = static_cast<uint16_t>((code >> 4) & state.hiMask);
       if (hi2 != state.hi) {
+        continue;
+      }
+      uint32_t bin = static_cast<uint32_t>(code >> (qidx->fpHiBits + 4));
+      if (bin >= maskSize || mask[bin] == 0u) {
         continue;
       }
       uint16_t sp = static_cast<uint16_t>(code & 0xF);
@@ -692,12 +692,12 @@ inline void InterleavedMergedCuckooFilter::bulkContain_events_subset_qidx_marked
     qidx_group_range(bucket, state.group, s, e);
     for (uint64_t i = s; i < e; ++i) {
       uint64_t code = qidx->entries[i];
-      uint32_t bin = static_cast<uint32_t>(code >> (qidx->fpHiBits + 4));
-      if (bin >= marksSize || marks[bin] != activeMark) {
-        continue;
-      }
       uint16_t hi2 = static_cast<uint16_t>((code >> 4) & state.hiMask);
       if (hi2 != state.hi) {
+        continue;
+      }
+      uint32_t bin = static_cast<uint32_t>(code >> (qidx->fpHiBits + 4));
+      if (bin >= marksSize || marks[bin] != activeMark) {
         continue;
       }
       uint16_t sp = static_cast<uint16_t>(code & 0xF);
