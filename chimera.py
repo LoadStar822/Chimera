@@ -1,6 +1,7 @@
 import argparse
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,6 +21,14 @@ def get_downloader():
 
 
 def get_chimera_path():
+    env_path = os.environ.get("CHIMERA_BIN")
+    if env_path:
+        chimera_path = Path(env_path)
+        if chimera_path.is_file() and os.access(chimera_path, os.X_OK):
+            return str(chimera_path)
+        raise FileNotFoundError(
+            f"CHIMERA_BIN points to a missing or non-executable file: {env_path}"
+        )
     # Use which command to find the chimera program path
     chimera_path = shutil.which("Chimera")
     if chimera_path is None:
@@ -27,6 +36,29 @@ def get_chimera_path():
             "Cannot find 'Chimera' executable. Please ensure it is installed and in your PATH."
         )
     return chimera_path
+
+
+def _infer_profile_taxonomy_paths(database_path: str):
+    db = Path(database_path).resolve()
+    search_dirs = []
+    if db.parent not in search_dirs:
+        search_dirs.append(db.parent)
+    stem_path = db.with_suffix("")
+    if stem_path.is_dir() and stem_path not in search_dirs:
+        search_dirs.append(stem_path)
+
+    taxonomy_meta = None
+    taxonomy_info = None
+    for base in search_dirs:
+        if taxonomy_meta is None:
+            candidate = base / "taxonomy.meta"
+            if candidate.exists():
+                taxonomy_meta = str(candidate)
+        if taxonomy_info is None:
+            candidate = base / "tax.info"
+            if candidate.exists():
+                taxonomy_info = str(candidate)
+    return taxonomy_meta, taxonomy_info
 
 
 def min_length_type(value: str):
@@ -222,49 +254,14 @@ def parse_arguments():
         "-p", "--paired", nargs="+", help="Paired input files for classifying"
     )
     classify_parser.add_argument(
-        "-o", "--output", default="ChimeraClassify", help="Output file for classifying"
+        "-o",
+        "--output",
+        default="ChimeraOutput",
+        help="Output directory for classify, evidence, and profile results",
     )
     classify_parser.add_argument(
         "-d", "--database", required=True, help="Database file for classifying"
     )
-    classify_parser.add_argument(
-        "-s",
-        "--shot-threshold",
-        type=float,
-        default=None,
-        help="Shot threshold for classifying (defaults to 0.70 if unset)",
-    )
-    classify_parser.add_argument(
-        "--first-filter-beta",
-        type=float,
-        default=None,
-        help="Beta multiplier for first-stage filter (default 0.75)",
-    )
-    classify_parser.add_argument(
-        "--presence-pi",
-        type=float,
-        default=None,
-        help="Presence prior probability for coverage model (0-1)",
-    )
-    classify_parser.add_argument(
-        "--presence-tau",
-        type=float,
-        default=None,
-        help="Log posterior odds threshold for coverage model",
-    )
-    classify_parser.add_argument(
-        "--presence-breadth-bits",
-        type=int,
-        default=None,
-        help="Sketch bits for presence breadth (power-of-two suggested)",
-    )
-    classify_parser.add_argument(
-        "--post-pi-min",
-        type=float,
-        default=None,
-        help="Minimum global class weight (default 0.0005)",
-    )
-    # NOTE: Deprecated LCA/post-processing knobs are intentionally not exposed.
     classify_parser.add_argument(
         "-t",
         "--threads",
@@ -304,19 +301,6 @@ def parse_arguments():
         dest="taxonomy_meta",
         default=None,
         help="Path to taxonomy.meta metadata; if omitted, the input directory will be probed",
-    )
-    profile_parser.add_argument(
-        "--abundance-mode",
-        dest="abundance_mode",
-        default="soft_seq",
-        choices=["soft_seq", "hard_seq", "top1", "soft_tax", "soft", "hard"],
-        help="Abundance mode: soft_seq (default, sum all taxid:count), hard_seq (top1 taxid:count only), or top1 (count each sequence once)",
-    )
-    profile_parser.add_argument(
-        "--hd-species-head-mass",
-        type=float,
-        default=97.0,
-        help="Head-mass percentage for species output in high-diversity samples (default 97.0)",
     )
 
     if len(sys.argv) == 1:
@@ -403,8 +387,6 @@ def run_chimera(args, chimera_path=None):
                 taxonomy_kind=args.taxonomy_kind,
                 taxonomy_info=args.taxonomy_info,
                 taxonomy_meta=args.taxonomy_meta,
-                abundance_mode=args.abundance_mode,
-                hd_species_head_mass=args.hd_species_head_mass,
             )
         except ValueError as exc:
             print(f"Profile failed: {exc}")
@@ -439,37 +421,46 @@ def run_chimera(args, chimera_path=None):
         command.extend(["--taxonomy-version", str(args.taxonomy_version)])
 
     elif args.command == "classify":
+        output_dir = Path(args.output)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        classify_output = output_dir / "ChimeraClassify.tsv"
+        evidence_output = output_dir / "ChimeraEvidence.tsv"
+        profile_output = output_dir / "ChimeraProfile"
         if args.single:
             command.extend(["-i"] + args.single)
         if args.paired:
             command.extend(["-p"] + args.paired)
-        command.extend(["-o", args.output])
+        command.extend(["-o", str(classify_output)])
         command.extend(["-d", args.database])
-        if args.shot_threshold is not None:
-            command.extend(["-s", str(args.shot_threshold)])
-        if args.first_filter_beta is not None:
-            command.extend(["--first-filter-beta", str(args.first_filter_beta)])
-        if args.presence_pi is not None:
-            command.extend(["--presence-pi", str(args.presence_pi)])
-        if args.presence_tau is not None:
-            command.extend(["--presence-tau", str(args.presence_tau)])
-        if args.presence_breadth_bits is not None:
-            command.extend(
-                ["--presence-breadth-bits", str(args.presence_breadth_bits)]
-            )
-        if args.post_pi_min is not None:
-            command.extend(["--post-pi-min", str(args.post_pi_min)])
         command.extend(["-t", str(args.threads)])
         command.extend(["-b", str(args.batch_size)])
 
-    # Execute the command using the provided run function
+    if args.command == "classify":
+        subprocess.run(command, check=True)
+        if not evidence_output.is_file():
+            print(f"Classify did not produce abundance evidence: {evidence_output}")
+            return 1
+        taxonomy_meta, taxonomy_info = _infer_profile_taxonomy_paths(args.database)
+        try:
+            profile.process_file(
+                [str(evidence_output)],
+                str(profile_output),
+                taxonomy_kind="auto",
+                taxonomy_info=taxonomy_info,
+                taxonomy_meta=taxonomy_meta,
+            )
+        except ValueError as exc:
+            print(f"Profile failed: {exc}")
+            return 1
+        return 0
     downloader = get_downloader()
     downloader.run_command(command)
+    return 0
 
 
 def main():
     args = parse_arguments()
-    run_chimera(args)
+    raise SystemExit(run_chimera(args) or 0)
 
 
 if __name__ == "__main__":

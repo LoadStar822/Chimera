@@ -11,6 +11,27 @@
 
 namespace ChimeraClassify {
 
+void rebuild_bin_slot_rep_lookup(
+    TaxDict &tax, const std::vector<uint32_t> *tid2speciesRep) {
+  tax.binSlotRepTid.assign(tax.idx2id.size() * kTaxSlotCount, kInvalidTidId);
+  for (size_t bin = 0; bin < tax.idx2id.size(); ++bin) {
+    const auto &speciesVec = tax.idx2id[bin];
+    const size_t slotLimit =
+        std::min<size_t>(speciesVec.size(), kTaxSlotCount);
+    const size_t base = bin * kTaxSlotCount;
+    for (size_t slot = 0; slot < slotLimit; ++slot) {
+      uint32_t tid = speciesVec[slot];
+      if (tid >= tax.id2str.size()) {
+        continue;
+      }
+      if (tid2speciesRep && tid < tid2speciesRep->size()) {
+        tid = (*tid2speciesRep)[tid];
+      }
+      tax.binSlotRepTid[base + slot] = tid;
+    }
+  }
+}
+
 TaxDict build_tax_dict(const std::vector<std::vector<std::string>> &idx2tax) {
   robin_hood::unordered_flat_map<std::string, uint32_t> dict;
   dict.reserve(1ull << 20);
@@ -40,6 +61,7 @@ TaxDict build_tax_dict(const std::vector<std::vector<std::string>> &idx2tax) {
     bins.erase(std::unique(bins.begin(), bins.end()), bins.end());
   }
   td.str2id = std::move(dict);
+  rebuild_bin_slot_rep_lookup(td);
   return td;
 }
 

@@ -47,9 +47,9 @@ namespace ChimeraClassify {
 		double em_prune_ratio = 2e-4;   // relative to max_expected in EM sparsity
 		double em_conf_power = 2.0;     // confidence exponent for EM M-step (0 disables)
 			double post_pi_min = 5e-4;
-	// Unified tail-risk control in [0,1], where 0=head-heavy and 1=tail-rich.
-	double tail_risk_u = 1.0;
-	double tail_risk_s = 1.0;
+	// Continuous sample-level community dispersion in [0,1].
+	double community_dispersion_u = 1.0;
+	double community_dispersion_s = 1.0;
 		size_t hash_sample_min = 16;
 		size_t hash_sample_max = 96;
 			double idf_max = 8.0;
@@ -67,35 +67,28 @@ namespace ChimeraClassify {
 		std::unordered_set<std::string> uniqueTaxids;
 	};
 
-	enum class ReadRegime {
-		ShortLike,
-		LongLike,
-	};
-
 	struct CandidatePolicy {
 		bool enable_taxpool{ true };
 	};
 
 	struct PostDecisionPolicy {
-		bool disable_fallback{ false };
-		bool enable_selective_reject{ false };
+		double fallback_scale{ 1.0 };
+		double selective_reject_scale{ 1.0 };
+		bool enable_selective_reject{ true };
 	};
 
 	struct AutoClassifyPolicy {
-		ReadRegime regime{ ReadRegime::LongLike };
 		CandidatePolicy candidate{};
 		PostDecisionPolicy post{};
+		double evidence_strength{ 1.0 };
 	};
 
 	inline AutoClassifyPolicy derive_auto_policy(const FileInfo &fi,
 	                                             const ClassifyConfig &cfg) {
 		(void)cfg;
+		(void)fi;
 		AutoClassifyPolicy policy{};
-		const bool short_like = fi.avgLen < 1000;
-		policy.regime = short_like ? ReadRegime::ShortLike : ReadRegime::LongLike;
 		policy.candidate.enable_taxpool = true;
-		policy.post.disable_fallback = short_like;
-		policy.post.enable_selective_reject = !short_like;
 		return policy;
 	}
 
@@ -112,14 +105,15 @@ namespace ChimeraClassify {
 		std::vector< std::vector< seqan3::dna4 > > seqs2{};
 	};
 
-		struct classifyResult {
-			std::string id;
-			std::vector<std::pair<std::string, double>> taxidCount;
-			std::vector<std::pair<std::string, double>> posteriors;
-			double evaluated{ 0.0 }; // 实际参与判别的 feature 数，用于归一化
-			std::string reject_reason; // 为空表示未拒绝或接受
-			std::string best_taxid_hint; // 最佳候选 taxid（即使未被接受）
-		};
+			struct classifyResult {
+				std::string id;
+				std::vector<std::pair<std::string, double>> taxidCount;
+				std::vector<std::pair<std::string, double>> posteriors;
+				double evaluated{ 0.0 }; // 实际参与判别的 feature 数，用于归一化
+				std::string reject_reason; // 为空表示未拒绝或接受
+				std::string best_taxid_hint; // 最佳候选 taxid（即使未被接受）
+				std::vector<std::pair<std::string, double>> abundanceCount;
+			};
 
 			struct DecisionConfig {
 					double min_class_weight = 1e-4;

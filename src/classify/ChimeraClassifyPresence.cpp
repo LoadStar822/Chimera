@@ -649,10 +649,6 @@ void postEmDecision(
       std::clamp(decisionConfig.selective_reject_strength, 0.0, 1.0);
   const bool selective_reject_fulln_enabled =
       selective_strength > 1e-9 && postPolicy.enable_selective_reject;
-  const size_t selective_fulln_min = static_cast<size_t>(
-      std::llround(lerp(18.0, 10.0, selective_strength)));
-  const size_t selective_pruned_max = static_cast<size_t>(
-      std::llround(lerp(4.0, 6.0, selective_strength)));
 
   double presence_tau = std::numeric_limits<double>::infinity();
   double presence_strict_tau = std::numeric_limits<double>::infinity();
@@ -696,7 +692,7 @@ void postEmDecision(
 	      return PresenceLevel::kAccepted;
 	    }
     // Use symmetric strong-negative rejection to avoid over-penalizing
-    // mid-confidence taxa (especially in tail-rich samples).
+    // mid-confidence taxa.
 	    // Accept: lp >= strict_tau (possibly raised by cap).
 	    // Reject:  lp <= -tau (strong evidence of absence).
 	    // Else:    Unknown (neutral).
@@ -708,6 +704,55 @@ void postEmDecision(
 
 			  constexpr size_t kFallbackHintTopK = 16;
 			  constexpr double kFallbackGenusConflictGapMax = 0.20;
+			  constexpr size_t kResolutionInspectTopK = 16;
+			  constexpr double kResolutionSameGenusShare = 0.80;
+
+			  auto posterior_genus_coherent =
+			      [&](const std::vector<std::pair<std::string, double>> &posterior,
+			          const std::string &anchor_taxid) -> bool {
+			    if (!ncbiTaxdump || !ncbiTaxdump->enabled() ||
+			        anchor_taxid.empty() || anchor_taxid == kUnclassified) {
+			      return false;
+			    }
+			    uint32_t anchor_tid = 0;
+			    if (!chimera::utils::try_parse_u32(anchor_taxid, anchor_tid)) {
+			      return false;
+			    }
+			    const uint32_t anchor_genus = ncbiTaxdump->to_genus(anchor_tid);
+			    if (anchor_genus == 0u) {
+			      return false;
+			    }
+			    const size_t inspect =
+			        std::min(kResolutionInspectTopK, posterior.size());
+			    double inspected_mass = 0.0;
+			    double same_genus_mass = 0.0;
+			    size_t usable = 0;
+			    for (size_t i = 0; i < inspect; ++i) {
+			      const auto &[taxid, prob] = posterior[i];
+			      if (!(prob > 0.0) || taxid.empty() ||
+			          taxid == kUnclassified) {
+			        continue;
+			      }
+			      uint32_t tid = 0;
+			      if (!chimera::utils::try_parse_u32(taxid, tid)) {
+			        continue;
+			      }
+			      const uint32_t genus = ncbiTaxdump->to_genus(tid);
+			      if (genus == 0u) {
+			        continue;
+			      }
+			      ++usable;
+			      inspected_mass += prob;
+			      if (genus == anchor_genus) {
+			        same_genus_mass += prob;
+			      }
+			    }
+			    if (usable < 2 || !(inspected_mass > 0.0)) {
+			      return false;
+			    }
+			    return (same_genus_mass / inspected_mass) >=
+			           kResolutionSameGenusShare;
+			  };
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
@@ -737,8 +782,8 @@ void postEmDecision(
 	
 
 	    // Ensure POST_TOPK uses the same (pruned/renormalized) posterior view as the
-    // final decision logic. This reduces long-tail noise in head-heavy
-	    // profile aggregation (e.g., avoids peaky-rescue picking hitchhiking taxa).
+    // final decision logic. This reduces low-weight posterior noise in
+	    // profile aggregation.
     result.posteriors = posterior;
 
 	    const auto &top = posterior.front();
@@ -792,9 +837,16 @@ void postEmDecision(
 			    if (pass) {
 			      const size_t full_n = posterior_full.size();
 			      const size_t pruned_n = posterior.size();
+          const double posterior_compression =
+              std::max(0.0, std::log1p(static_cast<double>(full_n)) -
+                                std::log1p(static_cast<double>(pruned_n)));
+          const bool selective_cert =
+              (selective_strength * posterior_compression) >= 1.0;
           if (selective_reject_fulln_enabled && pruned.audit.pruned_any &&
-              full_n >= selective_fulln_min &&
-              pruned_n <= selective_pruned_max) {
+              selective_cert) {
+			        const bool taxonomy_coherent =
+			            posterior_genus_coherent(posterior_full, top.first);
+			        if (!taxonomy_coherent) {
 			        bool rescued = false;
 				        if (!result.best_taxid_hint.empty() &&
 				            result.best_taxid_hint != kUnclassified) {
@@ -820,11 +872,12 @@ void postEmDecision(
 		        if (rescued) {
 		          continue;
 		        }
-		        result.taxidCount.clear();
-		        result.taxidCount.emplace_back(kUnclassified, 1.0);
-		        result.reject_reason = "selective_cert";
-		        continue;
-		      }
+			        result.taxidCount.clear();
+			        result.taxidCount.emplace_back(kUnclassified, 1.0);
+			        result.reject_reason = "selective_cert";
+			        continue;
+			        }
+			      }
 
 	      result.taxidCount.clear();
 
@@ -887,8 +940,8 @@ void postEmDecision(
       continue;
     }
 
-        // Continuous fallback: strength=0 keeps reject, strength=1 behaves like
-        // previous tail-rich fallback.
+        // Continuous fallback: strength=0 keeps reject, strength=1 allows the
+        // posterior readout to override a weak reject.
         if (fallback_strength > 1e-9) {
           const double gap = top_score - second_score;
           const double base_gap_min =

@@ -166,6 +166,42 @@ struct NcbiTaxdump {
     }
     return 0;
   }
+
+  uint32_t lca(uint32_t a, uint32_t b) const {
+    if (!enabled() || a == 0 || b == 0 || a >= parent.size() ||
+        b >= parent.size()) {
+      return 0;
+    }
+    std::unordered_set<uint32_t> seen;
+    uint32_t cur = a;
+    for (int steps = 0; steps < 128; ++steps) {
+      if (cur == 0 || cur >= parent.size()) {
+        break;
+      }
+      seen.insert(cur);
+      const uint32_t p = parent[cur];
+      if (p == 0 || p == cur) {
+        break;
+      }
+      cur = p;
+    }
+    cur = b;
+    for (int steps = 0; steps < 128; ++steps) {
+      if (cur == 0 || cur >= parent.size()) {
+        break;
+      }
+      if (seen.find(cur) != seen.end()) {
+        return cur;
+      }
+      const uint32_t p = parent[cur];
+      if (p == 0 || p == cur) {
+        break;
+      }
+      cur = p;
+    }
+    return 0;
+  }
+
 };
 
 struct WeightingContext {
@@ -214,21 +250,15 @@ inline std::size_t effective_df_bins(std::size_t deg_effective,
   return df_bins;
 }
 
-// Choose which DF to use for IDF computation.
-//
-// Empirically, using df_eff for IDF helps tail-rich "short contigs" avoid
-// posterior_weight rejects, while using df_bins for long reads reduces FP
-// sensitivity (especially under subset/topBins).
-//
-// Policy:
-// - readLen<=min_len: allow full fragmented-species correction (w=tail_s)
-// - readLen>=max_len: disable correction (w=0)
-// - middle zone: smoothstep transition
+// Choose which DF to use for IDF computation. Community-dispersed samples get
+// more fragmented-species correction on short reads; long reads keep the
+// bin-level DF to reduce false-positive sensitivity under subset/topBins.
 inline double df_for_idf(std::size_t df_bins, std::size_t df_eff,
-                         std::size_t readLen, double tail_risk_s,
+                         std::size_t readLen,
+                         double community_dispersion_s,
                          std::size_t max_len = 4096,
                          std::size_t min_len = 1024) {
-  const double w_s = clamp01(tail_risk_s);
+  const double w_s = clamp01(community_dispersion_s);
   double w_len = 0.0;
   if (readLen <= min_len) {
     w_len = 1.0;
@@ -275,9 +305,9 @@ inline bool is_local_unique_edge(std::size_t deg_effective,
   return deg_effective == 1 && df_bins == 1;
 }
 
-inline double clamp_idf(double idf_raw, double tail_risk_s, double idf_max,
-                        double idf_power) {
-  const double s = clamp01(tail_risk_s);
+inline double clamp_idf(double idf_raw, double community_dispersion_s,
+                        double idf_max, double idf_power) {
+  const double s = clamp01(community_dispersion_s);
   const double idf_min = 0.5 * (1.0 - s);
   const double idf_max_eff = std::max(idf_min, idf_max);
   const double idf0 = std::clamp(idf_raw, idf_min, idf_max_eff);
@@ -307,39 +337,26 @@ struct AutoPostPiMinTune {
   bool applied{false};
 };
 
-// High-div only: choose a more permissive (smaller) post_pi_min when the sample
-// has short average read length (weak evidence), which helps reduce
-// posterior_weight/em_post rejects without touching posterior thresholds.
-//
-// We use a smooth log-space interpolation to avoid hard length boundaries:
-//   avgLen >= L0  => pi=pi_hi
-//   avgLen <= L1  => pi=pi_lo
-//   else          => log10(pi) = (1-t)log10(pi_hi) + tlog10(pi_lo)
-inline AutoPostPiMinTune tune_post_pi_min_by_avg_len(
-    double pi_hi, double pi_lo, std::size_t avgLen, double relax_strength,
-    std::size_t L0 = 2000, std::size_t L1 = 800) {
+// High-div only: choose a more permissive (smaller) post_pi_min when the
+// sample-level evidence capacity is weak. Evidence strength is computed once
+// from read window size and community complexity, then reused by post-decision
+// policies so this tuning is not tied to fixed read-length anchors.
+inline AutoPostPiMinTune tune_post_pi_min_by_evidence_strength(
+    double pi_hi, double pi_lo, double evidence_strength,
+    double relax_strength) {
   AutoPostPiMinTune out;
   out.pi_hi = pi_hi;
   out.pi_lo = pi_lo;
 
   const double relax = clamp01(relax_strength);
-  if (!(pi_hi > 0.0) || !(pi_lo > 0.0) || avgLen == 0 || relax <= 0.0 ||
-      L0 <= L1 || pi_lo >= pi_hi) {
+  if (!(pi_hi > 0.0) || !(pi_lo > 0.0) || relax <= 0.0 ||
+      pi_lo >= pi_hi) {
     out.tuned = pi_hi;
     return out;
   }
 
-  double t_len = 0.0;
-  if (avgLen >= L0) {
-    t_len = 0.0;
-  } else if (avgLen <= L1) {
-    t_len = 1.0;
-  } else {
-    const double denom = static_cast<double>(L0) - static_cast<double>(L1);
-    t_len = (static_cast<double>(L0) - static_cast<double>(avgLen)) / denom;
-    t_len = std::clamp(t_len, 0.0, 1.0);
-  }
-  double t = clamp01(t_len * relax);
+  const double weak_evidence = 1.0 - clamp01(evidence_strength);
+  double t = clamp01(weak_evidence * relax);
   out.t = t;
 
   if (t <= 0.0) {
@@ -388,15 +405,27 @@ inline std::vector<uint64_t> select_rare_route_values(
   return out;
 }
 
-inline double compute_head_mass(
+inline double compute_simpson_core_mass(
     const std::vector<std::pair<uint32_t, uint32_t>> &ranked,
-    std::size_t topN, uint64_t total) {
-  if (total == 0 || ranked.empty() || topN == 0) {
+    uint64_t total) {
+  if (total == 0 || ranked.empty()) {
     return 0.0;
   }
-  const std::size_t limit = std::min<std::size_t>(topN, ranked.size());
+  double square_sum = 0.0;
+  const double inv_total = 1.0 / static_cast<double>(total);
+  for (const auto &[_, score] : ranked) {
+    const double p = static_cast<double>(score) * inv_total;
+    square_sum += p * p;
+  }
+  if (!(square_sum > 0.0)) {
+    return 0.0;
+  }
+  const double simpson = 1.0 / square_sum;
+  const std::size_t core_size = std::max<std::size_t>(
+      1, std::min<std::size_t>(
+             ranked.size(), static_cast<std::size_t>(std::ceil(simpson))));
   uint64_t sum = 0;
-  for (std::size_t i = 0; i < limit; ++i) {
+  for (std::size_t i = 0; i < core_size; ++i) {
     sum += ranked[i].second;
   }
   return static_cast<double>(sum) / static_cast<double>(total);
@@ -404,8 +433,7 @@ inline double compute_head_mass(
 
 inline std::size_t compute_candidate_cap(std::size_t baseCap,
                                          std::size_t maxCap,
-                                         double headMass,
-                                         double headMassThresh,
+                                         double coreMass,
                                          std::size_t rankedSize) {
   if (rankedSize == 0) {
     return 0;
@@ -416,25 +444,30 @@ inline std::size_t compute_candidate_cap(std::size_t baseCap,
   if (maxCap < baseCap) {
     maxCap = baseCap;
   }
-  std::size_t cap = std::min<std::size_t>(baseCap, rankedSize);
-  if (rankedSize > baseCap && headMass < headMassThresh) {
-    cap = std::min<std::size_t>(maxCap, rankedSize);
-  }
-  return cap;
+  const double residual = clamp01(1.0 - coreMass);
+  const double expansion = residual * residual;
+  const double scaled =
+      static_cast<double>(baseCap) +
+      ((static_cast<double>(maxCap) - static_cast<double>(baseCap)) *
+       expansion);
+  return std::min<std::size_t>(
+      rankedSize, std::max<std::size_t>(
+                      1, static_cast<std::size_t>(std::ceil(scaled))));
 }
 
-struct TailRiskProbeStats {
+struct CommunityDispersionProbeStats {
   double shannon{0.0};
   double top_mass{0.0};
   double eff_species{0.0};
+  double simpson_species{0.0};
   std::size_t total{0};
   std::size_t unclassified{0};
 };
 
-inline TailRiskProbeStats
-compute_tail_risk_probe_stats(const std::vector<double> &counts,
-                              std::size_t unclassified, std::size_t topk) {
-  TailRiskProbeStats stats;
+inline CommunityDispersionProbeStats
+compute_community_dispersion_probe_stats(const std::vector<double> &counts,
+                                          std::size_t unclassified) {
+  CommunityDispersionProbeStats stats;
   stats.unclassified = unclassified;
   double total = 0.0;
   for (double c : counts) {
@@ -449,58 +482,89 @@ compute_tail_risk_probe_stats(const std::vector<double> &counts,
 
   std::vector<double> rels;
   rels.reserve(counts.size());
+  double square_sum = 0.0;
   for (double c : counts) {
     if (c <= 0.0) {
       continue;
     }
     double p = c / total;
     stats.shannon -= p * std::log(p);
+    square_sum += p * p;
     rels.push_back(p);
   }
 
   std::sort(rels.begin(), rels.end(), std::greater<double>());
-  if (topk > 0 && !rels.empty()) {
-    const std::size_t limit = std::min(topk, rels.size());
-    for (std::size_t i = 0; i < limit; ++i) {
-      stats.top_mass += rels[i];
+  stats.simpson_species = (square_sum > 0.0) ? (1.0 / square_sum) : 0.0;
+  if (rels.size() == 1) {
+    stats.top_mass = 1.0;
+  } else if (rels.size() > 1) {
+    const std::size_t core_size = std::max<std::size_t>(
+        1, std::min<std::size_t>(
+               rels.size(),
+               static_cast<std::size_t>(std::ceil(stats.simpson_species))));
+    double cumulative = 0.0;
+    for (std::size_t i = 0; i < core_size; ++i) {
+      cumulative += rels[i];
     }
+    stats.top_mass = clamp01(cumulative);
   }
   stats.eff_species = (stats.shannon > 0.0) ? std::exp(stats.shannon) : 0.0;
   return stats;
 }
 
-inline double compute_tail_risk_u(double tail_risk_r, double eff_species,
-                                  double r_anchor, double e_anchor) {
-  const double r = clamp01(tail_risk_r);
-  const double r0 = std::max(r_anchor, 1e-9);
-  const double u_r = clamp01(r / (r + r0));
-
-  const double e0 = std::max(e_anchor, 1e-9);
+inline double compute_community_dispersion_volume(double head_mass,
+                                                  double eff_species) {
+  const double tail = clamp01(1.0 - head_mass);
   const double e = std::max(0.0, eff_species);
-  const double u_e = clamp01((e - e0) / (e + e0));
-  return clamp01(1.0 - ((1.0 - u_r) * (1.0 - u_e)));
+  return std::max(0.0, tail * std::log1p(e));
 }
 
-inline double compute_tail_risk_s(double tail_risk_u, int beta) {
-  const double u = clamp01(tail_risk_u);
-  const int b = std::max(1, beta);
-  const double up = std::pow(u, static_cast<double>(b));
-  const double down = std::pow(1.0 - u, static_cast<double>(b));
-  return clamp01(up / (up + down + 1e-12));
+inline double compute_community_dispersion_u(double head_mass,
+                                             double eff_species) {
+  const double volume =
+      compute_community_dispersion_volume(head_mass, eff_species);
+  return clamp01(volume / (1.0 + volume));
+}
+
+inline double compute_community_dispersion_s(double head_mass,
+                                             double eff_species) {
+  const double volume =
+      compute_community_dispersion_volume(head_mass, eff_species);
+  const double evidence = volume * volume;
+  return clamp01(1.0 - std::exp(-(evidence * evidence)));
 }
 
 chimera::feature::Params prepare_feature_params_for_classify(
     const ChimeraBuild::IMCFConfig &imcfConfig, size_t &feature_min_len);
 
 // --- fast taxid dictionary ---
+inline constexpr uint16_t kTaxSlotCount = 16;
+inline constexpr uint32_t kInvalidTidId =
+    std::numeric_limits<uint32_t>::max();
+
 struct TaxDict {
   std::vector<std::vector<uint32_t>> idx2id;  // [bin][species] -> tid_id
   std::vector<std::string> id2str;            // tid_id -> taxid string
   std::vector<std::vector<uint32_t>> tid2bin; // tid_id -> 所在 bin 列表
   robin_hood::unordered_flat_map<std::string, uint32_t> str2id; // taxid -> tid_id
+  std::vector<uint32_t> binSlotRepTid; // [bin * 16 + slot] -> rep tid_id
+
+  inline uint32_t rep_tid_for_bin_slot(uint32_t bin, uint16_t slot) const {
+    if (slot >= kTaxSlotCount) {
+      return kInvalidTidId;
+    }
+    const size_t offset =
+        static_cast<size_t>(bin) * kTaxSlotCount + static_cast<size_t>(slot);
+    if (offset >= binSlotRepTid.size()) {
+      return kInvalidTidId;
+    }
+    return binSlotRepTid[offset];
+  }
 };
 
 TaxDict build_tax_dict(const std::vector<std::vector<std::string>> &idx2tax);
+void rebuild_bin_slot_rep_lookup(
+    TaxDict &tax, const std::vector<uint32_t> *tid2speciesRep = nullptr);
 
 struct SpoolCandidate {
   uint32_t tid{0};
@@ -513,6 +577,7 @@ struct SpoolReadRecord {
   uint32_t best_taxid_hint{0};
   std::string reject_reason;
   std::vector<SpoolCandidate> candidates;
+  std::vector<SpoolCandidate> abundance_candidates;
 };
 
 inline constexpr uint32_t kSpoolUnclassifiedTid =
@@ -524,6 +589,7 @@ struct CompactClassifyResult {
   uint32_t best_taxid_hint{kSpoolUnclassifiedTid};
   std::string reject_reason;
   std::vector<SpoolCandidate> candidates;
+  std::vector<SpoolCandidate> abundance_candidates;
 };
 
 void write_spool_header(std::ostream &os);
@@ -625,6 +691,7 @@ struct ProcessScratch {
   std::vector<size_t> deferredEval;
   std::vector<std::pair<uint32_t, uint64_t>> weighted;
   std::vector<uint32_t> topBins;
+  std::vector<uint32_t> baseTopBins;
   std::vector<std::pair<uint32_t, uint64_t>> repRanked;
   std::vector<std::pair<uint32_t, uint64_t>> genusRanked;
   std::vector<uint32_t> repPool;
@@ -635,9 +702,13 @@ struct ProcessScratch {
   std::vector<uint32_t> minimizerBins;
   std::vector<uint32_t> minimizerTidEpoch;
   uint32_t minimizerTidEpochValue{0};
+  std::vector<uint32_t> minimizerTidBaseEpoch;
+  std::vector<uint32_t> minimizerTidCompletionEpoch;
   std::vector<uint32_t> minimizerBinEpoch;
   uint32_t minimizerBinEpochValue{0};
   std::vector<double> tidScoreDense;
+  std::vector<double> tidBaseScoreDense;
+  std::vector<double> tidCompletionScoreDense;
   std::vector<uint32_t> tidScoreEpoch;
   std::vector<uint32_t> activeTidScores;
   uint32_t tidScoreEpochValue{0};

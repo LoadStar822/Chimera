@@ -90,6 +90,18 @@ void write_spool_record(std::ostream &os, const SpoolReadRecord &record) {
       throw std::runtime_error("Failed to write classify spool candidates");
     }
   }
+  const uint32_t abundance_len =
+      static_cast<uint32_t>(record.abundance_candidates.size());
+  write_pod(os, abundance_len);
+  if (abundance_len > 0) {
+    os.write(reinterpret_cast<const char *>(record.abundance_candidates.data()),
+             static_cast<std::streamsize>(abundance_len *
+                                          sizeof(SpoolCandidate)));
+    if (!os) {
+      throw std::runtime_error(
+          "Failed to write classify spool abundance candidates");
+    }
+  }
 }
 
 void write_spool_record(std::ostream &os,
@@ -105,6 +117,18 @@ void write_spool_record(std::ostream &os,
              static_cast<std::streamsize>(cand_len * sizeof(SpoolCandidate)));
     if (!os) {
       throw std::runtime_error("Failed to write classify spool candidates");
+    }
+  }
+  const uint32_t abundance_len =
+      static_cast<uint32_t>(record.abundance_candidates.size());
+  write_pod(os, abundance_len);
+  if (abundance_len > 0) {
+    os.write(reinterpret_cast<const char *>(record.abundance_candidates.data()),
+             static_cast<std::streamsize>(abundance_len *
+                                          sizeof(SpoolCandidate)));
+    if (!os) {
+      throw std::runtime_error(
+          "Failed to write classify spool abundance candidates");
     }
   }
 }
@@ -148,6 +172,19 @@ bool read_spool_record(std::istream &is, SpoolReadRecord &record) {
             static_cast<std::streamsize>(cand_len * sizeof(SpoolCandidate)));
     if (!is) {
       throw std::runtime_error("Truncated classify spool candidates");
+    }
+  }
+  uint32_t abundance_len = 0;
+  if (!read_pod(is, abundance_len)) {
+    throw std::runtime_error("Truncated classify spool abundance length");
+  }
+  record.abundance_candidates.resize(abundance_len);
+  if (abundance_len > 0) {
+    is.read(reinterpret_cast<char *>(record.abundance_candidates.data()),
+            static_cast<std::streamsize>(abundance_len *
+                                         sizeof(SpoolCandidate)));
+    if (!is) {
+      throw std::runtime_error("Truncated classify spool abundance candidates");
     }
   }
   return true;

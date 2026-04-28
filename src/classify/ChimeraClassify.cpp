@@ -27,6 +27,7 @@
 #include <memory>
 #include <sstream>
 #include <thread>
+#include <unordered_set>
 
 namespace {
 
@@ -125,6 +126,70 @@ struct SpoolEMFit {
   size_t candidate_count{0};
 };
 
+struct SpoolAbundancePreparedCandidate {
+  size_t idx{0};
+  double score{0.0};
+};
+
+struct SpoolAbundanceFit {
+  std::vector<uint32_t> taxid_list;
+  std::unordered_map<uint32_t, size_t> taxid_to_idx;
+  std::vector<double> class_pi_vec;
+  std::vector<double> abundance_mass_vec;
+  std::vector<double> local_mass_vec;
+  std::vector<double> read_support_vec;
+  size_t read_count{0};
+  size_t candidate_count{0};
+};
+
+struct AbundanceEvidenceOutput {
+  double count{0.0};
+  double abundance_mass{0.0};
+  double primary_mass{0.0};
+  double decision_mass{0.0};
+  double local_mass{0.0};
+  double read_support{0.0};
+};
+
+static double compute_sample_evidence_strength(
+    const ChimeraClassify::FileInfo &fileInfo,
+    const chimera::presence::CoverageMeta &coverageMeta,
+    const ChimeraClassify::CommunityDispersionProbeStats &probeStats) {
+  const size_t avg_len =
+      (fileInfo.avgLen > 0)
+          ? fileInfo.avgLen
+          : static_cast<size_t>(coverageMeta.ref_read_length);
+  const size_t span =
+      (coverageMeta.effective_span > 0)
+          ? static_cast<size_t>(coverageMeta.effective_span)
+          : static_cast<size_t>(1);
+  const size_t ref_len =
+      static_cast<size_t>(std::max<uint16_t>(coverageMeta.ref_read_length, 1));
+  const double sample_window = static_cast<double>(
+      std::max<int64_t>(1, static_cast<int64_t>(avg_len) -
+                               static_cast<int64_t>(span) + 1));
+  const double ref_window = static_cast<double>(
+      std::max<int64_t>(1, static_cast<int64_t>(ref_len) -
+                               static_cast<int64_t>(span) + 1));
+  double community_complexity = probeStats.simpson_species;
+  if (!(community_complexity > 0.0)) {
+    community_complexity = probeStats.eff_species;
+  }
+  if (!(community_complexity > 0.0)) {
+    community_complexity = 1.0;
+  }
+  const double required_window = community_complexity * ref_window;
+  if (!(sample_window > required_window)) {
+    return 0.0;
+  }
+  const double excess = sample_window - required_window;
+  const double denom = sample_window + required_window;
+  if (!(denom > 0.0)) {
+    return 1.0;
+  }
+  return ChimeraClassify::clamp01(excess / denom);
+}
+
 static std::string spool_taxid_to_string(
     uint32_t tid, const ChimeraClassify::TaxDict &tax) {
   if (tid == ChimeraClassify::kSpoolUnclassifiedTid ||
@@ -132,6 +197,12 @@ static std::string spool_taxid_to_string(
     return "unclassified";
   }
   return tax.id2str[tid];
+}
+
+static bool env_flag_enabled(const char *name) {
+  const char *value = std::getenv(name);
+  return value != nullptr && value[0] != '\0' &&
+         !(value[0] == '0' && value[1] == '\0');
 }
 
 static void normalize_distribution(std::vector<double> &dist) {
@@ -200,6 +271,43 @@ static bool prepare_spool_candidates(
     prepared.push_back(SpoolPreparedCandidate{cand.idx, log_likelihood});
   }
   return !prepared.empty();
+}
+
+static const std::vector<ChimeraClassify::SpoolCandidate> &
+select_spool_abundance_candidates(
+    const ChimeraClassify::SpoolReadRecord &record) {
+  return !record.abundance_candidates.empty() ? record.abundance_candidates
+                                              : record.candidates;
+}
+
+static bool prepare_spool_abundance_candidates(
+    const ChimeraClassify::SpoolReadRecord &record,
+    const std::unordered_map<uint32_t, size_t> &taxid_to_idx,
+    const ChimeraClassify::EMOptions &options,
+    std::vector<SpoolAbundancePreparedCandidate> &prepared,
+    double &read_weight) {
+  prepared.clear();
+  read_weight = 0.0;
+  const auto &candidates = select_spool_abundance_candidates(record);
+  if (candidates.empty()) {
+    return false;
+  }
+
+  prepared.reserve(candidates.size());
+  for (const auto &cand : candidates) {
+    if (cand.tid == ChimeraClassify::kSpoolUnclassifiedTid ||
+        !(cand.score > 0.0)) {
+      continue;
+    }
+    auto it = taxid_to_idx.find(cand.tid);
+    if (it == taxid_to_idx.end()) {
+      continue;
+    }
+    const double score = std::max(cand.score, options.eps);
+    prepared.push_back(SpoolAbundancePreparedCandidate{it->second, score});
+    read_weight += score;
+  }
+  return read_weight > 0.0 && !prepared.empty();
 }
 
 static SpoolEMFit fit_spool_em(
@@ -433,6 +541,339 @@ static SpoolEMFit fit_spool_em(
   return fit;
 }
 
+static SpoolAbundanceFit fit_spool_abundance_em(
+    const std::vector<std::string> &spoolPaths,
+    const ChimeraClassify::TaxDict &tax, size_t maxIter,
+    const ChimeraClassify::EMOptions &options, double pruneRatio) {
+  SpoolAbundanceFit fit;
+  std::unordered_set<uint32_t> taxid_set;
+  std::unordered_map<uint32_t, double> local_mass_by_tid;
+  std::unordered_map<uint32_t, double> read_support_by_tid;
+
+  for (const auto &path : spoolPaths) {
+    std::ifstream is(path, std::ios::binary);
+    if (!is.is_open()) {
+      throw std::runtime_error("Failed to open classify spool: " + path);
+    }
+    ChimeraClassify::read_spool_header(is, path);
+    ChimeraClassify::SpoolReadRecord record;
+    while (ChimeraClassify::read_spool_record(is, record)) {
+      const auto &candidates = select_spool_abundance_candidates(record);
+      if (candidates.empty()) {
+        continue;
+      }
+      ++fit.read_count;
+      fit.candidate_count += candidates.size();
+      std::unordered_set<uint32_t> seen_in_read;
+      seen_in_read.reserve(candidates.size());
+      for (const auto &cand : candidates) {
+        if (cand.tid == ChimeraClassify::kSpoolUnclassifiedTid ||
+            cand.tid >= tax.id2str.size() || !(cand.score > 0.0)) {
+          continue;
+        }
+        taxid_set.insert(cand.tid);
+        local_mass_by_tid[cand.tid] += cand.score;
+        seen_in_read.insert(cand.tid);
+      }
+      for (uint32_t tid : seen_in_read) {
+        read_support_by_tid[tid] += 1.0;
+      }
+    }
+  }
+
+  fit.taxid_list.reserve(taxid_set.size());
+  for (uint32_t tid : taxid_set) {
+    fit.taxid_list.push_back(tid);
+  }
+  if (fit.taxid_list.empty()) {
+    return fit;
+  }
+  std::sort(fit.taxid_list.begin(), fit.taxid_list.end());
+
+  const size_t taxid_count = fit.taxid_list.size();
+  fit.taxid_to_idx.reserve(taxid_count);
+  fit.local_mass_vec.assign(taxid_count, 0.0);
+  fit.read_support_vec.assign(taxid_count, 0.0);
+  for (size_t idx = 0; idx < taxid_count; ++idx) {
+    const uint32_t tid = fit.taxid_list[idx];
+    fit.taxid_to_idx.emplace(tid, idx);
+    auto local_it = local_mass_by_tid.find(tid);
+    if (local_it != local_mass_by_tid.end()) {
+      fit.local_mass_vec[idx] = local_it->second;
+    }
+    auto support_it = read_support_by_tid.find(tid);
+    if (support_it != read_support_by_tid.end()) {
+      fit.read_support_vec[idx] = support_it->second;
+    }
+  }
+
+  fit.class_pi_vec = fit.local_mass_vec;
+  normalize_distribution(fit.class_pi_vec);
+  fit.abundance_mass_vec.assign(taxid_count, 0.0);
+
+#ifdef _OPENMP
+  const int num_threads = omp_get_max_threads();
+#else
+  const int num_threads = 1;
+#endif
+  std::vector<std::vector<double>> thread_expected(
+      num_threads, std::vector<double>(taxid_count, 0.0));
+  std::vector<double> expected_counts(taxid_count, 0.0);
+
+  for (size_t iteration = 0; iteration < maxIter; ++iteration) {
+    const bool final_iter = (iteration + 1 == maxIter);
+    for (auto &local : thread_expected) {
+      std::fill(local.begin(), local.end(), 0.0);
+    }
+
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+    {
+#ifdef _OPENMP
+      const int tid = omp_get_thread_num();
+#else
+      const int tid = 0;
+#endif
+      auto &local_expected = thread_expected[tid];
+      std::vector<SpoolAbundancePreparedCandidate> prepared;
+
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic)
+#endif
+      for (size_t path_idx = 0; path_idx < spoolPaths.size(); ++path_idx) {
+        const auto &path = spoolPaths[path_idx];
+        std::ifstream is(path, std::ios::binary);
+        if (!is.is_open()) {
+          throw std::runtime_error("Failed to open classify spool: " + path);
+        }
+        ChimeraClassify::read_spool_header(is, path);
+        ChimeraClassify::SpoolReadRecord record;
+        while (ChimeraClassify::read_spool_record(is, record)) {
+          double read_weight = 0.0;
+          if (!prepare_spool_abundance_candidates(
+                  record, fit.taxid_to_idx, options, prepared, read_weight)) {
+            continue;
+          }
+          double denom = 0.0;
+          for (const auto &cand : prepared) {
+            denom += std::max(fit.class_pi_vec[cand.idx], options.eps) *
+                     cand.score;
+          }
+          if (!(denom > 0.0)) {
+            continue;
+          }
+          for (const auto &cand : prepared) {
+            const double prior = std::max(fit.class_pi_vec[cand.idx],
+                                          options.eps);
+            const double q = (prior * cand.score) / denom;
+            local_expected[cand.idx] += read_weight * q;
+          }
+        }
+      }
+    }
+
+    std::fill(expected_counts.begin(), expected_counts.end(), 0.0);
+    double sum_expected = 0.0;
+    for (const auto &local : thread_expected) {
+      for (size_t idx = 0; idx < taxid_count; ++idx) {
+        expected_counts[idx] += local[idx];
+      }
+    }
+    double max_expected = 0.0;
+    for (double v : expected_counts) {
+      if (v > max_expected) {
+        max_expected = v;
+      }
+    }
+    const double prune_thres = max_expected * pruneRatio;
+    for (double &v : expected_counts) {
+      if (v < prune_thres) {
+        v = 0.0;
+      }
+      sum_expected += v;
+    }
+    if (final_iter) {
+      fit.abundance_mass_vec = expected_counts;
+    }
+
+    const double pseudo_mass =
+        options.alpha * static_cast<double>(taxid_count);
+    double denominator = pseudo_mass + sum_expected;
+    if (denominator <= 0.0) {
+      denominator = 1.0;
+    }
+    for (size_t idx = 0; idx < taxid_count; ++idx) {
+      fit.class_pi_vec[idx] = (expected_counts[idx] + options.alpha) /
+                              denominator;
+    }
+  }
+
+  double abundance_sum = 0.0;
+  for (double v : fit.abundance_mass_vec) {
+    abundance_sum += v;
+  }
+  if (!(abundance_sum > 0.0)) {
+    fit.abundance_mass_vec = fit.local_mass_vec;
+  }
+  return fit;
+}
+
+static void write_abundance_em_evidence(
+    const std::string &evidencePath, const SpoolAbundanceFit &fit,
+    const std::unordered_map<std::string, double> &primaryMass,
+    const std::unordered_map<std::string, double> &decisionMass,
+    const ChimeraClassify::TaxDict &tax, double abundanceWeight) {
+  std::unordered_map<std::string, AbundanceEvidenceOutput> merged;
+  merged.reserve(fit.taxid_list.size() + primaryMass.size() +
+                 decisionMass.size());
+
+  double abundanceSum = 0.0;
+  for (size_t idx = 0; idx < fit.taxid_list.size(); ++idx) {
+    if (idx < fit.abundance_mass_vec.size()) {
+      abundanceSum += std::max(0.0, fit.abundance_mass_vec[idx]);
+    }
+  }
+  double decisionSum = 0.0;
+  for (const auto &[taxid, value] : decisionMass) {
+    if (!taxid.empty() && taxid != "unclassified") {
+      decisionSum += std::max(0.0, value);
+    }
+  }
+  if (!(abundanceSum > 0.0)) {
+    abundanceWeight = 0.0;
+  }
+  if (!(decisionSum > 0.0)) {
+    abundanceWeight = 1.0;
+  }
+  abundanceWeight = ChimeraClassify::clamp01(abundanceWeight);
+  const double weightEpsilon =
+      std::sqrt(static_cast<double>(std::numeric_limits<float>::epsilon()));
+  if (abundanceWeight >= 1.0 - weightEpsilon) {
+    abundanceWeight = 1.0;
+  } else if (abundanceWeight <= weightEpsilon) {
+    abundanceWeight = 0.0;
+  }
+
+  for (size_t idx = 0; idx < fit.taxid_list.size(); ++idx) {
+    if (idx >= fit.abundance_mass_vec.size() ||
+        idx >= fit.local_mass_vec.size() ||
+        idx >= fit.read_support_vec.size()) {
+      continue;
+    }
+    const double abundanceMass = fit.abundance_mass_vec[idx];
+    const double localMass = fit.local_mass_vec[idx];
+    const double readSupport = fit.read_support_vec[idx];
+    if (!(abundanceMass > 0.0) && !(localMass > 0.0) &&
+        !(readSupport > 0.0)) {
+      continue;
+    }
+    const std::string taxid = spool_taxid_to_string(fit.taxid_list[idx], tax);
+    if (taxid.empty() || taxid == "unclassified") {
+      continue;
+    }
+    auto &dst = merged[taxid];
+    dst.abundance_mass += abundanceMass;
+    dst.local_mass += localMass;
+    dst.read_support += readSupport;
+  }
+
+  for (const auto &[taxid, value] : primaryMass) {
+    if (taxid.empty() || taxid == "unclassified" || !(value > 0.0)) {
+      continue;
+    }
+    merged[taxid].primary_mass += value;
+  }
+  for (const auto &[taxid, value] : decisionMass) {
+    if (taxid.empty() || taxid == "unclassified" || !(value > 0.0)) {
+      continue;
+    }
+    merged[taxid].decision_mass += value;
+  }
+
+  for (auto &[taxid, evidence] : merged) {
+    const double abundanceP =
+        abundanceSum > 0.0 ? evidence.abundance_mass / abundanceSum : 0.0;
+    const double decisionP =
+        decisionSum > 0.0 ? evidence.decision_mass / decisionSum : 0.0;
+    evidence.count =
+        (abundanceWeight * abundanceP) + ((1.0 - abundanceWeight) * decisionP);
+  }
+
+  std::vector<std::pair<std::string, AbundanceEvidenceOutput>> activeOrder;
+  activeOrder.reserve(merged.size());
+  for (const auto &[taxid, evidence] : merged) {
+    if (evidence.count > 0.0) {
+      activeOrder.emplace_back(taxid, evidence);
+    }
+  }
+  std::sort(activeOrder.begin(), activeOrder.end(),
+            [](const auto &lhs, const auto &rhs) {
+              if (lhs.second.count != rhs.second.count) {
+                return lhs.second.count > rhs.second.count;
+              }
+              return lhs.first < rhs.first;
+            });
+
+  double countSum = 0.0;
+  double countSqSum = 0.0;
+  for (const auto &[taxid, evidence] : activeOrder) {
+    const double value = std::max(0.0, evidence.count);
+    countSum += value;
+    countSqSum += value * value;
+  }
+  std::unordered_set<std::string> activeTaxids;
+  activeTaxids.reserve(activeOrder.size());
+  if (countSum > 0.0 && countSqSum > 0.0) {
+    const double effectiveTaxa = (countSum * countSum) / countSqSum;
+    const double residualPower = 2.0 - abundanceWeight;
+    const double residualScale =
+        std::pow(std::max(1.0, effectiveTaxa), residualPower);
+    const double residualLimit = countSum / std::max(1.0, residualScale);
+    double cumulative = 0.0;
+    for (const auto &[taxid, evidence] : activeOrder) {
+      activeTaxids.insert(taxid);
+      cumulative += std::max(0.0, evidence.count);
+      if ((countSum - cumulative) <= residualLimit) {
+        break;
+      }
+    }
+  }
+
+  std::vector<std::pair<std::string, AbundanceEvidenceOutput>> order;
+  order.reserve(activeTaxids.empty() ? activeOrder.size() : activeTaxids.size());
+  for (const auto &[taxid, evidence] : activeOrder) {
+    if (activeTaxids.empty() || activeTaxids.find(taxid) != activeTaxids.end()) {
+      order.emplace_back(taxid, evidence);
+    }
+  }
+  std::sort(order.begin(), order.end(),
+            [](const auto &lhs, const auto &rhs) {
+              return lhs.first < rhs.first;
+            });
+
+  std::ofstream aggregateOut(evidencePath, std::ios::out | std::ios::binary);
+  if (!aggregateOut.is_open()) {
+    throw std::runtime_error("Failed to open abundance evidence output: " +
+                             evidencePath);
+  }
+  aggregateOut << "taxid\tcount\tabundance_mass\tprimary_mass"
+               << "\tdecision_mass\tlocal_mass\tread_support\n";
+  aggregateOut << std::setprecision(17);
+  for (const auto &[taxid, evidence] : order) {
+    aggregateOut << taxid << '\t' << evidence.count << '\t'
+                 << evidence.abundance_mass << '\t' << evidence.primary_mass
+                 << '\t' << evidence.decision_mass << '\t'
+                 << evidence.local_mass << '\t'
+                 << evidence.read_support << '\n';
+  }
+  aggregateOut.close();
+  if (!aggregateOut.good()) {
+    throw std::runtime_error("Failed to close abundance evidence output: " +
+                             evidencePath);
+  }
+}
+
 static std::vector<std::pair<std::string, double>>
 materialize_spool_posterior(const ChimeraClassify::SpoolReadRecord &record,
                             const SpoolEMFit &fit,
@@ -484,6 +925,14 @@ materialize_spool_result(const ChimeraClassify::SpoolReadRecord &record,
   if (record.best_taxid_hint != ChimeraClassify::kSpoolUnclassifiedTid) {
     result.best_taxid_hint = spool_taxid_to_string(record.best_taxid_hint, tax);
   }
+  result.abundanceCount.reserve(record.abundance_candidates.size());
+  for (const auto &cand : record.abundance_candidates) {
+    if (cand.tid != ChimeraClassify::kSpoolUnclassifiedTid &&
+        cand.tid < tax.id2str.size() && cand.score > 0.0) {
+      result.abundanceCount.emplace_back(spool_taxid_to_string(cand.tid, tax),
+                                         cand.score);
+    }
+  }
   result.posteriors = materialize_spool_posterior(record, fit, tax, options);
   return result;
 }
@@ -493,6 +942,15 @@ static std::string resolve_tsv_output_path(const std::string &path) {
     return path;
   }
   return path + ".tsv";
+}
+
+static std::string resolve_evidence_output_path(const std::string &outputFile) {
+  std::filesystem::path path(outputFile);
+  if (path.filename() == "ChimeraClassify.tsv") {
+    return (path.parent_path() / "ChimeraEvidence.tsv").string();
+  }
+  path.replace_extension(".evidence.tsv");
+  return path.string();
 }
 
 static void write_spool_em_results(
@@ -513,6 +971,33 @@ static void write_spool_em_results(
 
   const size_t part_count = spoolPaths.size();
   std::vector<std::string> partPaths(part_count);
+  const std::string evidencePath = resolve_evidence_output_path(outputFile);
+  {
+    std::filesystem::path evidenceParent =
+        std::filesystem::path(evidencePath).parent_path();
+    if (!evidenceParent.empty()) {
+      std::filesystem::create_directories(evidenceParent);
+    }
+  }
+  const double abundancePruneRatio =
+      std::pow(options.prune_ratio,
+               0.5 + (0.5 * ChimeraClassify::clamp01(
+                                 config.community_dispersion_s)));
+  const double abundanceWeight =
+      ChimeraClassify::clamp01(config.community_dispersion_s);
+  const size_t abundanceIterations = static_cast<size_t>(
+      std::ceil(std::sqrt(static_cast<double>(config.emIter)) *
+                abundanceWeight));
+  std::cout << "[classify][auto] abundance-em"
+            << " prune_ratio=" << abundancePruneRatio
+            << " iterations=" << abundanceIterations
+            << " dispersion_s=" << config.community_dispersion_s << "\n";
+  SpoolAbundanceFit abundanceFit = fit_spool_abundance_em(
+      spoolPaths, tax, abundanceIterations, options, abundancePruneRatio);
+  std::vector<std::unordered_map<std::string, double>> primaryAggregates(
+      part_count);
+  std::vector<std::unordered_map<std::string, double>> decisionAggregates(
+      part_count);
   for (size_t i = 0; i < part_count; ++i) {
     partPaths[i] = outputFile + ".part." + std::to_string(i) + ".tmp";
   }
@@ -552,6 +1037,18 @@ static void write_spool_em_results(
             ++partStats[part_idx].unclassified;
           } else {
             ++partStats[part_idx].classified;
+          }
+          auto &primaryAggregate = primaryAggregates[part_idx];
+          for (const auto &[taxid, count] : result.taxidCount) {
+            if (!taxid.empty() && taxid != "unclassified" && count > 0.0) {
+              primaryAggregate[taxid] += count;
+            }
+          }
+          if (!result.taxidCount.empty()) {
+            const std::string &decisionTaxid = result.taxidCount.front().first;
+            if (!decisionTaxid.empty() && decisionTaxid != "unclassified") {
+              decisionAggregates[part_idx][decisionTaxid] += 1.0;
+            }
           }
           ChimeraClassify::writeResultRecord(partOs, result, postTopkOss);
         }
@@ -612,6 +1109,11 @@ static void write_spool_em_results(
       throw std::runtime_error("Failed to open classify output part: " +
                                partPaths[i]);
     }
+    std::error_code partSizeEc;
+    if (std::filesystem::file_size(partPaths[i], partSizeEc) == 0 &&
+        !partSizeEc) {
+      continue;
+    }
     os << partIs.rdbuf();
     if (!os.good()) {
       cleanup_parts();
@@ -622,6 +1124,21 @@ static void write_spool_em_results(
     fileInfo.unclassifiedNum += partStats[i].unclassified;
   }
   os.close();
+  std::unordered_map<std::string, double> primaryMass;
+  for (const auto &partMap : primaryAggregates) {
+    for (const auto &[taxid, count] : partMap) {
+      primaryMass[taxid] += count;
+    }
+  }
+  std::unordered_map<std::string, double> decisionMass;
+  for (const auto &partMap : decisionAggregates) {
+    for (const auto &[taxid, count] : partMap) {
+      decisionMass[taxid] += count;
+    }
+  }
+  write_abundance_em_evidence(
+      evidencePath, abundanceFit, primaryMass, decisionMass, tax,
+      abundanceWeight);
   cleanup_parts();
 }
 
@@ -763,23 +1280,18 @@ void run(ClassifyConfig config) {
     }
     weightCtx.tid2speciesRep = &tid2speciesRep;
     weightCtx.tid2genus = &tid2genus;
+    rebuild_bin_slot_rep_lookup(tax, weightCtx.tid2speciesRep);
   }
   std::vector<std::vector<std::string>>().swap(indexToTaxid);
   PresenceSummary presenceSummary(config.presence_breadth_bits);
   PresenceSummary *presencePtr = &presenceSummary;
 
-  config.tail_risk_u = 1.0;
-  config.tail_risk_s = 1.0;
+  config.community_dispersion_u = 1.0;
+  config.community_dispersion_s = 1.0;
 
-  constexpr uint32_t kTailRiskProbeReads = 200000;
-  constexpr std::size_t kTailRiskTopK = 10;
-  constexpr double kTailRiskTopMassAnchor = 0.75;
-  constexpr double kTailRiskEffSpeciesAnchor = 32.0;
-  constexpr double kTailRiskRAnchor = 1.0 - kTailRiskTopMassAnchor;
-  constexpr int kTailRiskBeta = 5; // align with profile ceil(1/PROB_HI_BASE)
-
-  TailRiskProbeStats probeStats;
-  if (kTailRiskProbeReads > 0) {
+  constexpr uint32_t kDispersionProbeReads = 200000;
+  CommunityDispersionProbeStats probeStats;
+  if (kDispersionProbeReads > 0) {
     FileInfo probeInfo;
     AutoClassifyPolicy probePolicy{};
     probePolicy.candidate = derive_candidate_policy(config);
@@ -789,7 +1301,7 @@ void run(ClassifyConfig config) {
     std::vector<classifyResult> probeResults;
     std::atomic<bool> probe_done{false};
     std::thread probeProducer([&]() {
-      parseReads(probeQueues, config, probeInfo, kTailRiskProbeReads,
+      parseReads(probeQueues, config, probeInfo, kDispersionProbeReads,
                  &probeThrottles);
       probe_done.store(true, std::memory_order_release);
     });
@@ -871,31 +1383,32 @@ void run(ClassifyConfig config) {
     for (const auto &kv : species_counts) {
       counts.push_back(kv.second);
     }
-    probeStats = compute_tail_risk_probe_stats(counts, unclassified_reads,
-                                               kTailRiskTopK);
-    const double tail_risk_r = clamp01(1.0 - probeStats.top_mass);
-    config.tail_risk_u = compute_tail_risk_u(
-        tail_risk_r, probeStats.eff_species, kTailRiskRAnchor,
-        kTailRiskEffSpeciesAnchor);
-    config.tail_risk_s = compute_tail_risk_s(config.tail_risk_u, kTailRiskBeta);
+    probeStats =
+        compute_community_dispersion_probe_stats(counts, unclassified_reads);
+    config.community_dispersion_u = compute_community_dispersion_u(
+        probeStats.top_mass, probeStats.eff_species);
+    config.community_dispersion_s = compute_community_dispersion_s(
+        probeStats.top_mass, probeStats.eff_species);
     std::vector<classifyResult>().swap(probeResults);
     std::vector<moodycamel::ConcurrentQueue<batchReads>>().swap(probeQueues);
   }
 
-  const double tail_risk_hi = smoothstep(config.tail_risk_s, 0.60, 0.95);
+  const double dispersion_hi = config.community_dispersion_s;
   if (!config.firstFilterBeta_user) {
-    config.firstFilterBeta = lerp(0.5, 0.8, tail_risk_hi);
+    config.firstFilterBeta = lerp(0.5, 0.8, dispersion_hi);
   }
-  config.em_conf_power = lerp(1.0, 2.0, tail_risk_hi);
-  std::cout << "[classify][auto] tail-risk"
-            << " u=" << std::fixed << std::setprecision(4) << config.tail_risk_u
-            << " s=" << config.tail_risk_s
+  config.em_conf_power = lerp(1.0, 2.0, dispersion_hi);
+  std::cout << "[classify][auto] community-dispersion"
+            << " u=" << std::fixed << std::setprecision(4)
+            << config.community_dispersion_u
+            << " s=" << config.community_dispersion_s
             << " top_mass=" << probeStats.top_mass
             << " eff_species=" << probeStats.eff_species
+            << " simpson_species=" << probeStats.simpson_species
             << " uncls=" << probeStats.unclassified << "\n";
   std::cout << "[classify][auto] firstFilterBeta=" << config.firstFilterBeta
             << " em_conf_power=" << config.em_conf_power
-            << " hi_gate=" << tail_risk_hi << "\n";
+            << " dispersion_gate=" << dispersion_hi << "\n";
   std::cout << std::defaultfloat;
 
   FileInfo fileInfo;
@@ -908,6 +1421,8 @@ void run(ClassifyConfig config) {
   AutoClassifyPolicy classifyPolicy{};
   classifyPolicy.candidate = derive_candidate_policy(config);
   const std::filesystem::path spoolDir = make_spool_dir(config.outputFile);
+  const bool keepClassifySpool =
+      env_flag_enabled("CHIMERA_KEEP_CLASSIFY_SPOOL");
   std::filesystem::remove_all(spoolDir);
   std::filesystem::create_directories(spoolDir);
   const std::vector<std::string> spoolPaths =
@@ -928,7 +1443,11 @@ void run(ClassifyConfig config) {
   if (fileInfo.sequenceNum > 0) {
     fileInfo.avgLen = fileInfo.bpLength / fileInfo.sequenceNum;
   }
-  const AutoClassifyPolicy autoPolicy = derive_auto_policy(fileInfo, config);
+  AutoClassifyPolicy autoPolicy = derive_auto_policy(fileInfo, config);
+  autoPolicy.evidence_strength =
+      compute_sample_evidence_strength(fileInfo, coverageMeta, probeStats);
+  autoPolicy.post.fallback_scale = autoPolicy.evidence_strength;
+  autoPolicy.post.selective_reject_scale = autoPolicy.evidence_strength;
 
   size_t presenceTotalReads = fileInfo.sequenceNum;
   size_t presenceMeanReadLen = fileInfo.avgLen;
@@ -998,11 +1517,10 @@ void run(ClassifyConfig config) {
     DecisionConfig decisionConfig;
     double tuned_post_pi_min = config.post_pi_min;
     double tuned_post_pi_min_weights = tuned_post_pi_min;
-    double top10_mass = 0.0;
-    double top50_mass = 0.0;
-    double tail_base = 0.0;
-    double head_heavy_score = 0.0;
-    double relax_strength = 0.0;
+    double low_weight_mass_base = 0.0;
+    double low_weight_mass_target = 0.0;
+    double dominance_score = clamp01(1.0 - config.community_dispersion_s);
+    double relax_strength = clamp01(config.community_dispersion_s);
 
     if (tuned_post_pi_min > 0.0 && !classWeights.empty()) {
       std::vector<double> weights;
@@ -1018,56 +1536,48 @@ void run(ClassifyConfig config) {
       if (total_mass > 0.0 && weights.size() > 1) {
         std::sort(weights.begin(), weights.end(),
                   [](double a, double b) { return a > b; });
-        const size_t topK = std::min<size_t>(10, weights.size());
-        for (size_t i = 0; i < topK; ++i) {
-          top10_mass += weights[i];
-        }
-        top10_mass /= total_mass;
-        const size_t topK50 = std::min<size_t>(50, weights.size());
-        for (size_t i = 0; i < topK50; ++i) {
-          top50_mass += weights[i];
-        }
-        top50_mass /= total_mass;
 
-        const double h10 = clamp01((top10_mass - 0.65) / (1.0 - 0.65));
-        const double h50 = clamp01((top50_mass - 0.90) / (1.0 - 0.90));
-        head_heavy_score = std::max(h10, h50);
-        relax_strength =
-            clamp01(config.tail_risk_s * (1.0 - head_heavy_score));
-
-        auto tail_mass = [&](double pi_min) -> double {
+        auto low_weight_mass = [&](double pi_min) -> double {
           if (!(pi_min > 0.0)) {
             return 0.0;
           }
-          double tail = 0.0;
+          double mass = 0.0;
           for (size_t i = weights.size(); i-- > 0;) {
             const double w = weights[i];
             if (w >= pi_min) {
               break;
             }
-            tail += w;
+            mass += w;
           }
-          return tail / total_mass;
+          return mass / total_mass;
         };
 
         const double base = tuned_post_pi_min;
-        tail_base = tail_mass(base);
-        const double tail_trigger = 0.02;
-        if (tail_base > tail_trigger && relax_strength > 0.0) {
-          double target_tail = 0.01;
-          if (fileInfo.avgLen >= 2000) {
-            target_tail = 0.005;
-          }
-          const std::array<double, 4> candidates = {5e-4, 2e-4, 1e-4, 5e-5};
+        low_weight_mass_base = low_weight_mass(base);
+        double square_sum = 0.0;
+        const double inv_total_mass = 1.0 / total_mass;
+        for (double w : weights) {
+          const double p = w * inv_total_mass;
+          square_sum += p * p;
+        }
+        const double simpson_eff =
+            (square_sum > 0.0) ? (1.0 / square_sum) : 1.0;
+        low_weight_mass_target = 1.0 / (1.0 + simpson_eff);
+        if (low_weight_mass_base > low_weight_mass_target &&
+            relax_strength > 0.0) {
+          const double target_mass = low_weight_mass_target * total_mass;
           double tuned_candidate = base;
-          for (double c : candidates) {
-            if (c > base) {
-              continue;
-            }
-            tuned_candidate = c;
-            if (tail_mass(c) <= target_tail) {
+          double pruned_mass = 0.0;
+          for (size_t i = weights.size(); i-- > 0;) {
+            const double w = weights[i];
+            if (w >= base) {
               break;
             }
+            if (pruned_mass + w > target_mass) {
+              tuned_candidate = w;
+              break;
+            }
+            pruned_mass += w;
           }
           if (tuned_candidate < base) {
             const double log_base = std::log10(base);
@@ -1085,38 +1595,38 @@ void run(ClassifyConfig config) {
     tuned_post_pi_min_weights = tuned_post_pi_min;
 
     constexpr double kAutoPostPiMinLoDefault = 1e-4;
-    constexpr size_t kAutoPostPiMinL0 = 2000;
-    constexpr size_t kAutoPostPiMinL1 = 800;
     const double auto_pi_lo = kAutoPostPiMinLoDefault;
 
-    auto len_tune = ChimeraClassify::tune_post_pi_min_by_avg_len(
-        tuned_post_pi_min_weights, auto_pi_lo, fileInfo.avgLen, relax_strength,
-        kAutoPostPiMinL0, kAutoPostPiMinL1);
-    tuned_post_pi_min = len_tune.tuned;
-
-    const bool short_like = (autoPolicy.regime == ReadRegime::ShortLike);
-    const bool fallback_enabled = !autoPolicy.post.disable_fallback;
-    const bool enable_selective_reject = autoPolicy.post.enable_selective_reject;
+    auto evidence_tune =
+        ChimeraClassify::tune_post_pi_min_by_evidence_strength(
+            tuned_post_pi_min_weights, auto_pi_lo,
+            autoPolicy.evidence_strength, relax_strength);
+    tuned_post_pi_min = evidence_tune.tuned;
 
     decisionConfig.min_class_weight = tuned_post_pi_min;
     decisionConfig.fallback_strength =
-        fallback_enabled ? relax_strength : 0.0;
+        ChimeraClassify::clamp01(relax_strength *
+                                 autoPolicy.post.fallback_scale);
     decisionConfig.selective_reject_strength =
-        enable_selective_reject ? relax_strength : 0.0;
+        autoPolicy.post.enable_selective_reject
+            ? ChimeraClassify::clamp01(
+                  relax_strength * autoPolicy.post.selective_reject_scale)
+            : 0.0;
     decisionConfig.fallback_gap_min = 0.10;
     std::cout << "[classify][auto] post-pi"
               << " s=" << std::fixed << std::setprecision(4)
-              << config.tail_risk_s << " head_heavy=" << head_heavy_score
+              << config.community_dispersion_s
+              << " dominance=" << dominance_score
               << " relax=" << relax_strength
               << " base=" << config.post_pi_min
-              << " tail_base=" << tail_base
+              << " low_weight_mass=" << low_weight_mass_base
+              << " low_weight_target=" << low_weight_mass_target
               << " tuned=" << tuned_post_pi_min
-              << " len_t=" << len_tune.t
+              << " evidence_t=" << evidence_tune.t
               << " avg_len=" << fileInfo.avgLen
-              << " regime=" << (short_like ? "short_like" : "long_like")
-              << " fallback_enabled=" << (fallback_enabled ? 1 : 0)
+              << " evidence_strength=" << autoPolicy.evidence_strength
               << " enable_selective_reject="
-              << (enable_selective_reject ? 1 : 0)
+              << (autoPolicy.post.enable_selective_reject ? 1 : 0)
               << " fallback_strength=" << decisionConfig.fallback_strength
               << " selective_strength="
               << decisionConfig.selective_reject_strength
@@ -1128,7 +1638,12 @@ void run(ClassifyConfig config) {
                            tax, &presenceDecision, weightCtx.ncbiTaxdump,
                            autoPolicy.post, config, fileInfo);
   }
-  std::filesystem::remove_all(spoolDir);
+  if (keepClassifySpool) {
+    std::cout << "[classify][debug] keeping spool=" << spoolDir.string()
+              << "\n";
+  } else {
+    std::filesystem::remove_all(spoolDir);
+  }
 }
 
 } // namespace ChimeraClassify
