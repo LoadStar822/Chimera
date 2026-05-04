@@ -67,38 +67,6 @@ namespace ChimeraClassify {
 		std::unordered_set<std::string> uniqueTaxids;
 	};
 
-	struct CandidatePolicy {
-		bool enable_taxpool{ true };
-	};
-
-	struct PostDecisionPolicy {
-		double fallback_scale{ 1.0 };
-		double selective_reject_scale{ 1.0 };
-		bool enable_selective_reject{ true };
-	};
-
-	struct AutoClassifyPolicy {
-		CandidatePolicy candidate{};
-		PostDecisionPolicy post{};
-		double evidence_strength{ 1.0 };
-	};
-
-	inline AutoClassifyPolicy derive_auto_policy(const FileInfo &fi,
-	                                             const ClassifyConfig &cfg) {
-		(void)cfg;
-		(void)fi;
-		AutoClassifyPolicy policy{};
-		policy.candidate.enable_taxpool = true;
-		return policy;
-	}
-
-	inline CandidatePolicy derive_candidate_policy(const ClassifyConfig &cfg) {
-		(void)cfg;
-		CandidatePolicy policy{};
-		policy.enable_taxpool = true;
-		return policy;
-	}
-
 	struct batchReads {
 		std::vector< std::string >                 ids;
 		std::vector< std::vector< seqan3::dna4 > > seqs;
@@ -113,13 +81,13 @@ namespace ChimeraClassify {
 				std::string reject_reason; // 为空表示未拒绝或接受
 				std::string best_taxid_hint; // 最佳候选 taxid（即使未被接受）
 				std::vector<std::pair<std::string, double>> abundanceCount;
+				std::vector<std::pair<std::string, double>> sampleMixturePosteriors;
+				std::vector<std::pair<std::string, double>> sampleMixtureLocalScores;
+				double sampleMixtureTopScore{ 0.0 };
 			};
 
 			struct DecisionConfig {
 					double min_class_weight = 1e-4;
-					double fallback_strength = 0.0; // 连续 fallback 强度（0=禁用，1=最积极）
-					double selective_reject_strength = 0.0; // 连续 selective reject 强度
-					double fallback_gap_min = 0.10; // fallback 仅在 top1-top2 gap 足够大时触发（抑制 FP）
 				};
 		}
 	#endif // !CLASSIFYCONFIG_HPP

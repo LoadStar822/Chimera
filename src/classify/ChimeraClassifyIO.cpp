@@ -16,7 +16,7 @@ namespace ChimeraClassify {
 
 namespace {
 
-constexpr char kSpoolMagic[] = {'C', 'H', 'S', 'P', '2', '\0', '\0', '\0'};
+constexpr char kSpoolMagic[] = {'C', 'H', 'S', 'P', '4', '\0', '\0', '\0'};
 
 template <typename T>
 void write_pod(std::ostream &os, const T &value) {
@@ -102,6 +102,18 @@ void write_spool_record(std::ostream &os, const SpoolReadRecord &record) {
           "Failed to write classify spool abundance candidates");
     }
   }
+  const uint32_t mixture_len =
+      static_cast<uint32_t>(record.sample_mixture_candidates.size());
+  write_pod(os, mixture_len);
+  if (mixture_len > 0) {
+    os.write(
+        reinterpret_cast<const char *>(record.sample_mixture_candidates.data()),
+        static_cast<std::streamsize>(mixture_len * sizeof(SpoolCandidate)));
+    if (!os) {
+      throw std::runtime_error(
+          "Failed to write classify spool sample mixture candidates");
+    }
+  }
 }
 
 void write_spool_record(std::ostream &os,
@@ -129,6 +141,18 @@ void write_spool_record(std::ostream &os,
     if (!os) {
       throw std::runtime_error(
           "Failed to write classify spool abundance candidates");
+    }
+  }
+  const uint32_t mixture_len =
+      static_cast<uint32_t>(record.sample_mixture_candidates.size());
+  write_pod(os, mixture_len);
+  if (mixture_len > 0) {
+    os.write(
+        reinterpret_cast<const char *>(record.sample_mixture_candidates.data()),
+        static_cast<std::streamsize>(mixture_len * sizeof(SpoolCandidate)));
+    if (!os) {
+      throw std::runtime_error(
+          "Failed to write classify spool sample mixture candidates");
     }
   }
 }
@@ -185,6 +209,20 @@ bool read_spool_record(std::istream &is, SpoolReadRecord &record) {
                                          sizeof(SpoolCandidate)));
     if (!is) {
       throw std::runtime_error("Truncated classify spool abundance candidates");
+    }
+  }
+  uint32_t mixture_len = 0;
+  if (!read_pod(is, mixture_len)) {
+    throw std::runtime_error("Truncated classify spool sample mixture length");
+  }
+  record.sample_mixture_candidates.resize(mixture_len);
+  if (mixture_len > 0) {
+    is.read(reinterpret_cast<char *>(record.sample_mixture_candidates.data()),
+            static_cast<std::streamsize>(mixture_len *
+                                         sizeof(SpoolCandidate)));
+    if (!is) {
+      throw std::runtime_error(
+          "Truncated classify spool sample mixture candidates");
     }
   }
   return true;

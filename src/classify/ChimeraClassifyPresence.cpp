@@ -20,19 +20,8 @@ enum class PostEmPresenceLevel {
   kRejected = 2,
 };
 
-struct PostEmPruneAudit {
-  bool pruned_any{false};
-};
-
 struct PostEmPruneResult {
   std::vector<std::pair<std::string, double>> posterior;
-  PostEmPruneAudit audit;
-};
-
-struct PostEmPruneTop1Override {
-  std::string taxid;
-  double local_pi_min_floor{0.0};
-  bool active{false};
 };
 
 template <class PresenceLevelFn>
@@ -41,8 +30,7 @@ inline PostEmPruneResult prune_post_em_posterior(
     double min_class_weight,
     const std::unordered_map<std::string, double> &classWeights,
     PresenceLevelFn presence_level, double presence_pi_floor,
-    double reject_factor,
-    const PostEmPruneTop1Override *top1_override = nullptr) {
+    double reject_factor) {
   PostEmPruneResult out;
   out.posterior = posterior_full_sorted;
 
@@ -64,11 +52,6 @@ inline PostEmPruneResult prune_post_em_posterior(
     } else if (pres == PostEmPresenceLevel::kRejected) {
       local_pi_min = pi_prune * reject_factor;
     }
-    if (top1_override && top1_override->active && !top1_override->taxid.empty() &&
-        kv.first == top1_override->taxid && pres == PostEmPresenceLevel::kRejected &&
-        top1_override->local_pi_min_floor > 0.0) {
-      local_pi_min = std::min(local_pi_min, top1_override->local_pi_min_floor);
-    }
     auto it = classWeights.find(kv.first);
     const double w = (it != classWeights.end()) ? it->second : 0.0;
     if (w >= local_pi_min) {
@@ -82,38 +65,12 @@ inline PostEmPruneResult prune_post_em_posterior(
     return out;
   }
 
-  out.audit.pruned_any = (pruned.size() < posterior_full_sorted.size());
   if (sum > 0.0) {
     for (auto &kv : pruned) {
       kv.second /= sum;
     }
   }
   out.posterior = std::move(pruned);
-  return out;
-}
-
-struct TopkLookup {
-  bool found{false};
-  std::size_t rank{0};
-  double prob{0.0};
-};
-
-inline TopkLookup lookup_taxid_in_topk(
-    const std::vector<std::pair<std::string, double>> &posterior_sorted,
-    const std::string &taxid, std::size_t topk) {
-  TopkLookup out;
-  if (taxid.empty() || topk == 0 || posterior_sorted.empty()) {
-    return out;
-  }
-  const std::size_t k = std::min<std::size_t>(topk, posterior_sorted.size());
-  for (std::size_t i = 0; i < k; ++i) {
-    if (posterior_sorted[i].first == taxid) {
-      out.found = true;
-      out.rank = i;
-      out.prob = posterior_sorted[i].second;
-      return out;
-    }
-  }
   return out;
 }
 
@@ -635,40 +592,19 @@ PresenceDecision evaluate_presence_coverage(
 void postEmDecision(
     std::vector<classifyResult> &results, const DecisionConfig &decisionConfig,
     const std::unordered_map<std::string, double> &classWeights,
-    const TaxDict &tax, const PresenceDecision *presenceDecision,
-    const NcbiTaxdump *ncbiTaxdump, const PostDecisionPolicy &postPolicy) {
+    const TaxDict &tax, const PresenceDecision *presenceDecision) {
   constexpr const char *kUnclassified = "unclassified";
-
-		  using PresenceLevel = PostEmPresenceLevel;
+  using PresenceLevel = PostEmPresenceLevel;
 
   constexpr double kPresencePiFloor = 1e-6;
   constexpr double kRejectFactor = 2.0;
-  const double fallback_strength =
-      std::clamp(decisionConfig.fallback_strength, 0.0, 1.0);
-  const double selective_strength =
-      std::clamp(decisionConfig.selective_reject_strength, 0.0, 1.0);
-  const bool selective_reject_fulln_enabled =
-      selective_strength > 1e-9 && postPolicy.enable_selective_reject;
 
   double presence_tau = std::numeric_limits<double>::infinity();
-  double presence_strict_tau = std::numeric_limits<double>::infinity();
   if (presenceDecision && !presenceDecision->logPosteriors.empty()) {
     presence_tau = presenceDecision->threshold;
-    presence_strict_tau = presence_tau;
-    constexpr size_t kPresenceCap = 2048;
-    std::vector<double> vals;
-    vals.reserve(presenceDecision->logPosteriors.size());
-    for (const auto &kv : presenceDecision->logPosteriors) {
-      vals.push_back(kv.second);
-    }
-    if (vals.size() > kPresenceCap) {
-      auto nth = vals.end() - static_cast<std::ptrdiff_t>(kPresenceCap);
-      std::nth_element(vals.begin(), nth, vals.end());
-      presence_strict_tau = std::max(presence_strict_tau, *nth);
-    }
   }
 
-	  auto presence_level = [&](const std::string &taxid) -> PresenceLevel {
+  auto presence_level = [&](const std::string &taxid) -> PresenceLevel {
     if (!presenceDecision) {
       return PresenceLevel::kUnknown;
     }
@@ -687,135 +623,47 @@ void postEmDecision(
     if (it_lp == presenceDecision->logPosteriors.end()) {
       return PresenceLevel::kUnknown;
     }
-	    const double lp = it_lp->second;
-	    if (lp >= presence_strict_tau) {
-	      return PresenceLevel::kAccepted;
-	    }
+    const double lp = it_lp->second;
+    if (lp >= presence_tau) {
+      return PresenceLevel::kAccepted;
+    }
     // Use symmetric strong-negative rejection to avoid over-penalizing
     // mid-confidence taxa.
-	    // Accept: lp >= strict_tau (possibly raised by cap).
-	    // Reject:  lp <= -tau (strong evidence of absence).
-	    // Else:    Unknown (neutral).
-		    if (lp <= -presence_tau) {
-		      return PresenceLevel::kRejected;
-		    }
-		    return PresenceLevel::kUnknown;
-			  };
-
-			  constexpr size_t kFallbackHintTopK = 16;
-			  constexpr double kFallbackGenusConflictGapMax = 0.20;
-			  constexpr size_t kResolutionInspectTopK = 16;
-			  constexpr double kResolutionSameGenusShare = 0.80;
-
-			  auto posterior_genus_coherent =
-			      [&](const std::vector<std::pair<std::string, double>> &posterior,
-			          const std::string &anchor_taxid) -> bool {
-			    if (!ncbiTaxdump || !ncbiTaxdump->enabled() ||
-			        anchor_taxid.empty() || anchor_taxid == kUnclassified) {
-			      return false;
-			    }
-			    uint32_t anchor_tid = 0;
-			    if (!chimera::utils::try_parse_u32(anchor_taxid, anchor_tid)) {
-			      return false;
-			    }
-			    const uint32_t anchor_genus = ncbiTaxdump->to_genus(anchor_tid);
-			    if (anchor_genus == 0u) {
-			      return false;
-			    }
-			    const size_t inspect =
-			        std::min(kResolutionInspectTopK, posterior.size());
-			    double inspected_mass = 0.0;
-			    double same_genus_mass = 0.0;
-			    size_t usable = 0;
-			    for (size_t i = 0; i < inspect; ++i) {
-			      const auto &[taxid, prob] = posterior[i];
-			      if (!(prob > 0.0) || taxid.empty() ||
-			          taxid == kUnclassified) {
-			        continue;
-			      }
-			      uint32_t tid = 0;
-			      if (!chimera::utils::try_parse_u32(taxid, tid)) {
-			        continue;
-			      }
-			      const uint32_t genus = ncbiTaxdump->to_genus(tid);
-			      if (genus == 0u) {
-			        continue;
-			      }
-			      ++usable;
-			      inspected_mass += prob;
-			      if (genus == anchor_genus) {
-			        same_genus_mass += prob;
-			      }
-			    }
-			    if (usable < 2 || !(inspected_mass > 0.0)) {
-			      return false;
-			    }
-			    return (same_genus_mass / inspected_mass) >=
-			           kResolutionSameGenusShare;
-			  };
+    // Accept: lp >= tau.
+    // Reject:  lp <= -tau (strong evidence of absence).
+    // Else:    Unknown (neutral).
+    if (lp <= -presence_tau) {
+      return PresenceLevel::kRejected;
+    }
+    return PresenceLevel::kUnknown;
+  };
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
-			  for (std::int64_t result_idx = 0;
-			       result_idx < static_cast<std::int64_t>(results.size());
-			       ++result_idx) {
-			    auto &result = results[static_cast<size_t>(result_idx)];
-			    // Keep the full posterior list (sorted) for dumping/analysis (POST_TOPK),
-			    // but use a pruned+renormalized view for final decisions and taxidCount
-			    // to avoid exploding long-tail allocations.
-			    auto posterior_full = std::move(result.posteriors);
-		    if (posterior_full.empty()) {
-		      result.taxidCount.clear();
-		      result.taxidCount.emplace_back(kUnclassified, 1.0);
-		      continue;
-		    }
-	    std::sort(posterior_full.begin(), posterior_full.end(),
-	              [](const auto &a, const auto &b) { return a.second > b.second; });
+  for (std::int64_t result_idx = 0;
+       result_idx < static_cast<std::int64_t>(results.size()); ++result_idx) {
+    auto &result = results[static_cast<size_t>(result_idx)];
+    auto posterior_full = std::move(result.posteriors);
+    if (posterior_full.empty()) {
+      result.taxidCount.clear();
+      result.taxidCount.emplace_back(kUnclassified, 1.0);
+      continue;
+    }
+    std::sort(posterior_full.begin(), posterior_full.end(),
+              [](const auto &a, const auto &b) { return a.second > b.second; });
 
-	    auto pruned = prune_post_em_posterior(
-	        posterior_full, decisionConfig.min_class_weight, classWeights,
-	        presence_level, kPresencePiFloor, kRejectFactor);
-	    std::vector<std::pair<std::string, double>> posterior =
-	        std::move(pruned.posterior);
+    auto pruned = prune_post_em_posterior(
+        posterior_full, decisionConfig.min_class_weight, classWeights,
+        presence_level, kPresencePiFloor, kRejectFactor);
+    std::vector<std::pair<std::string, double>> posterior =
+        std::move(pruned.posterior);
 
-	
-
-	    // Ensure POST_TOPK uses the same (pruned/renormalized) posterior view as the
-    // final decision logic. This reduces low-weight posterior noise in
-	    // profile aggregation.
+    // Keep POST_TOPK on the same pruned posterior that drives final decisions.
     result.posteriors = posterior;
 
-	    const auto &top = posterior.front();
-	    double top_score = top.second;
-	    double second_score = (posterior.size() > 1) ? posterior[1].second : 0.0;
-	    // Use the *full* (pre-prune) posterior probabilities for thresholding when
-	    // possible. The post-EM prune step can renormalize the distribution and
-	    // inflate top1/top2 scores (especially when low-weight taxa are dropped),
-	    // which may cause overconfident wrong calls. We keep pruning for output
-	    // stability, but gate using the unpruned probabilities to stay conservative.
-	    auto find_full_prob = [&](const std::string &taxid,
-	                              double fallback) -> double {
-	      if (taxid.empty()) {
-	        return fallback;
-	      }
-	      // posterior_full is already sorted by prob desc.
-	      for (const auto &kv : posterior_full) {
-	        if (kv.first == taxid) {
-	          return kv.second;
-	        }
-	      }
-	      return fallback;
-	    };
-	    const double full_top_score = find_full_prob(top.first, top_score);
-	    const double full_second_score =
-	        (posterior.size() > 1)
-	            ? find_full_prob(posterior[1].first, second_score)
-	            : 0.0;
-	    const double gate_top_score = std::min(top_score, full_top_score);
-	    const double gate_second_score = std::min(second_score, full_second_score);
-
-	    PresenceLevel top_presence = presence_level(top.first);
+    const auto &top = posterior.front();
+    PresenceLevel top_presence = presence_level(top.first);
 
     double class_weight = 0.0;
     bool weight_ok = true;
@@ -826,95 +674,49 @@ void postEmDecision(
         double pi_min = decisionConfig.min_class_weight;
         if (top_presence == PresenceLevel::kAccepted) {
           pi_min = std::min(pi_min, kPresencePiFloor);
-	        } else if (top_presence == PresenceLevel::kRejected) {
-	          pi_min = std::min(1.0, pi_min * kRejectFactor);
-	        }
+        } else if (top_presence == PresenceLevel::kRejected) {
+          pi_min = std::min(1.0, pi_min * kRejectFactor);
+        }
         weight_ok = (class_weight >= pi_min);
       }
     }
-    bool pass = weight_ok;
+    if (weight_ok) {
+      result.taxidCount.clear();
 
-			    if (pass) {
-			      const size_t full_n = posterior_full.size();
-			      const size_t pruned_n = posterior.size();
-          const double posterior_compression =
-              std::max(0.0, std::log1p(static_cast<double>(full_n)) -
-                                std::log1p(static_cast<double>(pruned_n)));
-          const bool selective_cert =
-              (selective_strength * posterior_compression) >= 1.0;
-          if (selective_reject_fulln_enabled && pruned.audit.pruned_any &&
-              selective_cert) {
-			        const bool taxonomy_coherent =
-			            posterior_genus_coherent(posterior_full, top.first);
-			        if (!taxonomy_coherent) {
-			        bool rescued = false;
-				        if (!result.best_taxid_hint.empty() &&
-				            result.best_taxid_hint != kUnclassified) {
-				          const auto hint_hit = lookup_taxid_in_topk(
-				              posterior, result.best_taxid_hint, posterior.size());
-				          // Only rescue when the hint is the pruned POST_TOPK rank-1 (top2).
-				          // Empirically this bucket has much higher precision than "hint==top1"
-				          // and avoids leaking high-confidence wrong reads back into output.
-				          if (hint_hit.found && hint_hit.rank == 1) {
-					            double total_evidence = result.evaluated;
-				            if (!(total_evidence > 0.0)) {
-				              total_evidence = 1.0;
-				            }
-				            double fallback = static_cast<double>(
-				                std::max<double>(1.0, std::llround(total_evidence)));
-				            result.taxidCount.clear();
-				            result.taxidCount.emplace_back(result.best_taxid_hint,
-				                                           fallback);
-				            result.reject_reason.clear();
-				            rescued = true;
-				          }
-				        }
-		        if (rescued) {
-		          continue;
-		        }
-			        result.taxidCount.clear();
-			        result.taxidCount.emplace_back(kUnclassified, 1.0);
-			        result.reject_reason = "selective_cert";
-			        continue;
-			        }
-			      }
-
-	      result.taxidCount.clear();
-
-	      double total_evidence = result.evaluated;
+      double total_evidence = result.evaluated;
       if (!(total_evidence > 0.0)) {
         total_evidence = 1.0;
       }
 
-	      auto eligible = [&](const std::string &taxid, double post) -> bool {
-	        if (!(post > 0.0)) {
-	          return false;
-	        }
-	        if (taxid != top.first &&
-	            presence_level(taxid) == PresenceLevel::kRejected) {
-	          return false;
-	        }
-	        return true;
-	      };
-	
-	      double sum_adj_total = 0.0;
-	      for (const auto &kv : posterior) {
-	        const std::string &taxid = kv.first;
-	        double post = kv.second;
-	        if (!eligible(taxid, post)) {
-	          continue;
-	        }
+      auto eligible = [&](const std::string &taxid, double post) -> bool {
+        if (!(post > 0.0)) {
+          return false;
+        }
+        if (taxid != top.first &&
+            presence_level(taxid) == PresenceLevel::kRejected) {
+          return false;
+        }
+        return true;
+      };
+
+      double sum_adj_total = 0.0;
+      for (const auto &kv : posterior) {
+        const std::string &taxid = kv.first;
+        double post = kv.second;
+        if (!eligible(taxid, post)) {
+          continue;
+        }
         sum_adj_total += post;
-	      }
-	
-	      if (sum_adj_total <= 0.0) {
-	        double fallback =
-	            static_cast<double>(std::max<double>(1.0, std::llround(total_evidence)));
-	        result.taxidCount.emplace_back(top.first, fallback);
-	        result.reject_reason.clear();
-	        continue;
-	      }
-	
+      }
+
+      if (sum_adj_total <= 0.0) {
+        double primary_count = static_cast<double>(
+            std::max<double>(1.0, std::llround(total_evidence)));
+        result.taxidCount.emplace_back(top.first, primary_count);
+        result.reject_reason.clear();
+        continue;
+      }
+
       for (const auto &kv : posterior) {
         const std::string &taxid = kv.first;
         double post = kv.second;
@@ -929,98 +731,24 @@ void postEmDecision(
           result.taxidCount.emplace_back(taxid, count_val);
         }
       }
-	
-	      if (result.taxidCount.empty()) {
-	        double fallback =
-	            static_cast<double>(std::max<double>(1.0, std::llround(total_evidence)));
-        result.taxidCount.emplace_back(top.first, fallback);
+
+      if (result.taxidCount.empty()) {
+        double primary_count = static_cast<double>(
+            std::max<double>(1.0, std::llround(total_evidence)));
+        result.taxidCount.emplace_back(top.first, primary_count);
       }
 
       result.reject_reason.clear();
       continue;
     }
 
-        // Continuous fallback: strength=0 keeps reject, strength=1 allows the
-        // posterior readout to override a weak reject.
-        if (fallback_strength > 1e-9) {
-          const double gap = top_score - second_score;
-          const double base_gap_min =
-              std::max(0.0, std::min(1.0, decisionConfig.fallback_gap_min));
-          const double gap_min = lerp(1.0, base_gap_min, fallback_strength);
-          if (gap < gap_min) {
-            // keep rejected
-          } else {
-			        bool genus_conflict_block = false;
-			        if (ncbiTaxdump && ncbiTaxdump->enabled() &&
-			            posterior.size() > 1 && gap < kFallbackGenusConflictGapMax) {
-			          uint32_t tid1 = 0;
-			          uint32_t tid2 = 0;
-			          if (chimera::utils::try_parse_u32(top.first, tid1) &&
-			              chimera::utils::try_parse_u32(posterior[1].first, tid2)) {
-			            const uint32_t g1 = ncbiTaxdump->to_genus(tid1);
-			            const uint32_t g2 = ncbiTaxdump->to_genus(tid2);
-			            genus_conflict_block =
-			                (g1 != 0 && g2 != 0 && g1 != g2);
-			          }
-			        }
-				        if (genus_conflict_block) {
-				          // keep rejected
-			        } else {
-			          std::string fallback_taxid = top.first;
-			          bool using_hint = false;
-			          if (!result.best_taxid_hint.empty() &&
-			              result.best_taxid_hint != kUnclassified) {
-			            fallback_taxid = result.best_taxid_hint;
-			            using_hint = true;
-			          }
+    result.taxidCount.clear();
+    result.taxidCount.emplace_back(kUnclassified, 1.0);
+    if (result.reject_reason.empty()) {
+      result.reject_reason = weight_ok ? "em_post" : "posterior_weight";
+    }
+  }
 
-		          if (using_hint) {
-		            const size_t topk = std::min(
-		                kFallbackHintTopK, static_cast<size_t>(posterior.size()));
-		            bool hint_in_topk = false;
-		            for (size_t i = 0; i < topk; ++i) {
-		              if (posterior[i].first == fallback_taxid) {
-		                hint_in_topk = true;
-		                break;
-		              }
-		            }
-			            if (!hint_in_topk) {
-			              // keep rejected
-			            } else {
-				              double total_evidence = result.evaluated;
-			              if (!(total_evidence > 0.0)) {
-			                total_evidence = 1.0;
-			              }
-			              double fallback = static_cast<double>(
-			                  std::max<double>(1.0, std::llround(total_evidence)));
-				              result.taxidCount.clear();
-					              result.taxidCount.emplace_back(fallback_taxid, fallback);
-					              result.reject_reason.clear();
-					              continue;
-				            }
-				          } else {
-				            double total_evidence = result.evaluated;
-			            if (!(total_evidence > 0.0)) {
-			              total_evidence = 1.0;
-			            }
-			            double fallback = static_cast<double>(
-			                std::max<double>(1.0, std::llround(total_evidence)));
-				            result.taxidCount.clear();
-					            result.taxidCount.emplace_back(fallback_taxid, fallback);
-					            result.reject_reason.clear();
-					            continue;
-				          }
-            }
-          }
-        }
-
-		    result.taxidCount.clear();
-	    result.taxidCount.emplace_back(kUnclassified, 1.0);
-		    if (result.reject_reason.empty()) {
-		      result.reject_reason = weight_ok ? "em_post" : "posterior_weight";
-		    }
-			  }
-
-				}
+}
 
 } // namespace ChimeraClassify

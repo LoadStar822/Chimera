@@ -60,8 +60,7 @@ static inline uint64_t splitmix64(uint64_t x) {
 void processSequence(
     const std::vector<uint64_t> &hashs1, size_t readLen,
     ChimeraBuild::IMCFConfig &imcfConfig, const TaxDict &tax,
-    ClassifyConfig &config, const WeightingContext &weightCtx,
-    const AutoClassifyPolicy &autoPolicy, GroupHeat &heat,
+    ClassifyConfig &config, const WeightingContext &weightCtx, GroupHeat &heat,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
     std::vector<classifyResult> *classifyResults,
     std::vector<CompactClassifyResult> *compactResults, FileInfo &fileInfo,
@@ -119,7 +118,6 @@ void processSequence(
   constexpr double kUniqueEdgeBonus = 3.0;
   double presence_weight = 1.0;
 
-  const bool taxpool_enabled = autoPolicy.candidate.enable_taxpool;
   const char *dump_preem_env = std::getenv("CHIMERA_DUMP_PREEM_TSV");
   const bool dump_preem_enabled = (dump_preem_env && dump_preem_env[0] != '\0');
   const std::string dump_preem_path =
@@ -136,17 +134,6 @@ void processSequence(
     }
     return 0u;
   };
-  auto map_ncbi_taxid = [&](uint32_t tid_id) -> uint32_t {
-    if (tid_id >= tax.id2str.size()) {
-      return 0u;
-    }
-    uint32_t out = 0u;
-    if (!chimera::utils::try_parse_u32(tax.id2str[tid_id], out)) {
-      return 0u;
-    }
-    return out;
-  };
-
   // Sample a subset of hashes for coarse candidate selection.
   size_t targetSample = hashNum / 2;
   targetSample = std::clamp<size_t>(targetSample, config.hash_sample_min, config.hash_sample_max);
@@ -225,7 +212,7 @@ void processSequence(
     for (uint64_t v : sampleVals) {
       routeScored.emplace_back(weightCtx.freqSketch->estimate(v), v);
     }
-    const double route_ratio = lerp(0.50, 0.50, dispersion_hi);
+    constexpr double route_ratio = 0.50;
     const size_t routeBudget =
         std::max<size_t>(1, static_cast<size_t>(
                                 std::llround(route_ratio * sampleVals.size())));
@@ -478,8 +465,7 @@ void processSequence(
   bool taxpool_mode = false;
   const bool short_like_read = (readLen <= 600);
   const double taxpool_dispersion_gate = short_like_read ? 0.20 : 0.35;
-  if (taxpool_enabled && !fallback_full &&
-      dispersion_hi > taxpool_dispersion_gate &&
+  if (!fallback_full && dispersion_hi > taxpool_dispersion_gate &&
       coarseTotal > 0 && !repCoarseScore.empty() && !genusCoarseScore.empty() &&
       weightCtx.tid2genus) {
     auto &repRanked = scratch.repRanked;
@@ -1280,6 +1266,44 @@ void processSequence(
     }
     return out;
   };
+  auto capture_sample_mixture_candidates = [&]() {
+    std::vector<SpoolCandidate> out;
+    out.reserve(scratch.activeTidScores.size());
+    for (uint32_t tid : scratch.activeTidScores) {
+      if (tid >= tax.id2str.size()) {
+        continue;
+      }
+      const double baseScore = scratch.tidBaseScoreDense[tid];
+      if (!(baseScore > 0.0)) {
+        continue;
+      }
+      out.push_back(SpoolCandidate{tid, baseScore});
+    }
+    if (out.empty()) {
+      return out;
+    }
+    std::sort(out.begin(), out.end(), [](const auto &a, const auto &b) {
+      if (a.score != b.score) {
+        return a.score > b.score;
+      }
+      return a.tid < b.tid;
+    });
+    double total = 0.0;
+    double square = 0.0;
+    for (const auto &cand : out) {
+      total += cand.score;
+      square += cand.score * cand.score;
+    }
+    if (total > 0.0 && square > 0.0) {
+      const double eff = (total * total) / square;
+      const double keepD = std::ceil(eff * eff);
+      if (std::isfinite(keepD) && keepD >= 1.0 &&
+          keepD < static_cast<double>(out.size())) {
+        out.resize(static_cast<size_t>(keepD));
+      }
+    }
+    return out;
+  };
 
   struct ScoreStateSnapshot {
     double eff_eval{0.0};
@@ -1385,7 +1409,6 @@ void processSequence(
       scratch.uniqueHitsEpoch[tid] = uniqueHitsEpoch;
       scratch.uniqueHitsDense[tid] = snap.active_unique_values[i];
     }
-
     eff_eval = snap.eff_eval;
     n_eval = snap.n_eval;
     deferredEval = snap.deferred_eval;
@@ -1762,6 +1785,8 @@ void processSequence(
   if (abundanceCandidates.empty()) {
     abundanceCandidates = capture_abundance_candidates();
   }
+  std::vector<SpoolCandidate> sampleMixtureCandidates =
+      capture_sample_mixture_candidates();
 
   if (!resultCandidates.empty()) {
     if (presenceEnabled && presenceAcc) {
@@ -1807,6 +1832,7 @@ void processSequence(
     result.reject_reason = std::move(rejectReason);
     result.candidates = std::move(resultCandidates);
     result.abundance_candidates = std::move(abundanceCandidates);
+    result.sample_mixture_candidates = std::move(sampleMixtureCandidates);
     compactResults->emplace_back(std::move(result));
   } else if (classifyResults != nullptr) {
     classifyResult result;
@@ -1841,8 +1867,7 @@ void processBatch(
     std::vector<classifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
-    const AutoClassifyPolicy &autoPolicy, PresenceAccumulator *presenceAcc,
-    ProcessScratch &scratch) {
+    PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
   auto &hashs1 = scratch.hashs1;
   hashs1.clear();
   hashs1.reserve(2048);
@@ -1872,8 +1897,8 @@ void processBatch(
         std::sort(hashs1.begin(), hashs1.end());
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
-      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
-                      autoPolicy, heat, imcf, batch.ids[i], &classifyResults,
+      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx, heat,
+                      imcf, batch.ids[i], &classifyResults,
                       nullptr, fileInfo, presenceAcc, scratch);
     }
   } else {
@@ -1896,8 +1921,8 @@ void processBatch(
         std::sort(hashs1.begin(), hashs1.end());
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
-      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
-                      autoPolicy, heat, imcf, batch.ids[i], &classifyResults,
+      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx, heat,
+                      imcf, batch.ids[i], &classifyResults,
                       nullptr, fileInfo, presenceAcc, scratch);
     }
   }
@@ -1910,8 +1935,7 @@ void processBatchCompact(
     std::vector<CompactClassifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
-    const AutoClassifyPolicy &autoPolicy, PresenceAccumulator *presenceAcc,
-    ProcessScratch &scratch) {
+    PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
   auto &hashs1 = scratch.hashs1;
   hashs1.clear();
   hashs1.reserve(2048);
@@ -1941,8 +1965,8 @@ void processBatchCompact(
         std::sort(hashs1.begin(), hashs1.end());
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
-      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
-                      autoPolicy, heat, imcf, batch.ids[i], nullptr,
+      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx, heat,
+                      imcf, batch.ids[i], nullptr,
                       &classifyResults, fileInfo, presenceAcc, scratch);
     }
   } else {
@@ -1965,8 +1989,8 @@ void processBatchCompact(
         std::sort(hashs1.begin(), hashs1.end());
         hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
       }
-      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
-                      autoPolicy, heat, imcf, batch.ids[i], nullptr,
+      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx, heat,
+                      imcf, batch.ids[i], nullptr,
                       &classifyResults, fileInfo, presenceAcc, scratch);
     }
   }
@@ -1980,8 +2004,7 @@ void classify_streaming(
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
     std::atomic<bool> &producer_done,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
-    const WeightingContext &weightCtx, const AutoClassifyPolicy &autoPolicy,
-    PresenceSummary *presenceSummary,
+    const WeightingContext &weightCtx, PresenceSummary *presenceSummary,
     std::vector<QueueThrottle> *queueThrottles) {
 
 #pragma omp parallel
@@ -2020,8 +2043,7 @@ void classify_streaming(
         release_queue_slot(queueThrottle, estimate_batch_bytes(batch));
         processBatch(batch, imcfConfig, tax, config, imcf,
                      localClassifyResults, feature_params, feature_min_len,
-                     localFileInfo, heat, weightCtx, autoPolicy, presencePtr,
-                     scratch);
+                     localFileInfo, heat, weightCtx, presencePtr, scratch);
         continue;
       }
       if (producer_done.load(std::memory_order_acquire)) {
@@ -2082,8 +2104,7 @@ void classify_streaming_spool(
     const std::vector<std::string> &spoolPaths, FileInfo &fileInfo,
     std::atomic<bool> &producer_done,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
-    const WeightingContext &weightCtx, const AutoClassifyPolicy &autoPolicy,
-    PresenceSummary *presenceSummary,
+    const WeightingContext &weightCtx, PresenceSummary *presenceSummary,
     std::vector<QueueThrottle> *queueThrottles) {
 
 #pragma omp parallel
@@ -2136,7 +2157,7 @@ void classify_streaming_spool(
         processBatchCompact(batch, imcfConfig, tax, config, imcf,
                             localClassifyResults, feature_params,
                             feature_min_len, localFileInfo, heat, weightCtx,
-                            autoPolicy, presencePtr, scratch);
+                            presencePtr, scratch);
         write_spool_results(localClassifyResults, spool);
         localClassifyResults.clear();
         continue;
@@ -2180,7 +2201,7 @@ void classify(
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const TaxDict &tax,
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
-    const WeightingContext &weightCtx, const AutoClassifyPolicy &autoPolicy) {
+    const WeightingContext &weightCtx) {
 
 #pragma omp parallel
   {
@@ -2207,7 +2228,7 @@ void classify(
     while (readQueue.try_dequeue(batch)) {
       processBatch(batch, imcfConfig, tax, config, imcf, localClassifyResults,
                    feature_params, feature_min_len, localFileInfo, heat,
-                   weightCtx, autoPolicy, nullptr, scratch);
+                   weightCtx, nullptr, scratch);
     }
 #pragma omp critical
     {

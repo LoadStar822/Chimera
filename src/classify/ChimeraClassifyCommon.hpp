@@ -578,6 +578,7 @@ struct SpoolReadRecord {
   std::string reject_reason;
   std::vector<SpoolCandidate> candidates;
   std::vector<SpoolCandidate> abundance_candidates;
+  std::vector<SpoolCandidate> sample_mixture_candidates;
 };
 
 inline constexpr uint32_t kSpoolUnclassifiedTid =
@@ -590,6 +591,7 @@ struct CompactClassifyResult {
   std::string reject_reason;
   std::vector<SpoolCandidate> candidates;
   std::vector<SpoolCandidate> abundance_candidates;
+  std::vector<SpoolCandidate> sample_mixture_candidates;
 };
 
 void write_spool_header(std::ostream &os);
@@ -729,8 +731,7 @@ PresenceDecision evaluate_presence_coverage(
 void processSequence(
     const std::vector<uint64_t> &hashs1, size_t readLen,
     ChimeraBuild::IMCFConfig &imcfConfig, const TaxDict &tax,
-    ClassifyConfig &config, const WeightingContext &weightCtx,
-    const AutoClassifyPolicy &autoPolicy, GroupHeat &heat,
+    ClassifyConfig &config, const WeightingContext &weightCtx, GroupHeat &heat,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
     std::vector<classifyResult> *classifyResults,
     std::vector<CompactClassifyResult> *compactResults, FileInfo &fileInfo,
@@ -743,7 +744,7 @@ void processBatch(
     std::vector<classifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
-    const AutoClassifyPolicy &autoPolicy, PresenceAccumulator *presenceAcc,
+    PresenceAccumulator *presenceAcc,
     ProcessScratch &scratch);
 
 void processBatchCompact(
@@ -753,7 +754,7 @@ void processBatchCompact(
     std::vector<CompactClassifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
-    const AutoClassifyPolicy &autoPolicy, PresenceAccumulator *presenceAcc,
+    PresenceAccumulator *presenceAcc,
     ProcessScratch &scratch);
 
 void classify_streaming(
@@ -764,8 +765,7 @@ void classify_streaming(
     std::vector<classifyResult> &classifyResults, FileInfo &fileInfo,
     std::atomic<bool> &producer_done,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
-    const WeightingContext &weightCtx, const AutoClassifyPolicy &autoPolicy,
-    PresenceSummary *presenceSummary,
+    const WeightingContext &weightCtx, PresenceSummary *presenceSummary,
     std::vector<QueueThrottle> *queueThrottles = nullptr);
 
 void classify_streaming_spool(
@@ -776,8 +776,7 @@ void classify_streaming_spool(
     const std::vector<std::string> &spoolPaths, FileInfo &fileInfo,
     std::atomic<bool> &producer_done,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
-    const WeightingContext &weightCtx, const AutoClassifyPolicy &autoPolicy,
-    PresenceSummary *presenceSummary,
+    const WeightingContext &weightCtx, PresenceSummary *presenceSummary,
     std::vector<QueueThrottle> *queueThrottles = nullptr);
 
 void classify(ChimeraBuild::IMCFConfig &imcfConfig,
@@ -787,7 +786,6 @@ void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               const TaxDict &tax, std::vector<classifyResult> &classifyResults,
               FileInfo &fileInfo,
               const chimera::feature::Params &feature_params,
-              size_t feature_min_len, const WeightingContext &weightCtx,
-              const AutoClassifyPolicy &autoPolicy);
+              size_t feature_min_len, const WeightingContext &weightCtx);
 
 } // namespace ChimeraClassify
