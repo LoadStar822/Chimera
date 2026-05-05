@@ -337,10 +337,10 @@ This command classifies the paired-end sequences using the `ChimeraDB` database,
 
 ### 5. Profile
 
-The `profile` function generates a taxonomic profile from the classification results. By default, it calculates the abundance, Shannon index, and Simpson index at different taxonomic levels (e.g., kingdom, phylum, class, order, family, genus, and species). Additionally, the `-k` option can be used to generate a **Krona chart** for interactive visualization.
+The `profile` function generates a taxonomic profile from `ChimeraEvidence.tsv`, the aggregate evidence file produced by `classify`. `ChimeraClassify.tsv` is the per-read selective classification output and is not used as the abundance input. By default, `profile` calculates abundance, Shannon index, and Simpson index at different taxonomic levels (e.g., kingdom, phylum, class, order, family, genus, and species). Additionally, the `-k` option can be used to generate a **Krona chart** for interactive visualization.
 
 **Available Parameters:**
-- `-i` or `--input` (required): Input file(s) containing classification results.
+- `-i` or `--input` (required): Input file(s) containing `ChimeraEvidence.tsv` aggregate evidence.
 - `-o` or `--output`: Output file name for the profile (default: `ChimeraProfile`).
 - `-k` or `--krona`: Generate a Krona chart for interactive visualization.
 
@@ -351,13 +351,13 @@ By default, Chimera calculates:
 
 **Example:**
 ```bash
-chimera profile -i ChimeraClassify.tsv
+chimera profile -i ChimeraEvidence.tsv
 ```
-This command generates a taxonomic profile with abundance, Shannon index, and Simpson index from the classification results in `ChimeraClassify.tsv`.
+This command generates a taxonomic profile with abundance, Shannon index, and Simpson index from the aggregate evidence in `ChimeraEvidence.tsv`.
 
 To generate a Krona chart:
 ```bash
-chimera profile -i ChimeraClassify.tsv -k
+chimera profile -i ChimeraEvidence.tsv -k
 ```
 This command generates both the taxonomic profile and a Krona chart (`ChimeraProfile.html`) for visualizing the results.
 
@@ -425,7 +425,7 @@ This command classifies the sequences in `input.fasta` using the `ChimeraDB` dat
 
 ### Profiling Output
 
-Chimera’s `profile` function generates a detailed taxonomic profile at various levels (e.g., superkingdom, clade, phylum, class, order, family, genus, species). The output includes the count, relative abundance, Shannon index, and Simpson index for each taxonomic level. The output is presented in a tabular format, making it easy to interpret and analyze.
+Chimera’s `profile` function consumes `ChimeraEvidence.tsv`, not the final per-read labels in `ChimeraClassify.tsv`. This keeps read-level primary labels and sample-level abundance evidence as separate outputs. The generated profile reports taxonomic abundance at various levels (e.g., superkingdom, clade, phylum, class, order, family, genus, species). The output includes the count, relative abundance, Shannon index, and Simpson index for each taxonomic level.
 
 **Output format:**
 The output is divided by taxonomic levels, and each section contains the following columns:
@@ -484,9 +484,9 @@ Additionally, you can generate a Krona chart for interactive visualization using
 
 **Example:**
 ```bash
-chimera profile -i results.tsv -o krona_chart -k
+chimera profile -i ChimeraEvidence.tsv -o krona_chart -k
 ```
-This command generates a `krona_chart.html` file from the classification results, which can be opened for visualizing the taxonomic profile.
+This command generates a `krona_chart.html` file from the aggregate evidence, which can be opened for visualizing the taxonomic profile.
 
 You can see an example of Krona chart visualization here: [Krona example chart](https://telatin.github.io/microbiome-bioinformatics/data/krona/krona-test.html).
 

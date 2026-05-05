@@ -455,7 +455,7 @@ inline std::size_t compute_candidate_cap(std::size_t baseCap,
                       1, static_cast<std::size_t>(std::ceil(scaled))));
 }
 
-struct CommunityDispersionProbeStats {
+struct CommunityDispersionStats {
   double shannon{0.0};
   double top_mass{0.0};
   double eff_species{0.0};
@@ -464,10 +464,10 @@ struct CommunityDispersionProbeStats {
   std::size_t unclassified{0};
 };
 
-inline CommunityDispersionProbeStats
-compute_community_dispersion_probe_stats(const std::vector<double> &counts,
-                                          std::size_t unclassified) {
-  CommunityDispersionProbeStats stats;
+inline CommunityDispersionStats
+compute_community_dispersion_stats(const std::vector<double> &counts,
+                                   std::size_t unclassified) {
+  CommunityDispersionStats stats;
   stats.unclassified = unclassified;
   double total = 0.0;
   for (double c : counts) {
@@ -673,7 +673,7 @@ struct PresenceDecision {
   double threshold{1.0};
 };
 
-struct TaxpoolGenusPick {
+struct AdaptiveSurfaceGenusPick {
   uint32_t genus_id{0u};
   uint32_t rep_id{0u};
   uint32_t rare_support{0u};
@@ -698,7 +698,7 @@ struct ProcessScratch {
   std::vector<std::pair<uint32_t, uint64_t>> genusRanked;
   std::vector<uint32_t> repPool;
   std::vector<uint32_t> dominantCandidates;
-  std::vector<TaxpoolGenusPick> nonDominantGenusPicks;
+  std::vector<AdaptiveSurfaceGenusPick> secondaryGenusPicks;
   std::vector<std::pair<uint32_t, double>> rankedTidScores;
   std::vector<uint32_t> minimizerTids;
   std::vector<uint32_t> minimizerBins;

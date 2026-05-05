@@ -11,6 +11,8 @@
  * -----------------------------------------------------------------------------
  */
 #include "ChimeraClassifyCommon.hpp"
+#include "ChimeraClassifyAutoPolicy.hpp"
+#include "ChimeraClassifyReadout.hpp"
 
 #include <utils/Parse.hpp>
 
@@ -163,45 +165,6 @@ struct AbundanceEvidenceOutput {
   double local_mass{0.0};
   double read_support{0.0};
 };
-
-static double compute_sample_evidence_strength(
-    const ChimeraClassify::FileInfo &fileInfo,
-    const chimera::presence::CoverageMeta &coverageMeta,
-    const ChimeraClassify::CommunityDispersionProbeStats &probeStats) {
-  const size_t avg_len =
-      (fileInfo.avgLen > 0)
-          ? fileInfo.avgLen
-          : static_cast<size_t>(coverageMeta.ref_read_length);
-  const size_t span =
-      (coverageMeta.effective_span > 0)
-          ? static_cast<size_t>(coverageMeta.effective_span)
-          : static_cast<size_t>(1);
-  const size_t ref_len =
-      static_cast<size_t>(std::max<uint16_t>(coverageMeta.ref_read_length, 1));
-  const double sample_window = static_cast<double>(
-      std::max<int64_t>(1, static_cast<int64_t>(avg_len) -
-                               static_cast<int64_t>(span) + 1));
-  const double ref_window = static_cast<double>(
-      std::max<int64_t>(1, static_cast<int64_t>(ref_len) -
-                               static_cast<int64_t>(span) + 1));
-  double community_complexity = probeStats.simpson_species;
-  if (!(community_complexity > 0.0)) {
-    community_complexity = probeStats.eff_species;
-  }
-  if (!(community_complexity > 0.0)) {
-    community_complexity = 1.0;
-  }
-  const double required_window = community_complexity * ref_window;
-  if (!(sample_window > required_window)) {
-    return 0.0;
-  }
-  const double excess = sample_window - required_window;
-  const double denom = sample_window + required_window;
-  if (!(denom > 0.0)) {
-    return 1.0;
-  }
-  return ChimeraClassify::clamp01(excess / denom);
-}
 
 static std::string spool_taxid_to_string(
     uint32_t tid, const ChimeraClassify::TaxDict &tax) {
@@ -930,12 +893,12 @@ static SpoolSampleMixtureFit fit_spool_sample_mixture_em(
 
 static void write_abundance_em_evidence(
     const std::string &evidencePath, const SpoolAbundanceFit &fit,
-    const std::unordered_map<std::string, double> &primaryMass,
-    const std::unordered_map<std::string, double> &decisionMass,
+    const std::unordered_map<std::string, double> &postemPrimaryEvidenceMass,
+    const std::unordered_map<std::string, double> &postemDecisionEvidenceMass,
     const ChimeraClassify::TaxDict &tax, double abundanceWeight) {
   std::unordered_map<std::string, AbundanceEvidenceOutput> merged;
-  merged.reserve(fit.taxid_list.size() + primaryMass.size() +
-                 decisionMass.size());
+  merged.reserve(fit.taxid_list.size() + postemPrimaryEvidenceMass.size() +
+                 postemDecisionEvidenceMass.size());
 
   double abundanceSum = 0.0;
   for (size_t idx = 0; idx < fit.taxid_list.size(); ++idx) {
@@ -944,7 +907,7 @@ static void write_abundance_em_evidence(
     }
   }
   double decisionSum = 0.0;
-  for (const auto &[taxid, value] : decisionMass) {
+  for (const auto &[taxid, value] : postemDecisionEvidenceMass) {
     if (!taxid.empty() && taxid != "unclassified") {
       decisionSum += std::max(0.0, value);
     }
@@ -987,13 +950,13 @@ static void write_abundance_em_evidence(
     dst.read_support += readSupport;
   }
 
-  for (const auto &[taxid, value] : primaryMass) {
+  for (const auto &[taxid, value] : postemPrimaryEvidenceMass) {
     if (taxid.empty() || taxid == "unclassified" || !(value > 0.0)) {
       continue;
     }
     merged[taxid].primary_mass += value;
   }
-  for (const auto &[taxid, value] : decisionMass) {
+  for (const auto &[taxid, value] : postemDecisionEvidenceMass) {
     if (taxid.empty() || taxid == "unclassified" || !(value > 0.0)) {
       continue;
     }
@@ -1247,215 +1210,6 @@ static std::string resolve_evidence_output_path(const std::string &outputFile) {
   return path.string();
 }
 
-static bool apply_candidate_preserving_local_odds_decision(
-    ChimeraClassify::classifyResult &result,
-    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump);
-
-static bool apply_deferred_penalized_odds_release(
-    ChimeraClassify::classifyResult &result,
-    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
-  if (!ncbiTaxdump || !ncbiTaxdump->enabled() ||
-      result.sampleMixturePosteriors.empty() || result.taxidCount.empty() ||
-      result.taxidCount.front().first != "unclassified" ||
-      result.reject_reason != "posterior_weight") {
-    return false;
-  }
-
-  std::unordered_map<uint32_t, double> speciesMass;
-  std::unordered_map<uint32_t, std::pair<std::string, double>>
-      bestMemberBySpecies;
-  speciesMass.reserve(result.sampleMixturePosteriors.size());
-  bestMemberBySpecies.reserve(result.sampleMixturePosteriors.size());
-
-  for (const auto &[taxidText, posterior] : result.sampleMixturePosteriors) {
-    if (!(posterior > 0.0)) {
-      continue;
-    }
-    uint32_t taxid = 0;
-    if (!chimera::utils::try_parse_u32(taxidText, taxid)) {
-      continue;
-    }
-    const uint32_t species = ncbiTaxdump->to_species(taxid);
-    if (species == 0) {
-      continue;
-    }
-    speciesMass[species] += posterior;
-    auto it = bestMemberBySpecies.find(species);
-    if (it == bestMemberBySpecies.end() || posterior > it->second.second ||
-        (posterior == it->second.second && taxidText < it->second.first)) {
-      bestMemberBySpecies[species] = {taxidText, posterior};
-    }
-  }
-  if (speciesMass.empty()) {
-    return false;
-  }
-
-  uint32_t topSpecies = 0;
-  double topSpeciesMass = 0.0;
-  for (const auto &[species, mass] : speciesMass) {
-    if (mass > topSpeciesMass ||
-        (mass == topSpeciesMass && species < topSpecies)) {
-      topSpecies = species;
-      topSpeciesMass = mass;
-    }
-  }
-  auto memberIt = bestMemberBySpecies.find(topSpecies);
-  if (memberIt == bestMemberBySpecies.end() ||
-      memberIt->second.first.empty()) {
-    return false;
-  }
-
-  constexpr double eps = 1e-12;
-  const double p = std::clamp(topSpeciesMass, eps, 1.0 - eps);
-  const double releaseGain = std::log(p / (1.0 - p));
-  const double releaseCost =
-      0.5 * std::log1p(std::max(0.0, result.sampleMixtureTopScore));
-  if (!(releaseGain > releaseCost)) {
-    return false;
-  }
-
-  result.taxidCount.clear();
-  result.taxidCount.emplace_back(memberIt->second.first, topSpeciesMass);
-  result.posteriors = result.sampleMixturePosteriors;
-  result.reject_reason.clear();
-  return true;
-}
-
-static bool apply_deferred_penalized_odds_readout(
-    ChimeraClassify::classifyResult &result,
-    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
-  apply_deferred_penalized_odds_release(result, ncbiTaxdump);
-  return apply_candidate_preserving_local_odds_decision(result, ncbiTaxdump);
-}
-
-static bool apply_candidate_preserving_local_odds_decision(
-    ChimeraClassify::classifyResult &result,
-    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
-  if (!ncbiTaxdump || !ncbiTaxdump->enabled() ||
-      result.sampleMixturePosteriors.empty() || result.taxidCount.empty()) {
-    return false;
-  }
-
-  std::unordered_map<uint32_t, double> speciesMass;
-  std::unordered_map<uint32_t, double> genusMass;
-  std::unordered_map<uint32_t, std::pair<std::string, double>>
-      bestMemberBySpecies;
-  speciesMass.reserve(result.sampleMixturePosteriors.size());
-  genusMass.reserve(result.sampleMixturePosteriors.size());
-  bestMemberBySpecies.reserve(result.sampleMixturePosteriors.size());
-
-  for (const auto &[taxidText, posterior] : result.sampleMixturePosteriors) {
-    if (!(posterior > 0.0)) {
-      continue;
-    }
-    uint32_t taxid = 0;
-    if (!chimera::utils::try_parse_u32(taxidText, taxid)) {
-      continue;
-    }
-    const uint32_t species = ncbiTaxdump->to_species(taxid);
-    const uint32_t genus = ncbiTaxdump->to_genus(taxid);
-    if (species != 0) {
-      speciesMass[species] += posterior;
-      auto it = bestMemberBySpecies.find(species);
-      if (it == bestMemberBySpecies.end() || posterior > it->second.second ||
-          (posterior == it->second.second && taxidText < it->second.first)) {
-        bestMemberBySpecies[species] = {taxidText, posterior};
-      }
-    }
-    if (genus != 0) {
-      genusMass[genus] += posterior;
-    }
-  }
-  if (genusMass.empty() || speciesMass.empty()) {
-    return false;
-  }
-
-  uint32_t topGenus = 0;
-  double topGenusMass = 0.0;
-  for (const auto &[genus, mass] : genusMass) {
-    if (mass > topGenusMass || (mass == topGenusMass && genus < topGenus)) {
-      topGenus = genus;
-      topGenusMass = mass;
-    }
-  }
-  if (topGenus == 0) {
-    return false;
-  }
-
-  uint32_t topSpecies = 0;
-  double topSpeciesMass = 0.0;
-  for (const auto &[species, mass] : speciesMass) {
-    if (ncbiTaxdump->to_genus(species) != topGenus) {
-      continue;
-    }
-    if (mass > topSpeciesMass ||
-        (mass == topSpeciesMass && species < topSpecies)) {
-      topSpecies = species;
-      topSpeciesMass = mass;
-    }
-  }
-  if (topSpecies == 0 || !(topSpeciesMass > 0.0)) {
-    return false;
-  }
-
-  uint32_t oldTaxid = 0;
-  if (!chimera::utils::try_parse_u32(result.taxidCount.front().first,
-                                    oldTaxid)) {
-    return false;
-  }
-  if (oldTaxid == 0) {
-    return false;
-  }
-  const uint32_t oldSpecies =
-      ncbiTaxdump->to_species(oldTaxid);
-  if (oldSpecies == topSpecies) {
-    return false;
-  }
-
-  const auto oldMassIt = speciesMass.find(oldSpecies);
-  const double oldSpeciesMass =
-      (oldMassIt == speciesMass.end()) ? 0.0 : oldMassIt->second;
-
-  std::vector<double> localScores;
-  localScores.reserve(result.sampleMixtureLocalScores.size());
-  for (const auto &[_, score] : result.sampleMixtureLocalScores) {
-    if (score > 0.0) {
-      localScores.push_back(score);
-    }
-  }
-  std::sort(localScores.begin(), localScores.end(), std::greater<double>());
-  double localRatio = 1.0;
-  if (localScores.size() >= 2 && localScores[1] > 0.0) {
-    localRatio = localScores[0] / localScores[1];
-  } else if (!localScores.empty()) {
-    localRatio = 1.0 + std::max(0.0, localScores[0]);
-  }
-  if (!std::isfinite(localRatio)) {
-    localRatio = 1.0;
-  }
-  constexpr double eps = 1e-12;
-  const double switchGain =
-      std::log(std::max(topSpeciesMass, eps) / std::max(oldSpeciesMass, eps));
-  const double localCost = std::log(std::max(1.0, localRatio));
-  const double speciesModelCost =
-      0.5 * std::log(std::max(1.0, static_cast<double>(speciesMass.size())));
-  const double switchCost = std::max(localCost, speciesModelCost);
-  if (!(switchGain > switchCost)) {
-    return false;
-  }
-
-  auto memberIt = bestMemberBySpecies.find(topSpecies);
-  if (memberIt == bestMemberBySpecies.end() || memberIt->second.first.empty() ||
-      memberIt->second.first == result.taxidCount.front().first) {
-    return false;
-  }
-
-  result.taxidCount.clear();
-  result.taxidCount.emplace_back(memberIt->second.first, topSpeciesMass);
-  result.posteriors = result.sampleMixturePosteriors;
-  return true;
-}
-
 static void write_spool_em_results(
     const std::vector<std::string> &spoolPaths, const SpoolEMFit &fit,
     const ChimeraClassify::EMOptions &options,
@@ -1481,31 +1235,25 @@ static void write_spool_em_results(
       std::filesystem::create_directories(evidenceParent);
     }
   }
-  const double abundancePruneRatio =
-      std::pow(options.prune_ratio,
-               0.5 + (0.5 * ChimeraClassify::clamp01(
-                                 config.community_dispersion_s)));
-  const double abundanceWeight =
-      ChimeraClassify::clamp01(config.community_dispersion_s);
-  const size_t abundanceIterations = static_cast<size_t>(
-      std::ceil(std::sqrt(static_cast<double>(config.emIter)) *
-                abundanceWeight));
+  const ChimeraClassify::AbundanceAutoPolicy abundancePolicy =
+      ChimeraClassify::derive_abundance_auto_policy(config, options);
   std::cout << "[classify][auto] abundance-em"
-            << " prune_ratio=" << abundancePruneRatio
-            << " iterations=" << abundanceIterations
+            << " prune_ratio=" << abundancePolicy.prune_ratio
+            << " iterations=" << abundancePolicy.iterations
             << " dispersion_s=" << config.community_dispersion_s << "\n";
   SpoolAbundanceFit abundanceFit = fit_spool_abundance_em(
-      spoolPaths, tax, abundanceIterations, options, abundancePruneRatio);
+      spoolPaths, tax, abundancePolicy.iterations, options,
+      abundancePolicy.prune_ratio);
   SpoolSampleMixtureFit sampleMixtureFit =
       fit_spool_sample_mixture_em(spoolPaths, tax, config.emIter);
   std::cout << "[classify][auto] sample-mixture"
             << " reads=" << sampleMixtureFit.read_count
             << " candidates=" << sampleMixtureFit.candidate_count
             << " taxa=" << sampleMixtureFit.taxid_list.size() << "\n";
-  std::vector<std::unordered_map<std::string, double>> primaryAggregates(
-      part_count);
-  std::vector<std::unordered_map<std::string, double>> decisionAggregates(
-      part_count);
+  std::vector<std::unordered_map<std::string, double>>
+      postemPrimaryEvidenceAggregates(part_count);
+  std::vector<std::unordered_map<std::string, double>>
+      postemDecisionEvidenceAggregates(part_count);
   for (size_t i = 0; i < part_count; ++i) {
     partPaths[i] = outputFile + ".part." + std::to_string(i) + ".tmp";
   }
@@ -1539,19 +1287,21 @@ static void write_spool_em_results(
         ChimeraClassify::postEmDecision(chunk, decisionConfig,
                                         fit.class_weights, tax, presenceDecision);
         for (auto &result : chunk) {
-          auto &primaryAggregate = primaryAggregates[part_idx];
+          auto &primaryEvidenceAggregate =
+              postemPrimaryEvidenceAggregates[part_idx];
           for (const auto &[taxid, count] : result.taxidCount) {
             if (!taxid.empty() && taxid != "unclassified" && count > 0.0) {
-              primaryAggregate[taxid] += count;
+              primaryEvidenceAggregate[taxid] += count;
             }
           }
           if (!result.taxidCount.empty()) {
             const std::string &decisionTaxid = result.taxidCount.front().first;
             if (!decisionTaxid.empty() && decisionTaxid != "unclassified") {
-              decisionAggregates[part_idx][decisionTaxid] += 1.0;
+              postemDecisionEvidenceAggregates[part_idx][decisionTaxid] += 1.0;
             }
           }
-          apply_deferred_penalized_odds_readout(result, ncbiTaxdump);
+          ChimeraClassify::readout::apply_selective_readout(result,
+                                                            ncbiTaxdump);
           if (!result.taxidCount.empty() &&
               result.taxidCount.front().first == "unclassified") {
             ++partStats[part_idx].unclassified;
@@ -1633,21 +1383,24 @@ static void write_spool_em_results(
     fileInfo.unclassifiedNum += partStats[i].unclassified;
   }
   os.close();
-  std::unordered_map<std::string, double> primaryMass;
-  for (const auto &partMap : primaryAggregates) {
+  std::unordered_map<std::string, double> postemPrimaryEvidenceMass;
+  for (const auto &partMap : postemPrimaryEvidenceAggregates) {
     for (const auto &[taxid, count] : partMap) {
-      primaryMass[taxid] += count;
+      postemPrimaryEvidenceMass[taxid] += count;
     }
   }
-  std::unordered_map<std::string, double> decisionMass;
-  for (const auto &partMap : decisionAggregates) {
+  std::unordered_map<std::string, double> postemDecisionEvidenceMass;
+  for (const auto &partMap : postemDecisionEvidenceAggregates) {
     for (const auto &[taxid, count] : partMap) {
-      decisionMass[taxid] += count;
+      postemDecisionEvidenceMass[taxid] += count;
     }
   }
+  // ChimeraEvidence.tsv is the sample-level profiling evidence head.  It is
+  // intentionally aggregated before final selective readout rewrites per-read
+  // labels, so it must not be interpreted as a histogram of ChimeraClassify.tsv.
   write_abundance_em_evidence(
-      evidencePath, abundanceFit, primaryMass, decisionMass, tax,
-      abundanceWeight);
+      evidencePath, abundanceFit, postemPrimaryEvidenceMass,
+      postemDecisionEvidenceMass, tax, abundancePolicy.abundance_weight);
   cleanup_parts();
 }
 
@@ -1798,53 +1551,54 @@ void run(ClassifyConfig config) {
   config.community_dispersion_u = 1.0;
   config.community_dispersion_s = 1.0;
 
-  constexpr uint32_t kDispersionProbeReads = 200000;
-  CommunityDispersionProbeStats probeStats;
+  constexpr uint32_t kDispersionCalibrationReads = 200000;
+  CommunityDispersionStats dispersionStats;
   {
-    FileInfo probeInfo;
-    std::vector<moodycamel::ConcurrentQueue<batchReads>> probeQueues(
+    FileInfo calibrationInfo;
+    std::vector<moodycamel::ConcurrentQueue<batchReads>> calibrationQueues(
         static_cast<size_t>(std::max<uint16_t>(1, config.threads)));
-    std::vector<QueueThrottle> probeThrottles(probeQueues.size());
-    std::vector<classifyResult> probeResults;
-    std::atomic<bool> probe_done{false};
-    std::thread probeProducer([&]() {
-      parseReads(probeQueues, config, probeInfo, kDispersionProbeReads,
-                 &probeThrottles);
-      probe_done.store(true, std::memory_order_release);
+    std::vector<QueueThrottle> calibrationThrottles(calibrationQueues.size());
+    std::vector<classifyResult> calibrationResults;
+    std::atomic<bool> calibration_done{false};
+    std::thread calibrationProducer([&]() {
+      parseReads(calibrationQueues, config, calibrationInfo,
+                 kDispersionCalibrationReads, &calibrationThrottles);
+      calibration_done.store(true, std::memory_order_release);
     });
 
-    classify_streaming(imcfConfig, probeQueues, config, imcf, tax, probeResults,
-                       probeInfo, probe_done, feature_params, feature_min_len,
-                       weightCtx, nullptr, &probeThrottles);
-    probeProducer.join();
+    classify_streaming(imcfConfig, calibrationQueues, config, imcf, tax,
+                       calibrationResults, calibrationInfo, calibration_done,
+                       feature_params, feature_min_len, weightCtx, nullptr,
+                       &calibrationThrottles);
+    calibrationProducer.join();
 
-    if (!probeResults.empty()) {
-      std::sort(probeResults.begin(), probeResults.end(),
+    if (!calibrationResults.empty()) {
+      std::sort(calibrationResults.begin(), calibrationResults.end(),
                 [](const classifyResult &a, const classifyResult &b) {
                   return a.id < b.id;
                 });
     }
 
-    bool probe_em = false;
-    if (!probeResults.empty()) {
+    bool calibrationEm = false;
+    if (!calibrationResults.empty()) {
       EMOptions options;
       options.temp = 1.05;
       options.prune_ratio = config.em_prune_ratio;
       options.conf_power = config.em_conf_power;
       auto [posterior, weights] =
-          EMAlgorithm(std::move(probeResults), config.emIter, 0.0, options,
-                      nullptr);
-      probeResults = std::move(posterior);
-      probe_em = true;
+          EMAlgorithm(std::move(calibrationResults), config.emIter, 0.0,
+                      options, nullptr);
+      calibrationResults = std::move(posterior);
+      calibrationEm = true;
     }
 
     std::unordered_map<std::string, double> species_counts;
-    species_counts.reserve(probeResults.size() / 4 + 8);
+    species_counts.reserve(calibrationResults.size() / 4 + 8);
     std::size_t unclassified_reads = 0;
 
-    for (const auto &res : probeResults) {
+    for (const auto &res : calibrationResults) {
       std::string top;
-      if (probe_em && !res.posteriors.empty()) {
+      if (calibrationEm && !res.posteriors.empty()) {
         double best_prob = -1.0;
         for (const auto &kv : res.posteriors) {
           if (kv.second > best_prob) {
@@ -1890,32 +1644,30 @@ void run(ClassifyConfig config) {
     for (const auto &kv : species_counts) {
       counts.push_back(kv.second);
     }
-    probeStats =
-        compute_community_dispersion_probe_stats(counts, unclassified_reads);
-    config.community_dispersion_u = compute_community_dispersion_u(
-        probeStats.top_mass, probeStats.eff_species);
-    config.community_dispersion_s = compute_community_dispersion_s(
-        probeStats.top_mass, probeStats.eff_species);
-    std::vector<classifyResult>().swap(probeResults);
-    std::vector<moodycamel::ConcurrentQueue<batchReads>>().swap(probeQueues);
+    dispersionStats =
+        compute_community_dispersion_stats(counts, unclassified_reads);
+    std::vector<classifyResult>().swap(calibrationResults);
+    std::vector<moodycamel::ConcurrentQueue<batchReads>>().swap(
+        calibrationQueues);
   }
 
-  const double dispersion_hi = config.community_dispersion_s;
-  if (!config.firstFilterBeta_user) {
-    config.firstFilterBeta = lerp(0.5, 0.8, dispersion_hi);
-  }
-  config.em_conf_power = lerp(1.0, 2.0, dispersion_hi);
+  const CommunityAutoPolicy communityPolicy =
+      derive_community_auto_policy(config, dispersionStats);
+  config.community_dispersion_u = communityPolicy.community_dispersion_u;
+  config.community_dispersion_s = communityPolicy.community_dispersion_s;
+  config.firstFilterBeta = communityPolicy.first_filter_beta;
+  config.em_conf_power = communityPolicy.em_conf_power;
   std::cout << "[classify][auto] community-dispersion"
             << " u=" << std::fixed << std::setprecision(4)
             << config.community_dispersion_u
             << " s=" << config.community_dispersion_s
-            << " top_mass=" << probeStats.top_mass
-            << " eff_species=" << probeStats.eff_species
-            << " simpson_species=" << probeStats.simpson_species
-            << " uncls=" << probeStats.unclassified << "\n";
+            << " top_mass=" << dispersionStats.top_mass
+            << " eff_species=" << dispersionStats.eff_species
+            << " simpson_species=" << dispersionStats.simpson_species
+            << " uncls=" << dispersionStats.unclassified << "\n";
   std::cout << "[classify][auto] firstFilterBeta=" << config.firstFilterBeta
             << " em_conf_power=" << config.em_conf_power
-            << " dispersion_gate=" << dispersion_hi << "\n";
+            << " dispersion_gate=" << config.community_dispersion_s << "\n";
   std::cout << std::defaultfloat;
 
   FileInfo fileInfo;
@@ -1948,9 +1700,6 @@ void run(ClassifyConfig config) {
   if (fileInfo.sequenceNum > 0) {
     fileInfo.avgLen = fileInfo.bpLength / fileInfo.sequenceNum;
   }
-  const double sample_evidence_strength =
-      compute_sample_evidence_strength(fileInfo, coverageMeta, probeStats);
-
   size_t presenceTotalReads = fileInfo.sequenceNum;
   size_t presenceMeanReadLen = fileInfo.avgLen;
 
@@ -2017,107 +1766,22 @@ void run(ClassifyConfig config) {
   posteriorModelUsed = true;
   if (posteriorModelUsed) {
     DecisionConfig decisionConfig;
-    double tuned_post_pi_min = config.post_pi_min;
-    double tuned_post_pi_min_weights = tuned_post_pi_min;
-    double low_weight_mass_base = 0.0;
-    double low_weight_mass_target = 0.0;
-    double dominance_score = clamp01(1.0 - config.community_dispersion_s);
-    double relax_strength = clamp01(config.community_dispersion_s);
-
-    if (tuned_post_pi_min > 0.0 && !classWeights.empty()) {
-      std::vector<double> weights;
-      weights.reserve(classWeights.size());
-      double total_mass = 0.0;
-      for (const auto &kv : classWeights) {
-        const double w = kv.second;
-        if (w > 0.0) {
-          weights.push_back(w);
-          total_mass += w;
-        }
-      }
-      if (total_mass > 0.0 && weights.size() > 1) {
-        std::sort(weights.begin(), weights.end(),
-                  [](double a, double b) { return a > b; });
-
-        auto low_weight_mass = [&](double pi_min) -> double {
-          if (!(pi_min > 0.0)) {
-            return 0.0;
-          }
-          double mass = 0.0;
-          for (size_t i = weights.size(); i-- > 0;) {
-            const double w = weights[i];
-            if (w >= pi_min) {
-              break;
-            }
-            mass += w;
-          }
-          return mass / total_mass;
-        };
-
-        const double base = tuned_post_pi_min;
-        low_weight_mass_base = low_weight_mass(base);
-        double square_sum = 0.0;
-        const double inv_total_mass = 1.0 / total_mass;
-        for (double w : weights) {
-          const double p = w * inv_total_mass;
-          square_sum += p * p;
-        }
-        const double simpson_eff =
-            (square_sum > 0.0) ? (1.0 / square_sum) : 1.0;
-        low_weight_mass_target = 1.0 / (1.0 + simpson_eff);
-        if (low_weight_mass_base > low_weight_mass_target &&
-            relax_strength > 0.0) {
-          const double target_mass = low_weight_mass_target * total_mass;
-          double tuned_candidate = base;
-          double pruned_mass = 0.0;
-          for (size_t i = weights.size(); i-- > 0;) {
-            const double w = weights[i];
-            if (w >= base) {
-              break;
-            }
-            if (pruned_mass + w > target_mass) {
-              tuned_candidate = w;
-              break;
-            }
-            pruned_mass += w;
-          }
-          if (tuned_candidate < base) {
-            const double log_base = std::log10(base);
-            const double log_tuned = std::log10(tuned_candidate);
-            const double log_mix =
-                ((1.0 - relax_strength) * log_base) +
-                (relax_strength * log_tuned);
-            double tuned = std::pow(10.0, log_mix);
-            tuned = std::clamp(tuned, tuned_candidate, base);
-            tuned_post_pi_min = tuned;
-          }
-        }
-      }
-    }
-    tuned_post_pi_min_weights = tuned_post_pi_min;
-
-    constexpr double kAutoPostPiMinLoDefault = 1e-4;
-    const double auto_pi_lo = kAutoPostPiMinLoDefault;
-
-    auto evidence_tune =
-        ChimeraClassify::tune_post_pi_min_by_evidence_strength(
-            tuned_post_pi_min_weights, auto_pi_lo,
-            sample_evidence_strength, relax_strength);
-    tuned_post_pi_min = evidence_tune.tuned;
-
-    decisionConfig.min_class_weight = tuned_post_pi_min;
+    const PostPiAutoPolicy postPiPolicy = derive_post_pi_auto_policy(
+        config, fileInfo, coverageMeta, dispersionStats, classWeights);
+    decisionConfig.min_class_weight = postPiPolicy.tuned;
     std::cout << "[classify][auto] post-pi"
               << " s=" << std::fixed << std::setprecision(4)
               << config.community_dispersion_s
-              << " dominance=" << dominance_score
-              << " relax=" << relax_strength
+              << " dominance=" << postPiPolicy.dominance
+              << " relax=" << postPiPolicy.relax
               << " base=" << config.post_pi_min
-              << " low_weight_mass=" << low_weight_mass_base
-              << " low_weight_target=" << low_weight_mass_target
-              << " tuned=" << tuned_post_pi_min
-              << " evidence_t=" << evidence_tune.t
+              << " low_weight_mass=" << postPiPolicy.low_weight_mass
+              << " low_weight_target=" << postPiPolicy.low_weight_target
+              << " tuned=" << postPiPolicy.tuned
+              << " evidence_t=" << postPiPolicy.evidence_t
               << " avg_len=" << fileInfo.avgLen
-              << " evidence_strength=" << sample_evidence_strength << "\n";
+              << " evidence_strength="
+              << postPiPolicy.sample_evidence_strength << "\n";
     std::cout << std::defaultfloat;
 
     write_spool_em_results(spoolPaths, speciesFit, options, decisionConfig,
