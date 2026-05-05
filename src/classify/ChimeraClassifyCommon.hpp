@@ -89,6 +89,21 @@ inline double lerp(double lo, double hi, double t) {
   return lo + (hi - lo) * tt;
 }
 
+inline size_t sample_state_calibration_support_floor(
+    double effective_candidate_count, size_t same_genus_competitors,
+    size_t floor_cap) {
+  if (floor_cap == 0 || !std::isfinite(effective_candidate_count) ||
+      effective_candidate_count <= 0.0) {
+    return 0;
+  }
+  const double competitor_penalty =
+      1.0 + static_cast<double>(same_genus_competitors);
+  const double support =
+      8.0 * std::sqrt(effective_candidate_count / competitor_penalty);
+  return std::min<size_t>(
+      floor_cap, static_cast<size_t>(std::ceil(std::max(0.0, support))));
+}
+
 inline double smoothstep(double x, double edge0, double edge1) {
   if (!(edge1 > edge0)) {
     return 0.0;

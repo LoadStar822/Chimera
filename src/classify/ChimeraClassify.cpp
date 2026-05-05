@@ -1566,7 +1566,9 @@ void run(ClassifyConfig config) {
       calibration_done.store(true, std::memory_order_release);
     });
 
-    classify_streaming(imcfConfig, calibrationQueues, config, imcf, tax,
+    ClassifyConfig calibrationConfig = config;
+    calibrationConfig.sample_state_calibration = true;
+    classify_streaming(imcfConfig, calibrationQueues, calibrationConfig, imcf, tax,
                        calibrationResults, calibrationInfo, calibration_done,
                        feature_params, feature_min_len, weightCtx, nullptr,
                        &calibrationThrottles);

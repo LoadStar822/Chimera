@@ -50,6 +50,10 @@ namespace ChimeraClassify {
 	// Continuous sample-level community dispersion in [0,1].
 	double community_dispersion_u = 1.0;
 	double community_dispersion_s = 1.0;
+	// Internal first-pass mode: retain broader candidate support only while
+	// estimating sample state; the main per-read classify pass keeps its normal
+	// selective candidate retention.
+	bool sample_state_calibration = false;
 		size_t hash_sample_min = 16;
 		size_t hash_sample_max = 96;
 			double idf_max = 8.0;

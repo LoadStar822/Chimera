@@ -1689,13 +1689,57 @@ void processSequence(
       const double thr_high = static_cast<double>(thr_final_raw);
       const double thr_base = lerp(thr_low, thr_high, dispersion_hi);
 
+      const uint32_t best_genus_id = map_genus(bestTid);
+      size_t same_genus_competitors_for_calibration = 0;
+      double effective_candidate_count_for_calibration = 1.0;
+      if (config.sample_state_calibration) {
+        const uint32_t best_rep_tid_id = map_species_rep(bestTid);
+        const size_t scan_limit = std::min<size_t>(64, ranked.size());
+        robin_hood::unordered_flat_set<uint32_t> scanned_rep_ids;
+        scanned_rep_ids.reserve(scan_limit);
+        for (size_t i = 0; i < scan_limit; ++i) {
+          const uint32_t tid_id = ranked[i].first;
+          if (tid_id >= tax.id2str.size()) {
+            continue;
+          }
+          const uint32_t rep_id = map_species_rep(tid_id);
+          if (!scanned_rep_ids.insert(rep_id).second) {
+            continue;
+          }
+          if (rep_id == best_rep_tid_id) {
+            continue;
+          }
+          if (best_genus_id != 0u && map_genus(tid_id) == best_genus_id) {
+            ++same_genus_competitors_for_calibration;
+          }
+        }
+
+        double score_total = 0.0;
+        double score_square_total = 0.0;
+        for (const auto &kv : ranked) {
+          const double score = std::max(0.0, kv.second);
+          score_total += score;
+          score_square_total += score * score;
+        }
+        if (score_total > 0.0 && score_square_total > 0.0) {
+          effective_candidate_count_for_calibration =
+              (score_total * score_total) / score_square_total;
+        }
+      }
+
       const size_t floorK_max = std::min<size_t>(128, ranked.size());
-      const size_t floorCount = std::min<size_t>(
+      const size_t dispersionFloor = std::min<size_t>(
           floorK_max,
           static_cast<size_t>(std::llround((1.0 - dispersion_hi) *
                                            static_cast<double>(floorK_max))));
-
-      const uint32_t best_genus_id = map_genus(bestTid);
+      const size_t calibrationSupportFloor =
+          config.sample_state_calibration
+              ? sample_state_calibration_support_floor(
+                    effective_candidate_count_for_calibration,
+                    same_genus_competitors_for_calibration, floorK_max)
+              : 0;
+      const size_t floorCount =
+          std::max(dispersionFloor, calibrationSupportFloor);
 
       if (dump_preem_enabled) {
         dump_preem_candidate_retention(dump_preem_path, id, tax, weightCtx,
