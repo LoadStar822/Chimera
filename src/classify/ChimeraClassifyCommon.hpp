@@ -688,6 +688,40 @@ struct PresenceDecision {
   double threshold{1.0};
 };
 
+struct PresenceEvidenceRow {
+  uint32_t tid{0};
+  double posterior{0.0};
+  double log_posterior{0.0};
+  double log_bf{0.0};
+  double score{0.0};
+  double unique_score{0.0};
+  double hits{0.0};
+  double unique_hits{0.0};
+  uint64_t read_hits{0};
+  uint64_t unique_reads{0};
+  double unique_obs{0.0};
+  double breadth_obs{0.0};
+  double breadth_ratio{0.0};
+  double unique_effective{0.0};
+  double local_factor{1.0};
+  double exposure{0.0};
+  double unique_reference{0.0};
+  double total_signatures{0.0};
+  double genome_length{0.0};
+  double unique_density{0.0};
+  double expected_unique_per_ref_read{0.0};
+};
+
+struct PresenceEvidenceTable {
+  double threshold{1.0};
+  std::vector<PresenceEvidenceRow> rows;
+};
+
+PresenceEvidenceTable build_presence_evidence_table(
+    const PresenceSummary &summary, const TaxDict &tax,
+    const ClassifyConfig &config, const chimera::presence::CoverageMeta &meta,
+    size_t totalReads, size_t meanReadLen);
+
 struct AdaptiveSurfaceGenusPick {
   uint32_t genus_id{0u};
   uint32_t rep_id{0u};

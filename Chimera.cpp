@@ -315,6 +315,8 @@ int main(int argc, char **argv) {
       ->add_option("--post-pi-min", classifyConfig.post_pi_min,
                    "Minimum global class weight")
       ->default_val(5e-4);
+  classify->add_flag("--read-evidence", classifyConfig.write_read_evidence,
+                     "Write ChimeraReadEvidence.tsv for read-resolved audits");
   // TODO: Deprecated post-processing knobs remain fixed to internal defaults.
 
   if (argc == 1) {

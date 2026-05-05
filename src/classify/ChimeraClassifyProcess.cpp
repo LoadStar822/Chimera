@@ -86,6 +86,22 @@ static uint32_t next_epoch(std::vector<uint32_t> &epochs, uint32_t &epoch) {
   return epoch;
 }
 
+static uint32_t species_rep_for_tid(const WeightingContext &weightCtx,
+                                    uint32_t tid_id) {
+  if (weightCtx.tid2speciesRep && tid_id < weightCtx.tid2speciesRep->size()) {
+    return (*weightCtx.tid2speciesRep)[tid_id];
+  }
+  return tid_id;
+}
+
+static uint32_t genus_for_tid(const WeightingContext &weightCtx,
+                              uint32_t tid_id) {
+  if (weightCtx.tid2genus && tid_id < weightCtx.tid2genus->size()) {
+    return (*weightCtx.tid2genus)[tid_id];
+  }
+  return 0u;
+}
+
 static bool expand_adaptive_candidate_surface(
     size_t readLen, double dispersion_hi, uint64_t coarseTotal,
     robin_hood::unordered_flat_map<uint32_t, uint64_t> &repCoarseScore,
@@ -106,12 +122,6 @@ static bool expand_adaptive_candidate_surface(
   if (!full_surface_mode && dispersion_hi > adaptive_surface_dispersion_gate &&
       coarseTotal > 0 && !repCoarseScore.empty() && !genusCoarseScore.empty() &&
       weightCtx.tid2genus) {
-    auto map_genus = [&](uint32_t tid_id) -> uint32_t {
-      if (weightCtx.tid2genus && tid_id < weightCtx.tid2genus->size()) {
-        return (*weightCtx.tid2genus)[tid_id];
-      }
-      return 0u;
-    };
     auto &repRanked = scratch.repRanked;
     auto &genusRanked = scratch.genusRanked;
     repRanked.clear();
@@ -151,7 +161,7 @@ static bool expand_adaptive_candidate_surface(
       const uint64_t top1_rep_score = repRanked.front().second;
       size_t dominant_crowded = 0;
       for (const auto &[rep_id, score] : repRanked) {
-        if (map_genus(rep_id) != dominant_genus) {
+        if (genus_for_tid(weightCtx, rep_id) != dominant_genus) {
           continue;
         }
         if (score * 10ull >= top1_rep_score * 4ull) {
@@ -188,7 +198,7 @@ static bool expand_adaptive_candidate_surface(
         dominantCandidates.clear();
         dominantCandidates.reserve(repRanked.size());
         for (const auto &[rep_id, _] : repRanked) {
-          if (map_genus(rep_id) != dominant_genus) {
+          if (genus_for_tid(weightCtx, rep_id) != dominant_genus) {
             continue;
           }
           if (rep_id == repRanked.front().first) {
@@ -238,7 +248,8 @@ static bool expand_adaptive_candidate_surface(
           uint64_t best_rep_coarse = 0u;
           bool have_best_rep = false;
           for (const auto &[rep_id, rep_score] : repCoarseScore) {
-            if (rep_score == 0u || map_genus(rep_id) != genus_id) {
+            if (rep_score == 0u ||
+                genus_for_tid(weightCtx, rep_id) != genus_id) {
               continue;
             }
             const uint32_t rep_rare =
@@ -422,150 +433,59 @@ capture_sample_mixture_candidates_from_base_scores(const ProcessScratch &scratch
   return out;
 }
 
-static void dump_preem_candidate_retention(
-    const std::string &dump_path, const std::string &read_id,
-    const TaxDict &tax, const WeightingContext &weightCtx,
-    const std::vector<std::pair<uint32_t, double>> &ranked, double effCap,
-    double thr_base, size_t floorCount, const std::string &bestTaxidStr,
-    uint32_t best_genus_id) {
-  static std::mutex preem_dump_mu;
-  static bool preem_dump_header_written = false;
-  auto map_genus = [&](uint32_t tid_id) -> uint32_t {
-    if (weightCtx.tid2genus && tid_id < weightCtx.tid2genus->size()) {
-      return (*weightCtx.tid2genus)[tid_id];
-    }
-    return 0u;
-  };
+static void prepare_hash_sample_and_route(
+    const std::vector<uint64_t> &hashs, const ClassifyConfig &config,
+    const WeightingContext &weightCtx, ProcessScratch &scratch) {
+  size_t targetSample = hashs.size() / 2;
+  targetSample = std::clamp<size_t>(
+      targetSample, config.hash_sample_min, config.hash_sample_max);
+  const size_t sampleBudget = std::min<size_t>(targetSample, hashs.size());
 
-  std::lock_guard<std::mutex> lock(preem_dump_mu);
-  std::ofstream dump_os(dump_path, std::ios::out | std::ios::app);
-  if (!dump_os.is_open()) {
-    return;
-  }
-  if (!preem_dump_header_written) {
-    dump_os
-        << "read_id\ttid\trank\tscore\tthr_base\tfloor_count\tbest_tid\tbest_genus\tcand_genus\tbaseline_kept\n";
-    preem_dump_header_written = true;
-  }
-  for (size_t i = 0; i < ranked.size(); ++i) {
-    const uint32_t tid_id = ranked[i].first;
-    if (tid_id >= tax.id2str.size()) {
-      continue;
-    }
-    const double countVal = std::clamp(ranked[i].second, 0.0, effCap);
-    if (countVal <= 0.0) {
-      continue;
-    }
-    const bool baseline_kept = (i < floorCount || countVal >= thr_base);
-    const uint32_t cand_genus_id = map_genus(tid_id);
-    dump_os << read_id << '\t' << tax.id2str[tid_id] << '\t' << i << '\t'
-            << countVal << '\t' << thr_base << '\t' << floorCount << '\t'
-            << bestTaxidStr << '\t' << best_genus_id << '\t' << cand_genus_id
-            << '\t' << (baseline_kept ? 1 : 0) << '\n';
-  }
-}
-
-void processSequence(
-    const std::vector<uint64_t> &hashs1, size_t readLen,
-    ChimeraBuild::IMCFConfig &imcfConfig, const TaxDict &tax,
-    ClassifyConfig &config, const WeightingContext &weightCtx, GroupHeat &heat,
-    chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
-    std::vector<classifyResult> *classifyResults,
-    std::vector<CompactClassifyResult> *compactResults, FileInfo &fileInfo,
-    PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
-  size_t hashNum = hashs1.size();
-  const size_t binNumAll = tax.idx2id.size();
-  heat.ensure(binNumAll);
-  const double community_dispersion_s =
-      clamp01(config.community_dispersion_s);
-  const double dispersion_hi = community_dispersion_s;
-  const bool presenceEnabled = (presenceAcc != nullptr);
-  const uint32_t presenceSketchBits =
-      presenceEnabled ? presenceAcc->sketchBits : 0;
-  const bool presenceSketchPow2 =
-      (presenceSketchBits > 0) &&
-      ((presenceSketchBits & (presenceSketchBits - 1u)) == 0);
-  const uint32_t presenceSketchMask =
-      presenceSketchPow2 ? (presenceSketchBits - 1u) : 0u;
-  auto sketch_index = [&](uint64_t value) -> uint32_t {
-    if (presenceSketchBits == 0) {
-      return std::numeric_limits<uint32_t>::max();
-    }
-    uint64_t mix = splitmix64(value);
-    if (presenceSketchPow2) {
-      return static_cast<uint32_t>(mix & presenceSketchMask);
-    }
-    return static_cast<uint32_t>(mix % presenceSketchBits);
-  };
-  constexpr double kUniqueEdgeBonus = 3.0;
-  double presence_weight = 1.0;
-
-  const char *dump_preem_env = std::getenv("CHIMERA_DUMP_PREEM_TSV");
-  const bool dump_preem_enabled = (dump_preem_env && dump_preem_env[0] != '\0');
-  const std::string dump_preem_path =
-      dump_preem_enabled ? std::string(dump_preem_env) : std::string();
-  auto map_species_rep = [&](uint32_t tid_id) -> uint32_t {
-    if (weightCtx.tid2speciesRep && tid_id < weightCtx.tid2speciesRep->size()) {
-      return (*weightCtx.tid2speciesRep)[tid_id];
-    }
-    return tid_id;
-  };
-  auto map_genus = [&](uint32_t tid_id) -> uint32_t {
-    if (weightCtx.tid2genus && tid_id < weightCtx.tid2genus->size()) {
-      return (*weightCtx.tid2genus)[tid_id];
-    }
-    return 0u;
-  };
-  // Sample a subset of hashes for coarse candidate selection.
-  size_t targetSample = hashNum / 2;
-  targetSample = std::clamp<size_t>(targetSample, config.hash_sample_min, config.hash_sample_max);
-  const size_t sampleBudget = std::min<size_t>(targetSample, hashs1.size());
   auto &sampleVals = scratch.sampleVals;
   sampleVals.clear();
   if (sampleBudget > 0) {
     sampleVals.reserve(sampleBudget);
-    if (hashs1.size() <= sampleBudget) {
-      sampleVals = hashs1;
+    if (hashs.size() <= sampleBudget) {
+      sampleVals = hashs;
     } else if (weightCtx.freqSketch) {
-      // Mix: prefer rarer hashes for a sharper candidate set, but keep some
-      // uniform coverage to avoid missing genus-level candidates.
+      // Mix rare-biased hashes with uniform coverage so coarse routing stays
+      // sharp without losing genus-level candidates.
       const size_t rareQuota = std::max<size_t>(1, sampleBudget / 2);
-      const size_t over =
-          std::min<size_t>(hashs1.size(), std::max<size_t>(sampleBudget * 8, sampleBudget));
+      const size_t over = std::min<size_t>(
+          hashs.size(), std::max<size_t>(sampleBudget * 8, sampleBudget));
       auto &scored = scratch.sampleScored;
       scored.clear();
       scored.reserve(over);
-      size_t step = std::max<size_t>(1, hashs1.size() / over);
-      for (size_t i = 0; i < hashs1.size() && scored.size() < over;
-           i += step) {
-        uint64_t v = hashs1[i];
+      const size_t step = std::max<size_t>(1, hashs.size() / over);
+      for (size_t i = 0; i < hashs.size() && scored.size() < over; i += step) {
+        const uint64_t v = hashs[i];
         scored.emplace_back(weightCtx.freqSketch->estimate(v), v);
       }
-      if (!hashs1.empty() && scored.size() < over) {
-        uint64_t v = hashs1.back();
+      if (!hashs.empty() && scored.size() < over) {
+        const uint64_t v = hashs.back();
         scored.emplace_back(weightCtx.freqSketch->estimate(v), v);
       }
-      std::sort(scored.begin(), scored.end(),
-                [](const auto &a, const auto &b) {
-                  if (a.first != b.first) {
-                    return a.first < b.first;
-                  }
-                  return a.second < b.second;
-                });
+      std::sort(scored.begin(), scored.end(), [](const auto &a,
+                                                 const auto &b) {
+        if (a.first != b.first) {
+          return a.first < b.first;
+        }
+        return a.second < b.second;
+      });
       for (const auto &kv : scored) {
         sampleVals.push_back(kv.second);
         if (sampleVals.size() >= rareQuota) {
           break;
         }
       }
-      // Top up with a coarse uniform stride.
-      size_t step2 = std::max<size_t>(1, hashs1.size() / sampleBudget);
-      for (size_t i = 0; i < hashs1.size() && sampleVals.size() < sampleBudget;
+
+      const size_t step2 = std::max<size_t>(1, hashs.size() / sampleBudget);
+      for (size_t i = 0; i < hashs.size() && sampleVals.size() < sampleBudget;
            i += step2) {
-        sampleVals.push_back(hashs1[i]);
+        sampleVals.push_back(hashs[i]);
       }
-      if (sampleVals.size() < sampleBudget && !hashs1.empty()) {
-        sampleVals.push_back(hashs1.back());
+      if (sampleVals.size() < sampleBudget && !hashs.empty()) {
+        sampleVals.push_back(hashs.back());
       }
       std::sort(sampleVals.begin(), sampleVals.end());
       sampleVals.erase(std::unique(sampleVals.begin(), sampleVals.end()),
@@ -574,19 +494,19 @@ void processSequence(
         sampleVals.resize(sampleBudget);
       }
     } else {
-      size_t step = std::max<size_t>(1, hashs1.size() / sampleBudget);
-      for (size_t i = 0; i < hashs1.size() && sampleVals.size() < sampleBudget;
+      const size_t step = std::max<size_t>(1, hashs.size() / sampleBudget);
+      for (size_t i = 0; i < hashs.size() && sampleVals.size() < sampleBudget;
            i += step) {
-        sampleVals.push_back(hashs1[i]);
+        sampleVals.push_back(hashs[i]);
       }
-      if (sampleVals.size() < sampleBudget && !hashs1.empty()) {
-        sampleVals.push_back(hashs1.back());
+      if (sampleVals.size() < sampleBudget && !hashs.empty()) {
+        sampleVals.push_back(hashs.back());
       }
     }
   }
+
   auto &routeVals = scratch.routeVals;
   routeVals = sampleVals;
-  bool used_rare_route = false;
   if (!sampleVals.empty() && weightCtx.freqSketch) {
     auto &routeScored = scratch.routeScored;
     routeScored.clear();
@@ -595,15 +515,24 @@ void processSequence(
       routeScored.emplace_back(weightCtx.freqSketch->estimate(v), v);
     }
     constexpr double route_ratio = 0.50;
-    const size_t routeBudget =
-        std::max<size_t>(1, static_cast<size_t>(
-                                std::llround(route_ratio * sampleVals.size())));
+    const size_t routeBudget = std::max<size_t>(
+        1, static_cast<size_t>(std::llround(route_ratio * sampleVals.size())));
     routeVals = select_rare_route_values(routeScored, routeBudget);
     if (routeVals.empty()) {
       routeVals = sampleVals;
     }
-    used_rare_route = (routeVals.size() < sampleVals.size());
   }
+
+}
+
+static uint64_t collect_coarse_evidence(
+    const std::vector<uint64_t> &sampleVals,
+    chimera::imcf::InterleavedMergedCuckooFilter &imcf, const TaxDict &tax,
+    const WeightingContext &weightCtx, ProcessScratch &scratch,
+    robin_hood::unordered_flat_map<uint32_t, uint32_t> &sampleBinScore,
+    robin_hood::unordered_flat_map<uint32_t, uint64_t> &repCoarseScore,
+    robin_hood::unordered_flat_map<uint32_t, uint64_t> &genusCoarseScore) {
+  using PairCode = uint64_t;
   auto &coarsePairCodes = scratch.coarsePairCodes;
   coarsePairCodes.clear();
   coarsePairCodes.reserve(64);
@@ -611,67 +540,69 @@ void processSequence(
   coarsePairCounts.clear();
   auto &coarseTouchedPairs = scratch.coarseTouchedPairs;
   coarseTouchedPairs.clear();
-  robin_hood::unordered_flat_map<uint32_t, uint32_t> sampleBinScore;
-  robin_hood::unordered_flat_map<uint32_t, uint64_t> repCoarseScore;
-  robin_hood::unordered_flat_map<uint32_t, uint64_t> genusCoarseScore;
-  robin_hood::unordered_flat_map<uint32_t, uint32_t> repRareSupport;
-  robin_hood::unordered_flat_map<uint32_t, uint32_t> genusRareSupport;
-  auto &rankedBins = scratch.rankedBins;
-  rankedBins.clear();
-  uint64_t coarseTotal = 0;
-  uint64_t sampleCovered = 0;
-  auto &deferredEval = scratch.deferredEval;
-  deferredEval.clear();
-  if (hashs1.size() > 64) {
-    deferredEval.reserve(hashs1.size() - 64);
+
+  if (sampleVals.empty()) {
+    return 0;
   }
 
-  if (sampleBudget > 0) {
-    using PairCode = uint64_t;
-    for (uint64_t value : sampleVals) {
-      coarsePairCodes.clear();
-      imcf.bulkContain_events(value, [&](uint32_t bin, uint16_t sp) {
-        coarsePairCodes.push_back((PairCode(bin) << 16) | PairCode(sp));
-      });
-      if (coarsePairCodes.empty()) {
-        continue;
-      }
-      std::sort(coarsePairCodes.begin(), coarsePairCodes.end());
-      coarsePairCodes.erase(
-          std::unique(coarsePairCodes.begin(), coarsePairCodes.end()),
-          coarsePairCodes.end());
-      for (PairCode code : coarsePairCodes) {
-        auto [it, inserted] = coarsePairCounts.try_emplace(code, 0u);
-        if (inserted) {
-          coarseTouchedPairs.push_back(code);
-        }
-        if (it->second < std::numeric_limits<uint32_t>::max()) {
-          ++it->second;
-        }
-      }
+  for (uint64_t value : sampleVals) {
+    coarsePairCodes.clear();
+    imcf.bulkContain_events(value, [&](uint32_t bin, uint16_t sp) {
+      coarsePairCodes.push_back((PairCode(bin) << 16) | PairCode(sp));
+    });
+    if (coarsePairCodes.empty()) {
+      continue;
     }
-    sampleBinScore.reserve(coarseTouchedPairs.size());
-    for (PairCode code : coarseTouchedPairs) {
-      auto countIt = coarsePairCounts.find(code);
-      if (countIt == coarsePairCounts.end() || countIt->second == 0u) {
-        continue;
+    std::sort(coarsePairCodes.begin(), coarsePairCodes.end());
+    coarsePairCodes.erase(
+        std::unique(coarsePairCodes.begin(), coarsePairCodes.end()),
+        coarsePairCodes.end());
+    for (PairCode code : coarsePairCodes) {
+      auto [it, inserted] = coarsePairCounts.try_emplace(code, 0u);
+      if (inserted) {
+        coarseTouchedPairs.push_back(code);
       }
-      const uint32_t bi = static_cast<uint32_t>(code >> 16);
-      const uint16_t sp = static_cast<uint16_t>(code & 0xFFFFu);
-      const uint32_t contrib = countIt->second;
-      coarseTotal += contrib;
-      sampleBinScore[bi] += contrib;
-      if (bi < tax.idx2id.size() && sp < tax.idx2id[bi].size()) {
-        const uint32_t tid_id = tax.idx2id[bi][sp];
-        const uint32_t rep_id = map_species_rep(tid_id);
-        repCoarseScore[rep_id] += static_cast<uint64_t>(contrib);
-        const uint32_t genus_id = map_genus(rep_id);
-        if (genus_id != 0u) {
-          genusCoarseScore[genus_id] += static_cast<uint64_t>(contrib);
-        }
+      if (it->second < std::numeric_limits<uint32_t>::max()) {
+        ++it->second;
       }
     }
   }
+
+  uint64_t coarseTotal = 0;
+  sampleBinScore.reserve(coarseTouchedPairs.size());
+  for (PairCode code : coarseTouchedPairs) {
+    auto countIt = coarsePairCounts.find(code);
+    if (countIt == coarsePairCounts.end() || countIt->second == 0u) {
+      continue;
+    }
+    const uint32_t bi = static_cast<uint32_t>(code >> 16);
+    const uint16_t sp = static_cast<uint16_t>(code & 0xFFFFu);
+    const uint32_t contrib = countIt->second;
+    coarseTotal += contrib;
+    sampleBinScore[bi] += contrib;
+    if (bi < tax.idx2id.size() && sp < tax.idx2id[bi].size()) {
+      const uint32_t tid_id = tax.idx2id[bi][sp];
+      const uint32_t rep_id = species_rep_for_tid(weightCtx, tid_id);
+      repCoarseScore[rep_id] += static_cast<uint64_t>(contrib);
+      const uint32_t genus_id = genus_for_tid(weightCtx, rep_id);
+      if (genus_id != 0u) {
+        genusCoarseScore[genus_id] += static_cast<uint64_t>(contrib);
+      }
+    }
+  }
+  return coarseTotal;
+}
+
+static bool build_initial_candidate_surface(
+    const std::vector<uint64_t> &routeVals,
+    const robin_hood::unordered_flat_map<uint32_t, uint32_t> &sampleBinScore,
+    uint64_t coarseTotal, double dispersion_hi, size_t binNumAll,
+    chimera::imcf::InterleavedMergedCuckooFilter &imcf, const TaxDict &tax,
+    const WeightingContext &weightCtx, const GroupHeat &heat,
+    ProcessScratch &scratch,
+    robin_hood::unordered_flat_map<uint32_t, uint32_t> &repRareSupport,
+    robin_hood::unordered_flat_map<uint32_t, uint32_t> &genusRareSupport,
+    robin_hood::unordered_flat_set<uint32_t> &lowDegPreserve) {
   const size_t baseCandidateCap = std::min<size_t>(
       binNumAll,
       static_cast<size_t>(std::llround(lerp(256.0, 320.0, dispersion_hi))));
@@ -679,13 +610,14 @@ void processSequence(
       binNumAll,
       static_cast<size_t>(std::llround(lerp(512.0, 640.0, dispersion_hi))));
   size_t candidateCap = baseCandidateCap;
+
   auto &topBins = scratch.topBins;
   topBins.clear();
   bool full_surface_mode = (coarseTotal == 0);
 
   robin_hood::unordered_flat_set<uint32_t> candidateSet;
   candidateSet.reserve(256);
-  robin_hood::unordered_flat_set<uint32_t> lowDegPreserve;
+  lowDegPreserve.clear();
   lowDegPreserve.reserve(64);
 
   uint32_t rare_freq_threshold = 2u;
@@ -732,9 +664,9 @@ void processSequence(
                 return;
               }
               const uint32_t tid_id = speciesVec[sp];
-              const uint32_t rep_id = map_species_rep(tid_id);
+              const uint32_t rep_id = species_rep_for_tid(weightCtx, tid_id);
               rareRepHits.push_back(rep_id);
-              const uint32_t genus_id = map_genus(rep_id);
+              const uint32_t genus_id = genus_for_tid(weightCtx, rep_id);
               if (genus_id != 0u) {
                 rareGenusHits.push_back(genus_id);
               }
@@ -761,6 +693,7 @@ void processSequence(
   }
 
   constexpr double coverageTarget = 0.92;
+  auto &rankedBins = scratch.rankedBins;
   if (coarseTotal > 0 && !sampleBinScore.empty()) {
     rankedBins.clear();
     rankedBins.reserve(sampleBinScore.size());
@@ -775,7 +708,7 @@ void processSequence(
     candidateCap = compute_candidate_cap(baseCandidateCap, maxCandidateCap,
                                          core_mass, rankedBins.size());
 
-    uint64_t goal = static_cast<uint64_t>(
+    const uint64_t goal = static_cast<uint64_t>(
         std::ceil(static_cast<double>(coarseTotal) * coverageTarget));
     uint64_t covered = 0;
     for (const auto &[bin, score] : rankedBins) {
@@ -788,7 +721,6 @@ void processSequence(
         break;
       }
     }
-    sampleCovered = covered;
     full_surface_mode = false;
   }
 
@@ -844,6 +776,867 @@ void processSequence(
     scratch.baseTopBins = topBins;
   }
 
+  return full_surface_mode;
+}
+
+static void dump_preem_candidate_retention(
+    const std::string &dump_path, const std::string &read_id,
+    const TaxDict &tax, const WeightingContext &weightCtx,
+    const std::vector<std::pair<uint32_t, double>> &ranked, double effCap,
+    double thr_base, size_t floorCount, const std::string &bestTaxidStr,
+    uint32_t best_genus_id) {
+  static std::mutex preem_dump_mu;
+  static bool preem_dump_header_written = false;
+  auto map_genus = [&](uint32_t tid_id) -> uint32_t {
+    if (weightCtx.tid2genus && tid_id < weightCtx.tid2genus->size()) {
+      return (*weightCtx.tid2genus)[tid_id];
+    }
+    return 0u;
+  };
+
+  std::lock_guard<std::mutex> lock(preem_dump_mu);
+  std::ofstream dump_os(dump_path, std::ios::out | std::ios::app);
+  if (!dump_os.is_open()) {
+    return;
+  }
+  if (!preem_dump_header_written) {
+    dump_os
+        << "read_id\ttid\trank\tscore\tthr_base\tfloor_count\tbest_tid\tbest_genus\tcand_genus\tbaseline_kept\n";
+    preem_dump_header_written = true;
+  }
+  for (size_t i = 0; i < ranked.size(); ++i) {
+    const uint32_t tid_id = ranked[i].first;
+    if (tid_id >= tax.id2str.size()) {
+      continue;
+    }
+    const double countVal = std::clamp(ranked[i].second, 0.0, effCap);
+    if (countVal <= 0.0) {
+      continue;
+    }
+    const bool baseline_kept = (i < floorCount || countVal >= thr_base);
+    const uint32_t cand_genus_id = map_genus(tid_id);
+    dump_os << read_id << '\t' << tax.id2str[tid_id] << '\t' << i << '\t'
+            << countVal << '\t' << thr_base << '\t' << floorCount << '\t'
+            << bestTaxidStr << '\t' << best_genus_id << '\t' << cand_genus_id
+            << '\t' << (baseline_kept ? 1 : 0) << '\n';
+  }
+}
+
+struct EvidenceStats {
+  uint32_t bestTid = std::numeric_limits<uint32_t>::max();
+  uint32_t secondTid = std::numeric_limits<uint32_t>::max();
+  double best = 0.0;
+  double second = 0.0;
+  double ratio = 0.0;
+  double gap = 0.0;
+  double uniqueCount = 0.0;
+  double uniqueRatio = 0.0;
+};
+
+static double score_ratio(double best_score, double second_score) {
+  if (second_score > 0.0) {
+    return best_score /
+           std::max(second_score, std::numeric_limits<double>::min());
+  }
+  return best_score <= 0.0 ? 0.0 : std::numeric_limits<double>::infinity();
+}
+
+static EvidenceStats collect_evidence_stats(
+    const robin_hood::unordered_flat_map<uint32_t, double> &tidScore,
+    const robin_hood::unordered_flat_map<uint32_t, double> &uniqueHits,
+    double eff_eval) {
+  EvidenceStats stats;
+  for (const auto &kv : tidScore) {
+    const double c = kv.second;
+    if (c > stats.best) {
+      stats.second = stats.best;
+      stats.secondTid = stats.bestTid;
+      stats.best = c;
+      stats.bestTid = kv.first;
+    } else if (c > stats.second) {
+      stats.second = c;
+      stats.secondTid = kv.first;
+    }
+  }
+  stats.ratio = score_ratio(stats.best, stats.second);
+  stats.gap = stats.best - stats.second;
+  if (stats.bestTid != std::numeric_limits<uint32_t>::max()) {
+    if (auto it = uniqueHits.find(stats.bestTid); it != uniqueHits.end()) {
+      stats.uniqueCount = it->second;
+    }
+  }
+  const double denom = eff_eval > 0.0 ? eff_eval : 1.0;
+  stats.uniqueRatio = stats.uniqueCount / denom;
+  return stats;
+}
+
+static bool meets_quick_high_conf(const ClassifyConfig &config,
+                                  const EvidenceStats &stats,
+                                  double eff_eval) {
+  if (stats.bestTid == std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
+  const double thr_conf_local = std::ceil(config.shotThreshold * eff_eval);
+  const double gap_need_local = std::max(0.5, eff_eval / 24.0);
+  const bool strong = (stats.best >= thr_conf_local);
+  const bool unique_ok = (stats.uniqueCount >= 3.0) ||
+                         (stats.uniqueCount >= 2.0 &&
+                          stats.uniqueRatio >= 0.12);
+  const bool stable =
+      (stats.gap >= gap_need_local) && (stats.ratio >= 1.35);
+  const size_t bestRoundedLocal = static_cast<size_t>(
+      std::max<double>(0.0, std::llround(stats.best)));
+  const size_t secondRoundedLocal = static_cast<size_t>(
+      std::max<double>(0.0, std::llround(stats.second)));
+  const size_t needLocal = static_cast<size_t>(std::ceil(thr_conf_local));
+  const auto dc =
+      decide_high_conf(bestRoundedLocal, secondRoundedLocal, eff_eval);
+  const bool margin_ok = (bestRoundedLocal >= needLocal) && dc.accept;
+  return strong && unique_ok && stable && margin_ok;
+}
+
+struct ReadScoringState {
+  ProcessScratch &scratch;
+  const WeightingContext &weightCtx;
+  size_t tid_count{0};
+  bool adaptive_surface_mode{false};
+  uint32_t tid_score_epoch{0};
+  uint32_t unique_hits_epoch{0};
+  robin_hood::unordered_flat_map<uint32_t, double> tid_score;
+  robin_hood::unordered_flat_map<uint32_t, double> unique_hits;
+
+  ReadScoringState(ProcessScratch &scratch_in,
+                   const WeightingContext &weightCtx_in, size_t tid_count_in,
+                   bool adaptive_surface_mode_in)
+      : scratch(scratch_in), weightCtx(weightCtx_in), tid_count(tid_count_in),
+        adaptive_surface_mode(adaptive_surface_mode_in) {
+    ensure_epoch_vector(scratch.tidScoreEpoch, tid_count);
+    ensure_double_vector(scratch.tidScoreDense, tid_count);
+    ensure_double_vector(scratch.tidBaseScoreDense, tid_count);
+    ensure_double_vector(scratch.tidCompletionScoreDense, tid_count);
+    ensure_epoch_vector(scratch.uniqueHitsEpoch, tid_count);
+    ensure_double_vector(scratch.uniqueHitsDense, tid_count);
+    scratch.activeTidScores.clear();
+    scratch.activeUniqueHits.clear();
+    tid_score.reserve(128);
+    unique_hits.reserve(128);
+    tid_score_epoch =
+        next_epoch(scratch.tidScoreEpoch, scratch.tidScoreEpochValue);
+    unique_hits_epoch =
+        next_epoch(scratch.uniqueHitsEpoch, scratch.uniqueHitsEpochValue);
+  }
+
+  void add_tid_score(uint32_t tid, double contrib, bool baseSource) {
+    if (tid >= tid_count) {
+      return;
+    }
+    if (scratch.tidScoreEpoch[tid] != tid_score_epoch) {
+      scratch.tidScoreEpoch[tid] = tid_score_epoch;
+      scratch.tidScoreDense[tid] = 0.0;
+      scratch.tidBaseScoreDense[tid] = 0.0;
+      scratch.tidCompletionScoreDense[tid] = 0.0;
+      scratch.activeTidScores.push_back(tid);
+    }
+    scratch.tidScoreDense[tid] += contrib;
+    if (baseSource) {
+      scratch.tidBaseScoreDense[tid] += contrib;
+    } else {
+      scratch.tidCompletionScoreDense[tid] += contrib;
+    }
+  }
+
+  void add_unique_hit(uint32_t tid, double value) {
+    if (tid >= tid_count) {
+      return;
+    }
+    if (scratch.uniqueHitsEpoch[tid] != unique_hits_epoch) {
+      scratch.uniqueHitsEpoch[tid] = unique_hits_epoch;
+      scratch.uniqueHitsDense[tid] = 0.0;
+      scratch.activeUniqueHits.push_back(tid);
+    }
+    scratch.uniqueHitsDense[tid] += value;
+  }
+
+  void reset_dense_scores() {
+    tid_score.clear();
+    unique_hits.clear();
+    scratch.activeTidScores.clear();
+    scratch.activeUniqueHits.clear();
+    tid_score_epoch =
+        next_epoch(scratch.tidScoreEpoch, scratch.tidScoreEpochValue);
+    unique_hits_epoch =
+        next_epoch(scratch.uniqueHitsEpoch, scratch.uniqueHitsEpochValue);
+  }
+
+  void materialize_score_maps() {
+    tid_score.clear();
+    robin_hood::unordered_flat_map<uint32_t, double> genusBaseSum;
+    genusBaseSum.reserve(scratch.activeTidScores.size());
+    if (adaptive_surface_mode && weightCtx.tid2genus) {
+      for (uint32_t tid : scratch.activeTidScores) {
+        const double baseScore = scratch.tidBaseScoreDense[tid];
+        if (!(baseScore > 0.0)) {
+          continue;
+        }
+        const uint32_t genus = genus_for_tid(weightCtx, tid);
+        if (genus != 0u) {
+          genusBaseSum[genus] += baseScore;
+        }
+      }
+    }
+    for (uint32_t tid : scratch.activeTidScores) {
+      const double totalScore = scratch.tidScoreDense[tid];
+      double primaryScore = totalScore;
+      if (adaptive_surface_mode && weightCtx.tid2genus) {
+        const double baseScore = scratch.tidBaseScoreDense[tid];
+        const double completionScore = scratch.tidCompletionScoreDense[tid];
+        if (completionScore > 0.0) {
+          const uint32_t genus = genus_for_tid(weightCtx, tid);
+          const auto genusIt =
+              (genus != 0u) ? genusBaseSum.find(genus) : genusBaseSum.end();
+          const double support =
+              (genusIt != genusBaseSum.end()) ? genusIt->second : 0.0;
+          const double completion =
+              support > 0.0
+                  ? completionScore * support / (support + completionScore)
+                  : 0.0;
+          primaryScore = baseScore + completion;
+        }
+      }
+      if (primaryScore > 0.0) {
+        tid_score[tid] = primaryScore;
+      }
+    }
+    unique_hits.clear();
+    for (uint32_t tid : scratch.activeUniqueHits) {
+      unique_hits[tid] = scratch.uniqueHitsDense[tid];
+    }
+  }
+
+  EvidenceStats collect_stats(double eff_eval) {
+    materialize_score_maps();
+    return collect_evidence_stats(tid_score, unique_hits, eff_eval);
+  }
+};
+
+struct ScoreStateSnapshot {
+  double eff_eval{0.0};
+  size_t n_eval{0};
+  std::vector<size_t> deferred_eval;
+  EvidenceStats stats;
+  bool high_conf_pre{false};
+  double thr_conf{0.0};
+  double gap_need{0.0};
+  uint32_t best_tid{std::numeric_limits<uint32_t>::max()};
+  uint32_t second_tid{std::numeric_limits<uint32_t>::max()};
+  double best{0.0};
+  double second{0.0};
+  double best_ratio{0.0};
+  double gap{0.0};
+  double unique_count{0.0};
+  double unique_ratio{0.0};
+  std::vector<uint32_t> active_tid_scores;
+  std::vector<double> active_tid_values;
+  std::vector<double> active_tid_base_values;
+  std::vector<double> active_tid_completion_values;
+  std::vector<uint32_t> active_unique_hits;
+  std::vector<double> active_unique_values;
+};
+
+static ScoreStateSnapshot snapshot_score_state(
+    const ProcessScratch &scratch, double eff_eval, size_t n_eval,
+    const std::vector<size_t> &deferredEval, const EvidenceStats &stats,
+    bool highConfPre, double thr_conf, double gap_need, uint32_t bestTid,
+    uint32_t secondTid, double best, double second, double best_ratio,
+    double gap, double uniqueCount, double uniqueRatio) {
+  ScoreStateSnapshot snap;
+  snap.eff_eval = eff_eval;
+  snap.n_eval = n_eval;
+  snap.deferred_eval = deferredEval;
+  snap.stats = stats;
+  snap.high_conf_pre = highConfPre;
+  snap.thr_conf = thr_conf;
+  snap.gap_need = gap_need;
+  snap.best_tid = bestTid;
+  snap.second_tid = secondTid;
+  snap.best = best;
+  snap.second = second;
+  snap.best_ratio = best_ratio;
+  snap.gap = gap;
+  snap.unique_count = uniqueCount;
+  snap.unique_ratio = uniqueRatio;
+  snap.active_tid_scores = scratch.activeTidScores;
+  snap.active_tid_values.reserve(snap.active_tid_scores.size());
+  snap.active_tid_base_values.reserve(snap.active_tid_scores.size());
+  snap.active_tid_completion_values.reserve(snap.active_tid_scores.size());
+  for (uint32_t tid : snap.active_tid_scores) {
+    snap.active_tid_values.push_back(scratch.tidScoreDense[tid]);
+    snap.active_tid_base_values.push_back(scratch.tidBaseScoreDense[tid]);
+    snap.active_tid_completion_values.push_back(
+        scratch.tidCompletionScoreDense[tid]);
+  }
+  snap.active_unique_hits = scratch.activeUniqueHits;
+  snap.active_unique_values.reserve(snap.active_unique_hits.size());
+  for (uint32_t tid : snap.active_unique_hits) {
+    snap.active_unique_values.push_back(scratch.uniqueHitsDense[tid]);
+  }
+  return snap;
+}
+
+static void restore_score_state(
+    const ScoreStateSnapshot &snap, ProcessScratch &scratch,
+    uint32_t tidScoreEpoch, uint32_t uniqueHitsEpoch, double &eff_eval,
+    size_t &n_eval, std::vector<size_t> &deferredEval, EvidenceStats &stats,
+    bool &highConfPre, double &thr_conf, double &gap_need, uint32_t &bestTid,
+    uint32_t &secondTid, double &best, double &second, double &best_ratio,
+    double &gap, double &uniqueCount, double &uniqueRatio) {
+  robin_hood::unordered_flat_set<uint32_t> oldTidScores;
+  oldTidScores.reserve(snap.active_tid_scores.size());
+  for (uint32_t tid : snap.active_tid_scores) {
+    oldTidScores.insert(tid);
+  }
+  for (uint32_t tid : scratch.activeTidScores) {
+    if (oldTidScores.find(tid) == oldTidScores.end() &&
+        tid < scratch.tidScoreEpoch.size() &&
+        scratch.tidScoreEpoch[tid] == tidScoreEpoch) {
+      scratch.tidScoreEpoch[tid] = 0u;
+      scratch.tidScoreDense[tid] = 0.0;
+      scratch.tidBaseScoreDense[tid] = 0.0;
+      scratch.tidCompletionScoreDense[tid] = 0.0;
+    }
+  }
+  scratch.activeTidScores = snap.active_tid_scores;
+  for (size_t i = 0; i < snap.active_tid_scores.size(); ++i) {
+    const uint32_t tid = snap.active_tid_scores[i];
+    scratch.tidScoreEpoch[tid] = tidScoreEpoch;
+    scratch.tidScoreDense[tid] = snap.active_tid_values[i];
+    scratch.tidBaseScoreDense[tid] = snap.active_tid_base_values[i];
+    scratch.tidCompletionScoreDense[tid] =
+        snap.active_tid_completion_values[i];
+  }
+
+  robin_hood::unordered_flat_set<uint32_t> oldUniqueHits;
+  oldUniqueHits.reserve(snap.active_unique_hits.size());
+  for (uint32_t tid : snap.active_unique_hits) {
+    oldUniqueHits.insert(tid);
+  }
+  for (uint32_t tid : scratch.activeUniqueHits) {
+    if (oldUniqueHits.find(tid) == oldUniqueHits.end() &&
+        tid < scratch.uniqueHitsEpoch.size() &&
+        scratch.uniqueHitsEpoch[tid] == uniqueHitsEpoch) {
+      scratch.uniqueHitsEpoch[tid] = 0u;
+      scratch.uniqueHitsDense[tid] = 0.0;
+    }
+  }
+  scratch.activeUniqueHits = snap.active_unique_hits;
+  for (size_t i = 0; i < snap.active_unique_hits.size(); ++i) {
+    const uint32_t tid = snap.active_unique_hits[i];
+    scratch.uniqueHitsEpoch[tid] = uniqueHitsEpoch;
+    scratch.uniqueHitsDense[tid] = snap.active_unique_values[i];
+  }
+  eff_eval = snap.eff_eval;
+  n_eval = snap.n_eval;
+  deferredEval = snap.deferred_eval;
+  stats = snap.stats;
+  highConfPre = snap.high_conf_pre;
+  thr_conf = snap.thr_conf;
+  gap_need = snap.gap_need;
+  bestTid = snap.best_tid;
+  secondTid = snap.second_tid;
+  best = snap.best;
+  second = snap.second;
+  best_ratio = snap.best_ratio;
+  gap = snap.gap;
+  uniqueCount = snap.unique_count;
+  uniqueRatio = snap.unique_ratio;
+}
+
+struct ResultCandidateSelection {
+  std::vector<SpoolCandidate> candidates;
+  uint32_t max_count_tid{kSpoolUnclassifiedTid};
+  double max_count_score{0.0};
+  bool max_count_valid{false};
+};
+
+struct CandidateThresholds {
+  double eff_cap{1.0};
+  bool use_em{false};
+  size_t thr_eval{1};
+  size_t thr_min_eval{0};
+  size_t thr_final_raw{0};
+  double thr_base{0.0};
+};
+
+static CandidateThresholds compute_candidate_thresholds(
+    const ClassifyConfig &config, bool highConfPre, double dispersion_hi,
+    double eff_eval, size_t n_eval, double best) {
+  CandidateThresholds out;
+  out.eff_cap = std::max(1.0, eff_eval);
+  out.use_em = !highConfPre;
+
+  const double maxEvidence = std::min(best, eff_eval);
+  double beta = config.firstFilterBeta;
+  if (!(beta > 0.0)) {
+    beta = 0.8;
+  }
+  if (!config.firstFilterBeta_user) {
+    const double beta_em = lerp(0.50, 0.45, dispersion_hi);
+    const double beta_no_em = lerp(0.50, 0.80, dispersion_hi);
+    beta = out.use_em ? beta_em : beta_no_em;
+  }
+  beta = std::clamp(beta, 0.0, 1.0);
+  const size_t thr_beta =
+      static_cast<size_t>(std::floor(beta * std::max(0.0, maxEvidence)));
+
+  out.thr_eval =
+      static_cast<size_t>(std::ceil(config.shotThreshold * eff_eval));
+  if (out.thr_eval == 0) {
+    out.thr_eval = 1;
+  }
+  if (out.use_em) {
+    const double softened_ratio = std::min(config.shotThreshold, 0.45);
+    size_t em_eval =
+        static_cast<size_t>(std::ceil(eff_eval * softened_ratio));
+    if (em_eval == 0 && eff_eval > 0.0) {
+      em_eval = 1;
+    }
+    out.thr_eval = std::min(out.thr_eval, em_eval);
+  }
+
+  if (n_eval > 0) {
+    const double factor = out.use_em ? 0.15 : 0.30;
+    out.thr_min_eval =
+        static_cast<size_t>(std::ceil(factor * static_cast<double>(n_eval)));
+  }
+  out.thr_min_eval =
+      std::max<size_t>(out.thr_min_eval, out.use_em ? 4 : 8);
+
+  if (out.use_em) {
+    const size_t thr_beta_eval = std::min(thr_beta, out.thr_eval);
+    out.thr_final_raw =
+        std::max({thr_beta_eval, static_cast<size_t>(1), out.thr_min_eval});
+  } else {
+    out.thr_final_raw =
+        std::max({out.thr_eval, thr_beta, out.thr_min_eval});
+  }
+
+  size_t thr_min_eval_low = out.thr_min_eval;
+  if (out.thr_min_eval > 0) {
+    thr_min_eval_low = std::max<size_t>(
+        1, static_cast<size_t>(
+               std::floor(0.3 * static_cast<double>(out.thr_min_eval))));
+  }
+  const double thr_low =
+      static_cast<double>(std::max(out.thr_eval, thr_min_eval_low));
+  const double thr_high = static_cast<double>(out.thr_final_raw);
+  out.thr_base = lerp(thr_low, thr_high, dispersion_hi);
+  return out;
+}
+
+static size_t count_same_genus_competitors(
+    const std::vector<std::pair<uint32_t, double>> &ranked,
+    const TaxDict &tax, const WeightingContext &weightCtx, uint32_t bestTid,
+    uint32_t best_genus_id, size_t scan_limit) {
+  const uint32_t best_rep_tid_id = species_rep_for_tid(weightCtx, bestTid);
+  size_t same_genus_competitors = 0;
+  robin_hood::unordered_flat_set<uint32_t> scanned_rep_ids;
+  scanned_rep_ids.reserve(scan_limit);
+  for (size_t i = 0; i < scan_limit; ++i) {
+    const uint32_t tid_id = ranked[i].first;
+    if (tid_id >= tax.id2str.size()) {
+      continue;
+    }
+    const uint32_t rep_id = species_rep_for_tid(weightCtx, tid_id);
+    if (!scanned_rep_ids.insert(rep_id).second) {
+      continue;
+    }
+    if (rep_id == best_rep_tid_id) {
+      continue;
+    }
+    if (best_genus_id != 0u &&
+        genus_for_tid(weightCtx, tid_id) == best_genus_id) {
+      ++same_genus_competitors;
+    }
+  }
+  return same_genus_competitors;
+}
+
+static double effective_score_count(
+    const std::vector<std::pair<uint32_t, double>> &ranked) {
+  double score_total = 0.0;
+  double score_square_total = 0.0;
+  for (const auto &kv : ranked) {
+    const double score = std::max(0.0, kv.second);
+    score_total += score;
+    score_square_total += score * score;
+  }
+  if (score_total > 0.0 && score_square_total > 0.0) {
+    return (score_total * score_total) / score_square_total;
+  }
+  return 1.0;
+}
+
+struct LocalRescueCandidate {
+  uint32_t tid{std::numeric_limits<uint32_t>::max()};
+  uint32_t rep{std::numeric_limits<uint32_t>::max()};
+  uint32_t priority{2u};
+  double score{0.0};
+};
+
+static void append_local_rescue_candidates(
+    const TaxDict &tax, const WeightingContext &weightCtx,
+    const std::vector<std::pair<uint32_t, double>> &ranked, double effCap,
+    double thr_base, uint32_t bestTid, uint32_t best_genus_id, double best,
+    double uniqueRatio, std::vector<SpoolCandidate> &candidates) {
+  const uint32_t best_rep_tid_id = species_rep_for_tid(weightCtx, bestTid);
+  robin_hood::unordered_flat_set<uint32_t> kept_rep_ids;
+  kept_rep_ids.reserve(candidates.size() + 8);
+  for (const auto &cand : candidates) {
+    if (cand.tid < tax.id2str.size()) {
+      kept_rep_ids.insert(species_rep_for_tid(weightCtx, cand.tid));
+    }
+  }
+
+  const size_t scan_limit = std::min<size_t>(64, ranked.size());
+  const size_t same_genus_competitors = count_same_genus_competitors(
+      ranked, tax, weightCtx, bestTid, best_genus_id, scan_limit);
+  const double best_score = std::clamp(best, 0.0, effCap);
+  const double second_score =
+      (ranked.size() > 1) ? std::clamp(ranked[1].second, 0.0, effCap) : 0.0;
+  const double gap_term =
+      1.0 - std::clamp((best_score - second_score) /
+                           std::max(best_score, 1e-6),
+                       0.0, 1.0);
+  const double genus_term =
+      std::clamp(static_cast<double>(same_genus_competitors) / 4.0, 0.0,
+                 1.0);
+  const double unique_term =
+      1.0 - std::clamp(uniqueRatio / 0.25, 0.0, 1.0);
+  const double uncertainty =
+      std::clamp(0.45 * gap_term + 0.35 * genus_term + 0.20 * unique_term,
+                 0.0, 1.0);
+  const size_t keep_budget =
+      1u + static_cast<size_t>(std::ceil(7.0 * uncertainty));
+  const double keep_floor = std::max(0.25 * best_score, 0.50 * thr_base);
+
+  std::vector<LocalRescueCandidate> rescue_candidates;
+  rescue_candidates.reserve(scan_limit);
+  for (size_t i = 0; i < scan_limit; ++i) {
+    const uint32_t tid_id = ranked[i].first;
+    if (tid_id >= tax.id2str.size()) {
+      continue;
+    }
+    const double score = std::clamp(ranked[i].second, 0.0, effCap);
+    if (score < keep_floor) {
+      continue;
+    }
+    const uint32_t rep_id = species_rep_for_tid(weightCtx, tid_id);
+    if (kept_rep_ids.find(rep_id) != kept_rep_ids.end()) {
+      continue;
+    }
+    uint32_t priority = 2u;
+    if (best_genus_id != 0u &&
+        genus_for_tid(weightCtx, tid_id) == best_genus_id) {
+      priority = 0u;
+    } else if (best_score > 0.0 && score >= 0.50 * best_score) {
+      priority = 1u;
+    }
+    rescue_candidates.push_back(
+        LocalRescueCandidate{tid_id, rep_id, priority, score});
+  }
+  std::sort(rescue_candidates.begin(), rescue_candidates.end(),
+            [](const LocalRescueCandidate &lhs,
+               const LocalRescueCandidate &rhs) {
+              if (lhs.priority != rhs.priority) {
+                return lhs.priority < rhs.priority;
+              }
+              if (lhs.score != rhs.score) {
+                return lhs.score > rhs.score;
+              }
+              return lhs.tid < rhs.tid;
+            });
+  for (const auto &cand : rescue_candidates) {
+    if (kept_rep_ids.size() >= keep_budget) {
+      break;
+    }
+    if (!kept_rep_ids.insert(cand.rep).second) {
+      continue;
+    }
+    candidates.push_back(SpoolCandidate{cand.tid, cand.score});
+  }
+}
+
+static ResultCandidateSelection select_result_candidates_from_scores(
+    const std::string &id, const TaxDict &tax,
+    const WeightingContext &weightCtx, const ClassifyConfig &config,
+    ProcessScratch &scratch,
+    const robin_hood::unordered_flat_map<uint32_t, double> &tidScore,
+    bool highConfPre, double dispersion_hi, double eff_eval, size_t n_eval,
+    uint32_t bestTid, double best, double uniqueRatio,
+    const std::string &bestTaxidStr, bool dump_preem_enabled,
+    const std::string &dump_preem_path) {
+  const CandidateThresholds thresholds = compute_candidate_thresholds(
+      config, highConfPre, dispersion_hi, eff_eval, n_eval, best);
+  const double effCap = thresholds.eff_cap;
+  const bool use_em = thresholds.use_em;
+  const size_t thr_final_raw = thresholds.thr_final_raw;
+  ResultCandidateSelection selection;
+  auto add_candidate = [&](uint32_t tid_id, double score) {
+    if (tid_id < tax.id2str.size() && score > 0.0) {
+      selection.candidates.push_back(SpoolCandidate{tid_id, score});
+    }
+  };
+
+  if (!selection.max_count_valid && bestTid < tax.id2str.size()) {
+    const double bestEvidence = std::clamp(best, 0.0, effCap);
+    if (bestEvidence > 0.0) {
+      selection.max_count_tid = bestTid;
+      selection.max_count_score = bestEvidence;
+      selection.max_count_valid = true;
+    }
+  }
+
+  if (highConfPre && bestTid < tax.id2str.size()) {
+    const double bestEvidence = std::clamp(best, 0.0, effCap);
+    add_candidate(bestTid, bestEvidence);
+    selection.max_count_tid = bestTid;
+    selection.max_count_score = bestEvidence;
+    selection.max_count_valid = true;
+  } else if (use_em && !tidScore.empty()) {
+    auto &ranked = scratch.rankedTidScores;
+    ranked.clear();
+    ranked.reserve(tidScore.size());
+    for (const auto &kv : tidScore) {
+      ranked.emplace_back(kv.first, kv.second);
+    }
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto &a, const auto &b) { return a.second > b.second; });
+
+    const uint32_t best_genus_id = genus_for_tid(weightCtx, bestTid);
+    size_t same_genus_competitors_for_calibration = 0;
+    double effective_candidate_count_for_calibration = 1.0;
+    if (config.sample_state_calibration) {
+      const size_t scan_limit = std::min<size_t>(64, ranked.size());
+      same_genus_competitors_for_calibration =
+          count_same_genus_competitors(ranked, tax, weightCtx, bestTid,
+                                       best_genus_id, scan_limit);
+      effective_candidate_count_for_calibration =
+          effective_score_count(ranked);
+    }
+
+    const size_t floorK_max = std::min<size_t>(128, ranked.size());
+    const size_t dispersionFloor = std::min<size_t>(
+        floorK_max,
+        static_cast<size_t>(std::llround((1.0 - dispersion_hi) *
+                                         static_cast<double>(floorK_max))));
+    const size_t calibrationSupportFloor =
+        config.sample_state_calibration
+            ? sample_state_calibration_support_floor(
+                  effective_candidate_count_for_calibration,
+                  same_genus_competitors_for_calibration, floorK_max)
+            : 0;
+    const size_t floorCount =
+        std::max(dispersionFloor, calibrationSupportFloor);
+
+    if (dump_preem_enabled) {
+      dump_preem_candidate_retention(dump_preem_path, id, tax, weightCtx,
+                                     ranked, effCap, thresholds.thr_base,
+                                     floorCount, bestTaxidStr, best_genus_id);
+    }
+
+    selection.candidates.reserve(ranked.size());
+    for (size_t i = 0; i < ranked.size(); ++i) {
+      const uint32_t tid_id = ranked[i].first;
+      if (tid_id >= tax.id2str.size()) {
+        continue;
+      }
+      const double countVal = std::clamp(ranked[i].second, 0.0, effCap);
+      if (countVal <= 0.0) {
+        continue;
+      }
+      const bool keep = (i < floorCount || countVal >= thresholds.thr_base);
+      if (keep) {
+        add_candidate(tid_id, countVal);
+        if (tid_id == bestTid) {
+          selection.max_count_tid = tid_id;
+          selection.max_count_score = countVal;
+          selection.max_count_valid = true;
+        }
+      }
+    }
+
+    if (!highConfPre && !ranked.empty()) {
+      append_local_rescue_candidates(
+          tax, weightCtx, ranked, effCap, thresholds.thr_base, bestTid,
+          best_genus_id, best, uniqueRatio, selection.candidates);
+    }
+  } else {
+    for (const auto &[tid_id, rawScore] : tidScore) {
+      const double countVal = std::clamp(rawScore, 0.0, effCap);
+      if (countVal >= static_cast<double>(thr_final_raw)) {
+        add_candidate(tid_id, countVal);
+        if (tid_id == bestTid) {
+          selection.max_count_tid = tid_id;
+          selection.max_count_score = countVal;
+          selection.max_count_valid = true;
+        }
+      }
+    }
+  }
+
+  if (selection.candidates.empty() && use_em && selection.max_count_valid &&
+      selection.max_count_score > 0.0) {
+    selection.candidates.push_back(SpoolCandidate{selection.max_count_tid,
+                                                  selection.max_count_score});
+  }
+  return selection;
+}
+
+static void finalize_read_record(
+    const std::string &id, const TaxDict &tax, FileInfo &fileInfo,
+    PresenceAccumulator *presenceAcc, double uniqueCount, double uniqueRatio,
+    double eff_eval, uint32_t bestTaxidHintTid,
+    const std::string &bestTaxidStr, bool maxCountValid,
+    uint32_t maxCountTid, double maxCountScore, bool tidScoreEmpty,
+    std::string rejectReason, std::vector<SpoolCandidate> resultCandidates,
+    std::vector<SpoolCandidate> abundanceCandidates,
+    std::vector<SpoolCandidate> sampleMixtureCandidates,
+    std::vector<classifyResult> *classifyResults,
+    std::vector<CompactClassifyResult> *compactResults) {
+  if (!resultCandidates.empty()) {
+    if (presenceAcc != nullptr) {
+      const auto &top = resultCandidates.front();
+      if (top.tid != kSpoolUnclassifiedTid) {
+        const bool unique_ok = (uniqueCount >= 3.0) ||
+                               (uniqueCount >= 2.0 && uniqueRatio >= 0.12);
+        presenceAcc->add_read_support(top.tid, unique_ok);
+      }
+    }
+    const bool isUniqueMapping = (resultCandidates.size() == 1);
+    if (isUniqueMapping && resultCandidates.front().tid < tax.id2str.size()) {
+      fileInfo.uniqueTaxids.insert(tax.id2str[resultCandidates.front().tid]);
+    }
+
+    fileInfo.classifiedNum++;
+    if (resultCandidates.size() == 1) {
+      if (!maxCountValid) {
+        maxCountTid = resultCandidates.front().tid;
+        maxCountScore = resultCandidates.front().score;
+        maxCountValid = true;
+      }
+      resultCandidates.clear();
+      resultCandidates.push_back(SpoolCandidate{maxCountTid, maxCountScore});
+    }
+  } else {
+    fileInfo.unclassifiedNum++;
+    resultCandidates.push_back(SpoolCandidate{kSpoolUnclassifiedTid, 1.0});
+    if (rejectReason.empty()) {
+      rejectReason = (!maxCountValid && tidScoreEmpty) ? "no_candidate"
+                                                       : "low_eval";
+    }
+  }
+
+  if (compactResults != nullptr) {
+    CompactClassifyResult result;
+    result.evaluated = eff_eval;
+    result.id = id;
+    result.best_taxid_hint = bestTaxidHintTid;
+    result.reject_reason = std::move(rejectReason);
+    result.candidates = std::move(resultCandidates);
+    result.abundance_candidates = std::move(abundanceCandidates);
+    result.sample_mixture_candidates = std::move(sampleMixtureCandidates);
+    compactResults->emplace_back(std::move(result));
+  } else if (classifyResults != nullptr) {
+    classifyResult result;
+    result.evaluated = eff_eval;
+    result.id = id;
+    result.best_taxid_hint = bestTaxidStr;
+    result.reject_reason = std::move(rejectReason);
+    result.taxidCount.reserve(resultCandidates.size());
+    for (const auto &candidate : resultCandidates) {
+      if (candidate.tid == kSpoolUnclassifiedTid) {
+        result.taxidCount.emplace_back("unclassified", candidate.score);
+      } else if (candidate.tid < tax.id2str.size()) {
+        result.taxidCount.emplace_back(tax.id2str[candidate.tid],
+                                       candidate.score);
+      }
+    }
+    result.abundanceCount.reserve(abundanceCandidates.size());
+    for (const auto &candidate : abundanceCandidates) {
+      if (candidate.tid < tax.id2str.size() && candidate.score > 0.0) {
+        result.abundanceCount.emplace_back(tax.id2str[candidate.tid],
+                                           candidate.score);
+      }
+    }
+    classifyResults->emplace_back(std::move(result));
+  }
+}
+
+void processSequence(
+    const std::vector<uint64_t> &hashs1, size_t readLen,
+    ChimeraBuild::IMCFConfig &imcfConfig, const TaxDict &tax,
+    ClassifyConfig &config, const WeightingContext &weightCtx, GroupHeat &heat,
+    chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
+    std::vector<classifyResult> *classifyResults,
+    std::vector<CompactClassifyResult> *compactResults, FileInfo &fileInfo,
+    PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
+  const size_t binNumAll = tax.idx2id.size();
+  heat.ensure(binNumAll);
+  const double community_dispersion_s =
+      clamp01(config.community_dispersion_s);
+  const double dispersion_hi = community_dispersion_s;
+  const bool presenceEnabled = (presenceAcc != nullptr);
+  const uint32_t presenceSketchBits =
+      presenceEnabled ? presenceAcc->sketchBits : 0;
+  const bool presenceSketchPow2 =
+      (presenceSketchBits > 0) &&
+      ((presenceSketchBits & (presenceSketchBits - 1u)) == 0);
+  const uint32_t presenceSketchMask =
+      presenceSketchPow2 ? (presenceSketchBits - 1u) : 0u;
+  auto sketch_index = [&](uint64_t value) -> uint32_t {
+    if (presenceSketchBits == 0) {
+      return std::numeric_limits<uint32_t>::max();
+    }
+    uint64_t mix = splitmix64(value);
+    if (presenceSketchPow2) {
+      return static_cast<uint32_t>(mix & presenceSketchMask);
+    }
+    return static_cast<uint32_t>(mix % presenceSketchBits);
+  };
+  constexpr double kUniqueEdgeBonus = 3.0;
+  double presence_weight = 1.0;
+
+  const char *dump_preem_env = std::getenv("CHIMERA_DUMP_PREEM_TSV");
+  const bool dump_preem_enabled = (dump_preem_env && dump_preem_env[0] != '\0');
+  const std::string dump_preem_path =
+      dump_preem_enabled ? std::string(dump_preem_env) : std::string();
+  prepare_hash_sample_and_route(hashs1, config, weightCtx, scratch);
+  auto &sampleVals = scratch.sampleVals;
+  auto &routeVals = scratch.routeVals;
+  robin_hood::unordered_flat_map<uint32_t, uint32_t> sampleBinScore;
+  robin_hood::unordered_flat_map<uint32_t, uint64_t> repCoarseScore;
+  robin_hood::unordered_flat_map<uint32_t, uint64_t> genusCoarseScore;
+  robin_hood::unordered_flat_map<uint32_t, uint32_t> repRareSupport;
+  robin_hood::unordered_flat_map<uint32_t, uint32_t> genusRareSupport;
+  auto &rankedBins = scratch.rankedBins;
+  rankedBins.clear();
+  uint64_t coarseTotal = 0;
+  auto &deferredEval = scratch.deferredEval;
+  deferredEval.clear();
+  if (hashs1.size() > 64) {
+    deferredEval.reserve(hashs1.size() - 64);
+  }
+
+  coarseTotal =
+      collect_coarse_evidence(sampleVals, imcf, tax, weightCtx, scratch,
+                              sampleBinScore, repCoarseScore, genusCoarseScore);
+  auto &topBins = scratch.topBins;
+  robin_hood::unordered_flat_set<uint32_t> lowDegPreserve;
+  bool full_surface_mode = build_initial_candidate_surface(
+      routeVals, sampleBinScore, coarseTotal, dispersion_hi, binNumAll, imcf,
+      tax, weightCtx, heat, scratch, repRareSupport, genusRareSupport,
+      lowDegPreserve);
+
   const bool adaptive_surface_mode = expand_adaptive_candidate_surface(
       readLen, dispersion_hi, coarseTotal, repCoarseScore, genusCoarseScore,
       repRareSupport, genusRareSupport, lowDegPreserve, rankedBins, tax,
@@ -865,110 +1658,13 @@ void processSequence(
   auto &minimizerBins = scratch.minimizerBins;
   minimizerBins.clear();
   minimizerBins.reserve(64);
-  robin_hood::unordered_flat_map<uint32_t, double> tidScore;
-  robin_hood::unordered_flat_map<uint32_t, double> uniqueHits;
-  tidScore.reserve(128);
-  uniqueHits.reserve(128);
   const size_t tidCountAll = tax.id2str.size();
   ensure_epoch_vector(scratch.minimizerTidEpoch, tidCountAll);
   ensure_epoch_vector(scratch.minimizerTidBaseEpoch, tidCountAll);
   ensure_epoch_vector(scratch.minimizerTidCompletionEpoch, tidCountAll);
   ensure_epoch_vector(scratch.minimizerBinEpoch, binNumAll);
-  ensure_epoch_vector(scratch.tidScoreEpoch, tidCountAll);
-  ensure_double_vector(scratch.tidScoreDense, tidCountAll);
-  ensure_double_vector(scratch.tidBaseScoreDense, tidCountAll);
-  ensure_double_vector(scratch.tidCompletionScoreDense, tidCountAll);
-  ensure_epoch_vector(scratch.uniqueHitsEpoch, tidCountAll);
-  ensure_double_vector(scratch.uniqueHitsDense, tidCountAll);
-  scratch.activeTidScores.clear();
-  scratch.activeUniqueHits.clear();
-  uint32_t tidScoreEpoch =
-      next_epoch(scratch.tidScoreEpoch, scratch.tidScoreEpochValue);
-  uint32_t uniqueHitsEpoch =
-      next_epoch(scratch.uniqueHitsEpoch, scratch.uniqueHitsEpochValue);
-  auto add_tid_score = [&](uint32_t tid, double contrib, bool baseSource) {
-    if (tid >= tidCountAll) {
-      return;
-    }
-    if (scratch.tidScoreEpoch[tid] != tidScoreEpoch) {
-      scratch.tidScoreEpoch[tid] = tidScoreEpoch;
-      scratch.tidScoreDense[tid] = 0.0;
-      scratch.tidBaseScoreDense[tid] = 0.0;
-      scratch.tidCompletionScoreDense[tid] = 0.0;
-      scratch.activeTidScores.push_back(tid);
-    }
-    scratch.tidScoreDense[tid] += contrib;
-    if (baseSource) {
-      scratch.tidBaseScoreDense[tid] += contrib;
-    } else {
-      scratch.tidCompletionScoreDense[tid] += contrib;
-    }
-  };
-  auto add_unique_hit = [&](uint32_t tid, double value) {
-    if (tid >= tidCountAll) {
-      return;
-    }
-    if (scratch.uniqueHitsEpoch[tid] != uniqueHitsEpoch) {
-      scratch.uniqueHitsEpoch[tid] = uniqueHitsEpoch;
-      scratch.uniqueHitsDense[tid] = 0.0;
-      scratch.activeUniqueHits.push_back(tid);
-    }
-    scratch.uniqueHitsDense[tid] += value;
-  };
-  auto reset_dense_scores = [&]() {
-    tidScore.clear();
-    uniqueHits.clear();
-    scratch.activeTidScores.clear();
-    scratch.activeUniqueHits.clear();
-    tidScoreEpoch =
-        next_epoch(scratch.tidScoreEpoch, scratch.tidScoreEpochValue);
-    uniqueHitsEpoch =
-        next_epoch(scratch.uniqueHitsEpoch, scratch.uniqueHitsEpochValue);
-  };
-  auto materialize_score_maps = [&]() {
-    tidScore.clear();
-    robin_hood::unordered_flat_map<uint32_t, double> genusBaseSum;
-    genusBaseSum.reserve(scratch.activeTidScores.size());
-    if (adaptive_surface_mode && weightCtx.tid2genus) {
-      for (uint32_t tid : scratch.activeTidScores) {
-        const double baseScore = scratch.tidBaseScoreDense[tid];
-        if (!(baseScore > 0.0)) {
-          continue;
-        }
-        const uint32_t genus = map_genus(tid);
-        if (genus != 0u) {
-          genusBaseSum[genus] += baseScore;
-        }
-      }
-    }
-    for (uint32_t tid : scratch.activeTidScores) {
-      const double totalScore = scratch.tidScoreDense[tid];
-      double primaryScore = totalScore;
-      if (adaptive_surface_mode && weightCtx.tid2genus) {
-        const double baseScore = scratch.tidBaseScoreDense[tid];
-        const double completionScore = scratch.tidCompletionScoreDense[tid];
-        if (completionScore > 0.0) {
-          const uint32_t genus = map_genus(tid);
-          const auto genusIt =
-              (genus != 0u) ? genusBaseSum.find(genus) : genusBaseSum.end();
-          const double support =
-              (genusIt != genusBaseSum.end()) ? genusIt->second : 0.0;
-          const double completion =
-              support > 0.0
-                  ? completionScore * support / (support + completionScore)
-                  : 0.0;
-          primaryScore = baseScore + completion;
-        }
-      }
-      if (primaryScore > 0.0) {
-        tidScore[tid] = primaryScore;
-      }
-    }
-    uniqueHits.clear();
-    for (uint32_t tid : scratch.activeUniqueHits) {
-      uniqueHits[tid] = scratch.uniqueHitsDense[tid];
-    }
-  };
+  ReadScoringState scoring(scratch, weightCtx, tidCountAll,
+                           adaptive_surface_mode);
 
   double eff_eval = 0.0;
   size_t n_eval = 0;
@@ -1041,25 +1737,6 @@ void processSequence(
 
   double idf_power = 1.0 + (0.25 * dispersion_hi);
   bool emitPresenceEvidence = true;
-
-  auto bucket_degree = [](size_t d) -> size_t {
-    if (d <= 1) {
-      return 0;
-    }
-    if (d <= 3) {
-      return 1;
-    }
-    if (d <= 7) {
-      return 2;
-    }
-    if (d <= 15) {
-      return 3;
-    }
-    if (d <= 31) {
-      return 4;
-    }
-    return 5;
-  };
 
   auto evaluate_minimizer = [&](uint64_t value,
                                 const std::vector<uint32_t> *subset) -> double {
@@ -1178,7 +1855,7 @@ void processSequence(
           scratch.minimizerTidBaseEpoch[tid] == minimizerEpoch;
       const bool hasCompletion =
           scratch.minimizerTidCompletionEpoch[tid] == minimizerEpoch;
-      add_tid_score(tid, contrib, hasBase || !hasCompletion);
+      scoring.add_tid_score(tid, contrib, hasBase || !hasCompletion);
     }
     if (emitPresenceEvidence && presenceEnabled && !minimizerTids.empty()) {
       const double hit_weight = presence_weight;
@@ -1198,7 +1875,7 @@ void processSequence(
                                breadth_bucket);
     }
     if (unique_strength > 0.0 && !minimizerTids.empty()) {
-      add_unique_hit(minimizerTids.front(), unique_strength);
+      scoring.add_unique_hit(minimizerTids.front(), unique_strength);
     }
 
     return contrib;
@@ -1223,60 +1900,8 @@ void processSequence(
     }
   };
 
-  auto compute_top = [&](uint32_t &bestTid, uint32_t &secondTid, double &best,
-                         double &second) {
-    best = 0.0;
-    second = 0.0;
-    bestTid = std::numeric_limits<uint32_t>::max();
-    secondTid = std::numeric_limits<uint32_t>::max();
-    for (const auto &kv : tidScore) {
-      double c = kv.second;
-      if (c > best) {
-        second = best;
-        secondTid = bestTid;
-        best = c;
-        bestTid = kv.first;
-      } else if (c > second) {
-        second = c;
-        secondTid = kv.first;
-      }
-    }
-  };
-
-  auto compute_ratio = [](double best_score, double second_score) {
-    if (second_score > 0.0) {
-      return best_score /
-             std::max(second_score, std::numeric_limits<double>::min());
-    }
-    return best_score <= 0.0 ? 0.0
-                             : std::numeric_limits<double>::infinity();
-  };
-
-  struct EvidenceStats {
-    uint32_t bestTid = std::numeric_limits<uint32_t>::max();
-    uint32_t secondTid = std::numeric_limits<uint32_t>::max();
-    double best = 0.0;
-    double second = 0.0;
-    double ratio = 0.0;
-    double gap = 0.0;
-    double uniqueCount = 0.0;
-    double uniqueRatio = 0.0;
-  };
-
   auto collect_stats = [&]() -> EvidenceStats {
-    materialize_score_maps();
-    EvidenceStats stats;
-    compute_top(stats.bestTid, stats.secondTid, stats.best, stats.second);
-    stats.ratio = compute_ratio(stats.best, stats.second);
-    stats.gap = stats.best - stats.second;
-    if (stats.bestTid != std::numeric_limits<uint32_t>::max()) {
-      if (auto it = uniqueHits.find(stats.bestTid); it != uniqueHits.end()) {
-        stats.uniqueCount = it->second;
-      }
-    }
-    double denom = eff_eval > 0.0 ? eff_eval : 1.0;
-    stats.uniqueRatio = stats.uniqueCount / denom;
-    return stats;
+    return scoring.collect_stats(eff_eval);
   };
 
   size_t n0 = std::min<size_t>(64, hashs1.size());
@@ -1286,28 +1911,8 @@ void processSequence(
   }
   n_eval = n0;
 
-  auto meets_quick = [&](const EvidenceStats &s) {
-    if (s.bestTid == std::numeric_limits<uint32_t>::max()) {
-      return false;
-    }
-    double thr_conf_local = std::ceil(config.shotThreshold * eff_eval);
-    double gap_need_local = std::max(0.5, eff_eval / 24.0);
-    bool strong = (s.best >= thr_conf_local);
-    bool unique_ok = (s.uniqueCount >= 3.0) ||
-                     (s.uniqueCount >= 2.0 && s.uniqueRatio >= 0.12);
-    bool stable = (s.gap >= gap_need_local) && (s.ratio >= 1.35);
-    size_t bestRoundedLocal = static_cast<size_t>(
-        std::max<double>(0.0, std::llround(s.best)));
-    size_t secondRoundedLocal = static_cast<size_t>(
-        std::max<double>(0.0, std::llround(s.second)));
-    size_t needLocal = static_cast<size_t>(std::ceil(thr_conf_local));
-    auto dc = decide_high_conf(bestRoundedLocal, secondRoundedLocal, eff_eval);
-    bool margin_ok = (bestRoundedLocal >= needLocal) && dc.accept;
-    return strong && unique_ok && stable && margin_ok;
-  };
-
   EvidenceStats stats = collect_stats();
-  bool highConfPre = meets_quick(stats);
+  bool highConfPre = meets_quick_high_conf(config, stats, eff_eval);
 
   if (!highConfPre && hashs1.size() > n0) {
     size_t mask = (static_cast<size_t>(1) << 3) - 1;
@@ -1321,7 +1926,7 @@ void processSequence(
       ++n_eval;
     }
     stats = collect_stats();
-    highConfPre = meets_quick(stats);
+    highConfPre = meets_quick_high_conf(config, stats, eff_eval);
 
     if (!highConfPre && !deferredEval.empty()) {
       for (size_t idx : deferredEval) {
@@ -1334,7 +1939,7 @@ void processSequence(
       }
       deferredEval.clear();
       stats = collect_stats();
-      highConfPre = meets_quick(stats);
+      highConfPre = meets_quick_high_conf(config, stats, eff_eval);
     }
   }
 
@@ -1381,7 +1986,7 @@ void processSequence(
       }
     }
     stats = collect_stats();
-    highConfPre = meets_quick(stats);
+    highConfPre = meets_quick_high_conf(config, stats, eff_eval);
     thr_conf = std::ceil(config.shotThreshold * eff_eval);
     gap_need = std::max(0.5, eff_eval / 24.0);
     apply_stats(stats);
@@ -1396,142 +2001,26 @@ void processSequence(
 
   std::vector<SpoolCandidate> abundanceCandidates;
 
-  struct ScoreStateSnapshot {
-    double eff_eval{0.0};
-    size_t n_eval{0};
-    std::vector<size_t> deferred_eval;
-    EvidenceStats stats;
-    bool high_conf_pre{false};
-    double thr_conf{0.0};
-    double gap_need{0.0};
-    uint32_t best_tid{std::numeric_limits<uint32_t>::max()};
-    uint32_t second_tid{std::numeric_limits<uint32_t>::max()};
-    double best{0.0};
-    double second{0.0};
-    double best_ratio{0.0};
-    double gap{0.0};
-    double unique_count{0.0};
-    double unique_ratio{0.0};
-    std::vector<uint32_t> active_tid_scores;
-    std::vector<double> active_tid_values;
-    std::vector<double> active_tid_base_values;
-    std::vector<double> active_tid_completion_values;
-    std::vector<uint32_t> active_unique_hits;
-    std::vector<double> active_unique_values;
-  };
-
-  auto snapshot_score_state = [&]() {
-    ScoreStateSnapshot snap;
-    snap.eff_eval = eff_eval;
-    snap.n_eval = n_eval;
-    snap.deferred_eval = deferredEval;
-    snap.stats = stats;
-    snap.high_conf_pre = highConfPre;
-    snap.thr_conf = thr_conf;
-    snap.gap_need = gap_need;
-    snap.best_tid = bestTid;
-    snap.second_tid = secondTid;
-    snap.best = best;
-    snap.second = second;
-    snap.best_ratio = best_ratio;
-    snap.gap = gap;
-    snap.unique_count = uniqueCount;
-    snap.unique_ratio = uniqueRatio;
-    snap.active_tid_scores = scratch.activeTidScores;
-    snap.active_tid_values.reserve(snap.active_tid_scores.size());
-    snap.active_tid_base_values.reserve(snap.active_tid_scores.size());
-    snap.active_tid_completion_values.reserve(snap.active_tid_scores.size());
-    for (uint32_t tid : snap.active_tid_scores) {
-      snap.active_tid_values.push_back(scratch.tidScoreDense[tid]);
-      snap.active_tid_base_values.push_back(scratch.tidBaseScoreDense[tid]);
-      snap.active_tid_completion_values.push_back(
-          scratch.tidCompletionScoreDense[tid]);
-    }
-    snap.active_unique_hits = scratch.activeUniqueHits;
-    snap.active_unique_values.reserve(snap.active_unique_hits.size());
-    for (uint32_t tid : snap.active_unique_hits) {
-      snap.active_unique_values.push_back(scratch.uniqueHitsDense[tid]);
-    }
-    return snap;
-  };
-
-  auto restore_score_state = [&](const ScoreStateSnapshot &snap) {
-    robin_hood::unordered_flat_set<uint32_t> oldTidScores;
-    oldTidScores.reserve(snap.active_tid_scores.size());
-    for (uint32_t tid : snap.active_tid_scores) {
-      oldTidScores.insert(tid);
-    }
-    for (uint32_t tid : scratch.activeTidScores) {
-      if (oldTidScores.find(tid) == oldTidScores.end() &&
-          tid < scratch.tidScoreEpoch.size() &&
-          scratch.tidScoreEpoch[tid] == tidScoreEpoch) {
-        scratch.tidScoreEpoch[tid] = 0u;
-        scratch.tidScoreDense[tid] = 0.0;
-        scratch.tidBaseScoreDense[tid] = 0.0;
-        scratch.tidCompletionScoreDense[tid] = 0.0;
-      }
-    }
-    scratch.activeTidScores = snap.active_tid_scores;
-    for (size_t i = 0; i < snap.active_tid_scores.size(); ++i) {
-      const uint32_t tid = snap.active_tid_scores[i];
-      scratch.tidScoreEpoch[tid] = tidScoreEpoch;
-      scratch.tidScoreDense[tid] = snap.active_tid_values[i];
-      scratch.tidBaseScoreDense[tid] = snap.active_tid_base_values[i];
-      scratch.tidCompletionScoreDense[tid] =
-          snap.active_tid_completion_values[i];
-    }
-
-    robin_hood::unordered_flat_set<uint32_t> oldUniqueHits;
-    oldUniqueHits.reserve(snap.active_unique_hits.size());
-    for (uint32_t tid : snap.active_unique_hits) {
-      oldUniqueHits.insert(tid);
-    }
-    for (uint32_t tid : scratch.activeUniqueHits) {
-      if (oldUniqueHits.find(tid) == oldUniqueHits.end() &&
-          tid < scratch.uniqueHitsEpoch.size() &&
-          scratch.uniqueHitsEpoch[tid] == uniqueHitsEpoch) {
-        scratch.uniqueHitsEpoch[tid] = 0u;
-        scratch.uniqueHitsDense[tid] = 0.0;
-      }
-    }
-    scratch.activeUniqueHits = snap.active_unique_hits;
-    for (size_t i = 0; i < snap.active_unique_hits.size(); ++i) {
-      const uint32_t tid = snap.active_unique_hits[i];
-      scratch.uniqueHitsEpoch[tid] = uniqueHitsEpoch;
-      scratch.uniqueHitsDense[tid] = snap.active_unique_values[i];
-    }
-    eff_eval = snap.eff_eval;
-    n_eval = snap.n_eval;
-    deferredEval = snap.deferred_eval;
-    stats = snap.stats;
-    highConfPre = snap.high_conf_pre;
-    thr_conf = snap.thr_conf;
-    gap_need = snap.gap_need;
-    bestTid = snap.best_tid;
-    secondTid = snap.second_tid;
-    best = snap.best;
-    second = snap.second;
-    best_ratio = snap.best_ratio;
-    gap = snap.gap;
-    uniqueCount = snap.unique_count;
-    uniqueRatio = snap.unique_ratio;
-    materialize_score_maps();
-  };
-
   if (highConfPre && n_eval < hashs1.size()) {
-    const ScoreStateSnapshot primarySnapshot = snapshot_score_state();
+    const ScoreStateSnapshot primarySnapshot = snapshot_score_state(
+        scratch, eff_eval, n_eval, deferredEval, stats, highConfPre, thr_conf,
+        gap_need, bestTid, secondTid, best, second, best_ratio, gap,
+        uniqueCount, uniqueRatio);
     const bool prevEmitPresenceEvidence = emitPresenceEvidence;
     emitPresenceEvidence = false;
     complete_original_subset_eval();
     abundanceCandidates = capture_abundance_candidates_from_scores(
         scratch, tax.id2str.size(), eff_eval, n_eval);
     emitPresenceEvidence = prevEmitPresenceEvidence;
-    restore_score_state(primarySnapshot);
+    restore_score_state(primarySnapshot, scratch, scoring.tid_score_epoch,
+                        scoring.unique_hits_epoch, eff_eval, n_eval,
+                        deferredEval, stats, highConfPre, thr_conf, gap_need,
+                        bestTid, secondTid, best, second, best_ratio, gap,
+                        uniqueCount, uniqueRatio);
+    scoring.materialize_score_maps();
   }
 
   bool expanded = false;
-  const size_t preTopBins = topBins.size();
-  size_t missingBins = 0;
   if (!adaptive_surface_mode && !full_surface_mode &&
       bestTid < tax.tid2bin.size()) {
     const auto &shards = tax.tid2bin[bestTid];
@@ -1540,7 +2029,6 @@ void processSequence(
         topBins.push_back(bin);
         mark_top_bin(bin);
         expanded = true;
-        ++missingBins;
       }
     }
   }
@@ -1551,7 +2039,7 @@ void processSequence(
     full_surface_mode = (topBins.size() == binNumAll);
     recompute_subset_state();
 
-    reset_dense_scores();
+    scoring.reset_dense_scores();
     eff_eval = 0.0;
     n_eval = 0;
     for (size_t i = 0; i < hashs1.size(); ++i) {
@@ -1560,7 +2048,7 @@ void processSequence(
       ++n_eval;
     }
     stats = collect_stats();
-    highConfPre = meets_quick(stats);
+    highConfPre = meets_quick_high_conf(config, stats, eff_eval);
     thr_conf = std::ceil(config.shotThreshold * eff_eval);
     gap_need = std::max(0.5, eff_eval / 24.0);
     apply_stats(stats);
@@ -1586,312 +2074,16 @@ void processSequence(
   }
   // --------------------------------
 
-  const double effCap = std::max(1.0, eff_eval);
-  std::vector<SpoolCandidate> resultCandidates;
-  uint32_t maxCountTid = kSpoolUnclassifiedTid;
-  double maxCountScore = 0.0;
-  bool maxCountValid = false;
   std::string rejectReason;
-  auto add_candidate = [&](uint32_t tid_id, double score) {
-    if (tid_id < tax.id2str.size() && score > 0.0) {
-      resultCandidates.push_back(SpoolCandidate{tid_id, score});
-    }
-  };
-
-  if (!maxCountValid && bestTid < tax.id2str.size()) {
-    double bestEvidence = std::clamp(best, 0.0, effCap);
-    if (bestEvidence > 0.0) {
-      maxCountTid = bestTid;
-      maxCountScore = bestEvidence;
-      maxCountValid = true;
-    }
-  }
-
-  bool use_em = !highConfPre;
-
-  double maxEvidence = std::min(best, eff_eval);
-  double beta = config.firstFilterBeta;
-  bool beta_user = config.firstFilterBeta_user;
-  if (!(beta > 0.0)) {
-    beta = 0.8;
-  }
-  if (!beta_user) {
-    const double beta_em = lerp(0.50, 0.45, dispersion_hi);
-    const double beta_no_em = lerp(0.50, 0.80, dispersion_hi);
-    beta = use_em ? beta_em : beta_no_em;
-  }
-  beta = std::clamp(beta, 0.0, 1.0);
-  size_t thr_beta =
-      static_cast<size_t>(std::floor(beta * std::max(0.0, maxEvidence)));
-  size_t thr_eval = static_cast<size_t>(
-      std::ceil(config.shotThreshold * eff_eval));
-  if (thr_eval == 0) {
-    thr_eval = 1;
-  }
-  if (use_em) {
-    double base = eff_eval;
-    double softened_ratio = std::min(config.shotThreshold, 0.45);
-    size_t em_eval =
-        static_cast<size_t>(std::ceil(base * softened_ratio));
-    if (em_eval == 0 && base > 0.0) {
-      em_eval = 1;
-    }
-    thr_eval = std::min(thr_eval, em_eval);
-  }
-  size_t thr_min_eval = 0;
-  if (n_eval > 0) {
-    double factor = use_em ? 0.15 : 0.30;
-    thr_min_eval =
-        static_cast<size_t>(std::ceil(factor * static_cast<double>(n_eval)));
-  }
-  if (use_em) {
-    thr_min_eval = std::max<size_t>(thr_min_eval, 4);
-  } else {
-    thr_min_eval = std::max<size_t>(thr_min_eval, 8);
-  }
-
-  size_t thr_final = 0;
-  if (use_em) {
-    size_t thr_beta_eval = std::min(thr_beta, thr_eval);
-    size_t min_hits = 1;
-    thr_final = std::max({thr_beta_eval, min_hits, thr_min_eval});
-  } else {
-    thr_final = std::max({thr_eval, thr_beta, thr_min_eval});
-  }
-
-  const size_t thr_final_raw = thr_final;
-  if (highConfPre && bestTid < tax.id2str.size()) {
-    double bestEvidence = std::clamp(best, 0.0, effCap);
-    add_candidate(bestTid, bestEvidence);
-    maxCountTid = bestTid;
-    maxCountScore = bestEvidence;
-    maxCountValid = true;
-
-  } else {
-    if (use_em && !tidScore.empty()) {
-      auto &ranked = scratch.rankedTidScores;
-      ranked.clear();
-      ranked.reserve(tidScore.size());
-      for (const auto &kv : tidScore) {
-        ranked.emplace_back(kv.first, kv.second);
-      }
-      std::sort(ranked.begin(), ranked.end(),
-                [](const auto &a, const auto &b) { return a.second > b.second; });
-
-      size_t thr_min_eval_low = thr_min_eval;
-      if (thr_min_eval > 0) {
-        thr_min_eval_low = std::max<size_t>(
-            1, static_cast<size_t>(
-                   std::floor(0.3 * static_cast<double>(thr_min_eval))));
-      }
-      const double thr_low =
-          static_cast<double>(std::max(thr_eval, thr_min_eval_low));
-      const double thr_high = static_cast<double>(thr_final_raw);
-      const double thr_base = lerp(thr_low, thr_high, dispersion_hi);
-
-      const uint32_t best_genus_id = map_genus(bestTid);
-      size_t same_genus_competitors_for_calibration = 0;
-      double effective_candidate_count_for_calibration = 1.0;
-      if (config.sample_state_calibration) {
-        const uint32_t best_rep_tid_id = map_species_rep(bestTid);
-        const size_t scan_limit = std::min<size_t>(64, ranked.size());
-        robin_hood::unordered_flat_set<uint32_t> scanned_rep_ids;
-        scanned_rep_ids.reserve(scan_limit);
-        for (size_t i = 0; i < scan_limit; ++i) {
-          const uint32_t tid_id = ranked[i].first;
-          if (tid_id >= tax.id2str.size()) {
-            continue;
-          }
-          const uint32_t rep_id = map_species_rep(tid_id);
-          if (!scanned_rep_ids.insert(rep_id).second) {
-            continue;
-          }
-          if (rep_id == best_rep_tid_id) {
-            continue;
-          }
-          if (best_genus_id != 0u && map_genus(tid_id) == best_genus_id) {
-            ++same_genus_competitors_for_calibration;
-          }
-        }
-
-        double score_total = 0.0;
-        double score_square_total = 0.0;
-        for (const auto &kv : ranked) {
-          const double score = std::max(0.0, kv.second);
-          score_total += score;
-          score_square_total += score * score;
-        }
-        if (score_total > 0.0 && score_square_total > 0.0) {
-          effective_candidate_count_for_calibration =
-              (score_total * score_total) / score_square_total;
-        }
-      }
-
-      const size_t floorK_max = std::min<size_t>(128, ranked.size());
-      const size_t dispersionFloor = std::min<size_t>(
-          floorK_max,
-          static_cast<size_t>(std::llround((1.0 - dispersion_hi) *
-                                           static_cast<double>(floorK_max))));
-      const size_t calibrationSupportFloor =
-          config.sample_state_calibration
-              ? sample_state_calibration_support_floor(
-                    effective_candidate_count_for_calibration,
-                    same_genus_competitors_for_calibration, floorK_max)
-              : 0;
-      const size_t floorCount =
-          std::max(dispersionFloor, calibrationSupportFloor);
-
-      if (dump_preem_enabled) {
-        dump_preem_candidate_retention(dump_preem_path, id, tax, weightCtx,
-                                       ranked, effCap, thr_base, floorCount,
-                                       bestTaxidStr, best_genus_id);
-      }
-
-      resultCandidates.reserve(ranked.size());
-      for (size_t i = 0; i < ranked.size(); ++i) {
-        const uint32_t tid_id = ranked[i].first;
-        if (tid_id >= tax.id2str.size()) {
-          continue;
-        }
-        const double countVal = std::clamp(ranked[i].second, 0.0, effCap);
-        if (countVal <= 0.0) {
-          continue;
-        }
-        const bool keep = (i < floorCount || countVal >= thr_base);
-        if (keep) {
-          add_candidate(tid_id, countVal);
-          if (tid_id == bestTid) {
-            maxCountTid = tid_id;
-            maxCountScore = countVal;
-            maxCountValid = true;
-          }
-        }
-      }
-
-      if (!highConfPre && !ranked.empty()) {
-        const uint32_t best_rep_tid_id = map_species_rep(bestTid);
-        robin_hood::unordered_flat_set<uint32_t> kept_rep_ids;
-        kept_rep_ids.reserve(resultCandidates.size() + 8);
-        for (const auto &cand : resultCandidates) {
-          if (cand.tid < tax.id2str.size()) {
-            kept_rep_ids.insert(map_species_rep(cand.tid));
-          }
-        }
-
-        const size_t scan_limit = std::min<size_t>(64, ranked.size());
-        size_t same_genus_competitors = 0;
-        robin_hood::unordered_flat_set<uint32_t> scanned_rep_ids;
-        scanned_rep_ids.reserve(scan_limit);
-        for (size_t i = 0; i < scan_limit; ++i) {
-          const uint32_t tid_id = ranked[i].first;
-          if (tid_id >= tax.id2str.size()) {
-            continue;
-          }
-          const uint32_t rep_id = map_species_rep(tid_id);
-          if (!scanned_rep_ids.insert(rep_id).second) {
-            continue;
-          }
-          if (rep_id == best_rep_tid_id) {
-            continue;
-          }
-          if (best_genus_id != 0u && map_genus(tid_id) == best_genus_id) {
-            ++same_genus_competitors;
-          }
-        }
-
-        const double best_score = std::clamp(best, 0.0, effCap);
-        const double second_score =
-            (ranked.size() > 1) ? std::clamp(ranked[1].second, 0.0, effCap)
-                                : 0.0;
-        const double gap_term =
-            1.0 - std::clamp((best_score - second_score) /
-                                 std::max(best_score, 1e-6),
-                             0.0, 1.0);
-        const double genus_term =
-            std::clamp(static_cast<double>(same_genus_competitors) / 4.0,
-                       0.0, 1.0);
-        const double unique_term =
-            1.0 - std::clamp(uniqueRatio / 0.25, 0.0, 1.0);
-        const double uncertainty =
-            std::clamp(0.45 * gap_term + 0.35 * genus_term +
-                           0.20 * unique_term,
-                       0.0, 1.0);
-        const size_t keep_budget =
-            1u + static_cast<size_t>(std::ceil(7.0 * uncertainty));
-        const double keep_floor =
-            std::max(0.25 * best_score, 0.50 * thr_base);
-
-        struct LocalRescueCandidate {
-          uint32_t tid{std::numeric_limits<uint32_t>::max()};
-          uint32_t rep{std::numeric_limits<uint32_t>::max()};
-          uint32_t priority{2u};
-          double score{0.0};
-        };
-        std::vector<LocalRescueCandidate> rescue_candidates;
-        rescue_candidates.reserve(scan_limit);
-        for (size_t i = 0; i < scan_limit; ++i) {
-          const uint32_t tid_id = ranked[i].first;
-          if (tid_id >= tax.id2str.size()) {
-            continue;
-          }
-          const double score = std::clamp(ranked[i].second, 0.0, effCap);
-          if (score < keep_floor) {
-            continue;
-          }
-          const uint32_t rep_id = map_species_rep(tid_id);
-          if (kept_rep_ids.find(rep_id) != kept_rep_ids.end()) {
-            continue;
-          }
-          uint32_t priority = 2u;
-          if (best_genus_id != 0u && map_genus(tid_id) == best_genus_id) {
-            priority = 0u;
-          } else if (best_score > 0.0 && score >= 0.50 * best_score) {
-            priority = 1u;
-          }
-          rescue_candidates.push_back(
-              LocalRescueCandidate{tid_id, rep_id, priority, score});
-        }
-        std::sort(rescue_candidates.begin(), rescue_candidates.end(),
-                  [](const LocalRescueCandidate &lhs,
-                     const LocalRescueCandidate &rhs) {
-                    if (lhs.priority != rhs.priority) {
-                      return lhs.priority < rhs.priority;
-                    }
-                    if (lhs.score != rhs.score) {
-                      return lhs.score > rhs.score;
-                    }
-                    return lhs.tid < rhs.tid;
-                  });
-        for (const auto &cand : rescue_candidates) {
-          if (kept_rep_ids.size() >= keep_budget) {
-            break;
-          }
-          if (!kept_rep_ids.insert(cand.rep).second) {
-            continue;
-          }
-          resultCandidates.push_back(SpoolCandidate{cand.tid, cand.score});
-        }
-      }
-    } else {
-      for (const auto &[tid_id, rawScore] : tidScore) {
-        double countVal = std::clamp(rawScore, 0.0, effCap);
-        if (countVal >= static_cast<double>(thr_final_raw)) {
-          add_candidate(tid_id, countVal);
-          if (tid_id == bestTid) {
-            maxCountTid = tid_id;
-            maxCountScore = countVal;
-            maxCountValid = true;
-          }
-        }
-      }
-
-    }
-  }
-
-  if (resultCandidates.empty() && use_em && maxCountValid &&
-      maxCountScore > 0.0) {
-    resultCandidates.push_back(SpoolCandidate{maxCountTid, maxCountScore});
-  }
+  auto selection = select_result_candidates_from_scores(
+      id, tax, weightCtx, config, scratch, scoring.tid_score, highConfPre,
+      dispersion_hi, eff_eval, n_eval, bestTid, best, uniqueRatio,
+      bestTaxidStr, dump_preem_enabled, dump_preem_path);
+  std::vector<SpoolCandidate> resultCandidates =
+      std::move(selection.candidates);
+  const uint32_t maxCountTid = selection.max_count_tid;
+  const double maxCountScore = selection.max_count_score;
+  const bool maxCountValid = selection.max_count_valid;
 
   if (abundanceCandidates.empty()) {
     abundanceCandidates = capture_abundance_candidates_from_scores(
@@ -1901,76 +2093,12 @@ void processSequence(
       capture_sample_mixture_candidates_from_base_scores(scratch,
                                                          tax.id2str.size());
 
-  if (!resultCandidates.empty()) {
-    if (presenceEnabled && presenceAcc) {
-      const auto &top = resultCandidates.front();
-      if (top.tid != kSpoolUnclassifiedTid) {
-        bool unique_ok = (uniqueCount >= 3.0) ||
-                         (uniqueCount >= 2.0 && uniqueRatio >= 0.12);
-        presenceAcc->add_read_support(top.tid, unique_ok);
-      }
-    }
-    bool isUniqueMapping = (resultCandidates.size() == 1);
-    if (isUniqueMapping && resultCandidates.front().tid < tax.id2str.size()) {
-      fileInfo.uniqueTaxids.insert(tax.id2str[resultCandidates.front().tid]);
-    }
-
-    fileInfo.classifiedNum++;
-    if (resultCandidates.size() == 1) {
-      if (!maxCountValid) {
-        maxCountTid = resultCandidates.front().tid;
-        maxCountScore = resultCandidates.front().score;
-        maxCountValid = true;
-      }
-      resultCandidates.clear();
-      resultCandidates.push_back(SpoolCandidate{maxCountTid, maxCountScore});
-    }
-  } else {
-    fileInfo.unclassifiedNum++;
-    resultCandidates.push_back(SpoolCandidate{kSpoolUnclassifiedTid, 1.0});
-    if (rejectReason.empty()) {
-      if (!maxCountValid && tidScore.empty()) {
-        rejectReason = "no_candidate";
-      } else {
-        rejectReason = "low_eval";
-      }
-    }
-  }
-
-  if (compactResults != nullptr) {
-    CompactClassifyResult result;
-    result.evaluated = eff_eval;
-    result.id = id;
-    result.best_taxid_hint = bestTaxidHintTid;
-    result.reject_reason = std::move(rejectReason);
-    result.candidates = std::move(resultCandidates);
-    result.abundance_candidates = std::move(abundanceCandidates);
-    result.sample_mixture_candidates = std::move(sampleMixtureCandidates);
-    compactResults->emplace_back(std::move(result));
-  } else if (classifyResults != nullptr) {
-    classifyResult result;
-    result.evaluated = eff_eval;
-    result.id = id;
-    result.best_taxid_hint = bestTaxidStr;
-    result.reject_reason = std::move(rejectReason);
-    result.taxidCount.reserve(resultCandidates.size());
-    for (const auto &candidate : resultCandidates) {
-      if (candidate.tid == kSpoolUnclassifiedTid) {
-        result.taxidCount.emplace_back("unclassified", candidate.score);
-      } else if (candidate.tid < tax.id2str.size()) {
-        result.taxidCount.emplace_back(tax.id2str[candidate.tid],
-                                       candidate.score);
-      }
-    }
-    result.abundanceCount.reserve(abundanceCandidates.size());
-    for (const auto &candidate : abundanceCandidates) {
-      if (candidate.tid < tax.id2str.size() && candidate.score > 0.0) {
-        result.abundanceCount.emplace_back(tax.id2str[candidate.tid],
-                                           candidate.score);
-      }
-    }
-    classifyResults->emplace_back(std::move(result));
-  }
+  finalize_read_record(
+      id, tax, fileInfo, presenceAcc, uniqueCount, uniqueRatio, eff_eval,
+      bestTaxidHintTid, bestTaxidStr, maxCountValid, maxCountTid,
+      maxCountScore, scoring.tid_score.empty(), std::move(rejectReason),
+      std::move(resultCandidates), std::move(abundanceCandidates),
+      std::move(sampleMixtureCandidates), classifyResults, compactResults);
 }
 
 void processBatch(

@@ -54,6 +54,7 @@ namespace ChimeraClassify {
 	// estimating sample state; the main per-read classify pass keeps its normal
 	// selective candidate retention.
 	bool sample_state_calibration = false;
+	bool write_read_evidence = false;
 		size_t hash_sample_min = 16;
 		size_t hash_sample_max = 96;
 			double idf_max = 8.0;

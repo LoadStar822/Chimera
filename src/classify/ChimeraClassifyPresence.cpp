@@ -247,11 +247,19 @@ void PresenceSummary::merge(const PresenceAccumulator &acc) {
 static PresenceDecision evaluate_presence_coverage_impl(
     const PresenceSummary &summary, const TaxDict &tax,
     const ClassifyConfig &config, const chimera::presence::CoverageMeta &meta,
-    size_t totalReads, size_t meanReadLen, bool unique_only) {
+    size_t totalReads, size_t meanReadLen, bool unique_only,
+    PresenceEvidenceTable *evidenceTable) {
   PresenceDecision decision;
   decision.threshold = config.presence_tau;
+  if (evidenceTable) {
+    evidenceTable->threshold = decision.threshold;
+    evidenceTable->rows.clear();
+  }
   if (summary.stats.empty()) {
     return decision;
+  }
+  if (evidenceTable) {
+    evidenceTable->rows.reserve(summary.stats.size());
   }
 
   robin_hood::unordered_flat_map<std::string, uint64_t> uniqueMap;
@@ -577,6 +585,31 @@ static PresenceDecision evaluate_presence_coverage_impl(
       posteriorProb = e / (1.0 + e);
     }
     decision.posteriors[tid] = posteriorProb;
+    if (evidenceTable) {
+      PresenceEvidenceRow row;
+      row.tid = tid;
+      row.posterior = posteriorProb;
+      row.log_posterior = logPosterior;
+      row.log_bf = logBF;
+      row.score = score;
+      row.unique_score = unique_score;
+      row.hits = from_fixed(stats.hits);
+      row.unique_hits = unique_hits;
+      row.read_hits = stats.readHits;
+      row.unique_reads = stats.uniqueReads;
+      row.unique_obs = unique_obs;
+      row.breadth_obs = breadth_obs;
+      row.breadth_ratio = breadth_ratio;
+      row.unique_effective = unique_effective;
+      row.local_factor = local_factor;
+      row.exposure = exposure;
+      row.unique_reference = resolve_unique(tid);
+      row.total_signatures = resolve_total(tid);
+      row.genome_length = resolve_genome(tid);
+      row.unique_density = resolve_density(tid);
+      row.expected_unique_per_ref_read = resolve_expected_ref(tid);
+      evidenceTable->rows.push_back(row);
+    }
   }
   return decision;
 }
@@ -586,7 +619,17 @@ PresenceDecision evaluate_presence_coverage(
     const ClassifyConfig &config, const chimera::presence::CoverageMeta &meta,
     size_t totalReads, size_t meanReadLen) {
   return evaluate_presence_coverage_impl(summary, tax, config, meta, totalReads,
-                                        meanReadLen, false);
+                                        meanReadLen, false, nullptr);
+}
+
+PresenceEvidenceTable build_presence_evidence_table(
+    const PresenceSummary &summary, const TaxDict &tax,
+    const ClassifyConfig &config, const chimera::presence::CoverageMeta &meta,
+    size_t totalReads, size_t meanReadLen) {
+  PresenceEvidenceTable table;
+  (void)evaluate_presence_coverage_impl(summary, tax, config, meta, totalReads,
+                                        meanReadLen, false, &table);
+  return table;
 }
 
 void postEmDecision(
