@@ -71,6 +71,182 @@ namespace ChimeraBuild {
 		}
 		return remaining == 0;
 	}
+
+	static std::string format_imcf_failure_rate(double rate)
+	{
+		std::ostringstream oss;
+		oss << std::fixed << std::setprecision(4) << rate * 100.0 << '%';
+		return oss.str();
+	}
+
+	struct ImcfInsertionGroupSummary {
+		size_t index;
+		uint64_t attempts;
+		uint64_t failures;
+		double rate;
+		size_t worstSlot;
+		uint64_t worstSlotAttempts;
+		uint64_t worstSlotFailures;
+		double worstSlotRate;
+	};
+
+	static void report_imcf_insertion_failures(
+	    const chimera::imcf::InterleavedMergedCuckooFilter& imcf,
+	    const std::vector<std::vector<std::string>>& indexToTaxid,
+	    const std::vector<uint64_t>& groupSuccess,
+	    const std::vector<uint64_t>& groupFailures,
+	    const std::vector<std::vector<uint64_t>>& slotSuccess,
+	    const std::vector<std::vector<uint64_t>>& slotFailures)
+	{
+		uint64_t totalInserted = 0;
+		uint64_t totalFailed = 0;
+		for (size_t i = 0; i < groupSuccess.size(); ++i) {
+			totalInserted += groupSuccess[i];
+			totalFailed += groupFailures[i];
+		}
+		uint64_t totalAttempts = totalInserted + totalFailed;
+		if (totalAttempts == 0) {
+			return;
+		}
+
+		double failureRate =
+		    static_cast<double>(totalFailed) / static_cast<double>(totalAttempts);
+		std::cout << "  - IMCF insertion result: " << totalFailed << "/"
+		          << totalAttempts << " failed ("
+		          << format_imcf_failure_rate(failureRate) << ")" << std::endl;
+		constexpr double kFailureWarningThreshold = 0.001; // 0.1%
+		constexpr uint64_t kFailureMinPrint = 100;
+		size_t groupsWithFailures = 0;
+		size_t groupsAboveWarn = 0;
+		double maxGroupRate = 0.0;
+		size_t maxGroupIndex = std::numeric_limits<size_t>::max();
+		std::vector<ImcfInsertionGroupSummary> summaries;
+		summaries.reserve(groupSuccess.size());
+
+		for (size_t i = 0; i < groupSuccess.size(); ++i) {
+			uint64_t attempts = groupSuccess[i] + groupFailures[i];
+			if (attempts == 0) {
+				continue;
+			}
+			double groupFailureRate =
+			    static_cast<double>(groupFailures[i]) / static_cast<double>(attempts);
+			if (groupFailures[i] > 0) {
+				++groupsWithFailures;
+			}
+			if (groupFailureRate > kFailureWarningThreshold) {
+				++groupsAboveWarn;
+			}
+			if (groupFailureRate > maxGroupRate) {
+				maxGroupRate = groupFailureRate;
+				maxGroupIndex = i;
+			}
+			if (groupFailures[i] == 0) {
+				continue;
+			}
+			if (groupFailureRate <= kFailureWarningThreshold &&
+			    groupFailures[i] < kFailureMinPrint) {
+				continue;
+			}
+
+			size_t worstSlot = std::numeric_limits<size_t>::max();
+			double worstSlotRate = 0.0;
+			uint64_t worstSlotAttempts = 0;
+			uint64_t worstSlotFailures = 0;
+			for (size_t slot = 0; slot < slotSuccess[i].size(); ++slot) {
+				uint64_t slotAttempts = slotSuccess[i][slot] + slotFailures[i][slot];
+				if (slotAttempts == 0) {
+					continue;
+				}
+				double slotRate = static_cast<double>(slotFailures[i][slot]) /
+				                  static_cast<double>(slotAttempts);
+				if (slotRate > worstSlotRate) {
+					worstSlotRate = slotRate;
+					worstSlot = slot;
+					worstSlotAttempts = slotAttempts;
+					worstSlotFailures = slotFailures[i][slot];
+				}
+			}
+
+			ImcfInsertionGroupSummary summary{
+			    i, attempts, groupFailures[i], groupFailureRate, worstSlot,
+			    worstSlotAttempts, worstSlotFailures, worstSlotRate};
+			summaries.push_back(summary);
+		}
+
+		std::cout << "    groups with failures: " << groupsWithFailures << "/"
+		          << groupSuccess.size();
+		if (maxGroupIndex != std::numeric_limits<size_t>::max()) {
+			std::cout << ", worst group=" << maxGroupIndex << " ("
+			          << format_imcf_failure_rate(maxGroupRate) << ")";
+		}
+		std::cout << std::endl;
+		if (groupsAboveWarn > 0) {
+			std::cout << "    groups above warning threshold ("
+			          << format_imcf_failure_rate(kFailureWarningThreshold)
+			          << "): " << groupsAboveWarn << std::endl;
+		}
+
+		std::sort(summaries.begin(), summaries.end(),
+		          [](const ImcfInsertionGroupSummary& a,
+		             const ImcfInsertionGroupSummary& b) {
+			          return a.rate > b.rate;
+		          });
+
+		const size_t maxDetails = 5;
+		for (size_t idx = 0; idx < summaries.size() && idx < maxDetails; ++idx) {
+			const auto& summary = summaries[idx];
+			std::ostringstream line;
+			line << "    group " << summary.index << ": " << summary.failures
+			     << "/" << summary.attempts << " failed ("
+			     << format_imcf_failure_rate(summary.rate) << ")";
+			if (summary.rate > kFailureWarningThreshold) {
+				line << " - consider lowering load_factor or increasing MaxCuckooCount/binSize";
+			}
+			std::cout << line.str() << std::endl;
+			if (summary.worstSlot != std::numeric_limits<size_t>::max() &&
+			    summary.worstSlot < indexToTaxid[summary.index].size() &&
+			    summary.worstSlotFailures > 0 &&
+			    summary.worstSlotRate > kFailureWarningThreshold) {
+				std::cout << "      worst slot " << summary.worstSlot
+				          << " (taxid=" << indexToTaxid[summary.index][summary.worstSlot]
+				          << ") : " << summary.worstSlotFailures << "/"
+				          << summary.worstSlotAttempts << " failed ("
+				          << format_imcf_failure_rate(summary.worstSlotRate) << ")"
+				          << std::endl;
+			}
+			auto bucketStats = imcf.computeBucketStats(summary.index, 256);
+			std::ostringstream statsLine;
+			statsLine << std::fixed << std::setprecision(4)
+			          << "      bucket load mean=" << bucketStats.meanLoad
+			          << ", stdev=" << bucketStats.stddevLoad
+			          << ", full=" << bucketStats.occupancy[4] << "/"
+			          << bucketStats.bucketCount << " ("
+			          << format_imcf_failure_rate(bucketStats.percentFull) << ")";
+			statsLine << std::setprecision(3)
+			          << ", low-bit load ratio range="
+			          << bucketStats.lowBitMinRatio << " - "
+			          << bucketStats.lowBitMaxRatio;
+			if (bucketStats.stashEntries > 0) {
+				statsLine << std::setprecision(0)
+				          << ", stash_species=" << bucketStats.stashEntries
+				          << " (entries=" << bucketStats.stashEntryCount
+				          << ", max_per_entry=" << bucketStats.stashMaxPerEntry
+				          << ")";
+			}
+			std::cout << statsLine.str() << std::endl;
+		}
+		uint64_t imcfFailureTotal = imcf.getInsertFailureTotal();
+		uint64_t imcfFailureSaturated =
+		    imcf.getInsertFailureSaturatedFingerprint();
+		if (imcfFailureTotal > 0) {
+			double saturatedRatio = static_cast<double>(imcfFailureSaturated) /
+			                        static_cast<double>(imcfFailureTotal);
+			std::cout << "  - IMCF failure counters: total=" << imcfFailureTotal
+			          << ", saturated_fp=" << imcfFailureSaturated << " ("
+			          << format_imcf_failure_rate(saturatedRatio) << ")"
+			          << std::endl;
+		}
+	}
 	} // namespace
 
 	std::vector<std::vector<std::string>> buildIMCF(
@@ -106,22 +282,6 @@ namespace ChimeraBuild {
 			for (size_t idx = 0; idx < featureLayout->taxids.size(); ++idx) {
 				featureLayoutIndex.emplace(featureLayout->taxids[idx], idx);
 			}
-		}
-
-		const bool collectCoverage = coverageMeta != nullptr;
-		const uint32_t uniqueDeg =
-		    std::max<uint32_t>(1, uniqueDegThreshold);
-		const uint16_t spanUsed =
-		    (effectiveSpan > 0) ? effectiveSpan : static_cast<uint16_t>(1);
-		const uint16_t refLenUsed =
-		    (refReadLen == 0) ? static_cast<uint16_t>(150) : refReadLen;
-		const bool hasSketch =
-		    collectCoverage && hashFreqContext && hashFreqContext->enabled();
-		if (collectCoverage) {
-			coverageMeta->unique_deg_threshold = uniqueDeg;
-			coverageMeta->ref_read_length = refLenUsed;
-			coverageMeta->effective_span = spanUsed;
-			coverageMeta->entries.clear();
 		}
 
 		for (size_t groupIdx = 0; groupIdx < groups.size(); ++groupIdx) {
@@ -387,176 +547,12 @@ namespace ChimeraBuild {
 			}
 		}
 
-		uint64_t totalInserted = 0;
-		uint64_t totalFailed = 0;
-		for (size_t i = 0; i < groups.size(); ++i) {
-			totalInserted += groupSuccess[i];
-			totalFailed += groupFailures[i];
-		}
-		uint64_t totalAttempts = totalInserted + totalFailed;
-		if (totalAttempts > 0) {
-			auto formatRate = [](double rate) {
-				std::ostringstream oss;
-				oss << std::fixed << std::setprecision(4) << rate * 100.0 << '%';
-				return oss.str();
-			};
-				double failureRate = static_cast<double>(totalFailed) / static_cast<double>(totalAttempts);
-				std::cout << "  - IMCF insertion result: " << totalFailed << "/" << totalAttempts
-					<< " failed (" << formatRate(failureRate) << ")" << std::endl;
-				constexpr double kFailureWarningThreshold = 0.001; // 0.1%
-				constexpr uint64_t kFailureMinPrint = 100;
-				size_t groupsWithFailures = 0;
-				size_t groupsAboveWarn = 0;
-				double maxGroupRate = 0.0;
-				size_t maxGroupIndex = std::numeric_limits<size_t>::max();
-				struct GroupSummary {
-					size_t index;
-					uint64_t attempts;
-					uint64_t failures;
-					double rate;
-					size_t worstSlot;
-					uint64_t worstSlotAttempts;
-					uint64_t worstSlotFailures;
-					double worstSlotRate;
-				};
-				std::vector<GroupSummary> summaries;
-				summaries.reserve(groups.size());
+		report_imcf_insertion_failures(imcf, indexToTaxid, groupSuccess,
+		                               groupFailures, slotSuccess, slotFailures);
 
-				for (size_t i = 0; i < groups.size(); ++i) {
-					uint64_t attempts = groupSuccess[i] + groupFailures[i];
-					if (attempts == 0) {
-						continue;
-					}
-					double groupFailureRate = static_cast<double>(groupFailures[i]) / static_cast<double>(attempts);
-					if (groupFailures[i] > 0) {
-						++groupsWithFailures;
-					}
-					if (groupFailureRate > kFailureWarningThreshold) {
-						++groupsAboveWarn;
-					}
-					if (groupFailureRate > maxGroupRate) {
-						maxGroupRate = groupFailureRate;
-						maxGroupIndex = i;
-					}
-					if (groupFailures[i] == 0) {
-						continue;
-					}
-					if (groupFailureRate <= kFailureWarningThreshold && groupFailures[i] < kFailureMinPrint) {
-						continue;
-					}
-
-					size_t worstSlot = std::numeric_limits<size_t>::max();
-					double worstSlotRate = 0.0;
-					uint64_t worstSlotAttempts = 0;
-					uint64_t worstSlotFailures = 0;
-					for (size_t slot = 0; slot < slotSuccess[i].size(); ++slot) {
-						uint64_t slotAttempts = slotSuccess[i][slot] + slotFailures[i][slot];
-						if (slotAttempts == 0) {
-							continue;
-						}
-						double slotRate = static_cast<double>(slotFailures[i][slot]) / static_cast<double>(slotAttempts);
-						if (slotRate > worstSlotRate) {
-							worstSlotRate = slotRate;
-							worstSlot = slot;
-							worstSlotAttempts = slotAttempts;
-							worstSlotFailures = slotFailures[i][slot];
-						}
-					}
-
-					GroupSummary summary{ i, attempts, groupFailures[i], groupFailureRate, worstSlot, worstSlotAttempts, worstSlotFailures, worstSlotRate };
-					summaries.push_back(summary);
-				}
-
-				std::cout << "    groups with failures: " << groupsWithFailures << "/" << groups.size();
-				if (maxGroupIndex != std::numeric_limits<size_t>::max()) {
-					std::cout << ", worst group=" << maxGroupIndex << " (" << formatRate(maxGroupRate) << ")";
-				}
-				std::cout << std::endl;
-				if (groupsAboveWarn > 0) {
-					std::cout << "    groups above warning threshold (" << formatRate(kFailureWarningThreshold) << "): "
-						<< groupsAboveWarn << std::endl;
-				}
-
-				std::sort(summaries.begin(), summaries.end(), [](const GroupSummary& a, const GroupSummary& b) {
-					return a.rate > b.rate;
-				});
-
-				const size_t maxDetails = 5;
-				for (size_t idx = 0; idx < summaries.size() && idx < maxDetails; ++idx) {
-					const auto& summary = summaries[idx];
-					std::ostringstream line;
-					line << "    group " << summary.index << ": " << summary.failures << "/" << summary.attempts
-						 << " failed (" << formatRate(summary.rate) << ")";
-					if (summary.rate > kFailureWarningThreshold) {
-						line << " - consider lowering load_factor or increasing MaxCuckooCount/binSize";
-					}
-					std::cout << line.str() << std::endl;
-					if (summary.worstSlot != std::numeric_limits<size_t>::max() && summary.worstSlot < indexToTaxid[summary.index].size() && summary.worstSlotFailures > 0 && summary.worstSlotRate > kFailureWarningThreshold) {
-						std::cout << "      worst slot " << summary.worstSlot << " (taxid="
-							<< indexToTaxid[summary.index][summary.worstSlot] << ") : "
-							<< summary.worstSlotFailures << "/" << summary.worstSlotAttempts
-							<< " failed (" << formatRate(summary.worstSlotRate) << ")" << std::endl;
-					}
-					auto bucketStats = imcf.computeBucketStats(summary.index, 256);
-					std::ostringstream statsLine;
-					statsLine << std::fixed << std::setprecision(4)
-						<< "      bucket load mean=" << bucketStats.meanLoad
-						<< ", stdev=" << bucketStats.stddevLoad
-						<< ", full=" << bucketStats.occupancy[4] << "/" << bucketStats.bucketCount
-						<< " (" << formatRate(bucketStats.percentFull) << ")";
-					statsLine << std::setprecision(3)
-						<< ", low-bit load ratio range=" << bucketStats.lowBitMinRatio << " - " << bucketStats.lowBitMaxRatio;
-					if (bucketStats.stashEntries > 0) {
-						statsLine << std::setprecision(0)
-							<< ", stash_species=" << bucketStats.stashEntries
-							<< " (entries=" << bucketStats.stashEntryCount
-							<< ", max_per_entry=" << bucketStats.stashMaxPerEntry << ")";
-					}
-					std::cout << statsLine.str() << std::endl;
-				}
-			uint64_t imcfFailureTotal = imcf.getInsertFailureTotal();
-			uint64_t imcfFailureSaturated = imcf.getInsertFailureSaturatedFingerprint();
-			if (imcfFailureTotal > 0) {
-				double saturatedRatio = static_cast<double>(imcfFailureSaturated) / static_cast<double>(imcfFailureTotal);
-				std::cout << "  - IMCF failure counters: total=" << imcfFailureTotal
-					<< ", saturated_fp=" << imcfFailureSaturated << " ("
-					<< formatRate(saturatedRatio) << ")" << std::endl;
-			}
-		}
-
-		if (collectCoverage && featureLayout) {
-			coverageMeta->entries.reserve(featureLayout->taxids.size());
-			for (size_t layoutIdx = 0; layoutIdx < featureLayout->taxids.size();
-			     ++layoutIdx) {
-				const auto& taxid = featureLayout->taxids[layoutIdx];
-				const auto& layout = featureLayout->perTaxid[layoutIdx];
-				chimera::presence::CoverageEntry entry{};
-				entry.taxid = taxid;
-				entry.unique_signatures = layout.uniqueSignatures;
-				entry.total_signatures = layout.totalSignatures;
-				entry.genome_length = layout.genomeBp;
-				const double window = std::max<int64_t>(
-				    1, static_cast<int64_t>(refLenUsed) - static_cast<int64_t>(spanUsed) + 1);
-				entry.unique_density = (layout.genomeBp > 0 && entry.unique_signatures > 0)
-					? static_cast<double>(entry.unique_signatures) /
-					      static_cast<double>(layout.genomeBp)
-					: 0.0;
-				entry.expected_unique_per_ref_read =
-					(entry.unique_density > 0.0) ? entry.unique_density * window : 0.0;
-				coverageMeta->entries.push_back(entry);
-			}
-			if (hasSketch) {
-				coverageMeta->freq_model.depth = hashFreqContext->sketch->depth();
-				coverageMeta->freq_model.width = hashFreqContext->sketch->width();
-				coverageMeta->freq_model.quantile = hashFreqContext->quantile;
-				coverageMeta->freq_model.stats = hashFreqContext->stats;
-				coverageMeta->freq_model.total_hashes =
-				    hashFreqContext->passA_total_hashes.load(std::memory_order_relaxed);
-				coverageMeta->freq_model.filtered_hashes =
-				    hashFreqContext->passB_filtered_hashes.load(std::memory_order_relaxed);
-				hashFreqContext->sketch->exportCounts(
-				    coverageMeta->freq_model.counters);
-			}
+		if (coverageMeta) {
+			populateCoverageMeta(hashFreqContext, featureLayout, effectiveSpan,
+			                     refReadLen, uniqueDegThreshold, *coverageMeta);
 		}
 
 		return indexToTaxid;
@@ -569,10 +565,6 @@ namespace ChimeraBuild {
 	                          uint32_t uniqueDegThreshold,
 	                          chimera::presence::CoverageMeta& coverageMeta)
 	{
-		if (!featureLayout) {
-			coverageMeta.entries.clear();
-			return;
-		}
 		const uint32_t uniqueDeg = std::max<uint32_t>(1, uniqueDegThreshold);
 		const uint16_t spanUsed =
 		    (effectiveSpan > 0) ? effectiveSpan : static_cast<uint16_t>(1);
@@ -583,6 +575,9 @@ namespace ChimeraBuild {
 		coverageMeta.ref_read_length = refLenUsed;
 		coverageMeta.effective_span = spanUsed;
 		coverageMeta.entries.clear();
+		if (!featureLayout) {
+			return;
+		}
 		coverageMeta.entries.reserve(featureLayout->taxids.size());
 		for (size_t layoutIdx = 0; layoutIdx < featureLayout->taxids.size();
 		     ++layoutIdx) {

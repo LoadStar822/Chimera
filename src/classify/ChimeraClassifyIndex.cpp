@@ -11,6 +11,39 @@
 
 namespace ChimeraClassify {
 
+namespace {
+
+template <typename T>
+void load_required_archive_section(cereal::BinaryInputArchive &archive,
+                                   T &value, const std::string &label) {
+  try {
+    archive(value);
+  } catch (const cereal::Exception &exc) {
+    throw std::runtime_error("Failed to load IMCF " + label + ": " +
+                             exc.what());
+  }
+}
+
+void load_optional_coverage_meta(cereal::BinaryInputArchive &archive,
+                                 chimera::presence::CoverageMeta *coverageMeta) {
+  if (coverageMeta) {
+    try {
+      archive(*coverageMeta);
+    } catch (const cereal::Exception &) {
+      coverageMeta->entries.clear();
+      coverageMeta->unique_deg_threshold = 1;
+    }
+    return;
+  }
+  try {
+    chimera::presence::CoverageMeta tmp;
+    archive(tmp);
+  } catch (const cereal::Exception &) {
+  }
+}
+
+} // namespace
+
 void rebuild_bin_slot_rep_lookup(
     TaxDict &tax, const std::vector<uint32_t> *tid2speciesRep) {
   tax.binSlotRepTid.assign(tax.idx2id.size() * kTaxSlotCount, kInvalidTidId);
@@ -88,35 +121,10 @@ void loadFilter(
   }
 
   cereal::BinaryInputArchive archive(is);
-  try {
-    archive(imcf);
-  } catch (const cereal::Exception &exc) {
-    throw std::runtime_error(std::string("Failed to load IMCF archive: ") + exc.what());
-  }
-  try {
-    archive(indexToTaxid);
-  } catch (const cereal::Exception &exc) {
-    throw std::runtime_error(std::string("Failed to load IMCF taxid index: ") + exc.what());
-  }
-  try {
-    archive(imcfConfig);
-  } catch (const cereal::Exception &exc) {
-    throw std::runtime_error(std::string("Failed to load IMCF configuration: ") + exc.what());
-  }
-  if (coverageMeta) {
-    try {
-      archive(*coverageMeta);
-    } catch (const cereal::Exception &) {
-      coverageMeta->entries.clear();
-      coverageMeta->unique_deg_threshold = 1;
-    }
-  } else {
-    try {
-      chimera::presence::CoverageMeta tmp;
-      archive(tmp);
-    } catch (const cereal::Exception &) {
-    }
-  }
+  load_required_archive_section(archive, imcf, "archive");
+  load_required_archive_section(archive, indexToTaxid, "taxid index");
+  load_required_archive_section(archive, imcfConfig, "configuration");
+  load_optional_coverage_meta(archive, coverageMeta);
   is.close();
 
   if (imcfConfig.hashVersion != ChimeraBuild::IMCFConfig::CurrentHashVersion) {

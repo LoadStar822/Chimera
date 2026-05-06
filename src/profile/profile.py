@@ -1,7 +1,7 @@
 import warnings
 from collections import Counter
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Callable, Dict, Iterable, Optional, Tuple
 
 from ete3 import NCBITaxa
 
@@ -147,22 +147,34 @@ def _write_species_profile(
             outfile.write(f"{taxon}\t{count}\t{relative_abundance:.2f}\n")
 
 
-def _aggregate_levels(
-    tax: Optional[NCBITaxa],
-    taxid_counts: Counter[int],
+def _aggregate_species_counts(
+    taxon_counts: Counter,
     base_unclassified: float,
+    resolve_species: Callable[[object], Optional[str]],
 ) -> Dict[str, Counter[str]]:
     species: Counter[str] = Counter()
     if base_unclassified:
         species[UNCLASSIFIED] += base_unclassified
-    cache: Dict[int, Optional[str]] = {}
-    for taxid, count in taxid_counts.items():
-        sp = _ncbi_taxid_to_species(tax, int(taxid), cache)
+    for taxon_id, count in taxon_counts.items():
+        sp = resolve_species(taxon_id)
         if sp:
             species[sp] += count
         else:
             species[UNCLASSIFIED] += count
     return {"species": species}
+
+
+def _aggregate_levels(
+    tax: Optional[NCBITaxa],
+    taxid_counts: Counter[int],
+    base_unclassified: float,
+) -> Dict[str, Counter[str]]:
+    cache: Dict[int, Optional[str]] = {}
+    return _aggregate_species_counts(
+        taxid_counts,
+        base_unclassified,
+        lambda taxid: _ncbi_taxid_to_species(tax, int(taxid), cache),
+    )
 
 
 def _aggregate_gtdb_levels(
@@ -170,20 +182,17 @@ def _aggregate_gtdb_levels(
     taxid_counts: Counter[str],
     base_unclassified: float,
 ) -> Dict[str, Counter[str]]:
-    species: Counter[str] = Counter()
-    if base_unclassified:
-        species[UNCLASSIFIED] += base_unclassified
     cache: Dict[str, Optional[str]] = {}
-    for node, count in taxid_counts.items():
+
+    def resolve_species(node: object) -> Optional[str]:
+        node = str(node)
         if node not in taxonomy.rank:
-            species[UNCLASSIFIED] += count
-            continue
-        sp = _gtdb_node_to_species(taxonomy, node, cache)
-        if sp:
-            species[sp] += count
-        else:
-            species[UNCLASSIFIED] += count
-    return {"species": species}
+            return None
+        return _gtdb_node_to_species(taxonomy, node, cache)
+
+    return _aggregate_species_counts(
+        taxid_counts, base_unclassified, resolve_species
+    )
 
 
 def process_file(

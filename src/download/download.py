@@ -2,7 +2,6 @@ import argparse
 import re
 import sys
 import subprocess
-import sys
 import time
 import os
 import shlex
@@ -402,6 +401,28 @@ class RepresentativeEntry:
     assembly_name: str = ""
 
 
+def _remove_partial_file(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _download_url_to_path(
+    url: str,
+    destination: Path,
+    timeout: Optional[float] = None,
+) -> None:
+    if timeout is None:
+        response = urllib.request.urlopen(url)
+    else:
+        response = urllib.request.urlopen(url, timeout=timeout)
+    with response, destination.open("wb") as out_file:
+        shutil.copyfileobj(response, out_file)
+
+
 def _run_external_downloader(downloader: Optional[str], url: str, destination: Path, quiet: bool = False) -> bool:
     if not downloader:
         return False
@@ -461,11 +482,7 @@ def _run_external_downloader(downloader: Optional[str], url: str, destination: P
     except FileNotFoundError:
         return False
     except subprocess.CalledProcessError:
-        if destination.exists():
-            try:
-                destination.unlink()
-            except OSError:
-                pass
+        _remove_partial_file(destination)
         return False
 
 
@@ -486,7 +503,7 @@ def download_file(url: str, destination: Path, downloader: Optional[str] = None,
         if destination.suffix == ".gz":
             if _verify_gzip_integrity(destination, quiet=quiet):
                 return True
-            destination.unlink(missing_ok=True)
+            _remove_partial_file(destination)
         else:
             return True
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -498,27 +515,22 @@ def download_file(url: str, destination: Path, downloader: Optional[str] = None,
             if destination.suffix == ".gz":
                 if _verify_gzip_integrity(destination, quiet=quiet):
                     return True
-                destination.unlink(missing_ok=True)
+                _remove_partial_file(destination)
             else:
                 return True
         try:
-            with urllib.request.urlopen(url, timeout=120) as response, destination.open("wb") as out_file:
-                shutil.copyfileobj(response, out_file)
+            _download_url_to_path(url, destination, timeout=120)
             if destination.suffix == ".gz":
                 if _verify_gzip_integrity(destination, quiet=quiet):
                     return True
-                destination.unlink(missing_ok=True)
+                _remove_partial_file(destination)
             else:
                 return True
         except Exception as exc:
             last_error = exc
             if not quiet:
                 print(f"   Attempt {attempt}/{retries} failed: {exc}")
-            if destination.exists():
-                try:
-                    destination.unlink()
-                except OSError:
-                    pass
+            _remove_partial_file(destination)
             time.sleep(2)
     if not quiet and last_error:
         print(f"[red]Failed to download {url}: {last_error}[/red]")
@@ -1060,15 +1072,13 @@ def _stream_tar_member_with_pigz(
         if progress_cm and progress_task is not None:
             progress_cm.update(progress_task, completed=bytes_read)
         if return_code != 0:
-            if destination.exists():
-                destination.unlink()
+            _remove_partial_file(destination)
             if not quiet and stderr_data:
                 console.print(f"[yellow]   使用 pigz 解压 {member_name} 失败: {stderr_data}[/yellow]")
             return None
         return digest.hexdigest()
     except Exception as exc:
-        if destination.exists():
-            destination.unlink()
+        _remove_partial_file(destination)
         if process.poll() is None:
             process.kill()
         if not quiet:
@@ -1622,8 +1632,7 @@ def ensure_gtdb_metadata(output_dir, metadata_files=None, quiet=False):
         if not quiet:
             print(f" - Downloading GTDB metadata: {url}")
         try:
-            with urllib.request.urlopen(url) as response, open(target, "wb") as out_file:
-                shutil.copyfileobj(response, out_file)
+            _download_url_to_path(url, target)
             normalized_files.append(target)
             existing.add(filename)
         except Exception as exc:
@@ -1901,6 +1910,103 @@ def ask_gtdb_release(default_release=None, cache_dir=None, mirror_keys=None):
             default=default_release or ""
         )
         return sanitize_gtdb_release_input(manual) or manual
+
+
+def _build_download_config_summary(config, downloader_summary):
+    taxonomy_mode = config["taxonomy_mode"]
+    gtdb_mode = config["gtdb_mode"]
+    gtdb_release = config["gtdb_release"]
+    gtdb_mirror = config["gtdb_mirror"]
+
+    summary = Tree("[bold cyan]参数确认[/bold cyan]")
+    basic_branch = summary.add("[bold]基础[/bold]")
+    basic_branch.add(f"数据库: {_format_multi_display(config['database'])}")
+    basic_branch.add(f"物种群组: {_format_multi_display(config['organism_group'])}")
+    basic_branch.add(f"Taxonomy 模式: {taxonomy_mode}")
+    if taxonomy_mode == "gtdb":
+        basic_branch.add(f"GTDB 模式: {gtdb_mode or DEFAULT_GTDB_MODE}")
+        basic_branch.add(f"GTDB release: {gtdb_release or 'latest'}")
+        mirror_label = next(
+            (
+                opt["label"]
+                for opt in GTDB_MIRROR_OPTIONS
+                if opt["key"] == (gtdb_mirror or "primary")
+            ),
+            gtdb_mirror or "primary",
+        )
+        basic_branch.add(f"GTDB 镜像: {mirror_label}")
+    basic_branch.add(f"Taxonomy 层级: {config['taxonomy_rank']}")
+    basic_branch.add(f"Taxonomy ID: {_format_value(config['taxid'], '全部')}")
+    basic_branch.add(f"数量限制: {config['limit_assembly']}")
+
+    filter_branch = summary.add("[bold]过滤[/bold]")
+    if taxonomy_mode == "gtdb" and gtdb_mode == "representative":
+        filter_branch.add("代表模式：使用官方 representative 清单，未应用额外过滤")
+    else:
+        filter_branch.add(
+            f"文件类型: {_format_multi_display(config['file_types'], '默认')}"
+        )
+        filter_branch.add(f"RefSeq 分类: {_format_multi_display(config['refseq_category'])}")
+        filter_branch.add(f"组装层级: {_format_multi_display(config['assembly_level'])}")
+        filter_branch.add(
+            f"发布日期范围: {_format_value(config['start_date'], '不限')} ~ "
+            f"{_format_value(config['end_date'], '不限')}"
+        )
+        filter_branch.add(f"自定义过滤: {_format_value(config['custom_filter'], '未设置')}")
+
+    runtime_branch = summary.add("[bold]运行[/bold]")
+    runtime_branch.add(f"输出目录: {config['output_dir']}")
+    runtime_branch.add(f"线程数: {config['threads']}")
+    runtime_branch.add(f"Dry-run: {_format_bool(config['dry_run'])}")
+    runtime_branch.add(f"Fix mode: {_format_bool(config['fix_mode'])}")
+    runtime_branch.add(f"MD5 校验: {_format_bool(config['md5_check'])}")
+
+    report_branch = summary.add("[bold]报告[/bold]")
+    if taxonomy_mode == "gtdb" and gtdb_mode == "representative":
+        report_branch.add("代表模式：报告生成功能默认关闭")
+    else:
+        report_branch.add(f"Assembly 报告: {_format_bool(config['assembly_report'])}")
+        report_branch.add(f"Sequence 报告: {_format_bool(config['sequence_report'])}")
+        report_branch.add(f"URL 报告: {_format_bool(config['url_report'])}")
+
+    advanced_branch = summary.add("[bold]高级[/bold]")
+    advanced_items = []
+    if config["version_label"]:
+        advanced_items.append(f"版本标签: {config['version_label']}")
+    if config["external_assembly"]:
+        advanced_items.append(f"外部 assembly_summary: {config['external_assembly']}")
+    if config["alt_version_label"]:
+        advanced_items.append(f"备用版本标签: {config['alt_version_label']}")
+    if config["retry_attempts"] != DEFAULT_RETRY_ATTEMPTS:
+        advanced_items.append(f"重试次数: {config['retry_attempts']}")
+    if config["conditional_exit"] != "0":
+        advanced_items.append(f"失败阈值: {config['conditional_exit']}")
+    if config["ncbi_folders"]:
+        advanced_items.append("NCBI 目录结构: 已开启")
+    if downloader_summary:
+        if taxonomy_mode == "gtdb" and gtdb_mode == "representative":
+            label = "内置(urllib)" if downloader_summary == "urllib" else downloader_summary
+            advanced_items.append(f"下载工具: {label}")
+        elif downloader_summary != DEFAULT_DOWNLOADER:
+            advanced_items.append(f"下载工具: {downloader_summary}")
+    if config["delete_extra"]:
+        advanced_items.append("删除多余文件: 开启")
+    if config["silent"]:
+        advanced_items.append("静默输出: 开启")
+    if config["progress_only"]:
+        advanced_items.append("仅显示进度: 开启")
+    if config["verbose"]:
+        advanced_items.append("详细日志: 开启")
+    if config["debug"]:
+        advanced_items.append("调试模式: 开启")
+
+    if not advanced_items:
+        advanced_branch.add("使用默认配置")
+    else:
+        for item in advanced_items:
+            advanced_branch.add(item)
+
+    return summary
 
 
 def prompt_user(options):
@@ -2383,83 +2489,7 @@ def prompt_user(options):
             "gtdb_mirror": gtdb_mirror,
         }
 
-        summary = Tree("[bold cyan]参数确认[/bold cyan]")
-        basic_branch = summary.add("[bold]基础[/bold]")
-        basic_branch.add(f"数据库: {_format_multi_display(database)}")
-        basic_branch.add(f"物种群组: {_format_multi_display(organism_group)}")
-        basic_branch.add(f"Taxonomy 模式: {taxonomy_mode}")
-        if taxonomy_mode == "gtdb":
-            basic_branch.add(f"GTDB 模式: {gtdb_mode or DEFAULT_GTDB_MODE}")
-            basic_branch.add(f"GTDB release: {gtdb_release or 'latest'}")
-            mirror_label = next((opt["label"] for opt in GTDB_MIRROR_OPTIONS if opt["key"] == (gtdb_mirror or "primary")), gtdb_mirror or "primary")
-            basic_branch.add(f"GTDB 镜像: {mirror_label}")
-        basic_branch.add(f"Taxonomy 层级: {taxonomy_rank}")
-        basic_branch.add(f"Taxonomy ID: {_format_value(taxid, '全部')}")
-        basic_branch.add(f"数量限制: {limit_assembly}")
-
-        filter_branch = summary.add("[bold]过滤[/bold]")
-        if taxonomy_mode == "gtdb" and gtdb_mode == "representative":
-            filter_branch.add("代表模式：使用官方 representative 清单，未应用额外过滤")
-        else:
-            filter_branch.add(f"文件类型: {_format_multi_display(file_types, '默认')}")
-            filter_branch.add(f"RefSeq 分类: {_format_multi_display(refseq_category)}")
-            filter_branch.add(f"组装层级: {_format_multi_display(assembly_level)}")
-            filter_branch.add(f"发布日期范围: {_format_value(start_date, '不限')} ~ {_format_value(end_date, '不限')}")
-            filter_branch.add(f"自定义过滤: {_format_value(custom_filter, '未设置')}")
-
-        runtime_branch = summary.add("[bold]运行[/bold]")
-        runtime_branch.add(f"输出目录: {output_dir}")
-        runtime_branch.add(f"线程数: {threads}")
-        runtime_branch.add(f"Dry-run: {_format_bool(dry_run)}")
-        runtime_branch.add(f"Fix mode: {_format_bool(fix_mode)}")
-        runtime_branch.add(f"MD5 校验: {_format_bool(md5_check)}")
-
-        report_branch = summary.add("[bold]报告[/bold]")
-        if taxonomy_mode == "gtdb" and gtdb_mode == "representative":
-            report_branch.add("代表模式：报告生成功能默认关闭")
-        else:
-            report_branch.add(f"Assembly 报告: {_format_bool(assembly_report)}")
-            report_branch.add(f"Sequence 报告: {_format_bool(sequence_report)}")
-            report_branch.add(f"URL 报告: {_format_bool(url_report)}")
-
-        advanced_branch = summary.add("[bold]高级[/bold]")
-        advanced_items = []
-        if version_label:
-            advanced_items.append(f"版本标签: {version_label}")
-        if external_assembly:
-            advanced_items.append(f"外部 assembly_summary: {external_assembly}")
-        if alt_version_label:
-            advanced_items.append(f"备用版本标签: {alt_version_label}")
-        if retry_attempts != DEFAULT_RETRY_ATTEMPTS:
-            advanced_items.append(f"重试次数: {retry_attempts}")
-        if conditional_exit != "0":
-            advanced_items.append(f"失败阈值: {conditional_exit}")
-        if ncbi_folders:
-            advanced_items.append("NCBI 目录结构: 已开启")
-        if downloader_summary:
-            if taxonomy_mode == "gtdb" and gtdb_mode == "representative":
-                label = "内置(urllib)" if downloader_summary == "urllib" else downloader_summary
-                advanced_items.append(f"下载工具: {label}")
-            elif downloader_summary != DEFAULT_DOWNLOADER:
-                advanced_items.append(f"下载工具: {downloader_summary}")
-        if delete_extra:
-            advanced_items.append("删除多余文件: 开启")
-        if silent:
-            advanced_items.append("静默输出: 开启")
-        if progress_only:
-            advanced_items.append("仅显示进度: 开启")
-        if verbose:
-            advanced_items.append("详细日志: 开启")
-        if debug:
-            advanced_items.append("调试模式: 开启")
-
-        if not advanced_items:
-            advanced_branch.add("使用默认配置")
-        else:
-            for item in advanced_items:
-                advanced_branch.add(item)
-
-        console.print(summary)
+        console.print(_build_download_config_summary(config, downloader_summary))
         console.print()
 
         if Confirm.ask("确认以上设置并继续执行下载流程吗？", default=True, console=console):

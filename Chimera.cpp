@@ -89,6 +89,70 @@ std::string normalize_auto_min_length_help() {
   return "Minimum length sequence for building (auto => strobemer minimum span)";
 }
 
+uint16_t default_cli_threads() {
+  unsigned int hardware_threads = std::thread::hardware_concurrency();
+  if (hardware_threads == 0) {
+    hardware_threads = 1;
+  }
+  const auto max_threads =
+      static_cast<unsigned int>(std::numeric_limits<uint16_t>::max());
+  if (hardware_threads > max_threads) {
+    hardware_threads = max_threads;
+  }
+  return static_cast<uint16_t>(std::min<unsigned int>(hardware_threads, 192u));
+}
+
+std::string validate_min_length_option(std::string &input) {
+  std::string lowered = input;
+  std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                 [](unsigned char ch) {
+                   return static_cast<char>(std::tolower(ch));
+                 });
+  if (lowered == "auto") {
+    input = "0";
+    return {};
+  }
+  try {
+    long long value = std::stoll(input);
+    if (value < 0) {
+      return "Minimum length must be >= 0 or 'auto'";
+    }
+  } catch (const std::exception &) {
+    return "Minimum length must be an integer or 'auto'";
+  }
+  return {};
+}
+
+void normalize_auto_string(std::string &value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char ch) {
+                   return static_cast<char>(std::tolower(ch));
+                 });
+  if (value.empty()) {
+    value = "auto";
+  }
+}
+
+void validate_build_config(ChimeraBuild::BuildConfig &buildConfig,
+                           bool buildQuietRequested) {
+  normalize_auto_string(buildConfig.taxonomy_kind);
+  buildConfig.min_length =
+      std::max<uint64_t>(buildConfig.min_length, buildConfig.strobemer_k);
+  if (buildConfig.strobemer_w_min == 0 || buildConfig.strobemer_w_max == 0) {
+    throw CLI::ValidationError("--strobe-w-min/w-max must be greater than 0");
+  }
+  if (buildConfig.strobemer_w_min > buildConfig.strobemer_w_max) {
+    throw CLI::ValidationError("--strobe-w-min must be <= --strobe-w-max");
+  }
+  if (buildConfig.strobemer_k < 8) {
+    throw CLI::ValidationError("--strobe-k must be >= 8");
+  }
+  if (buildConfig.strobemer_order != 2) {
+    throw CLI::ValidationError("--strobe-order currently only supports value 2");
+  }
+  buildConfig.verbose = !buildQuietRequested;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -103,17 +167,7 @@ int main(int argc, char **argv) {
   auto build = app.add_subcommand("build", "Build a sequence database");
   auto classify = app.add_subcommand("classify", "Classify sequences");
 
-  unsigned int hardware_threads = std::thread::hardware_concurrency();
-  if (hardware_threads == 0) {
-    hardware_threads = 1;
-  }
-  const auto max_threads =
-      static_cast<unsigned int>(std::numeric_limits<uint16_t>::max());
-  if (hardware_threads > max_threads) {
-    hardware_threads = max_threads;
-  }
-  const auto default_threads = static_cast<uint16_t>(
-      std::min<unsigned int>(hardware_threads, 192u));
+  const uint16_t default_threads = default_cli_threads();
 
   bool buildQuietRequested = false;
 
@@ -150,25 +204,7 @@ int main(int argc, char **argv) {
   min_length_option->default_str("auto");
   CLI::Validator min_length_validator;
   min_length_validator.description("auto or non-negative integer");
-  min_length_validator.operation([](std::string &input) -> std::string {
-    std::string lowered = input;
-    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char ch) {
-      return static_cast<char>(std::tolower(ch));
-    });
-    if (lowered == "auto") {
-      input = "0";
-      return {};
-    }
-    try {
-      long long value = std::stoll(input);
-      if (value < 0) {
-        return "Minimum length must be >= 0 or 'auto'";
-      }
-    } catch (const std::exception &) {
-      return "Minimum length must be an integer or 'auto'";
-    }
-    return {};
-  });
+  min_length_validator.operation(validate_min_length_option);
   min_length_option->check(min_length_validator);
   build
       ->add_option("-t,--threads", buildConfig.threads,
@@ -193,31 +229,8 @@ int main(int argc, char **argv) {
       ->default_val("auto");
   build->add_flag("-q,--quiet", buildQuietRequested, "Quiet output");
 
-  build->callback([&buildConfig, min_length_option, &buildQuietRequested]() {
-    auto normalize_kind = [](std::string &value) {
-      std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-      });
-      if (value.empty()) {
-        value = "auto";
-      }
-    };
-    normalize_kind(buildConfig.taxonomy_kind);
-    buildConfig.min_length =
-        std::max<uint64_t>(buildConfig.min_length, buildConfig.strobemer_k);
-    if (buildConfig.strobemer_w_min == 0 || buildConfig.strobemer_w_max == 0) {
-      throw CLI::ValidationError("--strobe-w-min/w-max must be greater than 0");
-    }
-    if (buildConfig.strobemer_w_min > buildConfig.strobemer_w_max) {
-      throw CLI::ValidationError("--strobe-w-min must be <= --strobe-w-max");
-    }
-    if (buildConfig.strobemer_k < 8) {
-      throw CLI::ValidationError("--strobe-k must be >= 8");
-    }
-    if (buildConfig.strobemer_order != 2) {
-      throw CLI::ValidationError("--strobe-order currently only supports value 2");
-    }
-    buildConfig.verbose = !buildQuietRequested;
+  build->callback([&buildConfig, &buildQuietRequested]() {
+    validate_build_config(buildConfig, buildQuietRequested);
   });
 
   // Classify

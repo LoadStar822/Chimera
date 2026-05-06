@@ -10,6 +10,25 @@ class ReadEvidenceError(ValueError):
     pass
 
 
+READ_EVIDENCE_WIDE_ERROR = (
+    "ChimeraReadEvidence.tsv must be the wide table with "
+    "profile_evidence column"
+)
+
+
+def _require_column(
+    reader: csv.DictReader,
+    column: str,
+    message: str,
+) -> None:
+    if not reader.fieldnames or column not in reader.fieldnames:
+        raise ReadEvidenceError(message)
+
+
+def _taxid_sort_key(taxid: str):
+    return (0, int(taxid)) if taxid.isdigit() else (1, taxid)
+
+
 def _open_text(path: str):
     if path.endswith(".gz"):
         return gzip.open(path, "rt", encoding="utf-8", newline="")
@@ -45,12 +64,14 @@ def load_profile_masses(evidence_path: str) -> Dict[str, float]:
     masses: Dict[str, float] = {}
     with _open_text(evidence_path) as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        if not reader.fieldnames or "taxid" not in reader.fieldnames:
-            raise ReadEvidenceError("ChimeraEvidence.tsv is missing taxid column")
-        if "abundance_mass" not in reader.fieldnames:
-            raise ReadEvidenceError(
-                "ChimeraEvidence.tsv is missing abundance_mass column"
-            )
+        _require_column(
+            reader, "taxid", "ChimeraEvidence.tsv is missing taxid column"
+        )
+        _require_column(
+            reader,
+            "abundance_mass",
+            "ChimeraEvidence.tsv is missing abundance_mass column",
+        )
         for row in reader:
             taxid = row.get("taxid", "")
             if not taxid:
@@ -65,11 +86,7 @@ def reconstruct_profile_masses(read_evidence_path: str) -> Dict[str, float]:
     masses: Dict[str, float] = defaultdict(float)
     with _open_text(read_evidence_path) as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        if not reader.fieldnames or "profile_evidence" not in reader.fieldnames:
-            raise ReadEvidenceError(
-                "ChimeraReadEvidence.tsv must be the wide table with "
-                "profile_evidence column"
-            )
+        _require_column(reader, "profile_evidence", READ_EVIDENCE_WIDE_ERROR)
         for row in reader:
             for taxid, _q, mass in parse_profile_evidence(
                 row.get("profile_evidence", "")
@@ -84,8 +101,9 @@ def load_presence_rows(presence_path: Optional[str]) -> Dict[str, Dict[str, str]
     rows: Dict[str, Dict[str, str]] = {}
     with _open_text(presence_path) as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        if not reader.fieldnames or "taxid" not in reader.fieldnames:
-            raise ReadEvidenceError("ChimeraPresence.tsv is missing taxid column")
+        _require_column(
+            reader, "taxid", "ChimeraPresence.tsv is missing taxid column"
+        )
         for row in reader:
             taxid = row.get("taxid", "")
             if taxid:
@@ -121,8 +139,7 @@ def write_profile_reconstruction_table(
     read_masses = reconstruct_profile_masses(read_evidence_path)
     presence_rows = load_presence_rows(presence_path)
     all_taxids = sorted(
-        set(profile_masses) | set(read_masses),
-        key=lambda x: (0, int(x)) if x.isdigit() else (1, x),
+        set(profile_masses) | set(read_masses), key=_taxid_sort_key
     )
     errors: List[float] = []
     extractable_mass = 0.0
@@ -241,13 +258,10 @@ def load_read_selection(
     counts: Dict[str, int] = defaultdict(int)
     with _open_text(ledger_path) as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        if not reader.fieldnames or "read_id" not in reader.fieldnames:
-            raise ReadEvidenceError("ChimeraReadEvidence.tsv is missing read_id column")
-        if "profile_evidence" not in reader.fieldnames:
-            raise ReadEvidenceError(
-                "ChimeraReadEvidence.tsv must be the wide table with "
-                "profile_evidence column"
-            )
+        _require_column(
+            reader, "read_id", "ChimeraReadEvidence.tsv is missing read_id column"
+        )
+        _require_column(reader, "profile_evidence", READ_EVIDENCE_WIDE_ERROR)
         for row in reader:
             matched_taxids: Set[str] = set()
             for taxid, _q, mass in parse_profile_evidence(
@@ -365,9 +379,7 @@ def extract_read_bags(
     with open(manifest_path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         writer.writerow(["taxid", "read_count", "output"])
-        for taxid in sorted(
-            target_taxids, key=lambda x: (0, int(x)) if x.isdigit() else (1, x)
-        ):
+        for taxid in sorted(target_taxids, key=_taxid_sort_key):
             safe = _safe_taxid_name(taxid)
             if len(read_paths) == 1:
                 output = f"taxid_{safe}.fastq"

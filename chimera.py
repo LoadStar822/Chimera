@@ -74,6 +74,92 @@ def min_length_type(value: str):
     return parsed
 
 
+def add_build_arguments(parser, require_input: bool) -> None:
+    if require_input:
+        parser.add_argument(
+            "-i", "--input", required=True, help="Input file for building"
+        )
+    parser.add_argument(
+        "-o", "--output", default="ChimeraDB", help="Output file for building"
+    )
+    parser.add_argument(
+        "--strobe-k",
+        type=int,
+        default=28,
+        help="Strobemer k-mer length",
+    )
+    parser.add_argument(
+        "--strobe-order",
+        type=int,
+        default=2,
+        help="Strobemer order (currently only 2 is supported)",
+    )
+    parser.add_argument(
+        "--strobe-w-min",
+        type=int,
+        default=12,
+        help="Strobemer minimum window",
+    )
+    parser.add_argument(
+        "--strobe-w-max",
+        type=int,
+        default=32,
+        help="Strobemer maximum window",
+    )
+    parser.add_argument(
+        "-l",
+        "--min-length",
+        type=min_length_type,
+        default="auto",
+        help="Minimum sequence length for building (auto => strobemer minimum span)",
+    )
+    parser.add_argument(
+        "-t",
+        "--threads",
+        type=int,
+        default=default_threads(),
+        help="Number of threads for building",
+    )
+    parser.add_argument(
+        "--load-factor", type=float, default=0.85, help="IMCF filter load factor"
+    )
+    parser.add_argument(
+        "--presence-unique-deg",
+        type=int,
+        default=1,
+        help="Degree cutoff (<=) treated as unique signature for coverage meta",
+    )
+    parser.add_argument(
+        "--taxonomy-kind",
+        dest="taxonomy_kind",
+        default="auto",
+        choices=["auto", "ncbi", "gtdb"],
+        help="Taxonomy source identifier (auto/ncbi/gtdb)",
+    )
+    parser.add_argument(
+        "--taxonomy-version",
+        dest="taxonomy_version",
+        default="auto",
+        help="Taxonomy version label, for example ncbi-taxdump-2025-09-15 or gtdb-rs226",
+    )
+
+
+def append_build_command_args(command, args) -> None:
+    command.extend(["-i", args.input])
+    command.extend(["-o", args.output])
+    command.extend(["--strobe-k", str(args.strobe_k)])
+    command.extend(["--strobe-order", str(args.strobe_order)])
+    command.extend(["--strobe-w-min", str(args.strobe_w_min)])
+    command.extend(["--strobe-w-max", str(args.strobe_w_max)])
+    if args.min_length != "auto":
+        command.extend(["-l", str(args.min_length)])
+    command.extend(["-t", str(args.threads)])
+    command.extend(["--load-factor", str(args.load_factor)])
+    command.extend(["--presence-unique-deg", str(args.presence_unique_deg)])
+    command.extend(["--taxonomy-kind", str(args.taxonomy_kind)])
+    command.extend(["--taxonomy-version", str(args.taxonomy_version)])
+
+
 def parse_arguments():
     if len(sys.argv) > 1 and sys.argv[1] == "download":
         parser = argparse.ArgumentParser(
@@ -106,141 +192,14 @@ def parse_arguments():
     build_parser = subparsers.add_parser(
         "build", help="Build a taxonomic sequence database"
     )
-    build_parser.add_argument(
-        "-i", "--input", required=True, help="Input file for building"
-    )
-    build_parser.add_argument(
-        "-o", "--output", default="ChimeraDB", help="Output file for building"
-    )
-    build_parser.add_argument(
-        "--strobe-k",
-        type=int,
-        default=28,
-        help="Strobemer k-mer length",
-    )
-    build_parser.add_argument(
-        "--strobe-order",
-        type=int,
-        default=2,
-        help="Strobemer order (currently only 2 is supported)",
-    )
-    build_parser.add_argument(
-        "--strobe-w-min",
-        type=int,
-        default=12,
-        help="Strobemer minimum window",
-    )
-    build_parser.add_argument(
-        "--strobe-w-max",
-        type=int,
-        default=32,
-        help="Strobemer maximum window",
-    )
-    build_parser.add_argument(
-        "-l",
-        "--min-length",
-        type=min_length_type,
-        default="auto",
-        help="Minimum sequence length for building (auto => strobemer minimum span)",
-    )
-    build_parser.add_argument(
-        "-t",
-        "--threads",
-        type=int,
-        default=default_threads(),
-        help="Number of threads for building",
-    )
-    build_parser.add_argument(
-        "--load-factor", type=float, default=0.85, help="IMCF filter load factor"
-    )
-    build_parser.add_argument(
-        "--presence-unique-deg",
-        type=int,
-        default=1,
-        help="Degree cutoff (<=) treated as unique signature for coverage meta",
-    )
-    build_parser.add_argument(
-        "--taxonomy-kind",
-        dest="taxonomy_kind",
-        default="auto",
-        choices=["auto", "ncbi", "gtdb"],
-        help="Taxonomy source identifier (auto/ncbi/gtdb)",
-    )
-    build_parser.add_argument(
-        "--taxonomy-version",
-        dest="taxonomy_version",
-        default="auto",
-        help="Taxonomy version label, for example ncbi-taxdump-2025-09-15 or gtdb-rs226",
-    )
+    add_build_arguments(build_parser, require_input=True)
 
     # Download and Build combined subcommand
     download_build_parser = subparsers.add_parser(
         "download_and_build",
         help="Download NCBI database sequences and resources and build a taxonomic sequence database",
     )
-    download_build_parser.add_argument(
-        "-o", "--output", default="ChimeraDB", help="Output file for building"
-    )
-    download_build_parser.add_argument(
-        "--strobe-k",
-        type=int,
-        default=28,
-        help="Strobemer k-mer length",
-    )
-    download_build_parser.add_argument(
-        "--strobe-order",
-        type=int,
-        default=2,
-        help="Strobemer order (currently only 2 is supported)",
-    )
-    download_build_parser.add_argument(
-        "--strobe-w-min",
-        type=int,
-        default=12,
-        help="Strobemer minimum window",
-    )
-    download_build_parser.add_argument(
-        "--strobe-w-max",
-        type=int,
-        default=32,
-        help="Strobemer maximum window",
-    )
-    download_build_parser.add_argument(
-        "-l",
-        "--min-length",
-        type=min_length_type,
-        default="auto",
-        help="Minimum sequence length for building (auto => strobemer minimum span)",
-    )
-    download_build_parser.add_argument(
-        "-t",
-        "--threads",
-        type=int,
-        default=default_threads(),
-        help="Number of threads for building",
-    )
-    download_build_parser.add_argument(
-        "--load-factor", type=float, default=0.85, help="IMCF filter load factor"
-    )
-    download_build_parser.add_argument(
-        "--presence-unique-deg",
-        type=int,
-        default=1,
-        help="Degree cutoff (<=) treated as unique signature for coverage meta",
-    )
-    download_build_parser.add_argument(
-        "--taxonomy-kind",
-        dest="taxonomy_kind",
-        default="auto",
-        choices=["auto", "ncbi", "gtdb"],
-        help="Taxonomy source identifier (auto/ncbi/gtdb)",
-    )
-    download_build_parser.add_argument(
-        "--taxonomy-version",
-        dest="taxonomy_version",
-        default="auto",
-        help="Taxonomy version label, for example ncbi-taxdump-2025-09-15 or gtdb-rs226",
-    )
+    add_build_arguments(download_build_parser, require_input=False)
 
     # Classify subcommand
     classify_parser = subparsers.add_parser("classify", help="Classify sequences")
@@ -466,21 +425,7 @@ def run_chimera(args, chimera_path=None):
         command.append(args.command)
 
     if args.command == "build":
-        command.extend(["-i", args.input])
-        command.extend(["-o", args.output])
-        command.extend(["--strobe-k", str(args.strobe_k)])
-        command.extend(["--strobe-order", str(args.strobe_order)])
-        command.extend(["--strobe-w-min", str(args.strobe_w_min)])
-        command.extend(["--strobe-w-max", str(args.strobe_w_max)])
-        if args.min_length != "auto":
-            command.extend(["-l", str(args.min_length)])
-        command.extend(["-t", str(args.threads)])
-        command.extend(["--load-factor", str(args.load_factor)])
-        command.extend(
-            ["--presence-unique-deg", str(args.presence_unique_deg)]
-        )
-        command.extend(["--taxonomy-kind", str(args.taxonomy_kind)])
-        command.extend(["--taxonomy-version", str(args.taxonomy_version)])
+        append_build_command_args(command, args)
 
     elif args.command == "classify":
         output_dir = Path(args.output)

@@ -165,6 +165,43 @@ inline void append_kept_hash(uint32_t taxidIndex, uint64_t hash,
     ++uniqueSignatures[taxidIndex];
   }
 }
+
+inline void flush_feature_thread_buffer(
+    DirectSpoolWriter &spoolWriter, uint16_t threadId,
+    std::vector<uint64_t> &threadBuffer,
+    std::vector<PendingBufferChunk> &pendingChunks,
+    uint64_t &localSpoolOffset, std::vector<SpoolChunkRecord> &localChunks,
+    uint64_t *localHashCounts) {
+  if (threadBuffer.empty()) {
+    return;
+  }
+  if (pendingChunks.empty()) {
+    threadBuffer.clear();
+    return;
+  }
+  if (spoolWriter.failed()) {
+    threadBuffer.clear();
+    pendingChunks.clear();
+    return;
+  }
+
+  const size_t buffer_size = threadBuffer.size();
+  const uint64_t chunk_offset = localSpoolOffset;
+  std::vector<PendingBufferChunk> flush_chunks;
+  flush_chunks.swap(pendingChunks);
+  if (!spoolWriter.write_hashes(threadId, chunk_offset, threadBuffer)) {
+    threadBuffer.clear();
+    pendingChunks.clear();
+    return;
+  }
+  for (const auto &chunk : flush_chunks) {
+    localChunks.push_back(
+        {chunk.taxidIndex, chunk_offset + chunk.bufferOffset, chunk.count});
+    localHashCounts[chunk.taxidIndex] += chunk.count;
+  }
+  localSpoolOffset += static_cast<uint64_t>(buffer_size);
+  threadBuffer.clear();
+}
 } // namespace
 
 void set_tmp_work_dir(const std::filesystem::path &dir) {
@@ -287,39 +324,6 @@ void feature_count(
     { used_threads = omp_get_num_threads(); }
 #endif
 
-    auto flush_buffer = [&]() {
-      if (thread_buffer.empty()) {
-        return;
-      }
-      if (pending_buffer_chunks.empty()) {
-        thread_buffer.clear();
-        return;
-      }
-      if (spoolWriter.failed()) {
-        thread_buffer.clear();
-        pending_buffer_chunks.clear();
-        return;
-      }
-
-      const size_t buffer_size = thread_buffer.size();
-      const uint64_t chunk_offset = localSpoolOffset;
-      std::vector<PendingBufferChunk> flush_chunks;
-      flush_chunks.swap(pending_buffer_chunks);
-      if (!spoolWriter.write_hashes(static_cast<uint16_t>(tid), chunk_offset,
-                                    thread_buffer)) {
-        thread_buffer.clear();
-        pending_buffer_chunks.clear();
-        return;
-      }
-      for (const auto &chunk : flush_chunks) {
-        localChunks.push_back(
-            {chunk.taxidIndex, chunk_offset + chunk.bufferOffset, chunk.count});
-        local_hash_counts[chunk.taxidIndex] += chunk.count;
-      }
-      localSpoolOffset += static_cast<uint64_t>(buffer_size);
-      thread_buffer.clear();
-    };
-
 #pragma omp for schedule(dynamic)
     for (size_t idx = 0; idx < taxid_file_tasks.size(); ++idx) {
       if (spoolWriter.failed()) {
@@ -377,13 +381,19 @@ void feature_count(
         }
         if (thread_buffer.size() * sizeof(uint64_t) >=
             hash_buffer_flush_bytes) {
-          flush_buffer();
+          flush_feature_thread_buffer(
+              spoolWriter, static_cast<uint16_t>(tid), thread_buffer,
+              pending_buffer_chunks, localSpoolOffset, localChunks,
+              local_hash_counts);
         }
       }
     }
 
     if (!thread_buffer.empty()) {
-      flush_buffer();
+      flush_feature_thread_buffer(spoolWriter, static_cast<uint16_t>(tid),
+                                  thread_buffer, pending_buffer_chunks,
+                                  localSpoolOffset, localChunks,
+                                  local_hash_counts);
     }
     threadFileInfos[static_cast<size_t>(tid)] = localThreadInfo;
     threadPassBTotal[static_cast<size_t>(tid)] = localPassBTotal;

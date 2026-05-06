@@ -146,8 +146,7 @@ PresenceAccumulator::PresenceAccumulator(uint32_t breadthBits)
     : sketchBits(breadthBits), sketchWords(sketch_words(breadthBits)) {}
 
 PresenceStats &PresenceAccumulator::touch(uint32_t tid) {
-  auto [it, inserted] = stats.try_emplace(tid);
-  (void)inserted;
+  auto it = stats.try_emplace(tid).first;
   return it->second;
 }
 
@@ -412,8 +411,8 @@ static PresenceDecision evaluate_presence_coverage_impl(
 
   std::vector<double> score_vals;
   score_vals.reserve(summary.stats.size());
-  for (const auto &[tid, stats] : summary.stats) {
-    (void)tid;
+  for (const auto &entry : summary.stats) {
+    const auto &stats = entry.second;
     score_vals.push_back(from_fixed(stats.score));
   }
   const double score_cut = percentile(score_vals, 0.30);
@@ -427,8 +426,8 @@ static PresenceDecision evaluate_presence_coverage_impl(
   noise_breadth.reserve(summary.stats.size() / 3 + 1);
   noise_rate.reserve(summary.stats.size() / 3 + 1);
   noise_read_ratio.reserve(summary.stats.size() / 3 + 1);
-  for (const auto &[tid, stats] : summary.stats) {
-    (void)tid;
+  for (const auto &entry : summary.stats) {
+    const auto &stats = entry.second;
     double score = from_fixed(stats.score);
     if (score > score_cut) {
       continue;

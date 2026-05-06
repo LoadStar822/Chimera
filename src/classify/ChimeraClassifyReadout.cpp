@@ -13,20 +13,25 @@
 
 namespace ChimeraClassify::readout {
 
-bool apply_deferred_abstention_release(classifyResult &result,
-                                       const NcbiTaxdump *ncbiTaxdump) {
-  if (!ncbiTaxdump || !ncbiTaxdump->enabled() ||
-      result.sampleMixturePosteriors.empty() || result.taxidCount.empty() ||
-      result.taxidCount.front().first != "unclassified" ||
-      result.reject_reason != "posterior_weight") {
-    return false;
-  }
+namespace {
 
+struct LineagePosteriorMass {
   std::unordered_map<uint32_t, double> speciesMass;
+  std::unordered_map<uint32_t, double> genusMass;
   std::unordered_map<uint32_t, std::pair<std::string, double>>
       bestMemberBySpecies;
-  speciesMass.reserve(result.sampleMixturePosteriors.size());
-  bestMemberBySpecies.reserve(result.sampleMixturePosteriors.size());
+};
+
+LineagePosteriorMass
+collect_lineage_posterior_mass(const classifyResult &result,
+                               const NcbiTaxdump &ncbiTaxdump,
+                               bool collectGenus) {
+  LineagePosteriorMass mass;
+  mass.speciesMass.reserve(result.sampleMixturePosteriors.size());
+  if (collectGenus) {
+    mass.genusMass.reserve(result.sampleMixturePosteriors.size());
+  }
+  mass.bestMemberBySpecies.reserve(result.sampleMixturePosteriors.size());
 
   for (const auto &[taxidText, posterior] : result.sampleMixturePosteriors) {
     if (!(posterior > 0.0)) {
@@ -36,32 +41,78 @@ bool apply_deferred_abstention_release(classifyResult &result,
     if (!chimera::utils::try_parse_u32(taxidText, taxid)) {
       continue;
     }
-    const uint32_t species = ncbiTaxdump->to_species(taxid);
-    if (species == 0) {
-      continue;
+    const uint32_t species = ncbiTaxdump.to_species(taxid);
+    if (species != 0) {
+      mass.speciesMass[species] += posterior;
+      auto it = mass.bestMemberBySpecies.find(species);
+      if (it == mass.bestMemberBySpecies.end() ||
+          posterior > it->second.second ||
+          (posterior == it->second.second && taxidText < it->second.first)) {
+        mass.bestMemberBySpecies[species] = {taxidText, posterior};
+      }
     }
-    speciesMass[species] += posterior;
-    auto it = bestMemberBySpecies.find(species);
-    if (it == bestMemberBySpecies.end() || posterior > it->second.second ||
-        (posterior == it->second.second && taxidText < it->second.first)) {
-      bestMemberBySpecies[species] = {taxidText, posterior};
+    if (collectGenus) {
+      const uint32_t genus = ncbiTaxdump.to_genus(taxid);
+      if (genus != 0) {
+        mass.genusMass[genus] += posterior;
+      }
     }
   }
-  if (speciesMass.empty()) {
-    return false;
-  }
+  return mass;
+}
 
+std::pair<uint32_t, double>
+select_top_mass(const std::unordered_map<uint32_t, double> &massByTaxid) {
+  uint32_t topTaxid = 0;
+  double topMass = 0.0;
+  for (const auto &[taxid, mass] : massByTaxid) {
+    if (mass > topMass || (mass == topMass && taxid < topTaxid)) {
+      topTaxid = taxid;
+      topMass = mass;
+    }
+  }
+  return {topTaxid, topMass};
+}
+
+std::pair<uint32_t, double> select_top_species_in_genus(
+    const std::unordered_map<uint32_t, double> &speciesMass,
+    const NcbiTaxdump &ncbiTaxdump, uint32_t genus) {
   uint32_t topSpecies = 0;
   double topSpeciesMass = 0.0;
   for (const auto &[species, mass] : speciesMass) {
+    if (ncbiTaxdump.to_genus(species) != genus) {
+      continue;
+    }
     if (mass > topSpeciesMass ||
         (mass == topSpeciesMass && species < topSpecies)) {
       topSpecies = species;
       topSpeciesMass = mass;
     }
   }
-  auto memberIt = bestMemberBySpecies.find(topSpecies);
-  if (memberIt == bestMemberBySpecies.end() ||
+  return {topSpecies, topSpeciesMass};
+}
+
+} // namespace
+
+bool apply_deferred_abstention_release(classifyResult &result,
+                                       const NcbiTaxdump *ncbiTaxdump) {
+  if (!ncbiTaxdump || !ncbiTaxdump->enabled() ||
+      result.sampleMixturePosteriors.empty() || result.taxidCount.empty() ||
+      result.taxidCount.front().first != "unclassified" ||
+      result.reject_reason != "posterior_weight") {
+    return false;
+  }
+
+  const LineagePosteriorMass posteriorMass =
+      collect_lineage_posterior_mass(result, *ncbiTaxdump, false);
+  if (posteriorMass.speciesMass.empty()) {
+    return false;
+  }
+
+  const auto [topSpecies, topSpeciesMass] =
+      select_top_mass(posteriorMass.speciesMass);
+  auto memberIt = posteriorMass.bestMemberBySpecies.find(topSpecies);
+  if (memberIt == posteriorMass.bestMemberBySpecies.end() ||
       memberIt->second.first.empty()) {
     return false;
   }
@@ -89,64 +140,21 @@ bool apply_local_correction(classifyResult &result,
     return false;
   }
 
-  std::unordered_map<uint32_t, double> speciesMass;
-  std::unordered_map<uint32_t, double> genusMass;
-  std::unordered_map<uint32_t, std::pair<std::string, double>>
-      bestMemberBySpecies;
-  speciesMass.reserve(result.sampleMixturePosteriors.size());
-  genusMass.reserve(result.sampleMixturePosteriors.size());
-  bestMemberBySpecies.reserve(result.sampleMixturePosteriors.size());
-
-  for (const auto &[taxidText, posterior] : result.sampleMixturePosteriors) {
-    if (!(posterior > 0.0)) {
-      continue;
-    }
-    uint32_t taxid = 0;
-    if (!chimera::utils::try_parse_u32(taxidText, taxid)) {
-      continue;
-    }
-    const uint32_t species = ncbiTaxdump->to_species(taxid);
-    const uint32_t genus = ncbiTaxdump->to_genus(taxid);
-    if (species != 0) {
-      speciesMass[species] += posterior;
-      auto it = bestMemberBySpecies.find(species);
-      if (it == bestMemberBySpecies.end() || posterior > it->second.second ||
-          (posterior == it->second.second && taxidText < it->second.first)) {
-        bestMemberBySpecies[species] = {taxidText, posterior};
-      }
-    }
-    if (genus != 0) {
-      genusMass[genus] += posterior;
-    }
-  }
-  if (genusMass.empty() || speciesMass.empty()) {
+  const LineagePosteriorMass posteriorMass =
+      collect_lineage_posterior_mass(result, *ncbiTaxdump, true);
+  if (posteriorMass.genusMass.empty() || posteriorMass.speciesMass.empty()) {
     return false;
   }
 
-  uint32_t topGenus = 0;
-  double topGenusMass = 0.0;
-  for (const auto &[genus, mass] : genusMass) {
-    if (mass > topGenusMass || (mass == topGenusMass && genus < topGenus)) {
-      topGenus = genus;
-      topGenusMass = mass;
-    }
-  }
+  const auto [topGenus, topGenusMass] =
+      select_top_mass(posteriorMass.genusMass);
+  (void)topGenusMass;
   if (topGenus == 0) {
     return false;
   }
 
-  uint32_t topSpecies = 0;
-  double topSpeciesMass = 0.0;
-  for (const auto &[species, mass] : speciesMass) {
-    if (ncbiTaxdump->to_genus(species) != topGenus) {
-      continue;
-    }
-    if (mass > topSpeciesMass ||
-        (mass == topSpeciesMass && species < topSpecies)) {
-      topSpecies = species;
-      topSpeciesMass = mass;
-    }
-  }
+  const auto [topSpecies, topSpeciesMass] = select_top_species_in_genus(
+      posteriorMass.speciesMass, *ncbiTaxdump, topGenus);
   if (topSpecies == 0 || !(topSpeciesMass > 0.0)) {
     return false;
   }
@@ -164,9 +172,10 @@ bool apply_local_correction(classifyResult &result,
     return false;
   }
 
-  const auto oldMassIt = speciesMass.find(oldSpecies);
+  const auto oldMassIt = posteriorMass.speciesMass.find(oldSpecies);
   const double oldSpeciesMass =
-      (oldMassIt == speciesMass.end()) ? 0.0 : oldMassIt->second;
+      (oldMassIt == posteriorMass.speciesMass.end()) ? 0.0
+                                                     : oldMassIt->second;
 
   std::vector<double> localScores;
   localScores.reserve(result.sampleMixtureLocalScores.size());
@@ -190,14 +199,16 @@ bool apply_local_correction(classifyResult &result,
       std::log(std::max(topSpeciesMass, eps) / std::max(oldSpeciesMass, eps));
   const double localCost = std::log(std::max(1.0, localRatio));
   const double speciesModelCost =
-      0.5 * std::log(std::max(1.0, static_cast<double>(speciesMass.size())));
+      0.5 * std::log(std::max(
+                1.0, static_cast<double>(posteriorMass.speciesMass.size())));
   const double switchCost = std::max(localCost, speciesModelCost);
   if (!(switchGain > switchCost)) {
     return false;
   }
 
-  auto memberIt = bestMemberBySpecies.find(topSpecies);
-  if (memberIt == bestMemberBySpecies.end() || memberIt->second.first.empty() ||
+  auto memberIt = posteriorMass.bestMemberBySpecies.find(topSpecies);
+  if (memberIt == posteriorMass.bestMemberBySpecies.end() ||
+      memberIt->second.first.empty() ||
       memberIt->second.first == result.taxidCount.front().first) {
     return false;
   }

@@ -1,5 +1,5 @@
 from collections import Counter
-from typing import Iterable, Optional
+from typing import Iterable, Optional, TextIO
 
 from multitax import NcbiTx
 
@@ -73,6 +73,57 @@ def _gtdb_lineage(taxonomy: GtdbTaxonomy, node: str) -> Optional[str]:
     return "\t".join(lineage)
 
 
+def _resolve_taxonomy_kind(taxonomy_kind: str, taxonomy_meta: Optional[str]) -> str:
+    meta = read_taxonomy_meta(taxonomy_meta)
+    resolved_kind = normalize_kind(taxonomy_kind)
+    if resolved_kind == "auto":
+        resolved_kind = normalize_kind(meta.kind)
+    if resolved_kind == "auto":
+        resolved_kind = "ncbi"
+    return resolved_kind
+
+
+def _load_ncbi_taxonomy():
+    try:
+        return NcbiTx()
+    except Exception:
+        return None
+
+
+def _ncbi_lineage(ncbi_tax, taxid: str) -> Optional[str]:
+    if ncbi_tax is None:
+        return None
+    try:
+        levels = ncbi_tax.name_lineage(int(taxid))
+    except Exception:
+        return None
+    return "\t".join(levels)
+
+
+def _write_krona_line(outfile: TextIO, count: int, lineage: Optional[str]) -> None:
+    if lineage is None:
+        lineage = UNCLASSIFIED
+    outfile.write(f"{count + 1}\t{lineage}\n")
+
+
+def _write_taxid_krona_line(
+    outfile: TextIO,
+    taxid: str,
+    count: int,
+    resolved_kind: str,
+    gtdb_taxonomy: Optional[GtdbTaxonomy],
+    ncbi_tax,
+) -> None:
+    if taxid == UNCLASSIFIED:
+        _write_krona_line(outfile, count, UNCLASSIFIED)
+        return
+    if resolved_kind == "gtdb":
+        lineage = _gtdb_lineage(gtdb_taxonomy, taxid) if gtdb_taxonomy else None
+    else:
+        lineage = _ncbi_lineage(ncbi_tax, taxid)
+    _write_krona_line(outfile, count, lineage)
+
+
 def convert_multiple_files_to_krona_format(
     input_files: Iterable[str],
     output_file: str,
@@ -80,13 +131,7 @@ def convert_multiple_files_to_krona_format(
     taxonomy_info: Optional[str] = None,
     taxonomy_meta: Optional[str] = None,
 ) -> None:
-    meta = read_taxonomy_meta(taxonomy_meta)
-    resolved_kind = normalize_kind(taxonomy_kind)
-    if resolved_kind == "auto":
-        resolved_kind = normalize_kind(meta.kind)
-    if resolved_kind == "auto":
-        resolved_kind = "ncbi"
-
+    resolved_kind = _resolve_taxonomy_kind(taxonomy_kind, taxonomy_meta)
     expect_numeric = resolved_kind != "gtdb"
     taxid_count: Counter[str] = Counter()
     for input_file in input_files:
@@ -101,35 +146,15 @@ def convert_multiple_files_to_krona_format(
         if not taxonomy_info:
             raise ValueError("GTDB Krona conversion requires --taxonomy-info (tax.info)")
         gtdb_taxonomy = load_gtdb_taxonomy(taxonomy_info)
+    else:
+        gtdb_taxonomy = None
 
-    ncbi_tax = None
-    if resolved_kind == "ncbi":
-        try:
-            ncbi_tax = NcbiTx()
-        except Exception:
-            ncbi_tax = None
+    ncbi_tax = _load_ncbi_taxonomy() if resolved_kind == "ncbi" else None
 
     with open(output_file + ".tsv", "w", encoding="utf-8") as outfile:
         for taxid, count in taxid_count.items():
-            if taxid == UNCLASSIFIED:
-                outfile.write(f"{count + 1}\t{UNCLASSIFIED}\n")
-                continue
-            if resolved_kind == "gtdb":
-                lineage = _gtdb_lineage(gtdb_taxonomy, taxid)
-                if lineage is None:
-                    outfile.write(f"{count + 1}\t{UNCLASSIFIED}\n")
-                else:
-                    outfile.write(f"{count + 1}\t{lineage}\n")
-            else:
-                if ncbi_tax is None:
-                    outfile.write(f"{count + 1}\t{UNCLASSIFIED}\n")
-                    continue
-                try:
-                    levels = ncbi_tax.name_lineage(int(taxid))
-                except Exception:
-                    outfile.write(f"{count + 1}\t{UNCLASSIFIED}\n")
-                    continue
-                taxonomy_string = "\t".join(levels)
-                outfile.write(f"{count + 1}\t{taxonomy_string}\n")
+            _write_taxid_krona_line(
+                outfile, taxid, count, resolved_kind, gtdb_taxonomy, ncbi_tax
+            )
 
     print(f"Conversion completed. The combined output file is saved as {output_file}.")

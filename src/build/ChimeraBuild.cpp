@@ -37,6 +37,68 @@ constexpr uint64_t kBlockClassicTableTargetBytes =
 constexpr uint8_t kBlockQidxGroupBits = 8;
 constexpr uint32_t kBlockQidxGroupSize = 1u << kBlockQidxGroupBits;
 constexpr uint32_t kBlockQidxStride = kBlockQidxGroupSize + 1;
+constexpr const char *kTaxonomyMetaFilename = "taxonomy.meta";
+
+bool is_auto_or_empty(const std::string &value) {
+  return value == "auto" || value.empty();
+}
+
+void trim_in_place(std::string &value) {
+  while (!value.empty() &&
+         std::isspace(static_cast<unsigned char>(value.front()))) {
+    value.erase(value.begin());
+  }
+  while (!value.empty() &&
+         std::isspace(static_cast<unsigned char>(value.back()))) {
+    value.pop_back();
+  }
+}
+
+void lowercase_in_place(std::string &value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char ch) {
+                   return static_cast<char>(std::tolower(ch));
+                 });
+}
+
+void apply_taxonomy_meta_defaults(BuildConfig &config) {
+  if (!is_auto_or_empty(config.taxonomy_kind) &&
+      !is_auto_or_empty(config.taxonomy_version)) {
+    return;
+  }
+
+  std::filesystem::path metaPath =
+      std::filesystem::path(config.input_file).parent_path() /
+      kTaxonomyMetaFilename;
+  if (!std::filesystem::exists(metaPath)) {
+    return;
+  }
+
+  std::ifstream metaStream(metaPath);
+  std::string line;
+  while (std::getline(metaStream, line)) {
+    auto pos = line.find('=');
+    if (pos == std::string::npos) {
+      continue;
+    }
+    std::string key = line.substr(0, pos);
+    std::string value = line.substr(pos + 1);
+    trim_in_place(key);
+    trim_in_place(value);
+    if (key == "taxonomy_kind") {
+      if (is_auto_or_empty(config.taxonomy_kind)) {
+        lowercase_in_place(value);
+        if (!value.empty()) {
+          config.taxonomy_kind = value;
+        }
+      }
+    } else if (key == "taxonomy_version") {
+      if (is_auto_or_empty(config.taxonomy_version) && !value.empty()) {
+        config.taxonomy_version = value;
+      }
+    }
+  }
+}
 
 size_t compute_imcf_bin_size(const std::vector<chimera::imcf::Group> &groups,
                              double loadFactor) {
@@ -84,6 +146,21 @@ make_shard_offset_base(const std::vector<chimera::imcf::Group> &groups,
     }
   }
   return offsets;
+}
+
+void build_classic_block_imcf(
+    chimera::imcf::InterleavedMergedCuckooFilter &blockImcf,
+    const std::vector<chimera::imcf::Group> &groups,
+    const robin_hood::unordered_flat_map<std::string, uint64_t> &hashCount,
+    const FeatureBuildLayout &featureLayout, size_t blockBegin, size_t blockEnd,
+    size_t globalBinSize, uint16_t effectiveSpan, uint16_t refReadLen,
+    uint32_t presenceUniqueDeg) {
+  auto blockGroups = slice_groups(groups, blockBegin, blockEnd);
+  auto shardOffsetBase = make_shard_offset_base(groups, blockBegin);
+  blockImcf.initialize_classic_storage(blockGroups.size(), globalBinSize);
+  buildIMCF(blockImcf, blockGroups, hashCount, nullptr, &featureLayout,
+            effectiveSpan, refReadLen, presenceUniqueDeg, nullptr, blockBegin,
+            /*verifyShardTotals=*/false, &shardOffsetBase);
 }
 
 void write_prefix_spool_and_bucket_base(
@@ -308,57 +385,7 @@ void run(BuildConfig config) {
     }
     config.threads = static_cast<uint16_t>(hardwareThreads);
   }
-  const char *kTaxonomyMetaFilename = "taxonomy.meta";
-  auto trim = [](std::string &value) {
-    while (!value.empty() &&
-           std::isspace(static_cast<unsigned char>(value.front()))) {
-      value.erase(value.begin());
-    }
-    while (!value.empty() &&
-           std::isspace(static_cast<unsigned char>(value.back()))) {
-      value.pop_back();
-    }
-  };
-  if ((config.taxonomy_kind == "auto" || config.taxonomy_kind.empty()) ||
-      (config.taxonomy_version == "auto" ||
-       config.taxonomy_version.empty())) {
-    std::filesystem::path metaPath =
-        std::filesystem::path(config.input_file).parent_path() /
-        kTaxonomyMetaFilename;
-    if (std::filesystem::exists(metaPath)) {
-      std::ifstream metaStream(metaPath);
-      std::string line;
-      while (std::getline(metaStream, line)) {
-        auto pos = line.find('=');
-        if (pos == std::string::npos) {
-          continue;
-        }
-        std::string key = line.substr(0, pos);
-        std::string value = line.substr(pos + 1);
-        trim(key);
-        trim(value);
-        if (key == "taxonomy_kind") {
-          if (config.taxonomy_kind == "auto" ||
-              config.taxonomy_kind.empty()) {
-            std::transform(value.begin(), value.end(), value.begin(),
-                           [](unsigned char ch) {
-                             return static_cast<char>(std::tolower(ch));
-                           });
-            if (!value.empty()) {
-              config.taxonomy_kind = value;
-            }
-          }
-        } else if (key == "taxonomy_version") {
-          if (config.taxonomy_version == "auto" ||
-              config.taxonomy_version.empty()) {
-            if (!value.empty()) {
-              config.taxonomy_version = value;
-            }
-          }
-        }
-      }
-    }
-  }
+  apply_taxonomy_meta_defaults(config);
   if (config.verbose) {
     std::cout << config << std::endl;
   }
@@ -549,14 +576,11 @@ void run(BuildConfig config) {
   for (size_t blockIdx = 0; blockIdx < blockCount; ++blockIdx) {
     const size_t blockBegin = blockIdx * blockBinCapacity;
     const size_t blockEnd = std::min(globalBinNum, blockBegin + blockBinCapacity);
-    auto blockGroups = slice_groups(groups, blockBegin, blockEnd);
-    auto shardOffsetBase = make_shard_offset_base(groups, blockBegin);
     chimera::imcf::InterleavedMergedCuckooFilter blockImcf;
-    blockImcf.initialize_classic_storage(blockGroups.size(), globalBinSize);
-    buildIMCF(blockImcf, blockGroups, hashCount, nullptr, &featureLayout,
-              effective_span, ref_read_len, config.presence_unique_deg,
-              nullptr, blockBegin, /*verifyShardTotals=*/false,
-              &shardOffsetBase);
+    build_classic_block_imcf(blockImcf, groups, hashCount, featureLayout,
+                             blockBegin, blockEnd, globalBinSize,
+                             effective_span, ref_read_len,
+                             config.presence_unique_deg);
     std::vector<uint32_t> blockCounts(groupCountSize, 0u);
     blockImcf.accumulate_qidx_group_counts(blockCounts,
                                            /*include_stash=*/true);
@@ -611,14 +635,11 @@ void run(BuildConfig config) {
       const size_t blockBegin = blockIdx * blockBinCapacity;
       const size_t blockEnd =
           std::min(globalBinNum, blockBegin + blockBinCapacity);
-      auto blockGroups = slice_groups(groups, blockBegin, blockEnd);
-      auto shardOffsetBase = make_shard_offset_base(groups, blockBegin);
       chimera::imcf::InterleavedMergedCuckooFilter blockImcf;
-      blockImcf.initialize_classic_storage(blockGroups.size(), globalBinSize);
-      buildIMCF(blockImcf, blockGroups, hashCount, nullptr, &featureLayout,
-                effective_span, ref_read_len, config.presence_unique_deg,
-                nullptr, blockBegin, /*verifyShardTotals=*/false,
-                &shardOffsetBase);
+      build_classic_block_imcf(blockImcf, groups, hashCount, featureLayout,
+                               blockBegin, blockEnd, globalBinSize,
+                               effective_span, ref_read_len,
+                               config.presence_unique_deg);
       blockEntryPaths[blockIdx] =
           dir / ("qidx_block_entries." + std::to_string(blockIdx) + ".bin");
       int blockEntriesFd =
