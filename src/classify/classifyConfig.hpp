@@ -54,11 +54,20 @@ namespace ChimeraClassify {
 	// estimating sample state; the main per-read classify pass keeps its normal
 	// selective candidate retention.
 	bool sample_state_calibration = false;
-	bool write_read_evidence = false;
-		size_t hash_sample_min = 16;
-		size_t hash_sample_max = 96;
-			double idf_max = 8.0;
-			};
+	size_t hash_sample_min = 16;
+	size_t hash_sample_max = 96;
+	double idf_max = 8.0;
+	bool local_resolution_enabled = true;
+	uint32_t local_resolution_top_groups = 32;
+	uint32_t local_resolution_species_per_group = 8;
+		uint32_t local_resolution_targets_per_species = 8;
+		uint32_t local_resolution_max_targets_per_group = 32;
+		uint64_t local_resolution_max_anchor_bytes = 0;
+		double local_resolution_divergence_threshold = 0.5;
+	int lpc_diag_bin = 256;
+	uint32_t lpc_max_occ = 500;
+	uint32_t lpc_min_chain = 4;
+	};
 
 	struct FileInfo {
 		size_t fileNum{ 0 };

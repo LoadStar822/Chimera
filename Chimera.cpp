@@ -150,6 +150,12 @@ void validate_build_config(ChimeraBuild::BuildConfig &buildConfig,
   if (buildConfig.strobemer_order != 2) {
     throw CLI::ValidationError("--strobe-order currently only supports value 2");
   }
+  if (buildConfig.native_bounded_k < 8) {
+    throw CLI::ValidationError("Local resolution k-mer length must be >= 8");
+  }
+  if (buildConfig.native_bounded_w == 0) {
+    throw CLI::ValidationError("Local resolution window must be greater than 0");
+  }
   buildConfig.verbose = !buildQuietRequested;
 }
 
@@ -179,7 +185,7 @@ int main(int argc, char **argv) {
       ->check(CLI::ExistingFile);
   build
       ->add_option("-o,--output", buildConfig.output_file,
-                   "Output file for building")
+                   "Output database directory")
       ->default_val("ChimeraDB");
   build
       ->add_option("--strobe-k", buildConfig.strobemer_k,
@@ -227,6 +233,10 @@ int main(int argc, char **argv) {
       ->add_option("--taxonomy-version", buildConfig.taxonomy_version,
                    "Taxonomy version label, for example ncbi-taxdump-2025-09-15 or gtdb-rs226")
       ->default_val("auto");
+  build
+      ->add_option("--taxonomy-dir", buildConfig.taxonomy_dir,
+                   "Directory containing taxonomy nodes.dmp for local read resolution")
+      ->check(CLI::ExistingDirectory);
   build->add_flag("-q,--quiet", buildQuietRequested, "Quiet output");
 
   build->callback([&buildConfig, &buildQuietRequested]() {
@@ -263,9 +273,9 @@ int main(int argc, char **argv) {
       ->default_val("ChimeraClassify");
   classify
       ->add_option("-d,--database", classifyConfig.dbFile,
-                   "Database file for classifying")
+                   "Database directory for classifying")
       ->required()
-      ->check(CLI::ExistingFile);
+      ->check(CLI::ExistingPath);
   classify
       ->add_option("-s,--shot-threshold", classifyConfig.shotThreshold,
                    "Shot threshold for classifying")
@@ -328,8 +338,6 @@ int main(int argc, char **argv) {
       ->add_option("--post-pi-min", classifyConfig.post_pi_min,
                    "Minimum global class weight")
       ->default_val(5e-4);
-  classify->add_flag("--read-evidence", classifyConfig.write_read_evidence,
-                     "Write ChimeraReadEvidence.tsv for read-resolved audits");
   // TODO: Deprecated post-processing knobs remain fixed to internal defaults.
 
   if (argc == 1) {
@@ -371,10 +379,15 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  if (*build) {
-    ChimeraBuild::run(buildConfig);
-  } else if (*classify) {
-    ChimeraClassify::run(classifyConfig);
+  try {
+    if (*build) {
+      ChimeraBuild::run(buildConfig);
+    } else if (*classify) {
+      ChimeraClassify::run(classifyConfig);
+    }
+  } catch (const std::exception &ex) {
+    std::cerr << "Error: " << ex.what() << std::endl;
+    return 1;
   }
 
   return 0;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -25,8 +26,8 @@ struct Params
 
 std::vector<uint64_t> compute_hashes(const std::vector<seqan3::dna4> & seq, const Params & p);
 void compute_hashes_append(const std::vector<seqan3::dna4> &seq,
-                           const Params &p,
-                           std::vector<uint64_t> &out);
+	                           const Params &p,
+	                           std::vector<uint64_t> &out);
 
 bool strobemer_available() noexcept;
 

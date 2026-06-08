@@ -1,5 +1,7 @@
 #include "ChimeraClassifyCommon.hpp"
 
+#include <utils/LocalResolutionManifest.hpp>
+
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -106,10 +108,8 @@ void loadFilter(
     chimera::presence::CoverageMeta *coverageMeta) {
   namespace fs = std::filesystem;
 
-  fs::path archivePath{input_file};
-  if (!fs::exists(archivePath)) {
-    archivePath = fs::path{input_file + ".imcf"};
-  }
+  fs::path archivePath =
+      chimera::local_resolution::core_archive_path_for(input_file);
   if (!fs::exists(archivePath)) {
     throw std::runtime_error("Cannot find IMCF archive: " + input_file);
   }

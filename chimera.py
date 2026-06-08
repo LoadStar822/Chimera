@@ -231,11 +231,6 @@ def parse_arguments():
     classify_parser.add_argument(
         "-b", "--batch-size", type=int, default=400, help="Batch size for classifying"
     )
-    classify_parser.add_argument(
-        "--read-evidence",
-        action="store_true",
-        help="Write ChimeraReadEvidence.tsv for read-resolved audits",
-    )
     # Profile subcommand
     profile_parser = subparsers.add_parser("profile", help="Generate sequence profile")
     profile_parser.add_argument(
@@ -265,39 +260,6 @@ def parse_arguments():
         dest="taxonomy_meta",
         default=None,
         help="Path to taxonomy.meta metadata; if omitted, the input directory will be probed",
-    )
-
-    extract_parser = subparsers.add_parser(
-        "extract-reads", help="Extract taxon-specific read bags from ChimeraReadEvidence.tsv"
-    )
-    extract_parser.add_argument(
-        "--ledger", required=True, help="Path to ChimeraReadEvidence.tsv"
-    )
-    extract_parser.add_argument(
-        "--reads",
-        nargs="+",
-        required=True,
-        help="Input FASTQ file, or paired FASTQ files",
-    )
-    extract_parser.add_argument(
-        "--taxid",
-        action="append",
-        default=[],
-        help="Target taxid to extract; repeat for multiple taxa",
-    )
-    extract_parser.add_argument(
-        "--taxids",
-        default=None,
-        help="File with one target taxid per line",
-    )
-    extract_parser.add_argument(
-        "--min-profile-mass",
-        type=float,
-        default=0.0,
-        help="Minimum per-read profile mass for the target taxid",
-    )
-    extract_parser.add_argument(
-        "--out", required=True, help="Output directory for extracted read bags"
     )
 
     if len(sys.argv) == 1:
@@ -390,30 +352,6 @@ def run_chimera(args, chimera_path=None):
             return 1
         return 0
 
-    if args.command == "extract-reads":
-        from src.profile.read_evidence import (
-            ReadEvidenceError,
-            extract_read_bags,
-            load_target_taxids,
-        )
-
-        try:
-            target_taxids = load_target_taxids(args.taxid, args.taxids)
-            counts = extract_read_bags(
-                ledger_path=args.ledger,
-                read_paths=args.reads,
-                target_taxids=target_taxids,
-                output_dir=args.out,
-                min_profile_mass=args.min_profile_mass,
-            )
-        except ReadEvidenceError as exc:
-            print(f"Extract reads failed: {exc}")
-            return 1
-        print(f"Extracted read bags into: {args.out}")
-        for taxid in sorted(target_taxids, key=lambda x: (0, int(x)) if x.isdigit() else (1, x)):
-            print(f"{taxid}\t{counts.get(taxid, 0)}")
-        return 0
-
     if chimera_path is None:
         chimera_path = get_chimera_path()
     command = [chimera_path]
@@ -441,9 +379,6 @@ def run_chimera(args, chimera_path=None):
         command.extend(["-d", args.database])
         command.extend(["-t", str(args.threads)])
         command.extend(["-b", str(args.batch_size)])
-        if args.read_evidence:
-            command.append("--read-evidence")
-
     if args.command == "classify":
         subprocess.run(command, check=True)
         if not evidence_output.is_file():

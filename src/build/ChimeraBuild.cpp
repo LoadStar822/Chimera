@@ -2,6 +2,9 @@
  * Chimera build entry point (split from monolithic ChimeraBuild.cpp)
  */
 #include "ChimeraBuildCommon.hpp"
+#include "ChimeraBuildNativeBounded.hpp"
+
+#include <utils/LocalResolutionManifest.hpp>
 
 #include <algorithm>
 #include <cerrno>
@@ -389,6 +392,24 @@ void run(BuildConfig config) {
   if (config.verbose) {
     std::cout << config << std::endl;
   }
+  const std::filesystem::path databaseRoot = config.output_file;
+  const std::filesystem::path corePrefix = databaseRoot / "core";
+  const std::filesystem::path corePath = databaseRoot / "core.imcf";
+  const std::filesystem::path localPath =
+      databaseRoot / "local" / "index.nbcidx";
+  const std::filesystem::path repMetadataPath =
+      localPath.parent_path() / (localPath.stem().string() + ".nbcrep.bin");
+  const std::filesystem::path shardManifestPath =
+      localPath.parent_path() / (localPath.stem().string() + ".nbcshards.tsv");
+  if (std::filesystem::exists(databaseRoot) &&
+      !std::filesystem::is_directory(databaseRoot)) {
+    throw std::runtime_error("database output path exists and is not a directory: " +
+                             databaseRoot.string());
+  }
+  std::filesystem::create_directories(databaseRoot);
+  if (config.native_bounded_index) {
+    std::filesystem::create_directories(localPath.parent_path());
+  }
   omp_set_num_threads(config.threads);
   auto build_start = std::chrono::high_resolution_clock::now();
   auto read_start = std::chrono::high_resolution_clock::now();
@@ -408,6 +429,37 @@ void run(BuildConfig config) {
     std::cout << "Read time: ";
     print_build_time(read_total_time);
     std::cout << std::endl;
+  }
+  if (config.native_bounded_index) {
+    auto local_start = std::chrono::high_resolution_clock::now();
+    std::cout << "Building local read resolution data..." << std::endl;
+    const NativeBoundedBuildStats localStats =
+        build_native_bounded_index(config, inputFiles, localPath);
+    auto local_end = std::chrono::high_resolution_clock::now();
+    auto local_total_time =
+        std::chrono::duration_cast<std::chrono::milliseconds>(local_end -
+                                                              local_start)
+            .count();
+    if (config.verbose) {
+      std::cout << "Local targets: " << localStats.targets << std::endl;
+      std::cout << "Local sequences: " << localStats.sequences << std::endl;
+      std::cout << "Local base pairs: " << localStats.bp << std::endl;
+      std::cout << "Local anchors: " << localStats.anchors << std::endl;
+      std::cout << "Local representative records: "
+                << localStats.representativeRecords << std::endl;
+      std::cout << "Local count pass time: ";
+      print_build_time(static_cast<long long>(localStats.count_seconds * 1000.0));
+      std::cout << "Local selection time: ";
+      print_build_time(static_cast<long long>(localStats.selection_seconds * 1000.0));
+      std::cout << "Local layout time: ";
+      print_build_time(static_cast<long long>(localStats.layout_seconds * 1000.0));
+      std::cout << "Local anchor write time: ";
+      print_build_time(static_cast<long long>(localStats.write_seconds * 1000.0));
+      std::cout << "Local data: " << localPath.string() << std::endl;
+      std::cout << "Local data build time: ";
+      print_build_time(local_total_time);
+      std::cout << std::endl;
+    }
   }
   HashFrequencyContext hashFreqContext;
   build_hash_frequency_sketch(config, inputFiles, hashFreqContext);
@@ -571,8 +623,7 @@ void run(BuildConfig config) {
   std::vector<uint32_t> qidxGroupCounts(groupCountSize, 0u);
   std::vector<std::vector<uint32_t>> blockQidxCounts;
   blockQidxCounts.reserve(blockCount);
-  std::vector<std::vector<uint64_t>> blockBucketBases(blockCount);
-  std::vector<uint64_t> blockEntryCounts(blockCount, 0);
+  std::vector<std::filesystem::path> blockEntryPaths(blockCount);
   for (size_t blockIdx = 0; blockIdx < blockCount; ++blockIdx) {
     const size_t blockBegin = blockIdx * blockBinCapacity;
     const size_t blockEnd = std::min(globalBinNum, blockBegin + blockBinCapacity);
@@ -585,9 +636,30 @@ void run(BuildConfig config) {
     blockImcf.accumulate_qidx_group_counts(blockCounts,
                                            /*include_stash=*/true);
     uint64_t blockEntryCount = 0;
-    blockBucketBases[blockIdx] = make_bucket_base_from_group_counts(
+    std::vector<uint64_t> blockBucketBase = make_bucket_base_from_group_counts(
         blockCounts, globalBinSize, blockEntryCount);
-    blockEntryCounts[blockIdx] = blockEntryCount;
+    // Reuse the in-memory block for QIMCF entries; rebuilding it later is pure
+    // duplicate work.
+    blockEntryPaths[blockIdx] =
+        dir / ("qidx_block_entries." + std::to_string(blockIdx) + ".bin");
+    int blockEntriesFd =
+        open_sized_entries_spool(blockEntryPaths[blockIdx], blockEntryCount);
+    uint64_t writtenBlockEntries = 0;
+    try {
+      writtenBlockEntries = blockImcf.write_qidx_block_entries_by_bucket(
+          blockEntriesFd, blockBucketBase, blockBegin,
+          /*include_stash=*/true);
+      close_entries_spool(blockEntriesFd);
+      blockEntriesFd = -1;
+    } catch (...) {
+      if (blockEntriesFd >= 0) {
+        ::close(blockEntriesFd);
+      }
+      throw;
+    }
+    if (writtenBlockEntries != blockEntryCount) {
+      throw std::runtime_error("QIMCF block: block entry count mismatch");
+    }
 #pragma omp parallel for schedule(static)
     for (int64_t idx = 0; idx < static_cast<int64_t>(groupCountSize); ++idx) {
       qidxGroupCounts[static_cast<size_t>(idx)] +=
@@ -629,42 +701,7 @@ void run(BuildConfig config) {
   const uint64_t prefixSpoolCount =
       static_cast<uint64_t>(globalBinSize) * kBlockQidxStride;
   std::vector<uint32_t>().swap(qidxGroupCounts);
-  std::vector<std::filesystem::path> blockEntryPaths(blockCount);
   try {
-    for (size_t blockIdx = 0; blockIdx < blockCount; ++blockIdx) {
-      const size_t blockBegin = blockIdx * blockBinCapacity;
-      const size_t blockEnd =
-          std::min(globalBinNum, blockBegin + blockBinCapacity);
-      chimera::imcf::InterleavedMergedCuckooFilter blockImcf;
-      build_classic_block_imcf(blockImcf, groups, hashCount, featureLayout,
-                               blockBegin, blockEnd, globalBinSize,
-                               effective_span, ref_read_len,
-                               config.presence_unique_deg);
-      blockEntryPaths[blockIdx] =
-          dir / ("qidx_block_entries." + std::to_string(blockIdx) + ".bin");
-      int blockEntriesFd =
-          open_sized_entries_spool(blockEntryPaths[blockIdx],
-                                   blockEntryCounts[blockIdx]);
-      uint64_t writtenBlockEntries = 0;
-      try {
-        writtenBlockEntries = blockImcf.write_qidx_block_entries_by_bucket(
-            blockEntriesFd, blockBucketBases[blockIdx], blockBegin,
-            /*include_stash=*/true);
-        close_entries_spool(blockEntriesFd);
-        blockEntriesFd = -1;
-      } catch (...) {
-        if (blockEntriesFd >= 0) {
-          ::close(blockEntriesFd);
-        }
-        throw;
-      }
-      if (writtenBlockEntries != blockEntryCounts[blockIdx]) {
-        throw std::runtime_error("QIMCF block: block entry count mismatch");
-      }
-#if defined(__GLIBC__)
-      ::malloc_trim(0);
-#endif
-    }
     int entriesFd = open_sized_entries_spool(entriesSpoolPath, entriesCount);
     try {
       merge_block_entry_spools(blockEntryPaths, blockQidxCounts, globalBinSize,
@@ -681,7 +718,6 @@ void run(BuildConfig config) {
     throw;
   }
   std::vector<std::vector<uint32_t>>().swap(blockQidxCounts);
-  std::vector<std::vector<uint64_t>>().swap(blockBucketBases);
   const uint8_t prefixBits = bits_required_u64(maxBucketTotal);
   const uint8_t entryBits = static_cast<uint8_t>(
       bits_required_u64(globalBinNum > 0 ? (globalBinNum - 1) : 0) +
@@ -710,7 +746,12 @@ void run(BuildConfig config) {
   }
   auto save_start = std::chrono::high_resolution_clock::now();
   std::cout << "Saving IMCF..." << std::endl;
-  saveIMCF(imcf, config.output_file, indexToTaxid, imcfConfig, &presence_meta);
+  saveIMCF(imcf, corePrefix.string(), indexToTaxid, imcfConfig,
+           &presence_meta);
+  chimera::local_resolution::write_manifest(
+      corePath, config.native_bounded_index, localPath, repMetadataPath,
+      shardManifestPath, config.native_bounded_k, config.native_bounded_w,
+      config.native_bounded_targets_per_species);
   auto save_end = std::chrono::high_resolution_clock::now();
   auto save_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                              save_end - save_start)

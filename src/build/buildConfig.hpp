@@ -39,6 +39,7 @@ namespace ChimeraBuild {
 	struct BuildConfig {
 		std::string taxonomy_kind{ "auto" };
 		std::string taxonomy_version{ "auto" };
+		std::string taxonomy_dir;
 		std::string input_file;
 		std::string output_file;
 		uint8_t strobemer_k{ 28 };
@@ -48,9 +49,16 @@ namespace ChimeraBuild {
 		uint64_t min_length{ 0 };
 			uint16_t threads;
 			bool verbose = true;
-			double load_factor{ 0.85 };
-			uint32_t presence_unique_deg{ 1 };
-		};
+				double load_factor{ 0.85 };
+				uint32_t presence_unique_deg{ 1 };
+				bool native_bounded_index{ true };
+				uint8_t native_bounded_k{ 15 };
+				uint16_t native_bounded_w{ 10 };
+				uint32_t native_bounded_rep_pool_cap{ 0 };
+				uint32_t native_bounded_targets_per_species{ 32 };
+				uint32_t native_bounded_sources_per_species{ 8 };
+				uint32_t native_bounded_targets_per_source{ 0 };
+			};
 
 	inline std::ostream& operator<<(std::ostream& os, const BuildConfig& config) {
 		os << std::string(50, '=') << std::endl;
@@ -59,7 +67,7 @@ namespace ChimeraBuild {
 
 		os << std::left
 			<< std::setw(25) << "Input file:" << config.input_file << std::endl
-			<< std::setw(25) << "Output file:" << config.output_file << std::endl
+				<< std::setw(25) << "Output database:" << config.output_file << std::endl
 			<< std::setw(25) << "Feature method:" << "strobemer" << std::endl
 			<< std::setw(25) << "Strobemer k:" << static_cast<int>(config.strobemer_k) << std::endl
 			<< std::setw(25) << "Strobemer order:" << static_cast<int>(config.strobemer_order) << std::endl
@@ -67,11 +75,17 @@ namespace ChimeraBuild {
 			<< std::setw(25) << "Strobemer w_max:" << config.strobemer_w_max << std::endl
 			<< std::setw(25) << "Taxonomy kind:" << config.taxonomy_kind << std::endl
 			<< std::setw(25) << "Taxonomy version:" << config.taxonomy_version << std::endl
+			<< std::setw(25) << "Taxonomy directory:" << config.taxonomy_dir << std::endl
 				<< std::setw(25) << "Minimum length:" << config.min_length << std::endl
 				<< std::setw(25) << "Threads:" << config.threads << std::endl
-				<< std::setw(25) << "Load factor:" << config.load_factor << std::endl
-				<< std::setw(25) << "Presence unique deg:" << config.presence_unique_deg << std::endl
-				<< std::setw(25) << "Verbose:" << config.verbose << std::endl;
+					<< std::setw(25) << "Load factor:" << config.load_factor << std::endl
+					<< std::setw(25) << "Presence unique deg:" << config.presence_unique_deg << std::endl
+					<< std::setw(25) << "Local resolution data:" << config.native_bounded_index << std::endl
+					<< std::setw(25) << "Local rep pool cap:" << config.native_bounded_rep_pool_cap << std::endl
+					<< std::setw(25) << "Local targets/species:" << config.native_bounded_targets_per_species << std::endl
+					<< std::setw(25) << "Local sources/species:" << config.native_bounded_sources_per_species << std::endl
+					<< std::setw(25) << "Local targets/source:" << config.native_bounded_targets_per_source << std::endl
+					<< std::setw(25) << "Verbose:" << config.verbose << std::endl;
 
 		os << std::string(50, '=') << std::endl;
 

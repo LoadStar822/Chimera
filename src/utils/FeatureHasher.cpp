@@ -218,6 +218,7 @@ bool append_randstrobes_from_syncmers(const std::vector<Syncmer> & syncmers,
 
     return out.size() > initial_size;
 }
+
 #endif
 
 bool compute_hashes_strobemer_append_(const std::vector<seqan3::dna4> & seq,

@@ -1996,7 +1996,7 @@ void processSequence(
       bestTid < tax.id2str.size()) {
     bestTaxidStr = tax.id2str[bestTid];
   }
-  const uint32_t bestTaxidHintTid =
+  uint32_t bestTaxidHintTid =
       bestTaxidStr.empty() ? kSpoolUnclassifiedTid : bestTid;
 
   std::vector<SpoolCandidate> abundanceCandidates;
@@ -2081,9 +2081,9 @@ void processSequence(
       bestTaxidStr, dump_preem_enabled, dump_preem_path);
   std::vector<SpoolCandidate> resultCandidates =
       std::move(selection.candidates);
-  const uint32_t maxCountTid = selection.max_count_tid;
-  const double maxCountScore = selection.max_count_score;
-  const bool maxCountValid = selection.max_count_valid;
+  uint32_t maxCountTid = selection.max_count_tid;
+  double maxCountScore = selection.max_count_score;
+  bool maxCountValid = selection.max_count_valid;
 
   if (abundanceCandidates.empty()) {
     abundanceCandidates = capture_abundance_candidates_from_scores(
@@ -2092,6 +2092,7 @@ void processSequence(
   std::vector<SpoolCandidate> sampleMixtureCandidates =
       capture_sample_mixture_candidates_from_base_scores(scratch,
                                                          tax.id2str.size());
+
 
   finalize_read_record(
       id, tax, fileInfo, presenceAcc, uniqueCount, uniqueRatio, eff_eval,
@@ -2108,15 +2109,15 @@ void processBatch(
     std::vector<classifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
-    PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
-  auto &hashs1 = scratch.hashs1;
-  hashs1.clear();
-  hashs1.reserve(2048);
-  if (!batch.seqs2.empty()) {
-    for (size_t i = 0; i < batch.ids.size(); ++i) {
-      hashs1.clear();
-      size_t len1 = (i < batch.seqs.size()) ? batch.seqs[i].size() : 0;
-      size_t len2 = (i < batch.seqs2.size()) ? batch.seqs2[i].size() : 0;
+	    PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
+	  auto &hashs1 = scratch.hashs1;
+	  hashs1.clear();
+	  hashs1.reserve(2048);
+	  if (!batch.seqs2.empty()) {
+	    for (size_t i = 0; i < batch.ids.size(); ++i) {
+	      hashs1.clear();
+	      size_t len1 = (i < batch.seqs.size()) ? batch.seqs[i].size() : 0;
+	      size_t len2 = (i < batch.seqs2.size()) ? batch.seqs2[i].size() : 0;
       size_t readLen = len1 + len2;
       if (readLen > 0) {
         if (fileInfo.minLen == 0 || fileInfo.minLen == kInvalidLength ||
@@ -2125,27 +2126,28 @@ void processBatch(
         if (readLen > fileInfo.maxLen)
           fileInfo.maxLen = readLen;
         fileInfo.bpLength += readLen;
-      }
-      if (i < batch.seqs.size() && batch.seqs[i].size() >= feature_min_len) {
-        chimera::feature::compute_hashes_append(batch.seqs[i], feature_params,
-                                                hashs1);
-      }
-      if (i < batch.seqs2.size() && batch.seqs2[i].size() >= feature_min_len) {
-        chimera::feature::compute_hashes_append(batch.seqs2[i], feature_params,
-                                                hashs1);
-      }
-      if (hashs1.size() > 2048) {
-        std::sort(hashs1.begin(), hashs1.end());
-        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
-      }
-      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx, heat,
-                      imcf, batch.ids[i], &classifyResults,
-                      nullptr, fileInfo, presenceAcc, scratch);
-    }
-  } else {
-    for (size_t i = 0; i < batch.seqs.size(); i++) {
-      hashs1.clear();
-      size_t readLen = batch.seqs[i].size();
+	      }
+	      if (i < batch.seqs.size() && batch.seqs[i].size() >= feature_min_len) {
+	        chimera::feature::compute_hashes_append(batch.seqs[i], feature_params,
+	                                                hashs1);
+	      }
+	      if (i < batch.seqs2.size() && batch.seqs2[i].size() >= feature_min_len) {
+	        chimera::feature::compute_hashes_append(batch.seqs2[i], feature_params,
+	                                                hashs1);
+	      }
+	      if (hashs1.size() > 2048) {
+	        std::sort(hashs1.begin(), hashs1.end());
+	        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
+	      }
+	      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
+	                      heat, imcf, batch.ids[i],
+	                      &classifyResults,
+	                      nullptr, fileInfo, presenceAcc, scratch);
+	    }
+	  } else {
+	    for (size_t i = 0; i < batch.seqs.size(); i++) {
+	      hashs1.clear();
+	      size_t readLen = batch.seqs[i].size();
       if (readLen > 0) {
         if (fileInfo.minLen == 0 || fileInfo.minLen == kInvalidLength ||
             readLen < fileInfo.minLen)
@@ -2153,19 +2155,20 @@ void processBatch(
         if (readLen > fileInfo.maxLen)
           fileInfo.maxLen = readLen;
         fileInfo.bpLength += readLen;
-      }
-      if (batch.seqs[i].size() >= feature_min_len) {
-        chimera::feature::compute_hashes_append(batch.seqs[i], feature_params,
-                                                hashs1);
-      }
-      if (hashs1.size() > 2048) {
-        std::sort(hashs1.begin(), hashs1.end());
-        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
-      }
-      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx, heat,
-                      imcf, batch.ids[i], &classifyResults,
-                      nullptr, fileInfo, presenceAcc, scratch);
-    }
+	      }
+	      if (batch.seqs[i].size() >= feature_min_len) {
+	        chimera::feature::compute_hashes_append(batch.seqs[i], feature_params,
+	                                                hashs1);
+	      }
+	      if (hashs1.size() > 2048) {
+	        std::sort(hashs1.begin(), hashs1.end());
+	        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
+	      }
+	      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
+	                      heat, imcf, batch.ids[i],
+	                      &classifyResults,
+	                      nullptr, fileInfo, presenceAcc, scratch);
+	    }
   }
 }
 
@@ -2176,15 +2179,15 @@ void processBatchCompact(
     std::vector<CompactClassifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
-    PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
-  auto &hashs1 = scratch.hashs1;
-  hashs1.clear();
-  hashs1.reserve(2048);
-  if (!batch.seqs2.empty()) {
-    for (size_t i = 0; i < batch.ids.size(); ++i) {
-      hashs1.clear();
-      size_t len1 = (i < batch.seqs.size()) ? batch.seqs[i].size() : 0;
-      size_t len2 = (i < batch.seqs2.size()) ? batch.seqs2[i].size() : 0;
+	    PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
+	  auto &hashs1 = scratch.hashs1;
+	  hashs1.clear();
+	  hashs1.reserve(2048);
+	  if (!batch.seqs2.empty()) {
+	    for (size_t i = 0; i < batch.ids.size(); ++i) {
+	      hashs1.clear();
+	      size_t len1 = (i < batch.seqs.size()) ? batch.seqs[i].size() : 0;
+	      size_t len2 = (i < batch.seqs2.size()) ? batch.seqs2[i].size() : 0;
       size_t readLen = len1 + len2;
       if (readLen > 0) {
         if (fileInfo.minLen == 0 || fileInfo.minLen == kInvalidLength ||
@@ -2193,27 +2196,27 @@ void processBatchCompact(
         if (readLen > fileInfo.maxLen)
           fileInfo.maxLen = readLen;
         fileInfo.bpLength += readLen;
-      }
-      if (i < batch.seqs.size() && batch.seqs[i].size() >= feature_min_len) {
-        chimera::feature::compute_hashes_append(batch.seqs[i], feature_params,
-                                                hashs1);
-      }
-      if (i < batch.seqs2.size() && batch.seqs2[i].size() >= feature_min_len) {
-        chimera::feature::compute_hashes_append(batch.seqs2[i], feature_params,
-                                                hashs1);
-      }
-      if (hashs1.size() > 2048) {
-        std::sort(hashs1.begin(), hashs1.end());
-        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
-      }
-      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx, heat,
-                      imcf, batch.ids[i], nullptr,
-                      &classifyResults, fileInfo, presenceAcc, scratch);
-    }
-  } else {
-    for (size_t i = 0; i < batch.seqs.size(); i++) {
-      hashs1.clear();
-      size_t readLen = batch.seqs[i].size();
+	      }
+	      if (i < batch.seqs.size() && batch.seqs[i].size() >= feature_min_len) {
+	        chimera::feature::compute_hashes_append(batch.seqs[i], feature_params,
+	                                                hashs1);
+	      }
+	      if (i < batch.seqs2.size() && batch.seqs2[i].size() >= feature_min_len) {
+	        chimera::feature::compute_hashes_append(batch.seqs2[i], feature_params,
+	                                                hashs1);
+	      }
+	      if (hashs1.size() > 2048) {
+	        std::sort(hashs1.begin(), hashs1.end());
+	        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
+	      }
+	      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
+	                      heat, imcf, batch.ids[i], nullptr,
+	                      &classifyResults, fileInfo, presenceAcc, scratch);
+	    }
+	  } else {
+	    for (size_t i = 0; i < batch.seqs.size(); i++) {
+	      hashs1.clear();
+	      size_t readLen = batch.seqs[i].size();
       if (readLen > 0) {
         if (fileInfo.minLen == 0 || fileInfo.minLen == kInvalidLength ||
             readLen < fileInfo.minLen)
@@ -2221,19 +2224,19 @@ void processBatchCompact(
         if (readLen > fileInfo.maxLen)
           fileInfo.maxLen = readLen;
         fileInfo.bpLength += readLen;
-      }
-      if (batch.seqs[i].size() >= feature_min_len) {
-        chimera::feature::compute_hashes_append(batch.seqs[i], feature_params,
-                                                hashs1);
-      }
-      if (hashs1.size() > 2048) {
-        std::sort(hashs1.begin(), hashs1.end());
-        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
-      }
-      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx, heat,
-                      imcf, batch.ids[i], nullptr,
-                      &classifyResults, fileInfo, presenceAcc, scratch);
-    }
+	      }
+	      if (batch.seqs[i].size() >= feature_min_len) {
+	        chimera::feature::compute_hashes_append(batch.seqs[i], feature_params,
+	                                                hashs1);
+	      }
+	      if (hashs1.size() > 2048) {
+	        std::sort(hashs1.begin(), hashs1.end());
+	        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
+	      }
+	      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
+	                      heat, imcf, batch.ids[i], nullptr,
+	                      &classifyResults, fileInfo, presenceAcc, scratch);
+	    }
   }
 }
 
