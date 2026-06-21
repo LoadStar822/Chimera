@@ -1,9 +1,16 @@
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
+import urllib.request
 from pathlib import Path
+
+
+NCBI_TAXDUMP_URL = "https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz"
+NCBI_TAXDUMP_MD5_URL = NCBI_TAXDUMP_URL + ".md5"
 
 
 def default_threads():
@@ -57,6 +64,155 @@ def _infer_profile_taxonomy_paths(database_path: str):
             if candidate.exists():
                 taxonomy_info = str(candidate)
     return taxonomy_meta, taxonomy_info
+
+
+def _is_auto_or_empty(value) -> bool:
+    return value is None or str(value).strip() == "" or str(value).strip().lower() == "auto"
+
+
+def _read_metadata_file(path: Path):
+    values = {}
+    if not path.exists():
+        return values
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip()
+    return values
+
+
+def _apply_build_taxonomy_meta_defaults(args) -> None:
+    if not getattr(args, "input", None):
+        return
+    meta_path = Path(args.input).resolve().parent / "taxonomy.meta"
+    meta = _read_metadata_file(meta_path)
+    if not meta:
+        return
+    if _is_auto_or_empty(getattr(args, "taxonomy_kind", None)) and meta.get("taxonomy_kind"):
+        args.taxonomy_kind = meta["taxonomy_kind"].lower()
+    if _is_auto_or_empty(getattr(args, "taxonomy_version", None)) and meta.get("taxonomy_version"):
+        args.taxonomy_version = meta["taxonomy_version"]
+    if not getattr(args, "taxonomy_dir", None) and meta.get("taxonomy_dir"):
+        args.taxonomy_dir = meta["taxonomy_dir"]
+
+
+def _directory_has_taxdump(path: Path) -> bool:
+    return path.is_dir() and (path / "nodes.dmp").is_file()
+
+
+def _find_local_taxdump_archive(search_root: Path):
+    candidates = [
+        search_root / "taxdump.tar.gz",
+    ]
+    if search_root.is_dir():
+        for child in search_root.iterdir():
+            if child.is_dir():
+                candidates.append(child / "taxdump.tar.gz")
+    for candidate in candidates:
+        if candidate.is_file() and candidate.stat().st_size > 0:
+            return candidate
+    return None
+
+
+def _extract_taxdump_archive(archive_path: Path, extract_dir: Path) -> Path:
+    if _directory_has_taxdump(extract_dir):
+        return extract_dir
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for member in archive.getmembers():
+            if not member.isfile():
+                continue
+            name = Path(member.name).name
+            if not name:
+                continue
+            target = extract_dir / name
+            source = archive.extractfile(member)
+            if source is None:
+                continue
+            with source, target.open("wb") as out:
+                shutil.copyfileobj(source, out)
+    if not _directory_has_taxdump(extract_dir):
+        raise RuntimeError(f"Taxdump archive did not contain nodes.dmp: {archive_path}")
+    return extract_dir
+
+
+def _download_url(url: str, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.with_name(destination.name + ".part")
+    try:
+        with urllib.request.urlopen(url, timeout=120) as response, partial.open("wb") as out:
+            shutil.copyfileobj(response, out)
+        partial.replace(destination)
+    finally:
+        if partial.exists():
+            partial.unlink()
+
+
+def _download_ncbi_taxdump_archive(cache_dir: Path) -> Path:
+    archive_path = cache_dir / "taxdump.tar.gz"
+    md5_path = cache_dir / "taxdump.tar.gz.md5"
+    if not archive_path.is_file() or archive_path.stat().st_size == 0:
+        print(f"Downloading NCBI taxdump to {archive_path}")
+        _download_url(NCBI_TAXDUMP_URL, archive_path)
+    if not md5_path.is_file() or md5_path.stat().st_size == 0:
+        _download_url(NCBI_TAXDUMP_MD5_URL, md5_path)
+    expected = md5_path.read_text(encoding="utf-8").strip().split()[0].lower()
+    digest = hashlib.md5()
+    with archive_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    actual = digest.hexdigest().lower()
+    if expected != actual:
+        archive_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Downloaded NCBI taxdump md5 mismatch: expected {expected}, got {actual}"
+        )
+    return archive_path
+
+
+def _prepare_build_taxonomy_dir(args) -> None:
+    _apply_build_taxonomy_meta_defaults(args)
+    if getattr(args, "taxonomy_dir", None):
+        taxonomy_dir = Path(args.taxonomy_dir).resolve()
+        if not _directory_has_taxdump(taxonomy_dir):
+            raise FileNotFoundError(
+                f"--taxonomy-dir must contain nodes.dmp: {taxonomy_dir}"
+            )
+        args.taxonomy_dir = str(taxonomy_dir)
+        return
+
+    kind = str(getattr(args, "taxonomy_kind", "auto") or "auto").strip().lower()
+    if kind == "gtdb":
+        return
+
+    if not getattr(args, "input", None):
+        return
+    input_dir = Path(args.input).resolve().parent
+    extract_dir = input_dir / "taxdump"
+    if _directory_has_taxdump(extract_dir):
+        args.taxonomy_dir = str(extract_dir)
+        return
+    if _directory_has_taxdump(input_dir):
+        args.taxonomy_dir = str(input_dir)
+        return
+
+    meta = _read_metadata_file(input_dir / "taxonomy.meta")
+    archive_value = meta.get("taxonomy_archive")
+    archive_path = None
+    if archive_value:
+        archive_candidate = Path(archive_value).expanduser()
+        if not archive_candidate.is_absolute():
+            archive_candidate = input_dir / archive_candidate
+        if archive_candidate.is_file() and archive_candidate.stat().st_size > 0:
+            archive_path = archive_candidate
+    if archive_path is None:
+        archive_path = _find_local_taxdump_archive(input_dir)
+    if archive_path is None:
+        archive_path = _download_ncbi_taxdump_archive(input_dir)
+    args.taxonomy_dir = str(_extract_taxdump_archive(archive_path, extract_dir))
 
 
 def min_length_type(value: str):
@@ -140,6 +296,12 @@ def add_build_arguments(parser, require_input: bool) -> None:
         default="auto",
         help="Taxonomy version label, for example ncbi-taxdump-2025-09-15 or gtdb-rs226",
     )
+    parser.add_argument(
+        "--taxonomy-dir",
+        dest="taxonomy_dir",
+        default=None,
+        help="Directory containing NCBI taxdump nodes.dmp; downloaded automatically for NCBI builds when omitted",
+    )
 
 
 def append_build_command_args(command, args) -> None:
@@ -156,6 +318,8 @@ def append_build_command_args(command, args) -> None:
     command.extend(["--presence-unique-deg", str(args.presence_unique_deg)])
     command.extend(["--taxonomy-kind", str(args.taxonomy_kind)])
     command.extend(["--taxonomy-version", str(args.taxonomy_version)])
+    if getattr(args, "taxonomy_dir", None):
+        command.extend(["--taxonomy-dir", str(args.taxonomy_dir)])
 
 
 def parse_arguments():
@@ -371,6 +535,7 @@ def run_chimera(args, chimera_path=None):
         command.append(args.command)
 
     if args.command == "build":
+        _prepare_build_taxonomy_dir(args)
         append_build_command_args(command, args)
 
     elif args.command == "classify":

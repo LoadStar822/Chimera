@@ -3777,7 +3777,17 @@ def download(interactive=False, raw_args=None):
 
         tax_file_path = os.path.join(output_folder, "tax.info")
         write_tax(tax_file_path, info, tax)
-        write_taxonomy_metadata(output_folder, taxonomy_kind_value, taxonomy_version_value)
+        taxonomy_meta_extra = {}
+        if taxonomy_kind_value == "ncbi":
+            taxonomy_archive_path = Path(options.output_dir) / assembly_root_rel / "taxdump.tar.gz"
+            if taxonomy_archive_path.exists():
+                taxonomy_meta_extra["taxonomy_archive"] = str(taxonomy_archive_path.resolve())
+        write_taxonomy_metadata(
+            output_folder,
+            taxonomy_kind_value,
+            taxonomy_version_value,
+            **taxonomy_meta_extra,
+        )
 
         if not quiet:
             print(f"Taxonomy information written to: {tax_file_path}")
