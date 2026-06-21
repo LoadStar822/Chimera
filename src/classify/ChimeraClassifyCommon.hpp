@@ -127,6 +127,7 @@ struct NcbiTaxdump {
   std::vector<uint32_t> parent;
   std::vector<uint8_t> is_species; // 1 if rank == species
   std::vector<uint8_t> is_genus;   // 1 if rank == genus
+  std::vector<std::string> scientific_name;
 
   bool enabled() const {
     return !parent.empty() && parent.size() == is_species.size() &&
@@ -180,6 +181,14 @@ struct NcbiTaxdump {
       }
     }
     return 0;
+  }
+
+  const std::string &name(uint32_t tid) const {
+    static const std::string empty;
+    if (tid >= scientific_name.size()) {
+      return empty;
+    }
+    return scientific_name[tid];
   }
 
   uint32_t lca(uint32_t a, uint32_t b) const {
@@ -584,12 +593,15 @@ void rebuild_bin_slot_rep_lookup(
 struct SpoolCandidate {
   uint32_t tid{0};
   double score{0.0};
+  double raw_score{0.0};
 };
 
 struct SpoolReadRecord {
   std::string id;
   double evaluated{0.0};
+  uint32_t query_length{0};
   uint32_t best_taxid_hint{0};
+  uint32_t profile_response_taxid{0};
   std::string reject_reason;
   std::vector<SpoolCandidate> candidates;
   std::vector<SpoolCandidate> abundance_candidates;
@@ -602,7 +614,9 @@ inline constexpr uint32_t kSpoolUnclassifiedTid =
 struct CompactClassifyResult {
   std::string id;
   double evaluated{0.0};
+  uint32_t query_length{0};
   uint32_t best_taxid_hint{kSpoolUnclassifiedTid};
+  uint32_t profile_response_taxid{0};
   std::string reject_reason;
   std::vector<SpoolCandidate> candidates;
   std::vector<SpoolCandidate> abundance_candidates;
@@ -793,8 +807,7 @@ void processBatch(
     std::vector<classifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
-    PresenceAccumulator *presenceAcc,
-    ProcessScratch &scratch);
+    PresenceAccumulator *presenceAcc, ProcessScratch &scratch);
 
 void processBatchCompact(
     batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
@@ -803,8 +816,7 @@ void processBatchCompact(
     std::vector<CompactClassifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
-    PresenceAccumulator *presenceAcc,
-    ProcessScratch &scratch);
+    PresenceAccumulator *presenceAcc, ProcessScratch &scratch);
 
 void classify_streaming(
     ChimeraBuild::IMCFConfig &imcfConfig,

@@ -92,6 +92,8 @@ namespace ChimeraClassify {
 				std::vector<std::pair<std::string, double>> taxidCount;
 				std::vector<std::pair<std::string, double>> posteriors;
 				double evaluated{ 0.0 }; // 实际参与判别的 feature 数，用于归一化
+				uint32_t query_length{ 0 };
+				uint32_t profile_response_taxid{ 0 };
 				std::string reject_reason; // 为空表示未拒绝或接受
 				std::string best_taxid_hint; // 最佳候选 taxid（即使未被接受）
 				std::vector<std::pair<std::string, double>> abundanceCount;

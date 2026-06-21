@@ -5,8 +5,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from src.profile import profile
-
 
 def default_threads():
     cpu = os.cpu_count()
@@ -231,13 +229,21 @@ def parse_arguments():
     classify_parser.add_argument(
         "-b", "--batch-size", type=int, default=400, help="Batch size for classifying"
     )
-    # Profile subcommand
-    profile_parser = subparsers.add_parser("profile", help="Generate sequence profile")
-    profile_parser.add_argument(
-        "-i", "--input", nargs="+", required=True, help="Input file(s) for profiling"
+    # Auxiliary profile utilities. Native abundance profiles are written by
+    # `classify`; this command is for legacy aggregate conversion and Krona.
+    profile_parser = subparsers.add_parser(
+        "profile",
+        help="Auxiliary profile conversion; classify already writes ChimeraProfile.tsv",
     )
     profile_parser.add_argument(
-        "-o", "--output", default="ChimeraProfile", help="Output file for profiling"
+        "-i",
+        "--input",
+        nargs="+",
+        required=True,
+        help="Existing ChimeraEvidence.tsv or aggregate taxid/count table",
+    )
+    profile_parser.add_argument(
+        "-o", "--output", default="ChimeraProfile", help="Output prefix"
     )
     profile_parser.add_argument(
         "-k", "--krona", action="store_true", help="Generate Krona chart"
@@ -247,7 +253,7 @@ def parse_arguments():
         dest="taxonomy_kind",
         default="auto",
         choices=["auto", "ncbi", "gtdb"],
-        help="Taxonomy source for profile generation (auto attempts inference)",
+        help="Taxonomy source for auxiliary profile conversion",
     )
     profile_parser.add_argument(
         "--taxonomy-info",
@@ -261,7 +267,6 @@ def parse_arguments():
         default=None,
         help="Path to taxonomy.meta metadata; if omitted, the input directory will be probed",
     )
-
     if len(sys.argv) == 1:
         parser.print_help(sys.stderr)
         sys.exit(1)
@@ -306,6 +311,8 @@ def run_chimera(args, chimera_path=None):
         args.taxonomy_version = resolved_version
 
     if args.command == "profile":
+        from src.profile import profile
+
         if args.taxonomy_meta is None and args.input:
             candidate_meta = Path(args.input[0]).resolve().parent / "taxonomy.meta"
             if candidate_meta.exists():
@@ -325,6 +332,7 @@ def run_chimera(args, chimera_path=None):
         if args.krona:
             downloader = get_downloader()
             from src.profile import conversion2Krona
+
             print("Converting file to Krona format...")
             conversion2Krona.convert_multiple_files_to_krona_format(
                 args.input,
@@ -369,8 +377,7 @@ def run_chimera(args, chimera_path=None):
         output_dir = Path(args.output)
         output_dir.mkdir(parents=True, exist_ok=True)
         classify_output = output_dir / "ChimeraClassify.tsv"
-        evidence_output = output_dir / "ChimeraEvidence.tsv"
-        profile_output = output_dir / "ChimeraProfile"
+        profile_output = output_dir / "ChimeraProfile.tsv"
         if args.single:
             command.extend(["-i"] + args.single)
         if args.paired:
@@ -381,20 +388,8 @@ def run_chimera(args, chimera_path=None):
         command.extend(["-b", str(args.batch_size)])
     if args.command == "classify":
         subprocess.run(command, check=True)
-        if not evidence_output.is_file():
-            print(f"Classify did not produce abundance evidence: {evidence_output}")
-            return 1
-        taxonomy_meta, taxonomy_info = _infer_profile_taxonomy_paths(args.database)
-        try:
-            profile.process_file(
-                [str(evidence_output)],
-                str(profile_output),
-                taxonomy_kind="auto",
-                taxonomy_info=taxonomy_info,
-                taxonomy_meta=taxonomy_meta,
-            )
-        except ValueError as exc:
-            print(f"Profile failed: {exc}")
+        if not profile_output.is_file():
+            print(f"Classify did not produce native profile: {profile_output}")
             return 1
         return 0
     downloader = get_downloader()

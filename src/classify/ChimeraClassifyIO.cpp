@@ -79,7 +79,9 @@ void read_spool_header(std::istream &is, const std::string &path) {
 void write_spool_record(std::ostream &os, const SpoolReadRecord &record) {
   write_string(os, record.id);
   write_pod(os, record.evaluated);
+  write_pod(os, record.query_length);
   write_pod(os, record.best_taxid_hint);
+  write_pod(os, record.profile_response_taxid);
   write_string(os, record.reject_reason);
   const uint32_t cand_len = static_cast<uint32_t>(record.candidates.size());
   write_pod(os, cand_len);
@@ -120,7 +122,9 @@ void write_spool_record(std::ostream &os,
                         const CompactClassifyResult &record) {
   write_string(os, record.id);
   write_pod(os, record.evaluated);
+  write_pod(os, record.query_length);
   write_pod(os, record.best_taxid_hint);
+  write_pod(os, record.profile_response_taxid);
   write_string(os, record.reject_reason);
   const uint32_t cand_len = static_cast<uint32_t>(record.candidates.size());
   write_pod(os, cand_len);
@@ -171,7 +175,9 @@ bool read_spool_record(std::istream &is, SpoolReadRecord &record) {
     }
   }
   if (!read_pod(is, record.evaluated) ||
-      !read_pod(is, record.best_taxid_hint)) {
+      !read_pod(is, record.query_length) ||
+      !read_pod(is, record.best_taxid_hint) ||
+      !read_pod(is, record.profile_response_taxid)) {
     throw std::runtime_error("Truncated classify spool record header");
   }
   uint32_t reject_len = 0;

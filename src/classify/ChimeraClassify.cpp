@@ -22,11 +22,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -51,10 +53,22 @@ static inline std::string trim_copy(std::string s) {
 }
 
 static std::unique_ptr<ChimeraClassify::NcbiTaxdump>
+maybe_load_ncbi_taxdump_for_profile();
+static std::unique_ptr<ChimeraClassify::NcbiTaxdump>
+maybe_load_profiledb_taxonomy_for_profile(const std::filesystem::path &dbPath);
+static std::unique_ptr<ChimeraClassify::NcbiTaxdump>
+maybe_load_tax_tsv_for_profile(const std::filesystem::path &dbPath);
+
+static std::unique_ptr<ChimeraClassify::NcbiTaxdump>
 maybe_load_ncbi_taxdump(const std::string &taxonomyKind) {
   if (taxonomyKind != "ncbi") {
     return nullptr;
   }
+  return maybe_load_ncbi_taxdump_for_profile();
+}
+
+static std::unique_ptr<ChimeraClassify::NcbiTaxdump>
+maybe_load_ncbi_taxdump_for_profile() {
   const char *env_dir = std::getenv("CHIMERA_NCBI_TAXDUMP_DIR");
   if (env_dir == nullptr || *env_dir == '\0') {
     return nullptr;
@@ -106,6 +120,7 @@ maybe_load_ncbi_taxdump(const std::string &taxonomyKind) {
       tax->parent.resize(static_cast<size_t>(tid) + 1, 0);
       tax->is_species.resize(static_cast<size_t>(tid) + 1, 0);
       tax->is_genus.resize(static_cast<size_t>(tid) + 1, 0);
+      tax->scientific_name.resize(static_cast<size_t>(tid) + 1);
     }
     tax->parent[tid] = parent;
     const bool is_sp = (rank == "species");
@@ -117,7 +132,202 @@ maybe_load_ncbi_taxdump(const std::string &taxonomyKind) {
   if (!tax->enabled()) {
     return nullptr;
   }
+  const std::filesystem::path names = base / "names.dmp";
+  if (std::filesystem::exists(names)) {
+    std::ifstream names_is(names);
+    if (names_is.is_open()) {
+      while (std::getline(names_is, line)) {
+        if (line.empty()) {
+          continue;
+        }
+        std::vector<std::string> fields;
+        fields.reserve(4);
+        std::stringstream ss(line);
+        std::string tok;
+        while (std::getline(ss, tok, '|')) {
+          tok = trim_copy(tok);
+          if (tok.empty()) {
+            continue;
+          }
+          fields.push_back(tok);
+          if (fields.size() >= 4) {
+            break;
+          }
+        }
+        if (fields.size() < 3 || fields.back() != "scientific name") {
+          continue;
+        }
+        uint32_t tid = 0;
+        if (!chimera::utils::try_parse_u32(fields[0], tid)) {
+          continue;
+        }
+        if (tid >= tax->scientific_name.size()) {
+          tax->scientific_name.resize(static_cast<size_t>(tid) + 1);
+        }
+        tax->scientific_name[tid] = fields[1];
+      }
+    }
+  }
   return tax;
+}
+
+template <typename T>
+bool read_profiledb_taxonomy_pod(std::istream &in, T &value) {
+  return static_cast<bool>(in.read(reinterpret_cast<char *>(&value),
+                                   static_cast<std::streamsize>(sizeof(T))));
+}
+
+bool read_profiledb_taxonomy_string(std::istream &in, std::string &value) {
+  uint32_t size = 0;
+  if (!read_profiledb_taxonomy_pod(in, size)) {
+    return false;
+  }
+  if (size > (1u << 30)) {
+    return false;
+  }
+  value.assign(static_cast<size_t>(size), '\0');
+  if (size == 0) {
+    return true;
+  }
+  return static_cast<bool>(
+      in.read(value.data(), static_cast<std::streamsize>(size)));
+}
+
+std::filesystem::path profiledb_root_for_db(
+    const std::filesystem::path &dbPath) {
+  if (std::filesystem::is_directory(dbPath)) {
+    return dbPath;
+  }
+  const auto corePath = chimera::local_resolution::core_archive_path_for(dbPath);
+  const auto sidecarRoot =
+      corePath.parent_path() / (corePath.stem().string() + ".profiledb");
+  if (std::filesystem::is_directory(sidecarRoot)) {
+    return sidecarRoot;
+  }
+  return corePath.parent_path();
+}
+
+static std::unique_ptr<ChimeraClassify::NcbiTaxdump>
+maybe_load_tax_tsv_for_profile(const std::filesystem::path &dbPath) {
+  const auto corePath = chimera::local_resolution::core_archive_path_for(dbPath);
+  std::filesystem::path taxPath = corePath;
+  taxPath.replace_extension(".tax");
+  if (!std::filesystem::exists(taxPath)) {
+    return nullptr;
+  }
+
+  std::ifstream in(taxPath);
+  if (!in.is_open()) {
+    return nullptr;
+  }
+
+  auto tax = std::make_unique<ChimeraClassify::NcbiTaxdump>();
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty()) {
+      continue;
+    }
+    std::vector<std::string> fields;
+    size_t begin = 0;
+    while (begin <= line.size() && fields.size() < 4) {
+      const size_t end = line.find('\t', begin);
+      if (end == std::string::npos) {
+        fields.push_back(line.substr(begin));
+        break;
+      }
+      fields.push_back(line.substr(begin, end - begin));
+      begin = end + 1;
+    }
+    if (fields.size() < 4) {
+      continue;
+    }
+    uint32_t tid = 0;
+    uint32_t parent = 0;
+    if (!chimera::utils::try_parse_u32(fields[0], tid) ||
+        !chimera::utils::try_parse_u32(fields[1], parent)) {
+      continue;
+    }
+    if (tid >= tax->parent.size()) {
+      tax->parent.resize(static_cast<size_t>(tid) + 1, 0);
+      tax->is_species.resize(static_cast<size_t>(tid) + 1, 0);
+      tax->is_genus.resize(static_cast<size_t>(tid) + 1, 0);
+      tax->scientific_name.resize(static_cast<size_t>(tid) + 1);
+    }
+    tax->parent[tid] = parent;
+    tax->is_species[tid] = (fields[2] == "species") ? 1 : 0;
+    tax->is_genus[tid] = (fields[2] == "genus") ? 1 : 0;
+    tax->scientific_name[tid] = fields[3];
+  }
+
+  return tax->enabled() ? std::move(tax) : nullptr;
+}
+
+static std::unique_ptr<ChimeraClassify::NcbiTaxdump>
+maybe_load_profiledb_taxonomy_for_profile(const std::filesystem::path &dbPath) {
+  const std::filesystem::path taxonomyDir =
+      profiledb_root_for_db(dbPath) / "taxonomy";
+  const std::filesystem::path nodesPath = taxonomyDir / "nodes.bin";
+  const std::filesystem::path namesPath = taxonomyDir / "names.bin";
+  if (!std::filesystem::exists(nodesPath)) {
+    return nullptr;
+  }
+
+  std::ifstream nodes(nodesPath, std::ios::binary);
+  if (!nodes.is_open()) {
+    return nullptr;
+  }
+  uint32_t version = 0;
+  uint64_t count = 0;
+  if (!read_profiledb_taxonomy_pod(nodes, version) ||
+      !read_profiledb_taxonomy_pod(nodes, count) || version != 1) {
+    return nullptr;
+  }
+
+  auto tax = std::make_unique<ChimeraClassify::NcbiTaxdump>();
+  for (uint64_t i = 0; i < count; ++i) {
+    uint32_t tid = 0;
+    uint32_t parent = 0;
+    std::string rank;
+    if (!read_profiledb_taxonomy_pod(nodes, tid) ||
+        !read_profiledb_taxonomy_pod(nodes, parent) ||
+        !read_profiledb_taxonomy_string(nodes, rank)) {
+      return nullptr;
+    }
+    if (tid >= tax->parent.size()) {
+      tax->parent.resize(static_cast<size_t>(tid) + 1, 0);
+      tax->is_species.resize(static_cast<size_t>(tid) + 1, 0);
+      tax->is_genus.resize(static_cast<size_t>(tid) + 1, 0);
+      tax->scientific_name.resize(static_cast<size_t>(tid) + 1);
+    }
+    tax->parent[tid] = parent;
+    tax->is_species[tid] = (rank == "species") ? 1 : 0;
+    tax->is_genus[tid] = (rank == "genus") ? 1 : 0;
+  }
+
+  if (std::filesystem::exists(namesPath)) {
+    std::ifstream names(namesPath, std::ios::binary);
+    if (names.is_open()) {
+      uint32_t nameVersion = 0;
+      uint64_t nameCount = 0;
+      if (read_profiledb_taxonomy_pod(names, nameVersion) &&
+          read_profiledb_taxonomy_pod(names, nameCount) && nameVersion == 1) {
+        for (uint64_t i = 0; i < nameCount; ++i) {
+          uint32_t tid = 0;
+          std::string name;
+          if (!read_profiledb_taxonomy_pod(names, tid) ||
+              !read_profiledb_taxonomy_string(names, name)) {
+            return nullptr;
+          }
+          if (tid >= tax->scientific_name.size()) {
+            tax->scientific_name.resize(static_cast<size_t>(tid) + 1);
+          }
+          tax->scientific_name[tid] = std::move(name);
+        }
+      }
+    }
+  }
+
+  return tax->enabled() ? std::move(tax) : nullptr;
 }
 
 struct SpoolPreparedCandidate {
@@ -175,6 +385,56 @@ struct AbundanceEvidenceOutput {
   double read_support{0.0};
 };
 
+struct SeqProfileRow {
+  uint32_t species_taxid{0};
+  uint32_t genus_taxid{0};
+  double assigned_reads{0.0};
+  double unique_reads{0.0};
+  double assigned_features{0.0};
+  double unique_features{0.0};
+  double sequence_abundance{0.0};
+  double feature_abundance{0.0};
+  double effective_length{0.0};
+  double effective_callable_signatures{0.0};
+  double effective_unique_signatures{0.0};
+  double length_normalized_abundance{0.0};
+  double sqrt_length_normalized_abundance{0.0};
+  double callable_normalized_abundance{0.0};
+  double unique_callable_normalized_abundance{0.0};
+  double feature_length_normalized_abundance{0.0};
+  double feature_sqrt_length_normalized_abundance{0.0};
+  uint32_t source_count{0};
+};
+
+struct SeqProfileFit {
+  std::vector<SeqProfileRow> rows;
+  uint64_t input_reads{0};
+  uint64_t reads_with_candidates{0};
+  uint64_t multi_candidate_reads{0};
+  uint64_t candidate_edges{0};
+  double assigned_reads{0.0};
+  double assigned_features{0.0};
+};
+
+enum class PrimaryProfileScale {
+  LengthNormalized,
+  SqrtLengthNormalized,
+  CallableNormalized,
+  UniqueCallableNormalized,
+  SequenceAbundance,
+};
+
+struct SpeciesProfileMasses {
+  std::unordered_map<uint32_t, double> assigned_reads;
+  std::unordered_map<uint32_t, double> unique_reads;
+  std::unordered_map<uint32_t, double> assigned_features;
+  std::unordered_map<uint32_t, double> unique_features;
+  uint64_t input_reads{0};
+  uint64_t reads_with_candidates{0};
+  uint64_t multi_candidate_reads{0};
+  uint64_t candidate_edges{0};
+};
+
 static std::string spool_taxid_to_string(
     uint32_t tid, const ChimeraClassify::TaxDict &tax) {
   if (tid == ChimeraClassify::kSpoolUnclassifiedTid ||
@@ -182,6 +442,19 @@ static std::string spool_taxid_to_string(
     return "unclassified";
   }
   return tax.id2str[tid];
+}
+
+static uint32_t spool_tid_to_taxid(uint32_t tid,
+                                   const ChimeraClassify::TaxDict &tax) {
+  if (tid == ChimeraClassify::kSpoolUnclassifiedTid ||
+      tid >= tax.id2str.size()) {
+    return 0;
+  }
+  uint32_t taxid = 0;
+  if (!chimera::utils::try_parse_u32(tax.id2str[tid], taxid)) {
+    return 0;
+  }
+  return taxid;
 }
 
 static bool env_flag_enabled(const char *name) {
@@ -263,6 +536,12 @@ select_spool_abundance_candidates(
     const ChimeraClassify::SpoolReadRecord &record) {
   return !record.abundance_candidates.empty() ? record.abundance_candidates
                                               : record.candidates;
+}
+
+static const std::vector<ChimeraClassify::SpoolCandidate> &
+select_spool_sequence_profile_candidates(
+    const ChimeraClassify::SpoolReadRecord &record) {
+  return select_spool_abundance_candidates(record);
 }
 
 static bool prepare_spool_abundance_candidates(
@@ -740,6 +1019,356 @@ static SpoolAbundanceFit fit_spool_abundance_em(
   return fit;
 }
 
+static uint32_t taxid_to_species(const ChimeraClassify::TaxDict &tax,
+                                 const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
+                                 uint32_t tid_id) {
+  if (tid_id == ChimeraClassify::kSpoolUnclassifiedTid ||
+      tid_id >= tax.id2str.size()) {
+    return 0;
+  }
+  uint32_t taxid = 0;
+  if (!chimera::utils::try_parse_u32(tax.id2str[tid_id], taxid) ||
+      taxid == 0) {
+    return 0;
+  }
+  if (ncbiTaxdump && ncbiTaxdump->enabled()) {
+    taxid = ncbiTaxdump->to_species(taxid);
+  }
+  return taxid;
+}
+
+static bool is_strict_species_taxid(
+    uint32_t taxid, const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
+  if (taxid == 0) {
+    return false;
+  }
+  if (!(ncbiTaxdump && ncbiTaxdump->enabled())) {
+    return true;
+  }
+  return taxid < ncbiTaxdump->is_species.size() &&
+         ncbiTaxdump->is_species[taxid] != 0;
+}
+
+static uint32_t taxid_to_strict_species(
+    const ChimeraClassify::TaxDict &tax,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump, uint32_t tid_id) {
+  const uint32_t species = taxid_to_species(tax, ncbiTaxdump, tid_id);
+  return is_strict_species_taxid(species, ncbiTaxdump) ? species : 0;
+}
+
+static std::unordered_map<uint32_t, std::vector<double>>
+build_species_length_samples(
+    const chimera::presence::CoverageMeta &coverageMeta,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
+  std::unordered_map<uint32_t, std::vector<double>> lengths;
+  lengths.reserve(coverageMeta.entries.size());
+  for (const auto &entry : coverageMeta.entries) {
+    uint32_t taxid = 0;
+    if (!chimera::utils::try_parse_u32(entry.taxid, taxid) || taxid == 0 ||
+        entry.genome_length == 0) {
+      continue;
+    }
+    uint32_t species = taxid;
+    if (ncbiTaxdump && ncbiTaxdump->enabled()) {
+      species = ncbiTaxdump->to_species(taxid);
+    }
+    if (species == 0) {
+      continue;
+    }
+    lengths[species].push_back(static_cast<double>(entry.genome_length));
+  }
+  return lengths;
+}
+
+struct SpeciesCallableScaleSamples {
+  std::vector<double> genome_lengths;
+  std::vector<double> callable_signatures;
+  std::vector<double> unique_signatures;
+};
+
+static std::unordered_map<uint32_t, SpeciesCallableScaleSamples>
+build_species_callable_scale_samples(
+    const chimera::presence::CoverageMeta &coverageMeta,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
+  std::unordered_map<uint32_t, SpeciesCallableScaleSamples> samples;
+  samples.reserve(coverageMeta.entries.size());
+  for (const auto &entry : coverageMeta.entries) {
+    uint32_t taxid = 0;
+    if (!chimera::utils::try_parse_u32(entry.taxid, taxid) || taxid == 0) {
+      continue;
+    }
+    uint32_t species = taxid;
+    if (ncbiTaxdump && ncbiTaxdump->enabled()) {
+      species = ncbiTaxdump->to_species(taxid);
+    }
+    if (species == 0) {
+      continue;
+    }
+    auto &row = samples[species];
+    if (entry.genome_length > 0) {
+      row.genome_lengths.push_back(static_cast<double>(entry.genome_length));
+    }
+    if (entry.total_signatures > 0) {
+      row.callable_signatures.push_back(
+          static_cast<double>(entry.total_signatures));
+    }
+    if (entry.unique_signatures > 0) {
+      row.unique_signatures.push_back(
+          static_cast<double>(entry.unique_signatures));
+    }
+  }
+  return samples;
+}
+
+static double median_length(std::vector<double> values) {
+  if (values.empty()) {
+    return 0.0;
+  }
+  const size_t mid = values.size() / 2;
+  std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(mid),
+                   values.end());
+  double median = values[mid];
+  if ((values.size() % 2) == 0 && mid > 0) {
+    const auto max_lower =
+        std::max_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(mid));
+    if (max_lower != values.begin() + static_cast<std::ptrdiff_t>(mid)) {
+      median = 0.5 * (median + *max_lower);
+    }
+  }
+  return median;
+}
+
+static SeqProfileFit fit_spool_sequence_profile(
+    const std::vector<std::string> &spoolPaths,
+    const ChimeraClassify::TaxDict &tax,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
+    const chimera::presence::CoverageMeta &coverageMeta) {
+  constexpr double kProfileScoreRatio = 0.95;
+  SeqProfileFit fit;
+  std::unordered_map<uint32_t, double> assigned;
+  std::unordered_map<uint32_t, double> unique;
+  std::unordered_map<uint32_t, double> feature_assigned;
+  std::unordered_map<uint32_t, double> feature_unique;
+
+  for (const auto &path : spoolPaths) {
+    for_each_spool_record(
+        path, [&](const ChimeraClassify::SpoolReadRecord &record) {
+          ++fit.input_reads;
+          const auto &candidates =
+              select_spool_sequence_profile_candidates(record);
+          if (candidates.empty()) {
+            return;
+          }
+          std::unordered_map<uint32_t, double> by_species;
+          by_species.reserve(candidates.size());
+          for (const auto &cand : candidates) {
+            if (!(cand.score > 0.0)) {
+              continue;
+            }
+            const uint32_t species =
+                taxid_to_species(tax, ncbiTaxdump, cand.tid);
+            if (species == 0) {
+              continue;
+            }
+            auto it = by_species.find(species);
+            if (it == by_species.end() || cand.score > it->second) {
+              by_species[species] = cand.score;
+            }
+          }
+          if (by_species.empty()) {
+            return;
+          }
+          double best = 0.0;
+          for (const auto &[species, score] : by_species) {
+            (void)species;
+            if (score > best) {
+              best = score;
+            }
+          }
+          if (!(best > 0.0)) {
+            return;
+          }
+          std::vector<std::pair<uint32_t, double>> kept;
+          kept.reserve(by_species.size());
+          const double cutoff = best * kProfileScoreRatio;
+          double kept_score_sum = 0.0;
+          for (const auto &[species, score] : by_species) {
+            if (score >= cutoff) {
+              kept.emplace_back(species, score);
+              kept_score_sum += score;
+            }
+          }
+          if (kept.empty() || !(kept_score_sum > 0.0)) {
+            return;
+          }
+          ++fit.reads_with_candidates;
+          fit.candidate_edges += kept.size();
+          if (kept.size() > 1) {
+            ++fit.multi_candidate_reads;
+          }
+          const double feature_weight =
+              record.evaluated > 0.0 ? record.evaluated : 0.0;
+          for (const auto &[species, score] : kept) {
+            const double share = score / kept_score_sum;
+            assigned[species] += share;
+            if (feature_weight > 0.0) {
+              const double feature_share = feature_weight * share;
+              feature_assigned[species] += feature_share;
+            }
+          }
+          if (kept.size() == 1) {
+            unique[kept.front().first] += 1.0;
+            if (feature_weight > 0.0) {
+              feature_unique[kept.front().first] += feature_weight;
+            }
+          }
+        });
+  }
+
+  fit.assigned_reads = 0.0;
+  for (const auto &[species, value] : assigned) {
+    (void)species;
+    fit.assigned_reads += value;
+  }
+  fit.assigned_features = 0.0;
+  for (const auto &[species, value] : feature_assigned) {
+    (void)species;
+    fit.assigned_features += value;
+  }
+  const auto scale_samples =
+      build_species_callable_scale_samples(coverageMeta, ncbiTaxdump);
+  double length_scaled_sum = 0.0;
+  double sqrt_length_scaled_sum = 0.0;
+  double callable_scaled_sum = 0.0;
+  double unique_callable_scaled_sum = 0.0;
+  double feature_length_scaled_sum = 0.0;
+  double feature_sqrt_length_scaled_sum = 0.0;
+  fit.rows.reserve(assigned.size());
+  for (const auto &[species, value] : assigned) {
+    if (!(value > 0.0)) {
+      continue;
+    }
+    SeqProfileRow row;
+    row.species_taxid = species;
+    row.assigned_reads = value;
+    auto unique_it = unique.find(species);
+    if (unique_it != unique.end()) {
+      row.unique_reads = unique_it->second;
+    }
+    auto feature_it = feature_assigned.find(species);
+    if (feature_it != feature_assigned.end()) {
+      row.assigned_features = feature_it->second;
+    }
+    auto feature_unique_it = feature_unique.find(species);
+    if (feature_unique_it != feature_unique.end()) {
+      row.unique_features = feature_unique_it->second;
+    }
+    if (fit.assigned_reads > 0.0) {
+      row.sequence_abundance = value / fit.assigned_reads;
+    }
+    if (fit.assigned_features > 0.0) {
+      row.feature_abundance = row.assigned_features / fit.assigned_features;
+    }
+    auto scale_it = scale_samples.find(species);
+    if (scale_it != scale_samples.end()) {
+      row.source_count =
+          static_cast<uint32_t>(scale_it->second.genome_lengths.size());
+      row.effective_length = median_length(scale_it->second.genome_lengths);
+      if (row.effective_length > 0.0) {
+        length_scaled_sum += value / row.effective_length;
+        sqrt_length_scaled_sum += value / std::sqrt(row.effective_length);
+        if (row.assigned_features > 0.0) {
+          feature_length_scaled_sum +=
+              row.assigned_features / row.effective_length;
+          feature_sqrt_length_scaled_sum +=
+              row.assigned_features / std::sqrt(row.effective_length);
+        }
+      }
+      row.effective_callable_signatures =
+          median_length(scale_it->second.callable_signatures);
+      if (row.effective_callable_signatures > 0.0) {
+        callable_scaled_sum += value / row.effective_callable_signatures;
+      }
+      row.effective_unique_signatures =
+          median_length(scale_it->second.unique_signatures);
+      if (row.effective_unique_signatures > 0.0) {
+        unique_callable_scaled_sum += value / row.effective_unique_signatures;
+      }
+    }
+    if (ncbiTaxdump && ncbiTaxdump->enabled()) {
+      row.genus_taxid = ncbiTaxdump->to_genus(species);
+    }
+    fit.rows.push_back(row);
+  }
+  if (length_scaled_sum > 0.0) {
+    for (auto &row : fit.rows) {
+      if (row.effective_length > 0.0) {
+        row.length_normalized_abundance =
+            (row.assigned_reads / row.effective_length) / length_scaled_sum;
+      }
+    }
+  }
+  if (sqrt_length_scaled_sum > 0.0) {
+    for (auto &row : fit.rows) {
+      if (row.effective_length > 0.0) {
+        row.sqrt_length_normalized_abundance =
+            (row.assigned_reads / std::sqrt(row.effective_length)) /
+            sqrt_length_scaled_sum;
+      }
+    }
+  }
+  if (callable_scaled_sum > 0.0) {
+    for (auto &row : fit.rows) {
+      if (row.effective_callable_signatures > 0.0) {
+        row.callable_normalized_abundance =
+            (row.assigned_reads / row.effective_callable_signatures) /
+            callable_scaled_sum;
+      }
+    }
+  }
+  if (unique_callable_scaled_sum > 0.0) {
+    for (auto &row : fit.rows) {
+      if (row.effective_unique_signatures > 0.0) {
+        row.unique_callable_normalized_abundance =
+            (row.assigned_reads / row.effective_unique_signatures) /
+            unique_callable_scaled_sum;
+      }
+    }
+  }
+  if (feature_length_scaled_sum > 0.0) {
+    for (auto &row : fit.rows) {
+      if (row.effective_length > 0.0 && row.assigned_features > 0.0) {
+        row.feature_length_normalized_abundance =
+            (row.assigned_features / row.effective_length) /
+            feature_length_scaled_sum;
+      }
+    }
+  }
+  if (feature_sqrt_length_scaled_sum > 0.0) {
+    for (auto &row : fit.rows) {
+      if (row.effective_length > 0.0 && row.assigned_features > 0.0) {
+        row.feature_sqrt_length_normalized_abundance =
+            (row.assigned_features / std::sqrt(row.effective_length)) /
+            feature_sqrt_length_scaled_sum;
+      }
+    }
+  }
+  std::sort(fit.rows.begin(), fit.rows.end(),
+            [](const SeqProfileRow &lhs, const SeqProfileRow &rhs) {
+              const double la = lhs.length_normalized_abundance > 0.0
+                                    ? lhs.length_normalized_abundance
+                                    : lhs.sequence_abundance;
+              const double ra = rhs.length_normalized_abundance > 0.0
+                                    ? rhs.length_normalized_abundance
+                                    : rhs.sequence_abundance;
+              if (la != ra) {
+                return la > ra;
+              }
+              return lhs.species_taxid < rhs.species_taxid;
+            });
+  return fit;
+}
+
 static SpoolSampleMixtureFit fit_spool_sample_mixture_em(
     const std::vector<std::string> &spoolPaths, size_t maxIter) {
   SpoolSampleMixtureFit fit;
@@ -1168,6 +1797,7 @@ materialize_spool_result(const ChimeraClassify::SpoolReadRecord &record,
   ChimeraClassify::classifyResult result;
   result.id = record.id;
   result.evaluated = record.evaluated;
+  result.query_length = record.query_length;
   result.reject_reason = record.reject_reason;
   if (record.best_taxid_hint != ChimeraClassify::kSpoolUnclassifiedTid) {
     result.best_taxid_hint = spool_taxid_to_string(record.best_taxid_hint, tax);
@@ -1233,14 +1863,220 @@ resolve_local_profile_output_path(const std::string &outputFile) {
   return path.string();
 }
 
+static std::string resolve_profile_output_path(const std::string &outputFile) {
+  std::filesystem::path path(outputFile);
+  if (path.filename() == "ChimeraClassify.tsv") {
+    return (path.parent_path() / "ChimeraProfile.tsv").string();
+  }
+  path.replace_extension(".profile.tsv");
+  return path.string();
+}
+
+static std::string
+resolve_profile_cami_output_path(const std::string &outputFile) {
+  std::filesystem::path path(outputFile);
+  if (path.filename() == "ChimeraClassify.tsv") {
+    return (path.parent_path() / "ChimeraProfile.cami.tsv").string();
+  }
+  path.replace_extension(".profile.cami.tsv");
+  return path.string();
+}
+
+static std::string resolve_profile_variant_output_path(
+    const std::string &outputFile, const std::string &standardFilename,
+    const std::string &replacementExtension) {
+  std::filesystem::path path(outputFile);
+  if (path.filename() == "ChimeraClassify.tsv") {
+    return (path.parent_path() / standardFilename).string();
+  }
+  path.replace_extension(replacementExtension);
+  return path.string();
+}
+
+static std::string
+resolve_native_profile_trace_output_path(const std::string &outputFile) {
+  std::filesystem::path path(outputFile);
+  if (path.filename() == "ChimeraClassify.tsv") {
+    return (path.parent_path() / "ChimeraProfile.trace.tsv").string();
+  }
+  path.replace_extension(".profile.trace.tsv");
+  return path.string();
+}
+
+static std::string
+resolve_native_profile_debug_output_path(const std::string &outputFile) {
+  std::filesystem::path path(outputFile);
+  if (path.filename() == "ChimeraClassify.tsv") {
+    return (path.parent_path() / "ChimeraProfile.debug.tsv").string();
+  }
+  path.replace_extension(".profile.debug.tsv");
+  return path.string();
+}
+
+static void copy_profile_file_or_throw(const std::filesystem::path &src,
+                                       const std::filesystem::path &dst) {
+  if (!std::filesystem::exists(src)) {
+    throw std::runtime_error("Profile response-calibrated source is missing: " +
+                             src.string());
+  }
+  if (!dst.parent_path().empty()) {
+    std::filesystem::create_directories(dst.parent_path());
+  }
+  std::error_code ec;
+  std::filesystem::copy_file(src, dst,
+                             std::filesystem::copy_options::overwrite_existing,
+                             ec);
+  if (ec) {
+    throw std::runtime_error("Failed to write profile response-calibrated "
+                             "output from " +
+                             src.string() + " to " + dst.string() + ": " +
+                             ec.message());
+  }
+}
+
 struct SpoolOutputPartStats {
   uint64_t classified{0};
   uint64_t unclassified{0};
+  std::unordered_map<uint32_t, double> decision_taxid_counts;
+  std::unordered_map<uint32_t, double> profile_response_taxid_counts;
+  std::unordered_map<uint32_t, double> decision_species_counts;
+  SpeciesProfileMasses localmix_masses;
 };
+
+static double decision_support_fraction(
+    const ChimeraClassify::classifyResult &result) {
+  if (!(result.evaluated > 0.0)) {
+    return 1.0;
+  }
+  if (result.query_length == 0) {
+    return 1.0;
+  }
+  const double density =
+      result.evaluated / static_cast<double>(result.query_length);
+  return std::clamp(density, 0.0, 1.0);
+}
+
+static uint32_t taxid_text_to_u32_or_zero(const std::string &taxidText) {
+  uint32_t taxid = 0;
+  if (!chimera::utils::try_parse_u32(taxidText, taxid)) {
+    return 0;
+  }
+  return taxid;
+}
 
 using EvidenceAggregateMap = std::unordered_map<std::string, double>;
 using LocalResolutionCallMap =
     std::unordered_map<std::string, ChimeraClassify::LocalResolutionReadCall>;
+
+static uint32_t taxid_text_to_species(
+    const std::string &taxidText,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump);
+
+static const ChimeraClassify::LocalResolutionReadCall *
+find_local_resolution_call(const LocalResolutionCallMap *localCalls,
+                           const std::string &readId) {
+  if (localCalls == nullptr) {
+    return nullptr;
+  }
+  const auto found = localCalls->find(readId);
+  if (found == localCalls->end()) {
+    size_t firstTokenEnd = 0;
+    while (firstTokenEnd < readId.size() &&
+           std::isspace(static_cast<unsigned char>(readId[firstTokenEnd])) ==
+               0) {
+      ++firstTokenEnd;
+    }
+    if (firstTokenEnd == readId.size()) {
+      return nullptr;
+    }
+    const auto tokenFound = localCalls->find(readId.substr(0, firstTokenEnd));
+    if (tokenFound == localCalls->end()) {
+      return nullptr;
+    }
+    return &tokenFound->second;
+  }
+  return &found->second;
+}
+
+static void accumulate_localmix_profile_candidates(
+    const ChimeraClassify::classifyResult &result,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
+    SpeciesProfileMasses &masses) {
+  ++masses.input_reads;
+  if (result.taxidCount.empty() ||
+      result.taxidCount.front().first == "unclassified") {
+    return;
+  }
+
+  const uint32_t decisionSpecies =
+      taxid_text_to_species(result.taxidCount.front().first, ncbiTaxdump);
+  if (decisionSpecies == 0) {
+    return;
+  }
+
+  uint32_t decisionGenus = 0;
+  if (ncbiTaxdump && ncbiTaxdump->enabled()) {
+    decisionGenus = ncbiTaxdump->to_genus(decisionSpecies);
+  }
+
+  std::unordered_map<uint32_t, double> speciesScore;
+  speciesScore.reserve(result.posteriors.size() + 1);
+  for (const auto &[taxidText, weight] : result.posteriors) {
+    if (!(weight > 0.0) || taxidText.empty() ||
+        taxidText == "unclassified") {
+      continue;
+    }
+    const uint32_t species = taxid_text_to_species(taxidText, ncbiTaxdump);
+    if (species == 0) {
+      continue;
+    }
+    if (decisionGenus != 0 && ncbiTaxdump && ncbiTaxdump->enabled() &&
+        ncbiTaxdump->to_genus(species) != decisionGenus) {
+      continue;
+    }
+    auto &slot = speciesScore[species];
+    slot = std::max(slot, weight);
+  }
+
+  if (speciesScore.empty()) {
+    speciesScore.emplace(decisionSpecies, 1.0);
+  }
+
+  double total = 0.0;
+  for (auto &[species, score] : speciesScore) {
+    (void)species;
+    score = std::sqrt(std::max(0.0, score));
+    total += score;
+  }
+  if (!(total > 0.0)) {
+    speciesScore.clear();
+    speciesScore.emplace(decisionSpecies, 1.0);
+    total = 1.0;
+  }
+
+  ++masses.reads_with_candidates;
+  masses.candidate_edges += speciesScore.size();
+  if (speciesScore.size() > 1) {
+    ++masses.multi_candidate_reads;
+  }
+
+  const double feature_weight =
+      result.evaluated > 0.0 ? result.evaluated : 0.0;
+  for (const auto &[species, score] : speciesScore) {
+    const double share = score / total;
+    masses.assigned_reads[species] += share;
+    if (feature_weight > 0.0) {
+      masses.assigned_features[species] += feature_weight * share;
+    }
+  }
+  if (speciesScore.size() == 1) {
+    const uint32_t species = speciesScore.begin()->first;
+    masses.unique_reads[species] += 1.0;
+    if (feature_weight > 0.0) {
+      masses.unique_features[species] += feature_weight;
+    }
+  }
+}
 
 struct LocalResolutionPanel {
   uint32_t k{};
@@ -1715,14 +2551,17 @@ static bool apply_local_resolution_result(
     ChimeraClassify::classifyResult &result,
     const LocalResolutionCallMap *localCalls, double sampleDivergence,
     double divergenceThreshold) {
-  if (localCalls == nullptr || sampleDivergence < divergenceThreshold) {
+  if (localCalls == nullptr) {
     return false;
   }
-  const auto found = localCalls->find(result.id);
-  if (found == localCalls->end()) {
+  if (sampleDivergence < divergenceThreshold) {
     return false;
   }
-  const auto &call = found->second;
+  const auto *callPtr = find_local_resolution_call(localCalls, result.id);
+  if (callPtr == nullptr) {
+    return false;
+  }
+  const auto &call = *callPtr;
   if (call.candidates.empty()) {
     std::string hint;
     if (!result.taxidCount.empty()) {
@@ -1961,10 +2800,19 @@ static void write_spool_output_part(
 
   for_each_spool_postem_chunk(
       spoolPath, fit, sampleMixtureFit, options, decisionConfig, tax,
-      presenceDecision, false,
-      [&](const std::vector<ChimeraClassify::SpoolReadRecord> *,
+      presenceDecision, true,
+      [&](const std::vector<ChimeraClassify::SpoolReadRecord> *records,
           std::vector<ChimeraClassify::classifyResult> &chunk) {
-        for (auto &result : chunk) {
+        for (size_t resultIndex = 0; resultIndex < chunk.size();
+             ++resultIndex) {
+          auto &result = chunk[resultIndex];
+          if (records != nullptr && resultIndex < records->size()) {
+            const uint32_t observed =
+                (*records)[resultIndex].profile_response_taxid;
+            if (observed != 0) {
+              partStats.profile_response_taxid_counts[observed] += 1.0;
+            }
+          }
           for (const auto &[taxid, count] : result.taxidCount) {
             if (!taxid.empty() && taxid != "unclassified" && count > 0.0) {
               postemPrimaryEvidenceAggregate[taxid] += count;
@@ -1980,11 +2828,26 @@ static void write_spool_output_part(
                                                             ncbiTaxdump);
           apply_local_resolution_result(result, localCalls, sampleDivergence,
                                         divergenceThreshold);
+          accumulate_localmix_profile_candidates(
+              result, ncbiTaxdump, partStats.localmix_masses);
           if (!result.taxidCount.empty() &&
               result.taxidCount.front().first == "unclassified") {
             ++partStats.unclassified;
           } else {
             ++partStats.classified;
+            if (!result.taxidCount.empty()) {
+              const uint32_t decisionTaxid =
+                  taxid_text_to_u32_or_zero(result.taxidCount.front().first);
+              if (decisionTaxid != 0) {
+                partStats.decision_taxid_counts[decisionTaxid] += 1.0;
+              }
+              const uint32_t decisionSpecies =
+                  taxid_text_to_species(result.taxidCount.front().first,
+                                        ncbiTaxdump);
+              if (decisionSpecies != 0) {
+                partStats.decision_species_counts[decisionSpecies] += 1.0;
+              }
+            }
           }
           ChimeraClassify::writeResultRecord(partOs, result, postTopkOss);
         }
@@ -2097,6 +2960,824 @@ static void write_presence_evidence(
   }
 }
 
+static std::string profile_taxon_name(
+    uint32_t taxid, const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
+  if (ncbiTaxdump && ncbiTaxdump->enabled()) {
+    const std::string &name = ncbiTaxdump->name(taxid);
+    if (!name.empty()) {
+      return name;
+    }
+  }
+  return std::to_string(taxid);
+}
+
+static uint32_t taxid_text_to_species(
+    const std::string &taxidText,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
+  uint32_t taxid = 0;
+  if (!chimera::utils::try_parse_u32(taxidText, taxid) || taxid == 0) {
+    return 0;
+  }
+  if (ncbiTaxdump && ncbiTaxdump->enabled()) {
+    taxid = ncbiTaxdump->to_species(taxid);
+  }
+  return taxid;
+}
+
+static SeqProfileFit make_profile_from_species_counts(
+    const std::unordered_map<uint32_t, double> &speciesCounts,
+    uint64_t inputReads, uint64_t classifiedReads,
+    const chimera::presence::CoverageMeta &coverageMeta,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump);
+
+static uint32_t strict_species_for_taxid(
+    uint32_t taxid, const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
+  if (taxid == 0) {
+    return 0;
+  }
+  if (!(ncbiTaxdump && ncbiTaxdump->enabled())) {
+    return taxid;
+  }
+  const uint32_t species = ncbiTaxdump->to_species(taxid);
+  return is_strict_species_taxid(species, ncbiTaxdump) ? species : 0;
+}
+
+static bool taxid_is_descendant_of(
+    uint32_t taxid, uint32_t ancestor,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
+  if (taxid == 0 || ancestor == 0) {
+    return false;
+  }
+  if (taxid == ancestor) {
+    return true;
+  }
+  if (!(ncbiTaxdump && ncbiTaxdump->enabled()) ||
+      taxid >= ncbiTaxdump->parent.size()) {
+    return false;
+  }
+  uint32_t cur = taxid;
+  for (int steps = 0; steps < 128; ++steps) {
+    if (cur == 0 || cur >= ncbiTaxdump->parent.size()) {
+      break;
+    }
+    const uint32_t parent = ncbiTaxdump->parent[cur];
+    if (parent == 0 || parent == cur) {
+      break;
+    }
+    if (parent == ancestor) {
+      return true;
+    }
+    cur = parent;
+  }
+  return false;
+}
+
+static SeqProfileFit make_profile_from_species_masses(
+    const SpeciesProfileMasses &masses,
+    const chimera::presence::CoverageMeta &coverageMeta,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
+  SeqProfileFit fit;
+  fit.input_reads = masses.input_reads;
+  fit.reads_with_candidates = masses.reads_with_candidates;
+  fit.multi_candidate_reads = masses.multi_candidate_reads;
+  fit.candidate_edges = masses.candidate_edges;
+
+  for (const auto &[species, value] : masses.assigned_reads) {
+    if (species != 0 && value > 0.0) {
+      fit.assigned_reads += value;
+    }
+  }
+  for (const auto &[species, value] : masses.assigned_features) {
+    if (species != 0 && value > 0.0) {
+      fit.assigned_features += value;
+    }
+  }
+
+  const auto scale_samples =
+      build_species_callable_scale_samples(coverageMeta, ncbiTaxdump);
+  double length_scaled_sum = 0.0;
+  double sqrt_length_scaled_sum = 0.0;
+  double callable_scaled_sum = 0.0;
+  double unique_callable_scaled_sum = 0.0;
+  double feature_length_scaled_sum = 0.0;
+  double feature_sqrt_length_scaled_sum = 0.0;
+
+  fit.rows.reserve(masses.assigned_reads.size());
+  for (const auto &[species, value] : masses.assigned_reads) {
+    if (species == 0 || !(value > 0.0)) {
+      continue;
+    }
+    SeqProfileRow row;
+    row.species_taxid = species;
+    row.assigned_reads = value;
+    if (fit.assigned_reads > 0.0) {
+      row.sequence_abundance = value / fit.assigned_reads;
+    }
+    auto unique_it = masses.unique_reads.find(species);
+    if (unique_it != masses.unique_reads.end()) {
+      row.unique_reads = unique_it->second;
+    }
+    auto feature_it = masses.assigned_features.find(species);
+    if (feature_it != masses.assigned_features.end()) {
+      row.assigned_features = feature_it->second;
+    }
+    auto feature_unique_it = masses.unique_features.find(species);
+    if (feature_unique_it != masses.unique_features.end()) {
+      row.unique_features = feature_unique_it->second;
+    }
+    if (fit.assigned_features > 0.0) {
+      row.feature_abundance = row.assigned_features / fit.assigned_features;
+    }
+    auto scale_it = scale_samples.find(species);
+    if (scale_it != scale_samples.end()) {
+      row.source_count =
+          static_cast<uint32_t>(scale_it->second.genome_lengths.size());
+      row.effective_length = median_length(scale_it->second.genome_lengths);
+      if (row.effective_length > 0.0) {
+        length_scaled_sum += value / row.effective_length;
+        sqrt_length_scaled_sum += value / std::sqrt(row.effective_length);
+        if (row.assigned_features > 0.0) {
+          feature_length_scaled_sum +=
+              row.assigned_features / row.effective_length;
+          feature_sqrt_length_scaled_sum +=
+              row.assigned_features / std::sqrt(row.effective_length);
+        }
+      }
+      row.effective_callable_signatures =
+          median_length(scale_it->second.callable_signatures);
+      if (row.effective_callable_signatures > 0.0) {
+        callable_scaled_sum += value / row.effective_callable_signatures;
+      }
+      row.effective_unique_signatures =
+          median_length(scale_it->second.unique_signatures);
+      if (row.effective_unique_signatures > 0.0) {
+        unique_callable_scaled_sum += value / row.effective_unique_signatures;
+      }
+    }
+    if (ncbiTaxdump && ncbiTaxdump->enabled()) {
+      row.genus_taxid = ncbiTaxdump->to_genus(species);
+    }
+    fit.rows.push_back(row);
+  }
+
+  if (length_scaled_sum > 0.0) {
+    for (auto &row : fit.rows) {
+      if (row.effective_length > 0.0) {
+        row.length_normalized_abundance =
+            (row.assigned_reads / row.effective_length) / length_scaled_sum;
+      }
+    }
+  }
+  if (sqrt_length_scaled_sum > 0.0) {
+    for (auto &row : fit.rows) {
+      if (row.effective_length > 0.0) {
+        row.sqrt_length_normalized_abundance =
+            (row.assigned_reads / std::sqrt(row.effective_length)) /
+            sqrt_length_scaled_sum;
+      }
+    }
+  }
+  if (callable_scaled_sum > 0.0) {
+    for (auto &row : fit.rows) {
+      if (row.effective_callable_signatures > 0.0) {
+        row.callable_normalized_abundance =
+            (row.assigned_reads / row.effective_callable_signatures) /
+            callable_scaled_sum;
+      }
+    }
+  }
+  if (unique_callable_scaled_sum > 0.0) {
+    for (auto &row : fit.rows) {
+      if (row.effective_unique_signatures > 0.0) {
+        row.unique_callable_normalized_abundance =
+            (row.assigned_reads / row.effective_unique_signatures) /
+            unique_callable_scaled_sum;
+      }
+    }
+  }
+  if (feature_length_scaled_sum > 0.0) {
+    for (auto &row : fit.rows) {
+      if (row.effective_length > 0.0 && row.assigned_features > 0.0) {
+        row.feature_length_normalized_abundance =
+            (row.assigned_features / row.effective_length) /
+            feature_length_scaled_sum;
+      }
+    }
+  }
+  if (feature_sqrt_length_scaled_sum > 0.0) {
+    for (auto &row : fit.rows) {
+      if (row.effective_length > 0.0 && row.assigned_features > 0.0) {
+        row.feature_sqrt_length_normalized_abundance =
+            (row.assigned_features / std::sqrt(row.effective_length)) /
+            feature_sqrt_length_scaled_sum;
+      }
+    }
+  }
+
+  std::sort(fit.rows.begin(), fit.rows.end(),
+            [](const SeqProfileRow &lhs, const SeqProfileRow &rhs) {
+              const double la = lhs.length_normalized_abundance > 0.0
+                                    ? lhs.length_normalized_abundance
+                                    : lhs.sequence_abundance;
+              const double ra = rhs.length_normalized_abundance > 0.0
+                                    ? rhs.length_normalized_abundance
+                                    : rhs.sequence_abundance;
+              if (la != ra) {
+                return la > ra;
+              }
+              return lhs.species_taxid < rhs.species_taxid;
+            });
+  return fit;
+}
+
+static SeqProfileFit make_profile_from_species_counts(
+    const std::unordered_map<uint32_t, double> &speciesCounts,
+    uint64_t inputReads, uint64_t classifiedReads,
+    const chimera::presence::CoverageMeta &coverageMeta,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
+  SeqProfileFit fit;
+  fit.input_reads = inputReads;
+  fit.reads_with_candidates = classifiedReads;
+  fit.candidate_edges = classifiedReads;
+  fit.rows.reserve(speciesCounts.size());
+  double assigned_sum = 0.0;
+  for (const auto &[species, value] : speciesCounts) {
+    if (species != 0 && value > 0.0) {
+      assigned_sum += value;
+    }
+  }
+  fit.assigned_reads = assigned_sum;
+
+  const auto scale_samples =
+      build_species_callable_scale_samples(coverageMeta, ncbiTaxdump);
+  double length_scaled_sum = 0.0;
+  double sqrt_length_scaled_sum = 0.0;
+  double callable_scaled_sum = 0.0;
+  double unique_callable_scaled_sum = 0.0;
+  for (const auto &[species, value] : speciesCounts) {
+    if (species == 0 || !(value > 0.0)) {
+      continue;
+    }
+    SeqProfileRow row;
+    row.species_taxid = species;
+    row.assigned_reads = value;
+    row.unique_reads = value;
+    if (assigned_sum > 0.0) {
+      row.sequence_abundance = value / assigned_sum;
+    }
+    auto scale_it = scale_samples.find(species);
+    if (scale_it != scale_samples.end()) {
+      row.source_count =
+          static_cast<uint32_t>(scale_it->second.genome_lengths.size());
+      row.effective_length = median_length(scale_it->second.genome_lengths);
+      if (row.effective_length > 0.0) {
+        length_scaled_sum += value / row.effective_length;
+        sqrt_length_scaled_sum += value / std::sqrt(row.effective_length);
+      }
+      row.effective_callable_signatures =
+          median_length(scale_it->second.callable_signatures);
+      if (row.effective_callable_signatures > 0.0) {
+        callable_scaled_sum += value / row.effective_callable_signatures;
+      }
+      row.effective_unique_signatures =
+          median_length(scale_it->second.unique_signatures);
+      if (row.effective_unique_signatures > 0.0) {
+        unique_callable_scaled_sum += value / row.effective_unique_signatures;
+      }
+    }
+    if (ncbiTaxdump && ncbiTaxdump->enabled()) {
+      row.genus_taxid = ncbiTaxdump->to_genus(species);
+    }
+    fit.rows.push_back(row);
+  }
+  if (length_scaled_sum > 0.0) {
+    for (auto &row : fit.rows) {
+      if (row.effective_length > 0.0) {
+        row.length_normalized_abundance =
+            (row.assigned_reads / row.effective_length) / length_scaled_sum;
+      }
+    }
+  }
+  if (sqrt_length_scaled_sum > 0.0) {
+    for (auto &row : fit.rows) {
+      if (row.effective_length > 0.0) {
+        row.sqrt_length_normalized_abundance =
+            (row.assigned_reads / std::sqrt(row.effective_length)) /
+            sqrt_length_scaled_sum;
+      }
+    }
+  }
+  if (callable_scaled_sum > 0.0) {
+    for (auto &row : fit.rows) {
+      if (row.effective_callable_signatures > 0.0) {
+        row.callable_normalized_abundance =
+            (row.assigned_reads / row.effective_callable_signatures) /
+            callable_scaled_sum;
+      }
+    }
+  }
+  if (unique_callable_scaled_sum > 0.0) {
+    for (auto &row : fit.rows) {
+      if (row.effective_unique_signatures > 0.0) {
+        row.unique_callable_normalized_abundance =
+            (row.assigned_reads / row.effective_unique_signatures) /
+            unique_callable_scaled_sum;
+      }
+    }
+  }
+  return fit;
+}
+
+static double primary_profile_abundance(const SeqProfileRow &row,
+                                        PrimaryProfileScale primaryScale) {
+  if (primaryScale == PrimaryProfileScale::LengthNormalized) {
+    return row.length_normalized_abundance > 0.0
+               ? row.length_normalized_abundance
+               : row.sequence_abundance;
+  }
+  if (primaryScale == PrimaryProfileScale::SqrtLengthNormalized) {
+    return row.sqrt_length_normalized_abundance > 0.0
+               ? row.sqrt_length_normalized_abundance
+               : row.sequence_abundance;
+  }
+  if (primaryScale == PrimaryProfileScale::CallableNormalized) {
+    return row.callable_normalized_abundance > 0.0
+               ? row.callable_normalized_abundance
+               : row.sequence_abundance;
+  }
+  if (primaryScale == PrimaryProfileScale::UniqueCallableNormalized) {
+    return row.unique_callable_normalized_abundance > 0.0
+               ? row.unique_callable_normalized_abundance
+               : row.sequence_abundance;
+  }
+  return row.sequence_abundance;
+}
+
+static const char *primary_profile_scale_label(
+    PrimaryProfileScale primaryScale) {
+  switch (primaryScale) {
+  case PrimaryProfileScale::LengthNormalized:
+    return "length_normalized_abundance";
+  case PrimaryProfileScale::SqrtLengthNormalized:
+    return "sqrt_length_normalized_abundance";
+  case PrimaryProfileScale::CallableNormalized:
+    return "callable_signature_normalized_abundance";
+  case PrimaryProfileScale::UniqueCallableNormalized:
+    return "unique_signature_normalized_abundance";
+  case PrimaryProfileScale::SequenceAbundance:
+    return "sequence_abundance";
+  }
+  return "sequence_abundance";
+}
+
+static std::string clean_profile_tsv_field(std::string value) {
+  for (char &ch : value) {
+    if (ch == '\t' || ch == '\n' || ch == '\r') {
+      ch = ' ';
+    }
+  }
+  return value;
+}
+
+static uint32_t
+profile_parent_taxid(uint32_t taxid,
+                     const ChimeraClassify::NcbiTaxdump *taxdump) {
+  if (taxdump == nullptr || !taxdump->enabled() || taxid == 0) {
+    return 0;
+  }
+  const uint32_t genus = taxdump->to_genus(taxid);
+  if (genus != 0) {
+    return genus;
+  }
+  return taxid < taxdump->parent.size() ? taxdump->parent[taxid] : 0;
+}
+
+struct ClassifierResponseReportabilityMeta {
+  std::unordered_map<uint32_t, uint32_t> genus_species_count;
+};
+
+static ClassifierResponseReportabilityMeta build_classifier_response_meta(
+    const chimera::presence::CoverageMeta &coverageMeta,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
+  ClassifierResponseReportabilityMeta meta;
+  if (ncbiTaxdump == nullptr || !ncbiTaxdump->enabled()) {
+    return meta;
+  }
+  std::unordered_map<uint32_t, std::unordered_set<uint32_t>> by_genus;
+  by_genus.reserve(coverageMeta.entries.size());
+  for (const auto &entry : coverageMeta.entries) {
+    uint32_t taxid = 0;
+    if (!chimera::utils::try_parse_u32(entry.taxid, taxid) || taxid == 0) {
+      continue;
+    }
+    const uint32_t species = ncbiTaxdump->to_species(taxid);
+    if (species == 0) {
+      continue;
+    }
+    const uint32_t genus = ncbiTaxdump->to_genus(species);
+    if (genus == 0) {
+      continue;
+    }
+    by_genus[genus].insert(species);
+  }
+  for (const auto &[genus, species] : by_genus) {
+    const uint32_t count = static_cast<uint32_t>(species.size());
+    for (uint32_t taxid : species) {
+      meta.genus_species_count[taxid] = count;
+    }
+  }
+  return meta;
+}
+
+static std::string classifier_response_column_type(const SeqProfileRow &row) {
+  if (!(row.effective_callable_signatures > 0.0)) {
+    return "unusable_no_callable_exposure";
+  }
+  if (row.source_count <= 1) {
+    return "single_source_limited";
+  }
+  return "species_resolvable";
+}
+
+static double classifier_response_effective_taxa(
+    const std::vector<double> &normalizedAbundances) {
+  double sum_sq = 0.0;
+  for (double value : normalizedAbundances) {
+    if (value > 0.0 && std::isfinite(value)) {
+      sum_sq += value * value;
+    }
+  }
+  if (!(sum_sq > 0.0)) {
+    return 0.0;
+  }
+  return 1.0 / sum_sq;
+}
+
+static double classifier_response_dynamic_report_floor_percent(
+    const std::vector<double> &normalizedAbundances) {
+  const double effective_taxa =
+      classifier_response_effective_taxa(normalizedAbundances);
+  if (!(effective_taxa > 0.0) || !std::isfinite(effective_taxa)) {
+    return 0.05;
+  }
+  return std::clamp(0.5 / effective_taxa, 0.01, 0.05);
+}
+
+static uint64_t classifier_response_min_read_support(const SeqProfileFit &fit) {
+  const uint64_t reads = fit.reads_with_candidates > 0 ? fit.reads_with_candidates
+                                                       : fit.input_reads;
+  const double support = 0.01 * std::sqrt(static_cast<double>(reads));
+  return static_cast<uint64_t>(std::max<double>(3.0, std::ceil(support)));
+}
+
+static std::unordered_map<uint32_t, double>
+profile_abundance_by_species(const SeqProfileFit &fit,
+                             PrimaryProfileScale scale) {
+  std::unordered_map<uint32_t, double> mass;
+  mass.reserve(fit.rows.size());
+  double total = 0.0;
+  for (const SeqProfileRow &row : fit.rows) {
+    if (row.species_taxid == 0) {
+      continue;
+    }
+    const double abundance = primary_profile_abundance(row, scale);
+    if (!(abundance > 0.0) || !std::isfinite(abundance)) {
+      continue;
+    }
+    mass[row.species_taxid] += abundance;
+    total += abundance;
+  }
+  if (total > 0.0) {
+    const double inv_total = 1.0 / total;
+    for (auto &[taxid, value] : mass) {
+      (void)taxid;
+      value *= inv_total;
+    }
+  }
+  return mass;
+}
+
+static void write_classifier_response_reportable_profile_outputs(
+    const std::string &nativePath, const std::string &camiPath,
+    const std::string &debugPath, const std::string &tracePath,
+    const SeqProfileFit &fit, const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
+    const chimera::presence::CoverageMeta &coverageMeta,
+    const SeqProfileFit *localmixFit = nullptr,
+    const char *responseSourceOverride = nullptr,
+    PrimaryProfileScale primaryScale = PrimaryProfileScale::CallableNormalized) {
+  struct CandidateRow {
+    const SeqProfileRow *row{nullptr};
+    double raw_abundance{0.0};
+    double raw_percent{0.0};
+    double response_abundance{0.0};
+    double response_percent{0.0};
+    bool kept{false};
+    std::string column_type;
+    std::string reportability;
+    uint32_t genus_species_count{0};
+  };
+
+  constexpr const char *kProfileInput =
+      "classifier_response_sparse_reportability_v1";
+  const PrimaryProfileScale kScale = primaryScale;
+
+  std::vector<CandidateRow> rows;
+  rows.reserve(fit.rows.size());
+  double raw_total = 0.0;
+  for (const SeqProfileRow &row : fit.rows) {
+    if (row.species_taxid == 0) {
+      continue;
+    }
+    const double abundance = primary_profile_abundance(row, kScale);
+    if (!(abundance > 0.0) || !std::isfinite(abundance)) {
+      continue;
+    }
+    raw_total += abundance;
+    rows.push_back(
+        CandidateRow{&row, abundance, 0.0, 0.0, 0.0, false, {}, {}, 0});
+  }
+
+  std::vector<double> normalized;
+  normalized.reserve(rows.size());
+  if (raw_total > 0.0) {
+    for (CandidateRow &entry : rows) {
+      entry.raw_abundance /= raw_total;
+      entry.raw_percent = 100.0 * entry.raw_abundance;
+      normalized.push_back(entry.raw_abundance);
+    }
+  }
+  const double effective_taxa =
+      classifier_response_effective_taxa(normalized);
+  const double report_floor_percent =
+      classifier_response_dynamic_report_floor_percent(normalized);
+  const uint64_t min_read_support =
+      classifier_response_min_read_support(fit);
+  const auto meta = build_classifier_response_meta(coverageMeta, ncbiTaxdump);
+  const bool use_localmix_response = responseSourceOverride == nullptr &&
+                                     localmixFit != nullptr &&
+                                     effective_taxa >= 32.0;
+  const auto localmix_mass =
+      use_localmix_response
+          ? profile_abundance_by_species(*localmixFit,
+                                         PrimaryProfileScale::SequenceAbundance)
+          : std::unordered_map<uint32_t, double>{};
+  const char *abundance_response_source =
+      responseSourceOverride != nullptr
+          ? responseSourceOverride
+          : (use_localmix_response ? "localmix_restricted_response"
+                                   : "callable_diagonal_response");
+
+  uint64_t no_exposure_rows = 0;
+  uint64_t low_support_rows = 0;
+  uint64_t below_floor_rows = 0;
+  uint64_t single_source_rows = 0;
+  uint64_t reportable_without_response_rows = 0;
+  double kept_mass = 0.0;
+  double kept_observation_mass = 0.0;
+  double nuisance_mass = 0.0;
+  double single_source_kept_mass = 0.0;
+
+  for (CandidateRow &entry : rows) {
+    const SeqProfileRow &row = *entry.row;
+    entry.column_type = classifier_response_column_type(row);
+    auto genus_it = meta.genus_species_count.find(row.species_taxid);
+    if (genus_it != meta.genus_species_count.end()) {
+      entry.genus_species_count = genus_it->second;
+    }
+
+    if (!(row.effective_callable_signatures > 0.0)) {
+      entry.reportability = "nuisance_no_callable_exposure";
+      ++no_exposure_rows;
+    } else if (row.assigned_reads <
+               static_cast<double>(min_read_support)) {
+      entry.reportability = "nuisance_low_runtime_support";
+      ++low_support_rows;
+    } else if (entry.raw_percent < report_floor_percent) {
+      entry.reportability = "nuisance_below_dynamic_detection_floor";
+      ++below_floor_rows;
+    } else if (row.source_count <= 1) {
+      entry.kept = true;
+      entry.reportability = "single_source_limited_reportable";
+      ++single_source_rows;
+    } else {
+      entry.kept = true;
+      entry.reportability = "classifier_response_reportable";
+    }
+
+    if (entry.kept) {
+      entry.response_abundance = entry.raw_abundance;
+      if (use_localmix_response) {
+        auto response_it = localmix_mass.find(row.species_taxid);
+        entry.response_abundance =
+            response_it == localmix_mass.end() ? 0.0 : response_it->second;
+      }
+      if (!(entry.response_abundance > 0.0) ||
+          !std::isfinite(entry.response_abundance)) {
+        entry.kept = false;
+        entry.reportability = "nuisance_no_abundance_response";
+        ++reportable_without_response_rows;
+        nuisance_mass += entry.raw_abundance;
+        continue;
+      }
+      kept_mass += entry.response_abundance;
+      kept_observation_mass += entry.raw_abundance;
+      if (row.source_count <= 1) {
+        single_source_kept_mass += entry.response_abundance;
+      }
+    } else {
+      nuisance_mass += entry.raw_abundance;
+    }
+    entry.response_percent = 100.0 * entry.response_abundance;
+  }
+
+  std::sort(rows.begin(), rows.end(), [](const CandidateRow &lhs,
+                                         const CandidateRow &rhs) {
+    const double lhs_response = lhs.kept ? lhs.response_abundance : 0.0;
+    const double rhs_response = rhs.kept ? rhs.response_abundance : 0.0;
+    if (lhs_response != rhs_response) {
+      return lhs_response > rhs_response;
+    }
+    if (lhs.kept != rhs.kept) {
+      return lhs.kept;
+    }
+    if (lhs.raw_abundance != rhs.raw_abundance) {
+      return lhs.raw_abundance > rhs.raw_abundance;
+    }
+    const uint32_t lt = lhs.row == nullptr ? 0 : lhs.row->species_taxid;
+    const uint32_t rt = rhs.row == nullptr ? 0 : rhs.row->species_taxid;
+    return lt < rt;
+  });
+
+  auto ensure_parent = [](const std::string &path) {
+    const auto parent = std::filesystem::path(path).parent_path();
+    if (!parent.empty()) {
+      std::filesystem::create_directories(parent);
+    }
+  };
+
+  ensure_parent(nativePath);
+  {
+    std::ofstream out(nativePath, std::ios::out | std::ios::binary);
+    if (!out.is_open()) {
+      throw std::runtime_error(
+          "Failed to open classifier-response profile: " + nativePath);
+    }
+    out << "# profile_input=" << kProfileInput << "\n";
+    out << "# count_unit=" << primary_profile_scale_label(kScale) << "\n";
+    out << "# abundance_basis=reportability_constrained_response_normalized\n";
+    out << "# abundance_response_source=" << abundance_response_source << "\n";
+    out << "# classifier_response_effective_taxa=" << effective_taxa << "\n";
+    out << "# report_floor_policy=clamp(0.5/effective_taxa,0.01,0.05)\n";
+    out << "# dynamic_report_min_percent=" << report_floor_percent << "\n";
+    out << "# min_runtime_read_support=" << min_read_support << "\n";
+    out << "# source_profile_rows=" << rows.size() << "\n";
+    out << "# reportable_profile_rows="
+        << std::count_if(rows.begin(), rows.end(),
+                         [](const CandidateRow &row) { return row.kept; })
+        << "\n";
+    out << "# raw_biological_mass=" << raw_total << "\n";
+    out << "# kept_response_mass=" << kept_mass << "\n";
+    out << "# kept_observation_mass=" << kept_observation_mass << "\n";
+    out << "# nuisance_raw_mass=" << nuisance_mass << "\n";
+    out << "# single_source_limited_kept_mass=" << single_source_kept_mass
+        << "\n";
+    out << "# no_callable_exposure_rows=" << no_exposure_rows << "\n";
+    out << "# low_runtime_support_rows=" << low_support_rows << "\n";
+    out << "# below_dynamic_floor_rows=" << below_floor_rows << "\n";
+    out << "# reportable_without_response_rows="
+        << reportable_without_response_rows << "\n";
+    out << "rank\ttaxid\tname\tparent_taxid\trelative_abundance"
+        << "\tassigned_mass\teffective_yield\tread_support"
+        << "\tmeasurement_unit_support\tsingle_source_limited\treportability\n";
+    out << std::setprecision(17);
+    if (kept_mass > 0.0) {
+      for (const CandidateRow &entry : rows) {
+        if (!entry.kept || entry.row == nullptr) {
+          continue;
+        }
+        const SeqProfileRow &row = *entry.row;
+        out << "species\t" << row.species_taxid << '\t'
+            << clean_profile_tsv_field(
+                   profile_taxon_name(row.species_taxid, ncbiTaxdump))
+            << '\t' << profile_parent_taxid(row.species_taxid, ncbiTaxdump)
+            << '\t' << (entry.response_abundance / kept_mass) << '\t'
+            << entry.response_abundance << '\t'
+            << row.effective_callable_signatures << '\t'
+            << row.assigned_reads << '\t' << row.source_count << '\t'
+            << (row.source_count <= 1 ? 1 : 0) << '\t'
+            << entry.reportability << '\n';
+      }
+    }
+    out.close();
+    if (!out.good()) {
+      throw std::runtime_error(
+          "Failed to close classifier-response profile: " + nativePath);
+    }
+  }
+
+  ensure_parent(camiPath);
+  {
+    std::ofstream out(camiPath, std::ios::out | std::ios::binary);
+    if (!out.is_open()) {
+      throw std::runtime_error(
+          "Failed to open classifier-response CAMI profile: " + camiPath);
+    }
+    out << "# profile_input=" << kProfileInput << "\n";
+    out << "# count_unit=" << primary_profile_scale_label(kScale) << "\n";
+    out << "# abundance_basis=reportability_constrained_response_normalized\n";
+    out << "# abundance_response_source=" << abundance_response_source << "\n";
+    out << "# classifier_response_effective_taxa=" << effective_taxa << "\n";
+    out << "# dynamic_report_min_percent=" << report_floor_percent << "\n";
+    out << "# min_runtime_read_support=" << min_read_support << "\n";
+    out << "# kept_response_mass=" << kept_mass << "\n";
+    out << "# kept_observation_mass=" << kept_observation_mass << "\n";
+    out << "# nuisance_raw_mass=" << nuisance_mass << "\n";
+    out << "@@TAXID\tRANK\tTAXPATH\tTAXPATHSN\tPERCENTAGE\n";
+    out << std::setprecision(12);
+    if (kept_mass > 0.0) {
+      for (const CandidateRow &entry : rows) {
+        if (!entry.kept || entry.row == nullptr) {
+          continue;
+        }
+        const SeqProfileRow &row = *entry.row;
+        const std::string taxid = std::to_string(row.species_taxid);
+        const std::string name =
+            profile_taxon_name(row.species_taxid, ncbiTaxdump);
+        out << taxid << "\tspecies\t" << taxid << '\t' << name << '\t'
+            << (100.0 * entry.response_abundance / kept_mass) << '\n';
+      }
+    }
+    out.close();
+    if (!out.good()) {
+      throw std::runtime_error(
+          "Failed to close classifier-response CAMI profile: " + camiPath);
+    }
+  }
+
+  auto write_debug_like = [&](const std::string &path, const char *kind) {
+    ensure_parent(path);
+    std::ofstream out(path, std::ios::out | std::ios::binary);
+    if (!out.is_open()) {
+      throw std::runtime_error(
+          "Failed to open classifier-response debug profile: " + path);
+    }
+    out << "# profile_input=" << kProfileInput << "\n";
+    out << "# debug_kind=" << kind << "\n";
+    out << "key\tvalue\n";
+    out << "source_profile_rows\t" << rows.size() << "\n";
+    out << "reportable_profile_rows\t"
+        << std::count_if(rows.begin(), rows.end(),
+                         [](const CandidateRow &row) { return row.kept; })
+        << "\n";
+    out << "dynamic_report_min_percent\t" << report_floor_percent << "\n";
+    out << "abundance_response_source\t" << abundance_response_source << "\n";
+    out << "classifier_response_effective_taxa\t" << effective_taxa << "\n";
+    out << "min_runtime_read_support\t" << min_read_support << "\n";
+    out << "raw_biological_mass\t" << raw_total << "\n";
+    out << "kept_response_mass\t" << kept_mass << "\n";
+    out << "kept_observation_mass\t" << kept_observation_mass << "\n";
+    out << "nuisance_raw_mass\t" << nuisance_mass << "\n";
+    out << "single_source_limited_kept_mass\t" << single_source_kept_mass
+        << "\n";
+    out << "no_callable_exposure_rows\t" << no_exposure_rows << "\n";
+    out << "low_runtime_support_rows\t" << low_support_rows << "\n";
+    out << "below_dynamic_floor_rows\t" << below_floor_rows << "\n";
+    out << "reportable_without_response_rows\t"
+        << reportable_without_response_rows << "\n";
+    out << "\n";
+    out << "taxid\tname\traw_percent\tresponse_percent\trelative_if_reported"
+        << "\tassigned_reads\teffective_callable_exposure\tsource_count"
+        << "\tgenus_species_count\tcolumn_type\tkept\treportability\n";
+    out << std::setprecision(12);
+    for (const CandidateRow &entry : rows) {
+      if (entry.row == nullptr) {
+        continue;
+      }
+      const SeqProfileRow &row = *entry.row;
+      out << row.species_taxid << '\t'
+          << clean_profile_tsv_field(
+                 profile_taxon_name(row.species_taxid, ncbiTaxdump))
+          << '\t' << entry.raw_percent << '\t'
+          << entry.response_percent << '\t'
+          << (entry.kept && kept_mass > 0.0
+                  ? 100.0 * entry.response_abundance / kept_mass
+                  : 0.0)
+          << '\t' << row.assigned_reads << '\t'
+          << row.effective_callable_signatures << '\t' << row.source_count
+          << '\t' << entry.genus_species_count << '\t'
+          << entry.column_type << '\t' << (entry.kept ? 1 : 0) << '\t'
+          << entry.reportability << '\n';
+    }
+    out.close();
+    if (!out.good()) {
+      throw std::runtime_error(
+          "Failed to close classifier-response debug profile: " + path);
+    }
+  };
+  write_debug_like(debugPath, "debug");
+  write_debug_like(tracePath, "trace");
+}
+
 static ChimeraClassify::PresenceDecision presence_decision_from_table(
     const ChimeraClassify::PresenceEvidenceTable &table) {
   ChimeraClassify::PresenceDecision decision;
@@ -2121,6 +3802,71 @@ static EvidenceAggregateMap merge_evidence_aggregates(
   return merged;
 }
 
+static SpeciesProfileMasses
+merge_localmix_profile_masses(const std::vector<SpoolOutputPartStats> &parts) {
+  SpeciesProfileMasses merged;
+  auto merge_map = [](std::unordered_map<uint32_t, double> &dst,
+                      const std::unordered_map<uint32_t, double> &src) {
+    for (const auto &[species, value] : src) {
+      dst[species] += value;
+    }
+  };
+
+  for (const auto &part : parts) {
+    const SpeciesProfileMasses &src = part.localmix_masses;
+    merged.input_reads += src.input_reads;
+    merged.reads_with_candidates += src.reads_with_candidates;
+    merged.multi_candidate_reads += src.multi_candidate_reads;
+    merged.candidate_edges += src.candidate_edges;
+    merge_map(merged.assigned_reads, src.assigned_reads);
+    merge_map(merged.unique_reads, src.unique_reads);
+    merge_map(merged.assigned_features, src.assigned_features);
+    merge_map(merged.unique_features, src.unique_features);
+  }
+  return merged;
+}
+
+static std::string lowercase_copy(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  return value;
+}
+
+static bool ends_with_suffix(const std::string &value,
+                             const std::string &suffix) {
+  return value.size() >= suffix.size() &&
+         value.compare(value.size() - suffix.size(), suffix.size(), suffix) ==
+             0;
+}
+
+static bool path_looks_like_fasta(const std::string &inputPath) {
+  std::string name =
+      lowercase_copy(std::filesystem::path(inputPath).filename().string());
+  for (const std::string &compressed : {".gz", ".zst", ".bz2", ".xz"}) {
+    if (ends_with_suffix(name, compressed)) {
+      name.resize(name.size() - compressed.size());
+      break;
+    }
+  }
+  return ends_with_suffix(name, ".fa") || ends_with_suffix(name, ".fasta") ||
+         ends_with_suffix(name, ".fna") || ends_with_suffix(name, ".ffn");
+}
+
+static bool classify_inputs_are_unweighted_fasta(
+    const ChimeraClassify::ClassifyConfig &config) {
+  if (!config.pairedFiles.empty() || config.singleFiles.empty()) {
+    return false;
+  }
+  for (const auto &path : config.singleFiles) {
+    if (!path_looks_like_fasta(path)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static void write_spool_em_results(
     const std::vector<std::string> &spoolPaths, const SpoolEMFit &fit,
     const SpoolSampleMixtureFit &sampleMixtureFit,
@@ -2129,9 +3875,11 @@ static void write_spool_em_results(
     const ChimeraClassify::TaxDict &tax,
     const ChimeraClassify::PresenceDecision *presenceDecision,
     const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
+    const chimera::presence::CoverageMeta &coverageMeta,
     const ChimeraClassify::ClassifyConfig &config,
     const LocalResolutionCallMap *localCalls, double sampleDivergence,
-    ChimeraClassify::FileInfo &fileInfo) {
+    ChimeraClassify::FileInfo &fileInfo,
+    std::unordered_map<uint32_t, double> *profileClassTaxonPriors = nullptr) {
   const std::string outputFile = resolve_tsv_output_path(config.outputFile);
 
   const size_t part_count = spoolPaths.size();
@@ -2163,8 +3911,7 @@ static void write_spool_em_results(
             spoolPaths[part_idx], partPaths[part_idx], fit, sampleMixtureFit,
             options, decisionConfig, tax, presenceDecision, ncbiTaxdump,
             localCalls, sampleDivergence,
-            config.local_resolution_divergence_threshold,
-            partStats[part_idx],
+            config.local_resolution_divergence_threshold, partStats[part_idx],
             postemPrimaryEvidenceAggregates[part_idx],
             postemDecisionEvidenceAggregates[part_idx]);
       });
@@ -2175,6 +3922,75 @@ static void write_spool_em_results(
     cleanup_part_paths(partPaths);
     throw;
   }
+  std::unordered_map<uint32_t, double> decisionSpeciesCounts;
+  uint64_t decisionClassifiedReads = 0;
+  for (const auto &stats : partStats) {
+    decisionClassifiedReads += stats.classified;
+    for (const auto &[species, value] : stats.decision_species_counts) {
+      decisionSpeciesCounts[species] += value;
+    }
+  }
+  SeqProfileFit classifyDecisionProfile = make_profile_from_species_counts(
+      decisionSpeciesCounts, fileInfo.classifiedNum + fileInfo.unclassifiedNum,
+      decisionClassifiedReads, coverageMeta, ncbiTaxdump);
+  if (profileClassTaxonPriors != nullptr) {
+    profileClassTaxonPriors->clear();
+    if (ncbiTaxdump != nullptr && ncbiTaxdump->enabled()) {
+      for (const SeqProfileRow &row : classifyDecisionProfile.rows) {
+        const double value = row.callable_normalized_abundance > 0.0
+                                 ? row.callable_normalized_abundance
+                                 : row.sequence_abundance;
+        if (row.species_taxid == 0 || !(value > 0.0)) {
+          continue;
+        }
+        const uint32_t species = ncbiTaxdump->to_species(row.species_taxid);
+        const uint32_t genus = ncbiTaxdump->to_genus(species);
+        if (species != 0) {
+          (*profileClassTaxonPriors)[species] += value;
+        }
+        if (genus != 0) {
+          (*profileClassTaxonPriors)[genus] += value;
+        }
+      }
+    }
+  }
+  SpeciesProfileMasses localmixMasses =
+      merge_localmix_profile_masses(partStats);
+  SeqProfileFit localmixProfile =
+      make_profile_from_species_masses(localmixMasses, coverageMeta,
+                                       ncbiTaxdump);
+  const SeqProfileFit *profileOutputFit = &classifyDecisionProfile;
+  const SeqProfileFit *profileOutputLocalmixFit = &localmixProfile;
+  const char *profileResponseSourceOverride = nullptr;
+  PrimaryProfileScale profileOutputScale =
+      PrimaryProfileScale::CallableNormalized;
+  if (localCalls != nullptr && sampleDivergence >=
+                                  config.local_resolution_divergence_threshold) {
+    profileOutputLocalmixFit = nullptr;
+    profileResponseSourceOverride = "lpc_final_readcount";
+    profileOutputScale = PrimaryProfileScale::SequenceAbundance;
+  }
+  write_classifier_response_reportable_profile_outputs(
+      resolve_profile_variant_output_path(
+          outputFile, "ChimeraProfile.classifier_response.tsv",
+          ".profile.classifier_response.tsv"),
+      resolve_profile_variant_output_path(
+          outputFile, "ChimeraProfile.classifier_response.cami.tsv",
+          ".profile.classifier_response.cami.tsv"),
+      resolve_profile_variant_output_path(
+          outputFile, "ChimeraProfile.classifier_response.debug.tsv",
+          ".profile.classifier_response.debug.tsv"),
+      resolve_profile_variant_output_path(
+          outputFile, "ChimeraProfile.classifier_response.trace.tsv",
+          ".profile.classifier_response.trace.tsv"),
+      *profileOutputFit, ncbiTaxdump, coverageMeta, profileOutputLocalmixFit,
+      profileResponseSourceOverride, profileOutputScale);
+  std::cout << "[classify][profile] classifier-response reportable profile"
+            << " path="
+            << resolve_profile_variant_output_path(
+                   outputFile, "ChimeraProfile.classifier_response.tsv",
+                   ".profile.classifier_response.tsv")
+            << "\n";
   EvidenceAggregateMap postemPrimaryEvidenceMass =
       merge_evidence_aggregates(postemPrimaryEvidenceAggregates);
   EvidenceAggregateMap postemDecisionEvidenceMass =
@@ -2395,6 +4211,7 @@ void run(ClassifyConfig config) {
   WeightingContext weightCtx;
   std::unique_ptr<CountMinSketch> freqSketch;
   std::unique_ptr<NcbiTaxdump> ncbiTaxdump;
+  std::unique_ptr<NcbiTaxdump> profileTaxdump;
   if (freq_model_enabled) {
     try {
       freqSketch = std::make_unique<CountMinSketch>(
@@ -2438,9 +4255,24 @@ void run(ClassifyConfig config) {
   // Optional NCBI strain/subspecies -> species collapse.
   // This helps avoid candidate saturation by many strain taxids, which can
   // prevent sister species from entering pre-EM/posterior lists.
-  ncbiTaxdump = maybe_load_ncbi_taxdump(taxonomyKind);
+  if (taxonomyKind == "ncbi") {
+    ncbiTaxdump = maybe_load_profiledb_taxonomy_for_profile(config.dbFile);
+    if (!ncbiTaxdump) {
+      ncbiTaxdump = maybe_load_ncbi_taxdump(taxonomyKind);
+    }
+  }
+  if (!ncbiTaxdump) {
+    ncbiTaxdump = maybe_load_tax_tsv_for_profile(config.dbFile);
+  }
   if (ncbiTaxdump && ncbiTaxdump->enabled()) {
     weightCtx.ncbiTaxdump = ncbiTaxdump.get();
+  }
+  profileTaxdump = maybe_load_profiledb_taxonomy_for_profile(config.dbFile);
+  if (!profileTaxdump) {
+    profileTaxdump = maybe_load_ncbi_taxdump_for_profile();
+  }
+  if (!profileTaxdump) {
+    profileTaxdump = maybe_load_tax_tsv_for_profile(config.dbFile);
   }
   if (imcfConfig.featureMethod != 1) {
     throw std::runtime_error(
@@ -2569,7 +4401,6 @@ void run(ClassifyConfig config) {
 
   std::unordered_map<std::string, double> emPriorScale =
       build_em_prior_scale(coverageMeta, presenceDecision, tax, fileInfo);
-  std::vector<chimera::presence::CoverageEntry>().swap(coverageMeta.entries);
 
   EMOptions options;
   options.temp = 1.05;
@@ -2618,8 +4449,8 @@ void run(ClassifyConfig config) {
       const LocalResolutionEligibility localEligibility =
           derive_local_resolution_eligibility(postTopkScores);
       const bool localMayChangeOutput =
-          localResolutionDivergence >=
-              config.local_resolution_divergence_threshold &&
+          (localResolutionDivergence >=
+           config.local_resolution_divergence_threshold) &&
           localEligibility.hard_ambiguity;
       if (!localMayChangeOutput) {
         write_local_resolution_profile_json(
@@ -2830,9 +4661,39 @@ void run(ClassifyConfig config) {
 
     write_spool_em_results(spoolPaths, speciesFit, sampleMixtureFit, options,
                            decisionConfig, tax, &presenceDecision,
-                           weightCtx.ncbiTaxdump, config, localResolutionCallPtr,
-                           localResolutionDivergence, fileInfo);
+                           profileTaxdump && profileTaxdump->enabled()
+                               ? profileTaxdump.get()
+                               : weightCtx.ncbiTaxdump,
+                           coverageMeta, config,
+                           localResolutionCallPtr, localResolutionDivergence,
+                           fileInfo, nullptr);
   }
+  {
+    const std::string outputFile = resolve_tsv_output_path(config.outputFile);
+    copy_profile_file_or_throw(
+        resolve_profile_variant_output_path(
+            outputFile, "ChimeraProfile.classifier_response.tsv",
+            ".profile.classifier_response.tsv"),
+        resolve_profile_output_path(outputFile));
+    copy_profile_file_or_throw(
+        resolve_profile_variant_output_path(
+            outputFile, "ChimeraProfile.classifier_response.cami.tsv",
+            ".profile.classifier_response.cami.tsv"),
+        resolve_profile_cami_output_path(outputFile));
+    copy_profile_file_or_throw(
+        resolve_profile_variant_output_path(
+            outputFile, "ChimeraProfile.classifier_response.debug.tsv",
+            ".profile.classifier_response.debug.tsv"),
+        resolve_native_profile_debug_output_path(outputFile));
+    copy_profile_file_or_throw(
+        resolve_profile_variant_output_path(
+            outputFile, "ChimeraProfile.classifier_response.trace.tsv",
+            ".profile.classifier_response.trace.tsv"),
+        resolve_native_profile_trace_output_path(outputFile));
+    std::cout << "[classify][profile] classifier-response reportable default"
+              << " path=" << resolve_profile_output_path(outputFile) << "\n";
+  }
+  std::vector<chimera::presence::CoverageEntry>().swap(coverageMeta.entries);
   if (keepClassifySpool) {
     std::cout << "[classify][debug] keeping spool=" << spoolDir.string()
               << "\n";
