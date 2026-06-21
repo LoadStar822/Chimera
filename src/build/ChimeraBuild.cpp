@@ -395,12 +395,13 @@ void run(BuildConfig config) {
   const std::filesystem::path databaseRoot = config.output_file;
   const std::filesystem::path corePrefix = databaseRoot / "core";
   const std::filesystem::path corePath = databaseRoot / "core.imcf";
-  const std::filesystem::path localPath =
-      databaseRoot / "local" / "index.nbcidx";
-  const std::filesystem::path repMetadataPath =
-      localPath.parent_path() / (localPath.stem().string() + ".nbcrep.bin");
-  const std::filesystem::path shardManifestPath =
-      localPath.parent_path() / (localPath.stem().string() + ".nbcshards.tsv");
+  const std::filesystem::path localRoot = databaseRoot / "local";
+  const NativeBoundedOutputPaths localPaths{
+      localRoot / "metadata.nbcidx",
+      localRoot / "reps.bin",
+      localRoot / "shards.tsv",
+      localRoot / "shards",
+  };
   if (std::filesystem::exists(databaseRoot) &&
       !std::filesystem::is_directory(databaseRoot)) {
     throw std::runtime_error("database output path exists and is not a directory: " +
@@ -408,7 +409,7 @@ void run(BuildConfig config) {
   }
   std::filesystem::create_directories(databaseRoot);
   if (config.native_bounded_index) {
-    std::filesystem::create_directories(localPath.parent_path());
+    std::filesystem::create_directories(localRoot);
   }
   omp_set_num_threads(config.threads);
   auto build_start = std::chrono::high_resolution_clock::now();
@@ -434,7 +435,7 @@ void run(BuildConfig config) {
     auto local_start = std::chrono::high_resolution_clock::now();
     std::cout << "Building local read resolution data..." << std::endl;
     const NativeBoundedBuildStats localStats =
-        build_native_bounded_index(config, inputFiles, localPath);
+        build_native_bounded_index(config, inputFiles, localPaths);
     auto local_end = std::chrono::high_resolution_clock::now();
     auto local_total_time =
         std::chrono::duration_cast<std::chrono::milliseconds>(local_end -
@@ -455,7 +456,7 @@ void run(BuildConfig config) {
       print_build_time(static_cast<long long>(localStats.layout_seconds * 1000.0));
       std::cout << "Local anchor write time: ";
       print_build_time(static_cast<long long>(localStats.write_seconds * 1000.0));
-      std::cout << "Local data: " << localPath.string() << std::endl;
+      std::cout << "Local data: " << localRoot.string() << std::endl;
       std::cout << "Local data build time: ";
       print_build_time(local_total_time);
       std::cout << std::endl;
@@ -749,8 +750,9 @@ void run(BuildConfig config) {
   saveIMCF(imcf, corePrefix.string(), indexToTaxid, imcfConfig,
            &presence_meta);
   chimera::local_resolution::write_manifest(
-      corePath, config.native_bounded_index, localPath, repMetadataPath,
-      shardManifestPath, config.native_bounded_k, config.native_bounded_w,
+      corePath, config.native_bounded_index, localPaths.metadata_index,
+      localPaths.rep_metadata, localPaths.shard_manifest,
+      config.native_bounded_k, config.native_bounded_w,
       config.native_bounded_targets_per_species);
   auto save_end = std::chrono::high_resolution_clock::now();
   auto save_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(

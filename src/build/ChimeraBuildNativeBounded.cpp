@@ -560,15 +560,19 @@ uint64_t write_representative_pool_for_genus(
 
 NativeBoundedBuildStats build_native_bounded_index_direct_final(
     const BuildConfig &config, const std::vector<InputTask> &tasks,
-    const std::filesystem::path &outputPath) {
+    const NativeBoundedOutputPaths &paths) {
   const auto countStarted = std::chrono::steady_clock::now();
-  std::filesystem::create_directories(outputPath.parent_path().empty()
+  std::filesystem::create_directories(paths.metadata_index.parent_path().empty()
                                           ? std::filesystem::path(".")
-                                          : outputPath.parent_path());
-  const std::filesystem::path shardDir =
-      outputPath.parent_path() / (outputPath.stem().string() + ".nbcshards");
-  std::filesystem::remove_all(shardDir);
-  std::filesystem::create_directories(shardDir);
+                                          : paths.metadata_index.parent_path());
+  std::filesystem::create_directories(paths.rep_metadata.parent_path().empty()
+                                          ? std::filesystem::path(".")
+                                          : paths.rep_metadata.parent_path());
+  std::filesystem::create_directories(paths.shard_manifest.parent_path().empty()
+                                          ? std::filesystem::path(".")
+                                          : paths.shard_manifest.parent_path());
+  std::filesystem::remove_all(paths.shard_dir);
+  std::filesystem::create_directories(paths.shard_dir);
 
   const auto taxdump = load_required_taxdump_for_local_resolution(config);
   NativeBoundedBuildStats stats;
@@ -681,13 +685,9 @@ NativeBoundedBuildStats build_native_bounded_index_direct_final(
 
   const auto layoutStarted = std::chrono::steady_clock::now();
   chimera::native_bounded::write_index_metadata_only(
-      outputPath, config.native_bounded_k, config.native_bounded_w,
+      paths.metadata_index, config.native_bounded_k, config.native_bounded_w,
       rootTargets);
-  const std::filesystem::path shardManifest =
-      outputPath.parent_path() / (outputPath.stem().string() + ".nbcshards.tsv");
-	  const std::filesystem::path repMetadataPath =
-	      outputPath.parent_path() / (outputPath.stem().string() + ".nbcrep.bin");
-	  std::ofstream manifestOut(shardManifest, std::ios::trunc);
+	  std::ofstream manifestOut(paths.shard_manifest, std::ios::trunc);
 	  if (!manifestOut) {
 	    throw std::runtime_error("failed to open native bounded shard manifest");
 	  }
@@ -717,7 +717,8 @@ NativeBoundedBuildStats build_native_bounded_index_direct_final(
         mergedAnchors += plan->anchor_count;
         mergedAnchorBytes += plan->anchor_bytes;
       }
-      const std::filesystem::path shardPath = shardDir / shard_filename(genus);
+      const std::filesystem::path shardPath =
+          paths.shard_dir / shard_filename(genus);
       const uint64_t anchorDataOffset =
           chimera::native_bounded::write_index_header(
               shardPath, config.native_bounded_k, config.native_bounded_w,
@@ -731,7 +732,7 @@ NativeBoundedBuildStats build_native_bounded_index_direct_final(
 	          config.native_bounded_k,
 	          repMetadataRows);
 	    }
-	    chimera::local_resolution::write_rep_metadata(repMetadataPath,
+	    chimera::local_resolution::write_rep_metadata(paths.rep_metadata,
                                                   std::move(repMetadataRows));
     const auto layoutFinished = std::chrono::steady_clock::now();
     stats.layout_seconds =
@@ -852,12 +853,12 @@ NativeBoundedBuildStats build_native_bounded_index(
     const BuildConfig &config,
     const robin_hood::unordered_flat_map<std::string, std::vector<std::string>>
         &inputFiles,
-    const std::filesystem::path &outputPath) {
+    const NativeBoundedOutputPaths &paths) {
   const auto tasks = make_tasks(inputFiles);
 	  if (tasks.empty()) {
 	    throw std::runtime_error("native bounded index build has no valid inputs");
 	  }
-	  return build_native_bounded_index_direct_final(config, tasks, outputPath);
+	  return build_native_bounded_index_direct_final(config, tasks, paths);
 	}
 
 } // namespace ChimeraBuild

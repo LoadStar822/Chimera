@@ -176,6 +176,8 @@ int main(int argc, char **argv) {
   const uint16_t default_threads = default_cli_threads();
 
   bool buildQuietRequested = false;
+  bool buildNoLocalResolution = false;
+  bool classifyNoLocalResolution = false;
 
   // Build
   build
@@ -237,9 +239,15 @@ int main(int argc, char **argv) {
       ->add_option("--taxonomy-dir", buildConfig.taxonomy_dir,
                    "Directory containing taxonomy nodes.dmp for local read resolution")
       ->check(CLI::ExistingDirectory);
+  build->add_flag("--no-local-resolution", buildNoLocalResolution,
+                  "Do not build local read resolution (LPC) data");
   build->add_flag("-q,--quiet", buildQuietRequested, "Quiet output");
 
-  build->callback([&buildConfig, &buildQuietRequested]() {
+  build->callback([&buildConfig, &buildQuietRequested,
+                   &buildNoLocalResolution]() {
+    if (buildNoLocalResolution) {
+      buildConfig.native_bounded_index = false;
+    }
     validate_build_config(buildConfig, buildQuietRequested);
   });
 
@@ -259,7 +267,10 @@ int main(int argc, char **argv) {
 
   // Custom validation function to ensure that the --paired option must have an
   // even number of files
-  classify->callback([&classifyConfig]() {
+  classify->callback([&classifyConfig, &classifyNoLocalResolution]() {
+    if (classifyNoLocalResolution) {
+      classifyConfig.local_resolution_enabled = false;
+    }
     if (!classifyConfig.pairedFiles.empty() &&
         classifyConfig.pairedFiles.size() % 2 != 0) {
       throw CLI::ValidationError(
@@ -307,6 +318,8 @@ int main(int argc, char **argv) {
       ->add_option("-b,--batch-size", classifyConfig.batchSize,
                    "Batch size for classifying")
       ->default_val(400);
+  classify->add_flag("--no-local-resolution", classifyNoLocalResolution,
+                     "Disable local read resolution (LPC) at classify time");
   classify->add_option("--em-iter", classifyConfig.emIter, "EM iteration")
       ->default_val(100);
   classify

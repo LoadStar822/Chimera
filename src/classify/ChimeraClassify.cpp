@@ -2108,6 +2108,7 @@ struct LocalResolutionPanel {
 struct LocalResolutionArtifacts {
   std::filesystem::path index_path;
   std::filesystem::path rep_metadata_path;
+  std::filesystem::path shard_manifest_path;
   uint32_t k{};
 };
 
@@ -2260,6 +2261,8 @@ resolve_local_resolution_artifacts(const std::string &dbFile) {
           corePath, manifest->local_index),
       chimera::local_resolution::materialize_manifest_path(
           corePath, manifest->rep_metadata),
+      chimera::local_resolution::materialize_manifest_path(
+          corePath, manifest->shard_manifest),
       manifest->k,
   };
 }
@@ -4486,10 +4489,17 @@ void run(ClassifyConfig config) {
               resolvedLocalArtifacts->index_path;
           const std::filesystem::path repMetadataPath =
               resolvedLocalArtifacts->rep_metadata_path;
+          const std::filesystem::path shardManifestPath =
+              resolvedLocalArtifacts->shard_manifest_path;
           if (!std::filesystem::exists(repMetadataPath)) {
             throw std::runtime_error(
                 "Local resolution metadata is missing next to database: " +
                 repMetadataPath.string());
+          }
+          if (!std::filesystem::exists(shardManifestPath)) {
+            throw std::runtime_error(
+                "Local resolution shard manifest is missing next to database: " +
+                shardManifestPath.string());
           }
           const auto metadataStarted = std::chrono::steady_clock::now();
           const auto repMetadata =
@@ -4510,6 +4520,7 @@ void run(ClassifyConfig config) {
             ChimeraClassify::LocalResolutionRequest localRequest;
             localRequest.read_files = config.singleFiles;
             localRequest.index_file = localIndexPath.string();
+            localRequest.shard_manifest_file = shardManifestPath.string();
             localRequest.targets = panel.targets;
             localRequest.diag_bin = config.lpc_diag_bin;
             localRequest.max_occ = config.lpc_max_occ;

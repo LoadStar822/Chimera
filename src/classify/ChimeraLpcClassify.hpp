@@ -76,6 +76,7 @@ struct LocalResolutionTarget {
 struct LocalResolutionRequest {
   std::vector<std::string> read_files;
   std::string index_file;
+  std::string shard_manifest_file;
   std::vector<LocalResolutionTarget> targets;
   uint32_t diag_bin{};
   uint32_t max_occ{};

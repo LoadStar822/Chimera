@@ -473,12 +473,6 @@ make_local_resolution_call(const ReadRecord &read,
   return call;
 }
 
-std::filesystem::path
-shard_manifest_path_for(const std::filesystem::path &index_path) {
-  return index_path.parent_path() /
-         (index_path.stem().string() + ".nbcshards.tsv");
-}
-
 std::filesystem::path resolve_shard_entry_path(
     const std::filesystem::path &manifest_path, const std::string &raw_path) {
   std::filesystem::path path(raw_path);
@@ -1213,13 +1207,14 @@ void add_direct_logical_match_stats(const DirectTargetLoad &loaded,
 
 std::vector<TargetRecord> load_lpc_targets(
     const std::filesystem::path &index_path,
+    const std::filesystem::path &shard_manifest_path,
     const TargetFilter &target_filter,
     const QueryHashIndex &query_hashes, std::vector<MatchedPosting> &matches,
     LoadStats &stats,
     uint32_t threads) {
   std::vector<TargetRecord> targets;
   const auto root_meta = chimera::native_bounded::read_index_header(index_path);
-  const auto shards = load_shard_manifest(shard_manifest_path_for(index_path));
+  const auto shards = load_shard_manifest(shard_manifest_path);
   if (!shards.empty()) {
     const bool complete_routes =
         target_filter.route_by_name.size() == target_filter.names.size();
@@ -1491,11 +1486,12 @@ void fill_compact_postings_from_loaded(
 
 bool try_load_direct_lpc_targets_compact(
     const std::filesystem::path &index_path,
+    const std::filesystem::path &shard_manifest_path,
     const TargetFilter &target_filter, const QueryHashIndex &query_hashes,
     uint32_t max_occ, uint32_t threads, std::vector<TargetRecord> &targets,
     CompactPostingIndex &index, LoadStats &stats) {
   const auto root_meta = chimera::native_bounded::read_index_header(index_path);
-  const auto shards = load_shard_manifest(shard_manifest_path_for(index_path));
+  const auto shards = load_shard_manifest(shard_manifest_path);
   DirectTargetPlan plan;
   if (!build_direct_target_plan(target_filter, root_meta, shards, plan)) {
     return false;
@@ -1685,6 +1681,7 @@ namespace {
 LocalResolutionResult
 run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
                                  const std::filesystem::path &index_path,
+                                 const std::filesystem::path &shard_manifest_path,
                                  const TargetFilter &target_filter,
                                  uint32_t diag_bin, uint32_t max_occ,
                                  uint32_t min_chain, uint32_t threads) {
@@ -1693,6 +1690,10 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
   }
   if (index_path.empty()) {
     throw std::runtime_error("Local resolution route requires an index file");
+  }
+  if (shard_manifest_path.empty()) {
+    throw std::runtime_error(
+        "Local resolution route requires a shard manifest file");
   }
 
   const auto started = std::chrono::steady_clock::now();
@@ -1706,12 +1707,12 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
   std::vector<TargetRecord> targets;
   CompactPostingIndex index;
   const bool used_direct_compact = try_load_direct_lpc_targets_compact(
-      index_path, target_filter, query_hashes, max_occ, threads, targets, index,
-      stats);
+      index_path, shard_manifest_path, target_filter, query_hashes, max_occ,
+      threads, targets, index, stats);
   if (!used_direct_compact) {
     std::vector<MatchedPosting> matched_postings;
-    targets = load_lpc_targets(index_path, target_filter, query_hashes,
-                               matched_postings, stats, threads);
+    targets = load_lpc_targets(index_path, shard_manifest_path, target_filter,
+                               query_hashes, matched_postings, stats, threads);
     const auto index_finalize_started = std::chrono::steady_clock::now();
     index = build_compact_posting_index(matched_postings, query_hashes.size(),
                                         max_occ, stats);
@@ -1813,8 +1814,8 @@ run_local_resolution_engine(const LocalResolutionRequest &request) {
   const auto target_filter = target_filter_from_targets(request.targets);
   return run_local_resolution_engine_impl(
       request.read_files, std::filesystem::path(request.index_file),
-      target_filter, request.diag_bin, request.max_occ, request.min_chain,
-      request.threads);
+      std::filesystem::path(request.shard_manifest_file), target_filter,
+      request.diag_bin, request.max_occ, request.min_chain, request.threads);
 }
 
 } // namespace ChimeraClassify

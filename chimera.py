@@ -174,6 +174,8 @@ def _download_ncbi_taxdump_archive(cache_dir: Path) -> Path:
 
 
 def _prepare_build_taxonomy_dir(args) -> None:
+    if getattr(args, "no_local_resolution", False):
+        return
     _apply_build_taxonomy_meta_defaults(args)
     if getattr(args, "taxonomy_dir", None):
         taxonomy_dir = Path(args.taxonomy_dir).resolve()
@@ -302,6 +304,11 @@ def add_build_arguments(parser, require_input: bool) -> None:
         default=None,
         help="Directory containing NCBI taxdump nodes.dmp; downloaded automatically for NCBI builds when omitted",
     )
+    parser.add_argument(
+        "--no-local-resolution",
+        action="store_true",
+        help="Do not build local read resolution (LPC) data",
+    )
 
 
 def append_build_command_args(command, args) -> None:
@@ -320,6 +327,8 @@ def append_build_command_args(command, args) -> None:
     command.extend(["--taxonomy-version", str(args.taxonomy_version)])
     if getattr(args, "taxonomy_dir", None):
         command.extend(["--taxonomy-dir", str(args.taxonomy_dir)])
+    if getattr(args, "no_local_resolution", False):
+        command.append("--no-local-resolution")
 
 
 def parse_arguments():
@@ -365,13 +374,14 @@ def parse_arguments():
 
     # Classify subcommand
     classify_parser = subparsers.add_parser("classify", help="Classify sequences")
-    classify_parser.add_argument(
+    classify_inputs = classify_parser.add_mutually_exclusive_group(required=True)
+    classify_inputs.add_argument(
         "-i",
         "--single",
         nargs="+",
         help="Input files for classifying (supports multiple files)",
     )
-    classify_parser.add_argument(
+    classify_inputs.add_argument(
         "-p", "--paired", nargs="+", help="Paired input files for classifying"
     )
     classify_parser.add_argument(
@@ -392,6 +402,11 @@ def parse_arguments():
     )
     classify_parser.add_argument(
         "-b", "--batch-size", type=int, default=400, help="Batch size for classifying"
+    )
+    classify_parser.add_argument(
+        "--no-local-resolution",
+        action="store_true",
+        help="Disable local read resolution (LPC) at classify time",
     )
     # Auxiliary profile utilities. Native abundance profiles are written by
     # `classify`; this command is for legacy aggregate conversion and Krona.
@@ -551,8 +566,12 @@ def run_chimera(args, chimera_path=None):
         command.extend(["-d", args.database])
         command.extend(["-t", str(args.threads)])
         command.extend(["-b", str(args.batch_size)])
+        if getattr(args, "no_local_resolution", False):
+            command.append("--no-local-resolution")
     if args.command == "classify":
-        subprocess.run(command, check=True)
+        result = subprocess.run(command)
+        if result.returncode != 0:
+            return result.returncode
         if not profile_output.is_file():
             print(f"Classify did not produce native profile: {profile_output}")
             return 1
@@ -564,7 +583,11 @@ def run_chimera(args, chimera_path=None):
 
 def main():
     args = parse_arguments()
-    raise SystemExit(run_chimera(args) or 0)
+    try:
+        raise SystemExit(run_chimera(args) or 0)
+    except (FileNotFoundError, RuntimeError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
