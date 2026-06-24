@@ -237,7 +237,8 @@ bool read_spool_record(std::istream &is, SpoolReadRecord &record) {
 void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
                 ClassifyConfig config, FileInfo &fileInfo,
                 size_t max_reads,
-                std::vector<QueueThrottle> *queueThrottles) {
+                std::vector<QueueThrottle> *queueThrottles,
+                ClassifyProgressCounters *progress) {
   if (readQueues.empty()) {
     throw std::runtime_error("readQueues is empty");
   }
@@ -257,12 +258,16 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
     if (batch.ids.empty()) {
       return;
     }
+    const size_t batch_size = batch.ids.size();
     QueueThrottle *throttle =
         (queueThrottles != nullptr && shard < queueThrottles->size())
             ? &(*queueThrottles)[shard]
             : nullptr;
     acquire_queue_slot(throttle, estimate_batch_bytes(batch));
     readQueues[shard].enqueue(std::move(batch));
+    if (progress != nullptr) {
+      progress->parsed_reads.fetch_add(batch_size, std::memory_order_relaxed);
+    }
     batchReads fresh;
     init_batch(fresh, paired);
     batch = std::move(fresh);

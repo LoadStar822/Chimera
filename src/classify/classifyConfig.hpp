@@ -58,6 +58,7 @@ namespace ChimeraClassify {
 	size_t hash_sample_max = 96;
 	double idf_max = 8.0;
 	bool local_resolution_enabled = true;
+	bool write_cami_profile = false;
 	uint32_t local_resolution_top_groups = 32;
 	uint32_t local_resolution_species_per_group = 8;
 		uint32_t local_resolution_targets_per_species = 8;

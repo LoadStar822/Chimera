@@ -52,7 +52,7 @@ VALID_REFSEQ_CATEGORIES = ["reference genome", "na"]
 VALID_FILE_TYPES = ["genomic.fna.gz", "assembly_report.txt", "protein.faa.gz", "genomic.gbff.gz"]
 VALID_TAXONOMY_MODES = ["ncbi", "gtdb"]
 GTDB_DOWNLOAD_MODES = ["genome_updater", "representative"]
-VALID_DOWNLOADERS = ["wget", "curl", "aria2c"]
+VALID_DOWNLOADERS = ["wget", "curl"]
 VALID_TAXONOMY_RANKS = [
     "superkingdom", "phylum", "class", "order", "family", "genus", "species", "strain"
 ]
@@ -66,7 +66,7 @@ DEFAULT_THREADS = "1"
 DEFAULT_TAXONOMY_MODE = "ncbi"
 DEFAULT_GTDB_MODE = "genome_updater"
 DEFAULT_TAXONOMY_RANK = "species"
-DEFAULT_RETRY_ATTEMPTS = "999"
+DEFAULT_RETRY_ATTEMPTS = "5"
 DEFAULT_DOWNLOADER = "wget"
 
 GTDB_RELEASE_ROOT = "https://data.gtdb.ecogenomic.org/releases"
@@ -1489,25 +1489,46 @@ def write_taxonomy_metadata(output_folder, taxonomy_kind, taxonomy_version, **ex
 console = Console()
 
 
+class PromptBack(Exception):
+    """Raised when the user asks the interactive wizard to go back one step."""
+
+
+def _ask_questionary(prompt):
+    try:
+        if hasattr(prompt, "unsafe_ask"):
+            return prompt.unsafe_ask()
+        return prompt.ask()
+    except KeyboardInterrupt as exc:
+        raise PromptBack() from exc
+
+
 def _prompt_line_input(
     questionary_prompt: str,
     console_prompt: str,
     default: Optional[str] = None,
 ) -> str:
     """
-    获取单行输入：优先使用 questionary，失败或不可用时回退到 Rich 控制台。
+    Read one line from the user, preferring questionary when available.
     """
     if _interactive_available():
         try:
             if default is not None:
-                answer = questionary.text(questionary_prompt, default=default).ask()
+                answer = _ask_questionary(questionary.text(questionary_prompt, default=default))
             else:
-                answer = questionary.text(questionary_prompt).ask()
+                answer = _ask_questionary(questionary.text(questionary_prompt))
+        except PromptBack:
+            raise
         except Exception:
             answer = None
         if answer is not None:
             return answer
-    return console.input(console_prompt)
+    try:
+        return console.input(console_prompt)
+    except KeyboardInterrupt as exc:
+        raise PromptBack() from exc
+    except EOFError:
+        console.print("\n[red]No interactive input received. Operation cancelled.[/red]")
+        sys.exit(1)
 
 
 def _split_defaults(defaults):
@@ -1529,8 +1550,8 @@ def _render_choice_table(choices, defaults=None, title=None):
         box=box.MINIMAL_DOUBLE_HEAD,
         padding=(0, 1),
     )
-    table.add_column("编号", style="magenta", justify="right", width=4, no_wrap=True)
-    table.add_column("可选值", style="cyan", no_wrap=True)
+    table.add_column("No.", style="magenta", justify="right", width=4, no_wrap=True)
+    table.add_column("Value", style="cyan", no_wrap=True)
 
     for idx, choice in enumerate(choices, 1):
         style = "bold bright_cyan" if choice in default_set else "cyan"
@@ -1547,7 +1568,7 @@ def _print_section(title, description=None):
 
 
 def _format_bool(flag):
-    return "✅ 是" if flag else "❌ 否"
+    return "yes" if flag else "no"
 
 
 def _format_value(value, placeholder="—"):
@@ -1559,7 +1580,7 @@ def _format_value(value, placeholder="—"):
     return str(value)
 
 
-def _format_multi_display(value, empty_label="全部"):
+def _format_multi_display(value, empty_label="all"):
     if value is None:
         return empty_label
     parts = [part.strip() for part in str(value).split(",") if part.strip()]
@@ -1696,10 +1717,12 @@ def ask_multi(label, choices, default=None, allow_empty=False, note=None):
             prompt.append(f"\n{note}", style="dim")
         console.print(prompt)
         try:
-            answers = questionary.checkbox(
-                "请选择 (空格选中，回车确认)",
+            answers = _ask_questionary(questionary.checkbox(
+                "Select options (space to toggle, enter to confirm)",
                 choices=[questionary.Choice(title=choice, value=choice, checked=choice in default_set) for choice in choices],
-            ).ask()
+            ))
+        except PromptBack:
+            raise
         except Exception:
             answers = None
         if answers is None:
@@ -1711,7 +1734,7 @@ def ask_multi(label, choices, default=None, allow_empty=False, note=None):
             return ",".join(answers)
         if allow_empty:
             return ""
-        console.print("[yellow]未选择任何项，请至少选择一个选项[/yellow]")
+        console.print("[yellow]No option selected; please choose at least one.[/yellow]")
         # fall through to text mode if user deselected all without default
 
     console.print(Text(label, style="bold cyan"))
@@ -1719,18 +1742,18 @@ def ask_multi(label, choices, default=None, allow_empty=False, note=None):
         console.print(Text(note, style="dim"))
     default_hint = None
     if default:
-        default_hint = f"默认: {default}"
+        default_hint = f"Default: {default}"
     elif allow_empty:
-        default_hint = "默认: 全部/跳过"
+        default_hint = "Default: all / skip"
     if default_hint:
         console.print(Text(default_hint, style="dim"))
     if choices:
         _render_choice_table(choices, default)
-        console.print(Text("提示：可输入名称或编号（例如 '1 3 5-7' 或 '*'）", style="dim"))
+        console.print(Text("Tip: enter names or numbers, for example '1 3 5-7' or '*'.", style="dim"))
 
     while True:
         response = _prompt_line_input(
-            "请输入选项（支持编号范围，如 1 3 5-7 或 * 表示全部）",
+            "Enter options (supports ranges like 1 3 5-7, or * for all)",
             "[cyan]➜ [/cyan]",
             default=None,
         ).strip()
@@ -1739,32 +1762,32 @@ def ask_multi(label, choices, default=None, allow_empty=False, note=None):
                 return default
             if allow_empty:
                 return ""
-            console.print("[yellow]请输入至少一个值或使用默认值[/yellow]")
+            console.print("[yellow]Enter at least one value or use the default.[/yellow]")
             continue
 
         tokens = _tokenize_entries(response)
         if not tokens:
             if allow_empty:
                 return ""
-            console.print("[yellow]请输入有效内容[/yellow]")
+            console.print("[yellow]Enter a valid value.[/yellow]")
             continue
 
         interpreted = _interpret_tokens(tokens, choices)
         if interpreted is None:
-            console.print("[red]包含无效编号，请重新输入[/red]")
+            console.print("[red]Invalid number in selection; please try again.[/red]")
             continue
         entries = interpreted
         if not entries:
             if allow_empty:
                 return ""
-            console.print("[yellow]请输入有效内容[/yellow]")
+            console.print("[yellow]Enter a valid value.[/yellow]")
             continue
 
         if choices:
             normalized = []
             invalid = [entry for entry in entries if entry not in choices]
             if invalid:
-                console.print(f"[red]无效选项: {', '.join(invalid)}[/red]")
+                console.print(f"[red]Invalid option: {', '.join(invalid)}[/red]")
                 continue
             seen = set()
             for entry in entries:
@@ -1784,7 +1807,7 @@ def ask_multi(label, choices, default=None, allow_empty=False, note=None):
         if not entries:
             if allow_empty:
                 return ""
-            console.print("[yellow]请输入至少一个选项[/yellow]")
+            console.print("[yellow]Enter at least one option.[/yellow]")
             continue
 
         return ",".join(entries)
@@ -1794,9 +1817,9 @@ def ask_text(label, default=None, allow_empty=True, note=None):
     if note:
         console.print(Text(note, style="dim"))
     if default not in (None, ""):
-        console.print(Text(f"默认: {default}", style="dim"))
+        console.print(Text(f"Default: {default}", style="dim"))
     elif default == "":
-        console.print(Text("默认: 空", style="dim"))
+        console.print(Text("Default: empty", style="dim"))
 
     while True:
         response = _prompt_line_input(
@@ -1809,7 +1832,7 @@ def ask_text(label, default=None, allow_empty=True, note=None):
                 return default
             if allow_empty:
                 return ""
-            console.print("[yellow]该项不能为空，请重新输入[/yellow]")
+            console.print("[yellow]This field cannot be empty.[/yellow]")
             continue
         return response
 
@@ -1817,7 +1840,10 @@ def ask_text(label, default=None, allow_empty=True, note=None):
 def ask_bool(label, default=False, note=None):
     if note:
         console.print(Text(note, style="dim"))
-    return Confirm.ask(f"[bold]{label}[/bold]", default=default, console=console)
+    try:
+        return Confirm.ask(f"[bold]{label}[/bold]", default=default, console=console)
+    except KeyboardInterrupt as exc:
+        raise PromptBack() from exc
 
 
 def ask_choice(label, choices, default=None, note=None):
@@ -1827,11 +1853,13 @@ def ask_choice(label, choices, default=None, note=None):
             prompt.append(f"\n{note}", style="dim")
         console.print(prompt)
         try:
-            answer = questionary.select(
-                "请选择",
+            answer = _ask_questionary(questionary.select(
+                "Select",
                 choices=[questionary.Choice(title=choice, value=choice) for choice in choices],
                 default=default if default in choices else None,
-            ).ask()
+            ))
+        except PromptBack:
+            raise
         except Exception:
             answer = None
         if answer is not None:
@@ -1844,19 +1872,19 @@ def ask_choice(label, choices, default=None, note=None):
         console.print(Text(note, style="dim"))
     _render_choice_table(choices, default)
     if default is not None:
-        console.print(Text(f"默认: {default}", style="dim"))
-    console.print(Text("提示：可输入名称或编号，例如 '2'", style="dim"))
+        console.print(Text(f"Default: {default}", style="dim"))
+    console.print(Text("Tip: enter a name or number, for example '2'.", style="dim"))
 
     while True:
         response = _prompt_line_input(
-            "请选择选项（可输入编号或名称）",
+            "Select an option (name or number)",
             "[cyan]➜ [/cyan]",
             default=None,
         ).strip()
         if not response:
             if default is not None:
                 return default
-            console.print("[yellow]请选择一个选项[/yellow]")
+            console.print("[yellow]Select one option.[/yellow]")
             continue
         tokens = _tokenize_entries(response)
         interpreted = _interpret_tokens(tokens, choices, allow_partial_numeric=True)
@@ -1871,7 +1899,7 @@ def ask_choice(label, choices, default=None, note=None):
                 return expanded[0]
             if candidate in choices:
                 return candidate
-        console.print(f"[red]无效选项: {response}[/red]")
+        console.print(f"[red]Invalid option: {response}[/red]")
 
 
 def ask_gtdb_mode(default_mode=None):
@@ -1918,13 +1946,13 @@ def _build_download_config_summary(config, downloader_summary):
     gtdb_release = config["gtdb_release"]
     gtdb_mirror = config["gtdb_mirror"]
 
-    summary = Tree("[bold cyan]参数确认[/bold cyan]")
-    basic_branch = summary.add("[bold]基础[/bold]")
-    basic_branch.add(f"数据库: {_format_multi_display(config['database'])}")
-    basic_branch.add(f"物种群组: {_format_multi_display(config['organism_group'])}")
-    basic_branch.add(f"Taxonomy 模式: {taxonomy_mode}")
+    summary = Tree("[bold cyan]Download configuration[/bold cyan]")
+    basic_branch = summary.add("[bold]Input selection[/bold]")
+    basic_branch.add(f"Database: {_format_multi_display(config['database'])}")
+    basic_branch.add(f"Organism groups: {_format_multi_display(config['organism_group'])}")
+    basic_branch.add(f"Taxonomy mode: {taxonomy_mode}")
     if taxonomy_mode == "gtdb":
-        basic_branch.add(f"GTDB 模式: {gtdb_mode or DEFAULT_GTDB_MODE}")
+        basic_branch.add(f"GTDB mode: {gtdb_mode or DEFAULT_GTDB_MODE}")
         basic_branch.add(f"GTDB release: {gtdb_release or 'latest'}")
         mirror_label = next(
             (
@@ -1934,74 +1962,74 @@ def _build_download_config_summary(config, downloader_summary):
             ),
             gtdb_mirror or "primary",
         )
-        basic_branch.add(f"GTDB 镜像: {mirror_label}")
-    basic_branch.add(f"Taxonomy 层级: {config['taxonomy_rank']}")
-    basic_branch.add(f"Taxonomy ID: {_format_value(config['taxid'], '全部')}")
-    basic_branch.add(f"数量限制: {config['limit_assembly']}")
+        basic_branch.add(f"GTDB mirror: {mirror_label}")
+    basic_branch.add(f"Taxonomy rank: {config['taxonomy_rank']}")
+    basic_branch.add(f"Taxonomy ID: {_format_value(config['taxid'], 'all')}")
+    basic_branch.add(f"Assembly limit: {config['limit_assembly']}")
 
-    filter_branch = summary.add("[bold]过滤[/bold]")
+    filter_branch = summary.add("[bold]Filters[/bold]")
     if taxonomy_mode == "gtdb" and gtdb_mode == "representative":
-        filter_branch.add("代表模式：使用官方 representative 清单，未应用额外过滤")
+        filter_branch.add("Representative mode: using the official representative list")
     else:
         filter_branch.add(
-            f"文件类型: {_format_multi_display(config['file_types'], '默认')}"
+            f"File types: {_format_multi_display(config['file_types'], 'default')}"
         )
-        filter_branch.add(f"RefSeq 分类: {_format_multi_display(config['refseq_category'])}")
-        filter_branch.add(f"组装层级: {_format_multi_display(config['assembly_level'])}")
+        filter_branch.add(f"RefSeq category: {_format_multi_display(config['refseq_category'])}")
+        filter_branch.add(f"Assembly level: {_format_multi_display(config['assembly_level'])}")
         filter_branch.add(
-            f"发布日期范围: {_format_value(config['start_date'], '不限')} ~ "
-            f"{_format_value(config['end_date'], '不限')}"
+            f"Release date: {_format_value(config['start_date'], 'any')} ~ "
+            f"{_format_value(config['end_date'], 'any')}"
         )
-        filter_branch.add(f"自定义过滤: {_format_value(config['custom_filter'], '未设置')}")
+        filter_branch.add(f"Custom filter: {_format_value(config['custom_filter'], 'not set')}")
 
-    runtime_branch = summary.add("[bold]运行[/bold]")
-    runtime_branch.add(f"输出目录: {config['output_dir']}")
-    runtime_branch.add(f"线程数: {config['threads']}")
+    runtime_branch = summary.add("[bold]Runtime[/bold]")
+    runtime_branch.add(f"Output directory: {config['output_dir']}")
+    runtime_branch.add(f"Threads: {config['threads']}")
     runtime_branch.add(f"Dry-run: {_format_bool(config['dry_run'])}")
     runtime_branch.add(f"Fix mode: {_format_bool(config['fix_mode'])}")
-    runtime_branch.add(f"MD5 校验: {_format_bool(config['md5_check'])}")
+    runtime_branch.add(f"MD5 check: {_format_bool(config['md5_check'])}")
 
-    report_branch = summary.add("[bold]报告[/bold]")
+    report_branch = summary.add("[bold]Reports[/bold]")
     if taxonomy_mode == "gtdb" and gtdb_mode == "representative":
-        report_branch.add("代表模式：报告生成功能默认关闭")
+        report_branch.add("Representative mode: reports disabled by default")
     else:
-        report_branch.add(f"Assembly 报告: {_format_bool(config['assembly_report'])}")
-        report_branch.add(f"Sequence 报告: {_format_bool(config['sequence_report'])}")
-        report_branch.add(f"URL 报告: {_format_bool(config['url_report'])}")
+        report_branch.add(f"Assembly report: {_format_bool(config['assembly_report'])}")
+        report_branch.add(f"Sequence report: {_format_bool(config['sequence_report'])}")
+        report_branch.add(f"URL report: {_format_bool(config['url_report'])}")
 
-    advanced_branch = summary.add("[bold]高级[/bold]")
+    advanced_branch = summary.add("[bold]Advanced[/bold]")
     advanced_items = []
     if config["version_label"]:
-        advanced_items.append(f"版本标签: {config['version_label']}")
+        advanced_items.append(f"Version label: {config['version_label']}")
     if config["external_assembly"]:
-        advanced_items.append(f"外部 assembly_summary: {config['external_assembly']}")
+        advanced_items.append(f"External assembly summary: {config['external_assembly']}")
     if config["alt_version_label"]:
-        advanced_items.append(f"备用版本标签: {config['alt_version_label']}")
+        advanced_items.append(f"Alternate version label: {config['alt_version_label']}")
     if config["retry_attempts"] != DEFAULT_RETRY_ATTEMPTS:
-        advanced_items.append(f"重试次数: {config['retry_attempts']}")
+        advanced_items.append(f"Retry attempts: {config['retry_attempts']}")
     if config["conditional_exit"] != "0":
-        advanced_items.append(f"失败阈值: {config['conditional_exit']}")
+        advanced_items.append(f"Accepted failure count: {config['conditional_exit']}")
     if config["ncbi_folders"]:
-        advanced_items.append("NCBI 目录结构: 已开启")
+        advanced_items.append("NCBI folder layout: enabled")
     if downloader_summary:
         if taxonomy_mode == "gtdb" and gtdb_mode == "representative":
-            label = "内置(urllib)" if downloader_summary == "urllib" else downloader_summary
-            advanced_items.append(f"下载工具: {label}")
+            label = "builtin urllib" if downloader_summary == "urllib" else downloader_summary
+            advanced_items.append(f"Downloader: {label}")
         elif downloader_summary != DEFAULT_DOWNLOADER:
-            advanced_items.append(f"下载工具: {downloader_summary}")
+            advanced_items.append(f"Downloader: {downloader_summary}")
     if config["delete_extra"]:
-        advanced_items.append("删除多余文件: 开启")
+        advanced_items.append("Delete extra files: enabled")
     if config["silent"]:
-        advanced_items.append("静默输出: 开启")
+        advanced_items.append("Silent output: enabled")
     if config["progress_only"]:
-        advanced_items.append("仅显示进度: 开启")
+        advanced_items.append("Progress-only output: enabled")
     if config["verbose"]:
-        advanced_items.append("详细日志: 开启")
+        advanced_items.append("Verbose log: enabled")
     if config["debug"]:
-        advanced_items.append("调试模式: 开启")
+        advanced_items.append("Debug mode: enabled")
 
     if not advanced_items:
-        advanced_branch.add("使用默认配置")
+        advanced_branch.add("Using defaults")
     else:
         for item in advanced_items:
             advanced_branch.add(item)
@@ -2009,497 +2037,475 @@ def _build_download_config_summary(config, downloader_summary):
     return summary
 
 
-def prompt_user(options):
-    """
-    Interactively prompt user for download parameters
-    
-    Parameters:
-    - options (argparse.Namespace): Command line arguments
-    
-    Returns:
-    - dict: User input parameters
-    """
-    while True:
-        console.rule("[bold cyan]Chimera 下载向导[/bold cyan]")
-        intro = Text("欢迎使用 Chimera 数据库下载向导。\n", style="bold white")
-        intro.append("我们将一步步收集参数，自动拼装 genome_updater.sh 指令。", style="dim")
-        console.print(Panel(intro, border_style="cyan", box=box.DOUBLE, expand=False))
-        console.print()
+def _run_prompt_sequence(prompt_steps):
+    index = 0
+    while index < len(prompt_steps):
+        try:
+            prompt_steps[index]()
+            index += 1
+        except PromptBack:
+            if index == 0:
+                raise
+            index -= 1
+            console.print("\n[yellow]Back to the previous question.[/yellow]\n")
 
-        if questionary is None and sys.stdin.isatty() and sys.stdout.isatty():
-            console.print("[yellow]安装 questionary (pip install questionary) 可启用光标选择菜单。当前使用文本输入模式。[/yellow]")
-            console.print()
 
-        # Step 1: database & taxonomy
-        _print_section("步骤 1/4 · 数据与分类", "选择要下载的数据库、物种范围与分类体系。")
-
-        taxonomy_mode = getattr(options, "taxonomy_mode", None)
-        if taxonomy_mode is None:
-            taxonomy_mode = ask_choice(
-                "taxonomy 模式",
-                VALID_TAXONOMY_MODES,
-                default=DEFAULT_TAXONOMY_MODE,
-                note="选择 GTDB 时可在代表基因组/全量模式间切换。"
+def _edit_download_config_section(config, section):
+    if section == "edit genome selection":
+        def set_database():
+            database_raw = ask_multi(
+                "Database source",
+                VALID_DATABASES,
+                default=config.get("database") or DEFAULT_DATABASE,
+                note="Use comma-separated values for multiple sources. RefSeq is recommended.",
             )
-        else:
-            taxonomy_mode = taxonomy_mode.lower()
-
-        gtdb_mode = getattr(options, "gtdb_mode", None)
-        gtdb_release = getattr(options, "gtdb_release", None)
-        gtdb_mirror = getattr(options, "gtdb_mirror", None)
-        if taxonomy_mode == "gtdb":
-            if gtdb_mode is None or gtdb_mode not in GTDB_DOWNLOAD_MODES:
-                gtdb_mode = ask_gtdb_mode(DEFAULT_GTDB_MODE)
-            if gtdb_mirror is None:
-                default_key = "primary"
-                mirror_choice = ask_choice(
-                    "首选 GTDB 镜像",
-                    [opt["key"] for opt in GTDB_MIRROR_OPTIONS],
-                    default=default_key,
-                    note="网络较慢时可尝试镜像站。"
-                )
-                gtdb_mirror = mirror_choice or "primary"
-            mirror_order = [gtdb_mirror]
-            for opt in GTDB_MIRROR_OPTIONS:
-                if opt["key"] != gtdb_mirror:
-                    mirror_order.append(opt["key"])
-            if gtdb_release is None:
-                gtdb_release = ask_gtdb_release(default_release=None, cache_dir=getattr(options, "gtdb_cache_dir", None), mirror_keys=mirror_order)
-            gtdb_release = sanitize_gtdb_release_input(gtdb_release) or gtdb_release
-        else:
-            gtdb_mode = None
-            gtdb_release = None
-            gtdb_mirror = None
-
-        if taxonomy_mode == "gtdb" and gtdb_mode == "representative" and _interactive_available():
-            console.print(Text("\n代表基因组模式：将跳过 genome_updater 相关选项，仅需配置 GTDB 代表下载所需参数。", style="bold bright_cyan"))
-        if taxonomy_mode == "gtdb" and gtdb_release and _interactive_available():
-            console.print(Text(f"将使用 GTDB release: {gtdb_release}", style="dim"))
-        if taxonomy_mode == "gtdb" and gtdb_mirror and _interactive_available():
-            mirror_label = next((opt["label"] for opt in GTDB_MIRROR_OPTIONS if opt["key"] == gtdb_mirror), gtdb_mirror)
-            console.print(Text(f"首选镜像: {mirror_label}", style="dim"))
-
-        if taxonomy_mode == "gtdb" and gtdb_mode == "representative":
-            database = DEFAULT_DATABASE
-            use_refseq = True
-            use_genbank = False
-            database_tokens = [DEFAULT_DATABASE]
-            database_raw = DEFAULT_DATABASE
-            organism_group = getattr(options, "organism_group", None)
-            if organism_group is None:
-                organism_group = ask_multi(
-                    "代表模式：请选择需要的物种群组 (默认全选)",
-                    GTDB_ALLOWED_ORGANISM_GROUPS,
-                    default=",".join(GTDB_ALLOWED_ORGANISM_GROUPS),
-                    allow_empty=True,
-                    note="可选 archaea,bacteria；留空视为同时下载两类。"
-                )
-            taxid = ""
-        else:
-            database_raw = getattr(options, "database", None)
-            if database_raw is None:
-                if _interactive_available():
-                    console.print(Text("数据库 (可多选)", style="bold cyan"))
-                    console.print(Text("回车可默认选择 RefSeq；若需覆盖 GenBank，可额外勾选。", style="dim"))
-                    try:
-                        selection = questionary.checkbox(
-                            "请选择 (空格选中，回车确认)",
-                            choices=[questionary.Choice(title=choice, value=choice, checked=(choice == DEFAULT_DATABASE)) for choice in VALID_DATABASES],
-                        ).ask()
-                    except Exception:
-                        selection = None
-                    if not selection:
-                        database_raw = DEFAULT_DATABASE
-                    else:
-                        database_raw = ",".join(selection)
-                else:
-                    database_raw = ask_multi(
-                        "数据库 (可多选)",
-                        VALID_DATABASES,
-                        default=DEFAULT_DATABASE,
-                        note="输入多个值请用逗号分隔。回车即使用默认 RefSeq。"
-                    )
-            database_tokens = [item.strip() for item in str(database_raw).split(",") if item.strip() and item.strip() in VALID_DATABASES]
+            database_tokens = [
+                item.strip()
+                for item in str(database_raw).split(",")
+                if item.strip() and item.strip() in VALID_DATABASES
+            ]
             if not database_tokens:
                 database_tokens = [DEFAULT_DATABASE]
             database = ",".join(dict.fromkeys(database_tokens))
-            use_refseq = "refseq" in database_tokens
-            use_genbank = "genbank" in database_tokens
+            database, db_message = sanitize_database(database, "ncbi")
+            if db_message:
+                console.print(f"[yellow]{db_message}[/yellow]")
+            config["database"] = database
 
-            organism_group = getattr(options, "organism_group", None)
-            if organism_group is None:
-                organism_group = ask_multi(
-                    "物种群组 (可选)",
-                    VALID_ORGANISM_GROUPS,
-                    default="",
-                    allow_empty=True,
-                    note="默认包含全部群组，指定多个时以逗号分隔。"
-                )
+        def set_organism_group():
+            organism_group = ask_multi(
+                "Organism groups",
+                VALID_ORGANISM_GROUPS,
+                default=config.get("organism_group") or "",
+                allow_empty=True,
+                note="Leave empty to include all groups. For an archaeal test, select archaea.",
+            )
+            organism_group, group_message = sanitize_organism_group(organism_group, "ncbi")
+            if group_message:
+                console.print(f"[yellow]{group_message}[/yellow]")
+            config["organism_group"] = organism_group or ""
 
-            taxid = getattr(options, "taxid", None)
-            if taxid is None:
-                taxid = ask_text(
-                    "taxonomy ID (可留空)",
-                    default="",
-                    note="支持多个 ID，使用逗号分隔；留空表示不过滤。"
-                )
-
-        original_group = organism_group
-        organism_group, group_message = sanitize_organism_group(organism_group, taxonomy_mode)
-        if group_message:
-            console.print(f"[yellow]{group_message}[/yellow]")
-            if taxonomy_mode == "gtdb" and _interactive_available():
-                organism_group = ask_multi(
-                    "GTDB 可选物种群组",
-                    GTDB_ALLOWED_ORGANISM_GROUPS,
-                    default=organism_group or ",".join(GTDB_ALLOWED_ORGANISM_GROUPS),
-                    note="GTDB 仅提供 archaea/bacteria 数据，请重新选择。"
-                )
-
-        if not organism_group:
-            organism_group = ",".join(GTDB_ALLOWED_ORGANISM_GROUPS if taxonomy_mode == "gtdb" else [])
-
-        database, db_message = sanitize_database(database, taxonomy_mode)
-        if db_message:
-            console.print(f"[yellow]{db_message}[/yellow]")
-        database_tokens = [item.strip() for item in database.split(",") if item.strip()]
-        use_refseq = "refseq" in database_tokens
-        use_genbank = "genbank" in database_tokens
-
-        downloader_summary = None
-        downloader_value = getattr(options, "downloader", None)
-
-        taxonomy_rank = getattr(options, "taxonomy_rank", None) or ask_choice(
-            "taxonomy 层级",
-            VALID_TAXONOMY_RANKS,
-            default=DEFAULT_TAXONOMY_RANK,
-            note="决定 target.tsv 中目标节点的层级。"
-        )
-
-        limit_assembly = getattr(options, "limit_assembly", None)
-        if taxonomy_mode == "gtdb" and gtdb_mode == "representative":
-            limit_assembly = "0"
-        elif limit_assembly is None:
-            limit_assembly = ask_text(
-                "下载数量限制",
-                default="0",
-                note="0 表示全部；也可输入 rank:number，例如 genus:3。"
+        def set_taxid():
+            config["taxid"] = ask_text(
+                "NCBI taxonomy IDs",
+                default=config.get("taxid") or "",
+                note="Optional. Use comma-separated IDs, or leave empty for no taxid filter.",
             )
 
-        console.print()
+        def set_taxonomy_rank():
+            config["taxonomy_rank"] = ask_choice(
+                "Target taxonomy rank",
+                VALID_TAXONOMY_RANKS,
+                default=config.get("taxonomy_rank") or DEFAULT_TAXONOMY_RANK,
+                note="This rank defines the taxid written to target.tsv. Use species for normal profiling.",
+            )
 
-        # Step 2: filters
-        if taxonomy_mode == "gtdb" and gtdb_mode == "representative":
-            _print_section("步骤 2/4 · 文件与过滤", "代表模式自动使用 GTDB 官方代表列表，已跳过额外过滤。")
-            file_types = DEFAULT_FILE_TYPE
-            refseq_category = DEFAULT_REFSEQ_CATEGORY
-            assembly_level = DEFAULT_ASSEMBLY_LEVEL
-            start_date = ""
-            end_date = ""
-            custom_filter = ""
+        def set_limit_assembly():
+            config["limit_assembly"] = ask_text(
+                "Assemblies per selected taxon",
+                default=str(config.get("limit_assembly") or "0"),
+                note="0 means all. You can also use rank:number, for example genus:3.",
+            )
+
+        _run_prompt_sequence([
+            set_database,
+            set_organism_group,
+            set_taxid,
+            set_taxonomy_rank,
+            set_limit_assembly,
+        ])
+        if "refseq" not in config["database"].split(","):
+            config["refseq_category"] = ""
+        elif not config.get("refseq_category"):
+            config["refseq_category"] = DEFAULT_REFSEQ_CATEGORY
+        return config
+
+    if section == "edit filters":
+        use_refseq = "refseq" in str(config.get("database", "")).split(",")
+        prompt_steps = []
+
+        def set_file_types():
+            config["file_types"] = ask_multi(
+                "File types",
+                VALID_FILE_TYPES,
+                default=config.get("file_types") or DEFAULT_FILE_TYPE,
+                note="The build step needs genomic.fna.gz.",
+            )
+
+        def set_refseq_category():
+            config["refseq_category"] = ask_multi(
+                "RefSeq category",
+                VALID_REFSEQ_CATEGORIES,
+                default=config.get("refseq_category") or DEFAULT_REFSEQ_CATEGORY,
+                note="Default downloads RefSeq reference genomes.",
+            )
+
+        def set_assembly_level():
+            config["assembly_level"] = ask_multi(
+                "Assembly level",
+                VALID_ASSEMBLY_LEVELS,
+                default=config.get("assembly_level") or DEFAULT_ASSEMBLY_LEVEL,
+                note="Complete genome is the smallest clean default for a first trial.",
+            )
+
+        def set_start_date():
+            config["start_date"] = ask_text(
+                "Release date lower bound (YYYYMMDD)",
+                default=config.get("start_date") or "",
+                note="Optional. Leave empty for no lower bound.",
+            )
+
+        def set_end_date():
+            config["end_date"] = ask_text(
+                "Release date upper bound (YYYYMMDD)",
+                default=config.get("end_date") or "",
+                note="Optional. Leave empty for no upper bound.",
+            )
+
+        def set_custom_filter():
+            config["custom_filter"] = ask_text(
+                "Custom assembly filter",
+                default=config.get("custom_filter") or "",
+                note='Optional. Use awk syntax, for example: $14 == "Full" && $8 ~ /archaeon/.',
+            )
+
+        prompt_steps.append(set_file_types)
+        if use_refseq:
+            prompt_steps.append(set_refseq_category)
         else:
-            _print_section("步骤 2/4 · 文件与过滤", "根据需要调整文件类型、RefSeq 分类及时间过滤。")
-            filter_arguments = [
-                getattr(options, "file_types", None),
-                getattr(options, "refseq_category", None),
-                getattr(options, "assembly_level", None),
-                getattr(options, "start_date", None),
-                getattr(options, "end_date", None),
-                getattr(options, "custom_filter", None),
-            ]
-            filters_requested = any(value not in (None, "") for value in filter_arguments)
-            if filters_requested or Confirm.ask("需要配置文件类型或其他过滤条件吗？", default=False, console=console):
-                file_types = getattr(options, "file_types", None) or ask_multi(
-                    "文件类型",
-                    VALID_FILE_TYPES,
-                    default=DEFAULT_FILE_TYPE,
-                    note="可选择多个文件类型，逗号分隔。"
-                )
-                if use_refseq:
-                    refseq_note = "可多选；默认选择参考基因组。"
-                    refseq_category = getattr(options, "refseq_category", None) or ask_multi(
-                        "RefSeq 分类",
-                        VALID_REFSEQ_CATEGORIES,
-                        default=DEFAULT_REFSEQ_CATEGORY,
-                        note=refseq_note
-                    )
-                else:
-                    refseq_category = ""
-                assembly_level = getattr(options, "assembly_level", None) or ask_multi(
-                    "组装层级",
-                    VALID_ASSEMBLY_LEVELS,
-                    default=DEFAULT_ASSEMBLY_LEVEL,
-                    note="可多选；默认下载完整基因组。"
-                )
-                start_date = getattr(options, "start_date", None)
-                if start_date is None:
-                    start_date = ask_text(
-                        "发布日期下限 (YYYYMMDD，可留空)",
-                        default="",
-                        note="输入 YYYYMMDD 格式；留空表示不过滤。"
-                    )
-                end_date = getattr(options, "end_date", None)
-                if end_date is None:
-                    end_date = ask_text(
-                        "发布日期上限 (YYYYMMDD，可留空)",
-                        default="",
-                        note="输入 YYYYMMDD 格式；留空表示不过滤。"
-                    )
-                custom_filter = getattr(options, "custom_filter", None)
-                if custom_filter is None:
-                    custom_filter = ask_text(
-                        "自定义过滤 (colA:val1|colB:valX,valY)",
-                        default="",
-                        note="与 genome_updater.sh 语法一致；留空不启用。"
-                    )
-            else:
-                file_types = getattr(options, "file_types", None) or DEFAULT_FILE_TYPE
-                if use_refseq:
-                    refseq_category = getattr(options, "refseq_category", None) or DEFAULT_REFSEQ_CATEGORY
-                else:
-                    refseq_category = ""
-                assembly_level = getattr(options, "assembly_level", None) or DEFAULT_ASSEMBLY_LEVEL
-                start_date = getattr(options, "start_date", None) or ""
-                end_date = getattr(options, "end_date", None) or ""
-                custom_filter = getattr(options, "custom_filter", None) or ""
+            config["refseq_category"] = ""
+        prompt_steps.extend([set_assembly_level, set_start_date, set_end_date, set_custom_filter])
+        _run_prompt_sequence(prompt_steps)
+        return config
 
-        console.print()
-
-        # Step 3: runtime
-        if taxonomy_mode == "gtdb" and gtdb_mode == "representative":
-            _print_section("步骤 3/4 · 下载与执行", "代表模式将直接下载 GTDB 代表基因组，请确认输出目录与线程数。")
-        else:
-            _print_section("步骤 3/4 · 下载与执行", "设置输出路径、线程数与运行模式。")
-        output_dir = getattr(options, "output_dir", None) or ask_text(
-            "输出目录",
-            default=DEFAULT_OUTPUT_DIR,
-            allow_empty=False,
-            note="若目录已存在，可选择覆盖或继续。"
-        )
-        threads = getattr(options, "threads", None) or ask_text(
-            "下载线程数",
-            default=DEFAULT_THREADS,
-            allow_empty=False,
-            note="建议根据带宽与 I/O 能力设置。"
-        )
-
-        dry_run = ask_bool(
-            "仅模拟 (dry-run) 不执行下载？",
-            default=bool(getattr(options, "dry_run", False))
-        )
-        fix_mode = ask_bool(
-            "只修复缺失/失败文件 (fix mode)？",
-            default=bool(getattr(options, "fix_mode", False))
-        )
-        md5_check = ask_bool(
-            "下载后校验 MD5？",
-            default=True
-        )
-
-        console.print()
-
-        if taxonomy_mode == "gtdb" and gtdb_mode == "representative":
-            _print_section("步骤 4/4 · 高级选项", "代表模式使用默认高级参数，如需调整可改用命令行参数。")
-            assembly_report = bool(getattr(options, "assembly_report", False))
-            sequence_report = bool(getattr(options, "sequence_report", False))
-            url_report = bool(getattr(options, "url_report", False))
-            version_label = getattr(options, "version_label", None) or ""
-            external_assembly = getattr(options, "external_assembly", None) or ""
-            alt_version_label = getattr(options, "alt_version_label", None) or ""
-            retry_attempts = getattr(options, "retry_attempts", None) or DEFAULT_RETRY_ATTEMPTS
-            conditional_exit = getattr(options, "conditional_exit", None) or "0"
-            ncbi_folders = bool(getattr(options, "ncbi_folders", False))
-            downloader_choice = downloader_value.lower() if isinstance(downloader_value, str) else None
-            if downloader_choice is None:
-                downloader_choice = ask_choice(
-                    "下载工具",
-                    ["wget", "curl", "aria2c", "urllib (内置)"],
-                    default=DEFAULT_DOWNLOADER,
-                    note="选择可用的外部下载器；内置模式将使用 Python urllib。"
-                ).lower()
-            if downloader_choice in {"urllib", "urllib (内置)", "builtin", "内置", "builtin (urllib)"}:
-                downloader_summary = "urllib"
-            elif downloader_choice in {"wget", "curl", "aria2c"}:
-                downloader_summary = downloader_choice
-            else:
-                downloader_summary = DEFAULT_DOWNLOADER
-            downloader_value = downloader_summary
-            delete_extra = bool(getattr(options, "delete_extra", False))
-            silent = bool(getattr(options, "silent", False))
-            progress_only = bool(getattr(options, "progress_only", False))
-            verbose = bool(getattr(options, "verbose", False))
-            debug = bool(getattr(options, "debug", False))
-        else:
-            _print_section("步骤 4/4 · 报告与高级选项", "可选择生成分析报告，并调整高级参数。")
-            assembly_report = ask_bool(
-                "生成 assembly accession 报告？",
-                default=bool(getattr(options, "assembly_report", False))
-            )
-            sequence_report = ask_bool(
-                "生成 sequence accession 报告？",
-                default=bool(getattr(options, "sequence_report", False))
-            )
-            url_report = ask_bool(
-                "生成下载 URL 报告？",
-                default=bool(getattr(options, "url_report", False))
+    if section == "edit output and execution":
+        def set_output_dir():
+            config["output_dir"] = ask_text(
+                "Output directory",
+                default=config.get("output_dir") or DEFAULT_OUTPUT_DIR,
+                allow_empty=False,
+                note="If this directory exists, Chimera may update or overwrite files depending on the selected mode.",
             )
 
-            console.print()
+        def set_threads():
+            config["threads"] = ask_text(
+                "Download threads",
+                default=str(config.get("threads") or DEFAULT_THREADS),
+                allow_empty=False,
+                note="Use a modest value for public servers; 16 is usually enough for downloads.",
+            )
 
-            advanced_presets = [
-                getattr(options, "version_label", None),
-                getattr(options, "external_assembly", None),
-                getattr(options, "alt_version_label", None),
-                getattr(options, "retry_attempts", None),
-                getattr(options, "conditional_exit", None),
-                getattr(options, "ncbi_folders", None),
-                getattr(options, "downloader", None),
-                getattr(options, "delete_extra", None),
-                getattr(options, "silent", None),
-                getattr(options, "progress_only", None),
-                getattr(options, "verbose", None),
-                getattr(options, "debug", None),
-            ]
-            advanced_requested = any(value not in (None, "", False) for value in advanced_presets)
+        def set_dry_run():
+            config["dry_run"] = ask_bool("Dry-run only?", default=bool(config.get("dry_run", False)))
 
-            if advanced_requested or Confirm.ask("需要继续配置高级选项吗？", default=False, console=console):
-                version_label = getattr(options, "version_label", None)
-                if version_label is None:
-                    version_label = ask_text(
-                        "版本标签 (可留空自动使用时间戳)",
-                        default=""
-                    )
-                external_assembly = getattr(options, "external_assembly", None)
-                if external_assembly is None:
-                    external_assembly = ask_text(
-                        "外部 assembly_summary.txt (可留空)",
-                        default=""
-                    )
-                alt_version_label = getattr(options, "alt_version_label", None)
-                if alt_version_label is None:
-                    alt_version_label = ask_text(
-                        "备用版本标签 (可留空)",
-                        default=""
-                    )
-                retry_attempts = getattr(options, "retry_attempts", None) or ask_text(
-                    "下载重试次数",
-                    default=DEFAULT_RETRY_ATTEMPTS,
-                    allow_empty=False
+        def set_fix_mode():
+            config["fix_mode"] = ask_bool(
+                "Only repair missing or failed files?",
+                default=bool(config.get("fix_mode", False)),
+            )
+
+        def set_md5_check():
+            config["md5_check"] = ask_bool(
+                "Check MD5 after download?",
+                default=bool(config.get("md5_check", True)),
+            )
+
+        _run_prompt_sequence([set_output_dir, set_threads, set_dry_run, set_fix_mode, set_md5_check])
+        return config
+
+    if section == "edit reports and advanced options":
+        def set_assembly_report():
+            config["assembly_report"] = ask_bool(
+                "Generate assembly accession report?",
+                default=bool(config.get("assembly_report", False)),
+            )
+
+        def set_sequence_report():
+            config["sequence_report"] = ask_bool(
+                "Generate sequence accession report?",
+                default=bool(config.get("sequence_report", False)),
+            )
+
+        def set_url_report():
+            config["url_report"] = ask_bool(
+                "Generate URL report?",
+                default=bool(config.get("url_report", False)),
+            )
+
+        def set_advanced_requested():
+            config["_advanced_requested"] = ask_bool(
+                "Configure advanced options?",
+                default=any(
+                    config.get(key) not in (None, "", False, DEFAULT_RETRY_ATTEMPTS, "0", DEFAULT_DOWNLOADER)
+                    for key in [
+                        "version_label",
+                        "external_assembly",
+                        "alt_version_label",
+                        "retry_attempts",
+                        "conditional_exit",
+                        "downloader",
+                        "delete_extra",
+                        "silent",
+                        "progress_only",
+                        "verbose",
+                        "debug",
+                    ]
+                ) or bool(config.get("ncbi_folders", False)),
+            )
+
+        _run_prompt_sequence([set_assembly_report, set_sequence_report, set_url_report, set_advanced_requested])
+        advanced_requested = config.pop("_advanced_requested", False)
+        if advanced_requested:
+            def set_version_label():
+                config["version_label"] = ask_text("Version label", default=config.get("version_label") or "")
+
+            def set_external_assembly():
+                config["external_assembly"] = ask_text(
+                    "External assembly_summary.txt",
+                    default=config.get("external_assembly") or "",
                 )
-                conditional_exit = getattr(options, "conditional_exit", None) or ask_text(
-                    "失败阈值 (0 表示关闭)",
-                    default="0",
-                    allow_empty=False
+
+            def set_alt_version_label():
+                config["alt_version_label"] = ask_text(
+                    "Alternate version label",
+                    default=config.get("alt_version_label") or "",
                 )
-                ncbi_folders = ask_bool(
-                    "按照 NCBI FTP 目录结构存放文件？",
-                    default=bool(getattr(options, "ncbi_folders", False))
+
+            def set_retry_attempts():
+                config["retry_attempts"] = ask_text(
+                    "Retry attempts",
+                    default=str(config.get("retry_attempts") or DEFAULT_RETRY_ATTEMPTS),
+                    allow_empty=False,
                 )
-                downloader = getattr(options, "downloader", None) or ask_choice(
-                    "下载工具",
+
+            def set_conditional_exit():
+                config["conditional_exit"] = ask_text(
+                    "Accepted failure count",
+                    default=str(config.get("conditional_exit") or "0"),
+                    allow_empty=False,
+                )
+
+            def set_ncbi_folders():
+                config["ncbi_folders"] = ask_bool(
+                    "Use NCBI FTP folder layout?",
+                    default=bool(config.get("ncbi_folders", False)),
+                )
+
+            def set_downloader():
+                downloader = ask_choice(
+                    "Downloader",
                     VALID_DOWNLOADERS,
-                    default=DEFAULT_DOWNLOADER,
-                    note="wget 支持断点续传；curl 更适合受限环境。"
-                )
-                downloader = downloader.lower()
-                if downloader not in VALID_DOWNLOADERS:
-                    downloader = DEFAULT_DOWNLOADER
-                downloader_value = downloader
-                delete_extra = ask_bool(
-                    "允许删除输出目录中多余的常规文件？",
-                    default=bool(getattr(options, "delete_extra", False))
-                )
-                silent = ask_bool(
-                    "开启静默输出 (silent)？",
-                    default=bool(getattr(options, "silent", False))
-                )
-                progress_only = ask_bool(
-                    "仅显示下载进度 (progress-only)？",
-                    default=bool(getattr(options, "progress_only", False))
-                )
-                verbose = ask_bool(
-                    "开启详细日志 (verbose)？",
-                    default=bool(getattr(options, "verbose", False))
-                )
-                debug = ask_bool(
-                    "开启调试模式 (debug)？",
-                    default=bool(getattr(options, "debug", False))
-                )
-            else:
-                version_label = getattr(options, "version_label", None) or ""
-                external_assembly = getattr(options, "external_assembly", None) or ""
-                alt_version_label = getattr(options, "alt_version_label", None) or ""
-                retry_attempts = getattr(options, "retry_attempts", None) or DEFAULT_RETRY_ATTEMPTS
-                conditional_exit = getattr(options, "conditional_exit", None) or "0"
-                ncbi_folders = bool(getattr(options, "ncbi_folders", False))
-                downloader = getattr(options, "downloader", None) or DEFAULT_DOWNLOADER
-                downloader = downloader.lower()
-                if downloader not in VALID_DOWNLOADERS:
-                    downloader = DEFAULT_DOWNLOADER
-                downloader_value = downloader
-                delete_extra = bool(getattr(options, "delete_extra", False))
-                silent = bool(getattr(options, "silent", False))
-                progress_only = bool(getattr(options, "progress_only", False))
-                verbose = bool(getattr(options, "verbose", False))
-                debug = bool(getattr(options, "debug", False))
+                    default=config.get("downloader") if config.get("downloader") in VALID_DOWNLOADERS else DEFAULT_DOWNLOADER,
+                    note="wget supports resume; curl may work better in restricted environments.",
+                ).lower()
+                config["downloader"] = downloader if downloader in VALID_DOWNLOADERS else DEFAULT_DOWNLOADER
 
+            def set_delete_extra():
+                config["delete_extra"] = ask_bool(
+                    "Delete extra regular files in the output directory?",
+                    default=bool(config.get("delete_extra", False)),
+                )
+
+            def set_silent():
+                config["silent"] = ask_bool("Silent output?", default=bool(config.get("silent", False)))
+
+            def set_progress_only():
+                config["progress_only"] = ask_bool(
+                    "Progress-only output?",
+                    default=bool(config.get("progress_only", False)),
+                )
+
+            def set_verbose():
+                config["verbose"] = ask_bool("Verbose log?", default=bool(config.get("verbose", False)))
+
+            def set_debug():
+                config["debug"] = ask_bool("Debug mode?", default=bool(config.get("debug", False)))
+
+            _run_prompt_sequence([
+                set_version_label,
+                set_external_assembly,
+                set_alt_version_label,
+                set_retry_attempts,
+                set_conditional_exit,
+                set_ncbi_folders,
+                set_downloader,
+                set_delete_extra,
+                set_silent,
+                set_progress_only,
+                set_verbose,
+                set_debug,
+            ])
+        else:
+            config["version_label"] = ""
+            config["external_assembly"] = ""
+            config["alt_version_label"] = ""
+            config["retry_attempts"] = DEFAULT_RETRY_ATTEMPTS
+            config["conditional_exit"] = "0"
+            config["ncbi_folders"] = False
+            config["downloader"] = DEFAULT_DOWNLOADER
+            config["delete_extra"] = False
+            config["silent"] = False
+            config["progress_only"] = False
+            config["verbose"] = False
+            config["debug"] = False
+        return config
+
+    return config
+
+
+def _initial_download_config(options):
+    database, _ = sanitize_database(getattr(options, "database", None) or DEFAULT_DATABASE, "ncbi")
+    organism_group, _ = sanitize_organism_group(getattr(options, "organism_group", None) or "", "ncbi")
+    downloader = getattr(options, "downloader", None) or DEFAULT_DOWNLOADER
+    downloader = downloader.lower() if isinstance(downloader, str) else DEFAULT_DOWNLOADER
+    if downloader not in VALID_DOWNLOADERS:
+        downloader = DEFAULT_DOWNLOADER
+
+    return {
+        "database": database,
+        "organism_group": organism_group or "",
+        "taxid": getattr(options, "taxid", None) or "",
+        "file_types": getattr(options, "file_types", None) or DEFAULT_FILE_TYPE,
+        "refseq_category": getattr(options, "refseq_category", None) or DEFAULT_REFSEQ_CATEGORY,
+        "assembly_level": getattr(options, "assembly_level", None) or DEFAULT_ASSEMBLY_LEVEL,
+        "start_date": getattr(options, "start_date", None) or "",
+        "end_date": getattr(options, "end_date", None) or "",
+        "custom_filter": getattr(options, "custom_filter", None) or "",
+        "taxonomy_mode": "ncbi",
+        "taxonomy_rank": getattr(options, "taxonomy_rank", None) or DEFAULT_TAXONOMY_RANK,
+        "limit_assembly": getattr(options, "limit_assembly", None) or "0",
+        "output_dir": getattr(options, "output_dir", None) or DEFAULT_OUTPUT_DIR,
+        "threads": getattr(options, "threads", None) or DEFAULT_THREADS,
+        "dry_run": bool(getattr(options, "dry_run", False)),
+        "fix_mode": bool(getattr(options, "fix_mode", False)),
+        "md5_check": True,
+        "assembly_report": bool(getattr(options, "assembly_report", False)),
+        "sequence_report": bool(getattr(options, "sequence_report", False)),
+        "url_report": bool(getattr(options, "url_report", False)),
+        "version_label": getattr(options, "version_label", None) or "",
+        "external_assembly": getattr(options, "external_assembly", None) or "",
+        "alt_version_label": getattr(options, "alt_version_label", None) or "",
+        "retry_attempts": getattr(options, "retry_attempts", None) or DEFAULT_RETRY_ATTEMPTS,
+        "conditional_exit": getattr(options, "conditional_exit", None) or "0",
+        "ncbi_folders": bool(getattr(options, "ncbi_folders", False)),
+        "downloader": downloader,
+        "delete_extra": bool(getattr(options, "delete_extra", False)),
+        "silent": bool(getattr(options, "silent", False)),
+        "progress_only": bool(getattr(options, "progress_only", False)),
+        "verbose": bool(getattr(options, "verbose", False)),
+        "debug": bool(getattr(options, "debug", False)),
+        "gtdb_mode": None,
+        "gtdb_release": None,
+        "gtdb_mirror": None,
+    }
+
+
+def _reset_download_filters(config):
+    config["file_types"] = DEFAULT_FILE_TYPE
+    config["refseq_category"] = DEFAULT_REFSEQ_CATEGORY if "refseq" in str(config["database"]).split(",") else ""
+    config["assembly_level"] = DEFAULT_ASSEMBLY_LEVEL
+    config["start_date"] = ""
+    config["end_date"] = ""
+    config["custom_filter"] = ""
+
+
+def _download_filters_customized(config):
+    return any(
+        [
+            config.get("file_types") != DEFAULT_FILE_TYPE,
+            config.get("refseq_category") not in ("", DEFAULT_REFSEQ_CATEGORY),
+            config.get("assembly_level") != DEFAULT_ASSEMBLY_LEVEL,
+            bool(config.get("start_date")),
+            bool(config.get("end_date")),
+            bool(config.get("custom_filter")),
+        ]
+    )
+
+
+def _print_download_intro():
+    console.rule("[bold cyan]Chimera download wizard[/bold cyan]")
+    intro = Text("This wizard downloads NCBI genomes for Chimera database building.\n", style="bold white")
+    intro.append("It will create target.tsv, tax.info, and taxonomy.meta for the build step.\n", style="dim")
+    intro.append("Press Ctrl+C to go back one step. At the first step it cancels the wizard.", style="dim")
+    console.print(Panel(intro, border_style="cyan", box=box.DOUBLE, expand=False))
+    console.print()
+
+    if questionary is None and sys.stdin.isatty() and sys.stdout.isatty():
+        console.print("[yellow]Install questionary (pip install questionary) for interactive menus. Falling back to text input.[/yellow]")
         console.print()
 
-        if downloader_value is None:
-            downloader_value = DEFAULT_DOWNLOADER
-        if downloader_summary is None:
-            downloader_summary = downloader_value
 
-        # Assemble configuration
-        config = {
-            "database": database,
-            "organism_group": organism_group,
-            "taxid": taxid,
-            "file_types": file_types,
-            "refseq_category": refseq_category,
-            "assembly_level": assembly_level,
-            "start_date": start_date,
-            "end_date": end_date,
-            "custom_filter": custom_filter,
-            "taxonomy_mode": taxonomy_mode,
-            "taxonomy_rank": taxonomy_rank,
-            "limit_assembly": limit_assembly,
-            "output_dir": output_dir,
-            "threads": threads,
-            "dry_run": dry_run,
-            "fix_mode": fix_mode,
-            "md5_check": md5_check,
-            "assembly_report": assembly_report,
-            "sequence_report": sequence_report,
-            "url_report": url_report,
-            "version_label": version_label,
-            "external_assembly": external_assembly,
-            "alt_version_label": alt_version_label,
-            "retry_attempts": retry_attempts,
-            "conditional_exit": conditional_exit,
-            "ncbi_folders": ncbi_folders,
-            "downloader": downloader_value,
-            "delete_extra": delete_extra,
-            "silent": silent,
-            "progress_only": progress_only,
-            "verbose": verbose,
-            "debug": debug,
-            "gtdb_mode": gtdb_mode,
-            "gtdb_release": gtdb_release,
-            "gtdb_mirror": gtdb_mirror,
-        }
+def prompt_user(options):
+    """
+    Interactively prompt user for download parameters.
+    Ctrl+C returns to the previous step; Ctrl+C at the first step cancels.
+    """
+    config = _initial_download_config(options)
+    step = 0
+    _print_download_intro()
 
-        console.print(_build_download_config_summary(config, downloader_summary))
-        console.print()
+    while True:
+        try:
+            if step == 0:
+                _print_section(
+                    "Step 1/4 · Select genomes",
+                    "Choose the source database and taxonomic scope. NCBI taxonomy is used in this release.",
+                )
+                config = _edit_download_config_section(config, "edit genome selection")
+                step = 1
+                console.print()
+                continue
 
-        if Confirm.ask("确认以上设置并继续执行下载流程吗？", default=True, console=console):
-            return config
+            if step == 1:
+                _print_section(
+                    "Step 2/4 · File and assembly filters",
+                    "Use defaults unless you need a smaller or more specific database.",
+                )
+                configure_filters = ask_bool(
+                    "Configure file or assembly filters?",
+                    default=_download_filters_customized(config),
+                )
+                if configure_filters:
+                    config = _edit_download_config_section(config, "edit filters")
+                else:
+                    _reset_download_filters(config)
+                step = 2
+                console.print()
+                continue
 
-        if not Confirm.ask("需要重新配置参数吗？", default=True, console=console):
-            console.print("[red]已取消操作。[/red]")
-            sys.exit(1)
+            if step == 2:
+                _print_section(
+                    "Step 3/4 · Output and execution",
+                    "Choose where the download should be written and how it should run.",
+                )
+                config = _edit_download_config_section(config, "edit output and execution")
+                step = 3
+                console.print()
+                continue
 
-        console.print("[yellow]重新开始参数配置...\n[/yellow]")
+            if step == 3:
+                _print_section(
+                    "Step 4/4 · Reports and advanced options",
+                    "Most users can keep these disabled.",
+                )
+                config = _edit_download_config_section(config, "edit reports and advanced options")
+                step = 4
+                console.print()
+                continue
+
+            console.print(_build_download_config_summary(config, config.get("downloader") or DEFAULT_DOWNLOADER))
+            console.print()
+            if ask_bool("Continue with these settings?", default=True):
+                return config
+            step = 3
+            console.print("[yellow]Back to the previous step.[/yellow]\n")
+
+        except PromptBack:
+            if step <= 0:
+                console.print("\n[red]Operation cancelled.[/red]")
+                sys.exit(1)
+            step -= 1
+            console.print("\n[yellow]Back to the previous step.[/yellow]\n")
 
 
 def build_command(options):
@@ -2512,17 +2518,20 @@ def build_command(options):
     Returns:
     - str: Built command string
     """
-    cmd = ["genome_updater.sh"]
+    bundled_script = Path(__file__).resolve().parents[2] / "libs" / "genome_updater.sh"
+    genome_updater = str(bundled_script) if bundled_script.is_file() else "genome_updater.sh"
+    cmd = [shlex.quote(genome_updater)]
+    use_external_assembly = bool(getattr(options, "external_assembly", None))
 
     # Database options
-    if options.database:
+    if options.database and not use_external_assembly:
         cmd.append(f"-d '{options.database}'")
 
     # Organism options
-    if options.organism_group:
+    if options.organism_group and not use_external_assembly:
         cmd.append(f"-g '{options.organism_group}'")
 
-    if options.taxid:
+    if options.taxid and not use_external_assembly:
         cmd.append(f"-T '{options.taxid}'")
 
     # File options
@@ -2605,7 +2614,7 @@ def build_command(options):
     
     # NCBI folder structure
     if getattr(options, 'ncbi_folders', False):
-        cmd.append("-N")
+        cmd.append("-N split")
     
     if options.downloader:
         dl = options.downloader.strip().lower()
@@ -3184,7 +3193,7 @@ def setup_output_directory(options):
     elif os.path.exists(output_folder):
         while True:
             confirmation = _prompt_line_input(
-                "输出目录已存在，选择 y 清空 / c 继续 / n 取消",
+                "Output directory exists: clear [y], continue [c], or cancel [n]",
                 f"Output folder '{output_folder}' exists. Do you want to clear it [y], continue [c], or cancel [n]? [y/c/n]: ",
             ).strip().lower()
 
@@ -3411,9 +3420,9 @@ def run_gtdb_representative_pipeline(options):
     if not quiet:
         print("\nCleaning up temporary files...")
     if os.name == 'nt':
-        os.system(f"rmdir /s /q {tmp_folder}")
+        shutil.rmtree(tmp_folder, ignore_errors=True)
     else:
-        os.system(f"rm -rf {tmp_folder}")
+        shutil.rmtree(tmp_folder, ignore_errors=True)
     if not quiet:
         print(f"Removed temporary folder: {tmp_folder}")
 
@@ -3435,9 +3444,11 @@ def download(interactive=False, raw_args=None):
     """
     # Create argument parser
     parser = argparse.ArgumentParser(
-        description='Download NCBI genome data',
+        description='Download NCBI genomes and taxonomy files for Chimera database building',
         epilog='''Examples:
-        python download.py -d refseq -g "archaea,bacteria" -l "complete genome" -f genomic.fna.gz -o ./output
+        chimera download -d refseq -g archaea -l "complete genome" -f genomic.fna.gz -o ./download_archaea
+        chimera build -i ./download_archaea/target.tsv -o ./ChimeraDB_archaea
+        chimera classify -i reads.fastq.gz -d ./ChimeraDB_archaea -o ./chimera_out
         ''',
         formatter_class=argparse.RawTextHelpFormatter
     )
@@ -3445,25 +3456,25 @@ def download(interactive=False, raw_args=None):
     # Add arguments
     # Database options
     parser.add_argument("-d", "--database", 
-                       help=f"Database to download (default: {DEFAULT_DATABASE})\nOptions: {', '.join(VALID_DATABASES)}")
+                       help=f"Source database (default: {DEFAULT_DATABASE}; options: {', '.join(VALID_DATABASES)})")
     
     # Organism options
     parser.add_argument("-g", "--organism-group",
-                       help=f"Organism groups to download (comma-separated)\nOptions: {', '.join(VALID_ORGANISM_GROUPS)}")
+                       help=f"NCBI organism groups, comma-separated (for example: archaea,bacteria). Options: {', '.join(VALID_ORGANISM_GROUPS)}")
     
     parser.add_argument("-T", "--taxid",
-                       help="Taxonomy IDs to download (comma-separated)\nExample: 562,623 (for -M ncbi) or s__Escherichia coli (for -M gtdb)")
+                       help="NCBI taxonomy IDs to download, comma-separated (for example: 562,623)")
     
     # File options
     parser.add_argument("-f", "--file-types",
-                       help=f"File types to download (default: {DEFAULT_FILE_TYPE})\nOptions: {', '.join(VALID_FILE_TYPES)}")
+                       help=f"File types to download (default: {DEFAULT_FILE_TYPE}; options: {', '.join(VALID_FILE_TYPES)})")
     
     # Filter options
     parser.add_argument("-c", "--refseq-category",
-                       help=f"RefSeq categories to download (default: {DEFAULT_REFSEQ_CATEGORY})\nOptions: {', '.join(VALID_REFSEQ_CATEGORIES)}")
+                       help=f"RefSeq categories to download (default: {DEFAULT_REFSEQ_CATEGORY}; options: {', '.join(VALID_REFSEQ_CATEGORIES)})")
     
     parser.add_argument("-l", "--assembly-level",
-                       help=f"Assembly levels to download (default: {DEFAULT_ASSEMBLY_LEVEL})\nOptions: {', '.join(VALID_ASSEMBLY_LEVELS)}")
+                       help=f"Assembly levels to download (default: {DEFAULT_ASSEMBLY_LEVEL}; options: {', '.join(VALID_ASSEMBLY_LEVELS)})")
     
     parser.add_argument("-D", "--start-date",
                        help="Start date (>=), based on sequence release date. Format YYYYMMDD")
@@ -3472,35 +3483,35 @@ def download(interactive=False, raw_args=None):
                        help="End date (<=), based on sequence release date. Format YYYYMMDD")
     
     parser.add_argument("-F", "--custom-filter",
-                       help="Custom filter for assembly summary in format colA:val1|colB:valX,valY (case insensitive)")
+                       help='Custom assembly summary filter using awk syntax, for example: $14 == "Full" && $8 ~ /archaeon/')
     
     # Taxonomy options
     parser.add_argument("-M", "--taxonomy-mode",
-                       help=f"Taxonomy mode (default: {DEFAULT_TAXONOMY_MODE})\nOptions: {', '.join(VALID_TAXONOMY_MODES)}")
+                       help=argparse.SUPPRESS)
     
     parser.add_argument("-Y", "--taxonomy-rank",
-                       help=f"Taxonomy rank to use (default: {DEFAULT_TAXONOMY_RANK})\nOptions: {', '.join(VALID_TAXONOMY_RANKS)}")
+                       help=f"Taxonomy rank written to target.tsv (default: {DEFAULT_TAXONOMY_RANK}; options: {', '.join(VALID_TAXONOMY_RANKS)})")
 
     parser.add_argument("--gtdb-mode",
                        choices=GTDB_DOWNLOAD_MODES,
-                       help="GTDB download mode: genome_updater (default) or representative")
+                       help=argparse.SUPPRESS)
 
     parser.add_argument("--gtdb-release",
-                       help="GTDB release token (e.g., rs214.0). 默认自动选择最新版本")
+                       help=argparse.SUPPRESS)
 
     parser.add_argument("--gtdb-cache-dir",
-                       help="目录缓存 GTDB release/metadata 信息，默认 ~/.chimera/cache/gtdb")
+                       help=argparse.SUPPRESS)
 
     parser.add_argument("--gtdb-mirror",
                        choices=[opt["key"] for opt in GTDB_MIRROR_OPTIONS],
-                       help="选择首选 GTDB 镜像源 (默认: primary)")
+                       help=argparse.SUPPRESS)
     
     parser.add_argument("-A", "--limit-assembly",
                        help="Limit number of assemblies for each selected taxa. 0 for all.\nSelection by ranks also supported with rank:number (e.g., genus:3)")
     
     # Run options
     parser.add_argument("-o", "--output-dir",
-                       help=f"Output directory path (default: {DEFAULT_OUTPUT_DIR})\nWarning: Will be cleared if exists")
+                       help=f"Output directory (default: {DEFAULT_OUTPUT_DIR}; existing files may be updated or overwritten)")
     
     parser.add_argument("-t", "--threads",
                        help=f"Number of download threads (default: {DEFAULT_THREADS})")
@@ -3584,6 +3595,17 @@ def download(interactive=False, raw_args=None):
         # 命令行模式
         options = parser.parse_args()
 
+    requested_taxonomy_mode = getattr(options, "taxonomy_mode", None)
+    requested_gtdb = (
+        (isinstance(requested_taxonomy_mode, str) and requested_taxonomy_mode.lower() == "gtdb")
+        or getattr(options, "gtdb_mode", None) is not None
+        or getattr(options, "gtdb_release", None) is not None
+        or getattr(options, "gtdb_cache_dir", None) is not None
+        or getattr(options, "gtdb_mirror", None) is not None
+    )
+    if requested_gtdb:
+        parser.error("GTDB download is not supported in this release. Use the NCBI/RefSeq or GenBank download path.")
+
     if not getattr(options, 'taxonomy_mode', None):
         options.taxonomy_mode = DEFAULT_TAXONOMY_MODE
     else:
@@ -3654,6 +3676,11 @@ def download(interactive=False, raw_args=None):
         if not quiet:
             download_end = time.time()
             print(f"\nDownload completed in {download_end - download_start:.2f} seconds.")
+        if getattr(options, "dry_run", False):
+            if not quiet:
+                print("Dry-run completed; no downloaded files will be processed.")
+            return options
+        if not quiet:
             print(f"Downloaded files will be processed now...")
 
         # Processing phase
@@ -3802,9 +3829,9 @@ def download(interactive=False, raw_args=None):
             print("\nCleaning up temporary files...")
         
         if os.name == 'nt':  # Windows
-            os.system(f"rmdir /s /q {tmp_folder}")
+            shutil.rmtree(tmp_folder, ignore_errors=True)
         else:  # Unix/Linux
-            os.system(f"rm -rf {tmp_folder}")
+            shutil.rmtree(tmp_folder, ignore_errors=True)
             
         if not quiet:
             print(f"Removed temporary folder: {tmp_folder}")

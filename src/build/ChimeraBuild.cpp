@@ -24,6 +24,7 @@
 #endif
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -64,6 +65,11 @@ void lowercase_in_place(std::string &value) {
                  });
 }
 
+bool directory_is_empty(const std::filesystem::path &path) {
+  return std::filesystem::directory_iterator(path) ==
+         std::filesystem::directory_iterator();
+}
+
 void apply_taxonomy_meta_defaults(BuildConfig &config) {
   if (!is_auto_or_empty(config.taxonomy_kind) &&
       !is_auto_or_empty(config.taxonomy_version)) {
@@ -100,6 +106,51 @@ void apply_taxonomy_meta_defaults(BuildConfig &config) {
         config.taxonomy_version = value;
       }
     }
+  }
+}
+
+void copy_file_if_exists(const std::filesystem::path &src,
+                         const std::filesystem::path &dst) {
+  if (!std::filesystem::exists(src) || !std::filesystem::is_regular_file(src)) {
+    return;
+  }
+  std::filesystem::create_directories(dst.parent_path());
+  std::filesystem::copy_file(
+      src, dst, std::filesystem::copy_options::overwrite_existing);
+}
+
+void persist_taxonomy_sidecars(const BuildConfig &config,
+                               const std::filesystem::path &databaseRoot) {
+  const std::filesystem::path inputDir =
+      std::filesystem::path(config.input_file).parent_path();
+  const std::filesystem::path taxonomyRoot = databaseRoot / "taxonomy";
+  copy_file_if_exists(inputDir / "taxonomy.meta",
+                      taxonomyRoot / "taxonomy.meta");
+  copy_file_if_exists(inputDir / "tax.info", taxonomyRoot / "tax.info");
+  std::filesystem::path taxdumpSource;
+  if (!config.taxonomy_dir.empty()) {
+    taxdumpSource = config.taxonomy_dir;
+  } else if (const char *env_dir = std::getenv("CHIMERA_NCBI_TAXDUMP_DIR")) {
+    if (*env_dir) {
+      taxdumpSource = env_dir;
+    }
+  }
+  if (!taxdumpSource.empty()) {
+    const std::filesystem::path taxdumpDir = taxonomyRoot / "taxdump";
+    copy_file_if_exists(taxdumpSource / "nodes.dmp", taxdumpDir / "nodes.dmp");
+    copy_file_if_exists(taxdumpSource / "names.dmp", taxdumpDir / "names.dmp");
+  }
+}
+
+void remove_empty_default_tmp_root(const std::filesystem::path &tmpRoot) {
+  if (tmpRoot != std::filesystem::path("tmp")) {
+    return;
+  }
+  std::error_code ec;
+  if (std::filesystem::exists(tmpRoot, ec) &&
+      std::filesystem::is_directory(tmpRoot, ec) &&
+      std::filesystem::is_empty(tmpRoot, ec)) {
+    std::filesystem::remove(tmpRoot, ec);
   }
 }
 
@@ -389,9 +440,6 @@ void run(BuildConfig config) {
     config.threads = static_cast<uint16_t>(hardwareThreads);
   }
   apply_taxonomy_meta_defaults(config);
-  if (config.verbose) {
-    std::cout << config << std::endl;
-  }
   const std::filesystem::path databaseRoot = config.output_file;
   const std::filesystem::path corePrefix = databaseRoot / "core";
   const std::filesystem::path corePath = databaseRoot / "core.imcf";
@@ -407,7 +455,17 @@ void run(BuildConfig config) {
     throw std::runtime_error("database output path exists and is not a directory: " +
                              databaseRoot.string());
   }
+  if (std::filesystem::is_directory(databaseRoot) &&
+      !directory_is_empty(databaseRoot)) {
+    throw std::runtime_error(
+        "database output directory already exists and is not empty: " +
+        databaseRoot.string());
+  }
+  if (config.verbose) {
+    std::cout << config << std::endl;
+  }
   std::filesystem::create_directories(databaseRoot);
+  persist_taxonomy_sidecars(config, databaseRoot);
   if (config.native_bounded_index) {
     std::filesystem::create_directories(localRoot);
   }
@@ -773,6 +831,7 @@ void run(BuildConfig config) {
     std::cout << "Remove temporary files..." << std::endl;
   }
   std::filesystem::remove_all(dir);
+  remove_empty_default_tmp_root(tmpRoot);
 }
 
 } // namespace ChimeraBuild

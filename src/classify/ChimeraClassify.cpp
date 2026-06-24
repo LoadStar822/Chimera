@@ -39,6 +39,12 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include <unistd.h>
+
+#ifndef CHIMERA_VERSION
+#define CHIMERA_VERSION "unknown"
+#endif
+
 namespace {
 
 static inline std::string trim_copy(std::string s) {
@@ -59,6 +65,19 @@ maybe_load_profiledb_taxonomy_for_profile(const std::filesystem::path &dbPath);
 static std::unique_ptr<ChimeraClassify::NcbiTaxdump>
 maybe_load_tax_tsv_for_profile(const std::filesystem::path &dbPath);
 
+static void ensure_taxdump_capacity(ChimeraClassify::NcbiTaxdump &tax,
+                                    uint32_t tid) {
+  if (tid < tax.parent.size()) {
+    return;
+  }
+  const auto size = static_cast<size_t>(tid) + 1;
+  tax.parent.resize(size, 0);
+  tax.is_species.resize(size, 0);
+  tax.is_genus.resize(size, 0);
+  tax.rank_name.resize(size);
+  tax.scientific_name.resize(size);
+}
+
 static std::unique_ptr<ChimeraClassify::NcbiTaxdump>
 maybe_load_ncbi_taxdump(const std::string &taxonomyKind) {
   if (taxonomyKind != "ncbi") {
@@ -68,12 +87,7 @@ maybe_load_ncbi_taxdump(const std::string &taxonomyKind) {
 }
 
 static std::unique_ptr<ChimeraClassify::NcbiTaxdump>
-maybe_load_ncbi_taxdump_for_profile() {
-  const char *env_dir = std::getenv("CHIMERA_NCBI_TAXDUMP_DIR");
-  if (env_dir == nullptr || *env_dir == '\0') {
-    return nullptr;
-  }
-  std::filesystem::path base = env_dir;
+load_ncbi_taxdump_from_dir(const std::filesystem::path &base) {
   std::filesystem::path nodes = base / "nodes.dmp";
   if (!std::filesystem::exists(nodes)) {
     return nullptr;
@@ -116,17 +130,13 @@ maybe_load_ncbi_taxdump_for_profile() {
       continue;
     }
     const std::string &rank = fields[2];
-    if (tid >= tax->parent.size()) {
-      tax->parent.resize(static_cast<size_t>(tid) + 1, 0);
-      tax->is_species.resize(static_cast<size_t>(tid) + 1, 0);
-      tax->is_genus.resize(static_cast<size_t>(tid) + 1, 0);
-      tax->scientific_name.resize(static_cast<size_t>(tid) + 1);
-    }
+    ensure_taxdump_capacity(*tax, tid);
     tax->parent[tid] = parent;
     const bool is_sp = (rank == "species");
     tax->is_species[tid] = is_sp ? 1 : 0;
     const bool is_g = (rank == "genus");
     tax->is_genus[tid] = is_g ? 1 : 0;
+    tax->rank_name[tid] = rank;
   }
 
   if (!tax->enabled()) {
@@ -161,14 +171,21 @@ maybe_load_ncbi_taxdump_for_profile() {
         if (!chimera::utils::try_parse_u32(fields[0], tid)) {
           continue;
         }
-        if (tid >= tax->scientific_name.size()) {
-          tax->scientific_name.resize(static_cast<size_t>(tid) + 1);
-        }
+        ensure_taxdump_capacity(*tax, tid);
         tax->scientific_name[tid] = fields[1];
       }
     }
   }
   return tax;
+}
+
+static std::unique_ptr<ChimeraClassify::NcbiTaxdump>
+maybe_load_ncbi_taxdump_for_profile() {
+  const char *env_dir = std::getenv("CHIMERA_NCBI_TAXDUMP_DIR");
+  if (env_dir == nullptr || *env_dir == '\0') {
+    return nullptr;
+  }
+  return load_ncbi_taxdump_from_dir(std::filesystem::path(env_dir));
 }
 
 template <typename T>
@@ -208,10 +225,7 @@ std::filesystem::path profiledb_root_for_db(
 }
 
 static std::unique_ptr<ChimeraClassify::NcbiTaxdump>
-maybe_load_tax_tsv_for_profile(const std::filesystem::path &dbPath) {
-  const auto corePath = chimera::local_resolution::core_archive_path_for(dbPath);
-  std::filesystem::path taxPath = corePath;
-  taxPath.replace_extension(".tax");
+load_tax_tsv_file_for_profile(const std::filesystem::path &taxPath) {
   if (!std::filesystem::exists(taxPath)) {
     return nullptr;
   }
@@ -247,19 +261,37 @@ maybe_load_tax_tsv_for_profile(const std::filesystem::path &dbPath) {
         !chimera::utils::try_parse_u32(fields[1], parent)) {
       continue;
     }
-    if (tid >= tax->parent.size()) {
-      tax->parent.resize(static_cast<size_t>(tid) + 1, 0);
-      tax->is_species.resize(static_cast<size_t>(tid) + 1, 0);
-      tax->is_genus.resize(static_cast<size_t>(tid) + 1, 0);
-      tax->scientific_name.resize(static_cast<size_t>(tid) + 1);
-    }
+    ensure_taxdump_capacity(*tax, tid);
     tax->parent[tid] = parent;
     tax->is_species[tid] = (fields[2] == "species") ? 1 : 0;
     tax->is_genus[tid] = (fields[2] == "genus") ? 1 : 0;
+    tax->rank_name[tid] = fields[2];
     tax->scientific_name[tid] = fields[3];
   }
 
   return tax->enabled() ? std::move(tax) : nullptr;
+}
+
+static std::unique_ptr<ChimeraClassify::NcbiTaxdump>
+maybe_load_tax_tsv_for_profile(const std::filesystem::path &dbPath) {
+  const auto corePath = chimera::local_resolution::core_archive_path_for(dbPath);
+  std::vector<std::filesystem::path> candidates;
+  if (std::filesystem::is_directory(dbPath)) {
+    candidates.push_back(dbPath / "taxonomy" / "tax.info");
+    candidates.push_back(dbPath / "tax.info");
+  }
+  candidates.push_back(corePath.parent_path() / "taxonomy" / "tax.info");
+  candidates.push_back(corePath.parent_path() / "tax.info");
+  std::filesystem::path legacyTaxPath = corePath;
+  legacyTaxPath.replace_extension(".tax");
+  candidates.push_back(legacyTaxPath);
+  for (const auto &candidate : candidates) {
+    auto tax = load_tax_tsv_file_for_profile(candidate);
+    if (tax) {
+      return tax;
+    }
+  }
+  return nullptr;
 }
 
 static std::unique_ptr<ChimeraClassify::NcbiTaxdump>
@@ -269,7 +301,7 @@ maybe_load_profiledb_taxonomy_for_profile(const std::filesystem::path &dbPath) {
   const std::filesystem::path nodesPath = taxonomyDir / "nodes.bin";
   const std::filesystem::path namesPath = taxonomyDir / "names.bin";
   if (!std::filesystem::exists(nodesPath)) {
-    return nullptr;
+    return load_ncbi_taxdump_from_dir(taxonomyDir / "taxdump");
   }
 
   std::ifstream nodes(nodesPath, std::ios::binary);
@@ -293,15 +325,11 @@ maybe_load_profiledb_taxonomy_for_profile(const std::filesystem::path &dbPath) {
         !read_profiledb_taxonomy_string(nodes, rank)) {
       return nullptr;
     }
-    if (tid >= tax->parent.size()) {
-      tax->parent.resize(static_cast<size_t>(tid) + 1, 0);
-      tax->is_species.resize(static_cast<size_t>(tid) + 1, 0);
-      tax->is_genus.resize(static_cast<size_t>(tid) + 1, 0);
-      tax->scientific_name.resize(static_cast<size_t>(tid) + 1);
-    }
+    ensure_taxdump_capacity(*tax, tid);
     tax->parent[tid] = parent;
     tax->is_species[tid] = (rank == "species") ? 1 : 0;
     tax->is_genus[tid] = (rank == "genus") ? 1 : 0;
+    tax->rank_name[tid] = rank;
   }
 
   if (std::filesystem::exists(namesPath)) {
@@ -318,16 +346,17 @@ maybe_load_profiledb_taxonomy_for_profile(const std::filesystem::path &dbPath) {
               !read_profiledb_taxonomy_string(names, name)) {
             return nullptr;
           }
-          if (tid >= tax->scientific_name.size()) {
-            tax->scientific_name.resize(static_cast<size_t>(tid) + 1);
-          }
+          ensure_taxdump_capacity(*tax, tid);
           tax->scientific_name[tid] = std::move(name);
         }
       }
     }
   }
 
-  return tax->enabled() ? std::move(tax) : nullptr;
+  if (tax->enabled()) {
+    return tax;
+  }
+  return load_ncbi_taxdump_from_dir(taxonomyDir / "taxdump");
 }
 
 struct SpoolPreparedCandidate {
@@ -1882,17 +1911,6 @@ resolve_profile_cami_output_path(const std::string &outputFile) {
   return path.string();
 }
 
-static std::string resolve_profile_variant_output_path(
-    const std::string &outputFile, const std::string &standardFilename,
-    const std::string &replacementExtension) {
-  std::filesystem::path path(outputFile);
-  if (path.filename() == "ChimeraClassify.tsv") {
-    return (path.parent_path() / standardFilename).string();
-  }
-  path.replace_extension(replacementExtension);
-  return path.string();
-}
-
 static std::string
 resolve_native_profile_trace_output_path(const std::string &outputFile) {
   std::filesystem::path path(outputFile);
@@ -1913,24 +1931,246 @@ resolve_native_profile_debug_output_path(const std::string &outputFile) {
   return path.string();
 }
 
-static void copy_profile_file_or_throw(const std::filesystem::path &src,
-                                       const std::filesystem::path &dst) {
-  if (!std::filesystem::exists(src)) {
-    throw std::runtime_error("Profile response-calibrated source is missing: " +
-                             src.string());
+static std::string format_seconds(double seconds) {
+  std::ostringstream os;
+  os << std::fixed << std::setprecision(seconds < 10.0 ? 1 : 0) << seconds
+     << "s";
+  return os.str();
+}
+
+static std::string format_integer(uint64_t value) {
+  std::string s = std::to_string(value);
+  for (std::ptrdiff_t pos = static_cast<std::ptrdiff_t>(s.size()) - 3;
+       pos > 0; pos -= 3) {
+    s.insert(static_cast<size_t>(pos), ",");
   }
-  if (!dst.parent_path().empty()) {
-    std::filesystem::create_directories(dst.parent_path());
+  return s;
+}
+
+static std::string compact_path(const std::string &pathText,
+                                size_t maxLen = 96) {
+  if (pathText.size() <= maxLen) {
+    return pathText;
   }
-  std::error_code ec;
-  std::filesystem::copy_file(src, dst,
-                             std::filesystem::copy_options::overwrite_existing,
-                             ec);
-  if (ec) {
-    throw std::runtime_error("Failed to write profile response-calibrated "
-                             "output from " +
-                             src.string() + " to " + dst.string() + ": " +
-                             ec.message());
+  std::filesystem::path path(pathText);
+  std::vector<std::string> parts;
+  for (auto it = path.end(); it != path.begin() && parts.size() < 3;) {
+    --it;
+    if (!it->empty()) {
+      parts.push_back(it->string());
+    }
+  }
+  if (parts.empty()) {
+    return pathText.substr(0, maxLen - 3) + "...";
+  }
+  std::ostringstream os;
+  os << "...";
+  for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
+    os << "/" << *it;
+  }
+  return os.str();
+}
+
+static std::string summarize_input_paths(const std::vector<std::string> &paths,
+                                         size_t maxPaths = 3) {
+  if (paths.empty()) {
+    return "-";
+  }
+  std::ostringstream os;
+  const size_t shown = std::min(maxPaths, paths.size());
+  for (size_t i = 0; i < shown; ++i) {
+    if (i > 0) {
+      os << ", ";
+    }
+    os << compact_path(paths[i]);
+  }
+  if (paths.size() > shown) {
+    os << ", ... (" << paths.size() << " files)";
+  }
+  return os.str();
+}
+
+static bool stdout_is_terminal() {
+  static const bool isTerminal = (::isatty(STDOUT_FILENO) == 1);
+  return isTerminal;
+}
+
+static bool console_color_enabled() {
+  static const bool enabled = []() {
+    if (const char *mode = std::getenv("CHIMERA_COLOR");
+        mode != nullptr && *mode != '\0') {
+      std::string value(mode);
+      std::transform(value.begin(), value.end(), value.begin(),
+                     [](unsigned char ch) {
+                       return static_cast<char>(std::tolower(ch));
+                     });
+      if (value == "always" || value == "1" || value == "true") {
+        return true;
+      }
+      if (value == "never" || value == "0" || value == "false") {
+        return false;
+      }
+    }
+    if (std::getenv("NO_COLOR") != nullptr) {
+      return false;
+    }
+    return stdout_is_terminal();
+  }();
+  return enabled;
+}
+
+enum class ConsoleStatusKind { Run, Ok, Skip, Debug };
+
+static std::string colorize_text(const char *text, const char *colorCode) {
+  if (!console_color_enabled()) {
+    return std::string(text);
+  }
+  std::string out;
+  out.reserve(std::char_traits<char>::length(text) + 16);
+  out += "\033[";
+  out += colorCode;
+  out += "m";
+  out += text;
+  out += "\033[0m";
+  return out;
+}
+
+static std::string status_tag(ConsoleStatusKind kind) {
+  switch (kind) {
+  case ConsoleStatusKind::Run:
+    return colorize_text("[run]", "34");
+  case ConsoleStatusKind::Ok:
+    return colorize_text("[ok]", "32");
+  case ConsoleStatusKind::Skip:
+    return colorize_text("[skip]", "33");
+  case ConsoleStatusKind::Debug:
+    return colorize_text("[debug]", "90");
+  }
+  return "[run]";
+}
+
+static size_t status_tag_width(ConsoleStatusKind kind) {
+  switch (kind) {
+  case ConsoleStatusKind::Run:
+    return 5;
+  case ConsoleStatusKind::Ok:
+    return 4;
+  case ConsoleStatusKind::Skip:
+    return 6;
+  case ConsoleStatusKind::Debug:
+    return 7;
+  }
+  return 5;
+}
+
+static std::string status_field(ConsoleStatusKind kind) {
+  std::string field = status_tag(kind);
+  const size_t width = status_tag_width(kind);
+  if (width < 6) {
+    field.append(6 - width, ' ');
+  }
+  return field;
+}
+
+static std::string section_title(const char *text) {
+  return colorize_text(text, "1");
+}
+
+static void print_status_line(ConsoleStatusKind kind,
+                              const std::string &message) {
+  std::cout << "  " << status_field(kind) << " " << message << std::endl;
+}
+
+static void
+print_classify_configuration(const ChimeraClassify::ClassifyConfig &config) {
+  const std::string outputFile = resolve_tsv_output_path(config.outputFile);
+  const std::string profileFile = resolve_profile_output_path(outputFile);
+  std::cout << section_title(" Chimera classify v" CHIMERA_VERSION) << "\n";
+  std::cout << "\n" << section_title("Input") << "\n";
+  if (!config.singleFiles.empty()) {
+    std::cout << "  reads       "
+              << summarize_input_paths(config.singleFiles) << "\n";
+    std::cout << "  mode        single-end\n";
+  }
+  if (!config.pairedFiles.empty()) {
+    std::cout << "  paired      "
+              << summarize_input_paths(config.pairedFiles) << "\n";
+    std::cout << "  mode        paired-end\n";
+  }
+  std::filesystem::path outputPath(outputFile);
+  const std::string outputTarget =
+      outputPath.parent_path().empty() ? outputFile
+                                       : outputPath.parent_path().string();
+  std::cout << "  database    " << compact_path(config.dbFile) << "\n";
+
+  std::cout << "\n" << section_title("Output") << "\n";
+  std::cout << "  directory   " << compact_path(outputTarget) << "\n";
+  std::cout << "  classify    " << compact_path(outputFile) << "\n";
+  std::cout << "  profile     " << compact_path(profileFile) << "\n";
+  if (config.write_cami_profile) {
+    std::cout << "  profile.cami "
+              << compact_path(resolve_profile_cami_output_path(outputFile))
+              << "\n";
+  }
+
+  std::cout << "\n" << section_title("Settings") << "\n";
+  std::cout << "  threads     " << config.threads << "\n";
+  std::cout << "  batch size  " << config.batchSize << "\n";
+  std::cout << "  profile     enabled\n";
+  std::cout << "  local resolution "
+            << (config.local_resolution_enabled ? "enabled" : "disabled")
+            << "\n";
+  std::cout << "  debug       "
+            << (env_flag_enabled("CHIMERA_CLASSIFY_DEBUG") ? "enabled"
+                                                           : "disabled")
+            << "\n";
+  std::cout << "\n" << section_title("Running") << "\n";
+}
+
+static void print_streaming_progress(
+                                     const ChimeraClassify::ClassifyProgressCounters &progress,
+                                     bool producerDone,
+                                     std::chrono::steady_clock::time_point start,
+                                     bool finalLine) {
+  const size_t parsed = progress.parsed_reads.load(std::memory_order_relaxed);
+  const size_t processed =
+      progress.processed_reads.load(std::memory_order_relaxed);
+  const double elapsed =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  const double rate = elapsed > 0.0 ? static_cast<double>(processed) / elapsed
+                                    : 0.0;
+  std::ostringstream os;
+  const bool interactive = stdout_is_terminal();
+  if (interactive) {
+    os << "\r";
+  }
+  os << "  " << status_field(ConsoleStatusKind::Run)
+     << " reads: read=" << format_integer(parsed)
+     << " processed=" << format_integer(processed);
+  if (producerDone && parsed > 0) {
+    const double pct = 100.0 * static_cast<double>(processed) /
+                       static_cast<double>(parsed);
+    os << " (" << std::fixed << std::setprecision(1)
+       << std::min(100.0, pct) << "%)";
+  }
+  os << std::defaultfloat;
+  if (rate > 0.0) {
+    os << " rate=" << format_integer(static_cast<uint64_t>(rate)) << "/s";
+    if (producerDone && processed < parsed) {
+      const double remaining =
+          static_cast<double>(parsed - processed) / std::max(rate, 1.0);
+      os << " eta=" << format_seconds(remaining);
+    }
+  }
+  os << " elapsed=" << format_seconds(elapsed);
+  if (finalLine) {
+    os << " complete";
+  }
+  os << "          ";
+  std::cout << os.str() << std::flush;
+  if (finalLine || !interactive) {
+    std::cout << "\n";
   }
 }
 
@@ -2974,6 +3214,17 @@ static std::string profile_taxon_name(
   return std::to_string(taxid);
 }
 
+static std::string profile_taxon_rank(
+    uint32_t taxid, const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
+    const char *fallback) {
+  if (ncbiTaxdump && ncbiTaxdump->enabled() &&
+      taxid < ncbiTaxdump->rank_name.size() &&
+      !ncbiTaxdump->rank_name[taxid].empty()) {
+    return ncbiTaxdump->rank_name[taxid];
+  }
+  return fallback;
+}
+
 static uint32_t taxid_text_to_species(
     const std::string &taxidText,
     const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
@@ -3342,6 +3593,58 @@ static std::string clean_profile_tsv_field(std::string value) {
   return value;
 }
 
+static std::vector<uint32_t>
+profile_lineage_taxids(uint32_t taxid,
+                       const ChimeraClassify::NcbiTaxdump *taxdump) {
+  std::vector<uint32_t> lineage;
+  if (taxdump == nullptr || !taxdump->enabled() || taxid == 0 ||
+      taxid >= taxdump->parent.size()) {
+    if (taxid != 0) {
+      lineage.push_back(taxid);
+    }
+    return lineage;
+  }
+  uint32_t cur = taxid;
+  for (int steps = 0; steps < 128; ++steps) {
+    if (cur == 0 || cur >= taxdump->parent.size()) {
+      break;
+    }
+    lineage.push_back(cur);
+    const uint32_t parent = taxdump->parent[cur];
+    if (parent == 0 || parent == cur) {
+      break;
+    }
+    cur = parent;
+  }
+  std::reverse(lineage.begin(), lineage.end());
+  return lineage;
+}
+
+static std::string join_profile_lineage_taxids(
+    const std::vector<uint32_t> &lineage) {
+  std::ostringstream out;
+  for (size_t i = 0; i < lineage.size(); ++i) {
+    if (i > 0) {
+      out << ';';
+    }
+    out << lineage[i];
+  }
+  return out.str();
+}
+
+static std::string join_profile_lineage_names(
+    const std::vector<uint32_t> &lineage,
+    const ChimeraClassify::NcbiTaxdump *taxdump) {
+  std::ostringstream out;
+  for (size_t i = 0; i < lineage.size(); ++i) {
+    if (i > 0) {
+      out << ';';
+    }
+    out << clean_profile_tsv_field(profile_taxon_name(lineage[i], taxdump));
+  }
+  return out.str();
+}
+
 static uint32_t
 profile_parent_taxid(uint32_t taxid,
                      const ChimeraClassify::NcbiTaxdump *taxdump) {
@@ -3353,6 +3656,15 @@ profile_parent_taxid(uint32_t taxid,
     return genus;
   }
   return taxid < taxdump->parent.size() ? taxdump->parent[taxid] : 0;
+}
+
+static uint32_t
+profile_genus_taxid(uint32_t taxid,
+                    const ChimeraClassify::NcbiTaxdump *taxdump) {
+  if (taxdump == nullptr || !taxdump->enabled() || taxid == 0) {
+    return 0;
+  }
+  return taxdump->to_genus(taxid);
 }
 
 struct ClassifierResponseReportabilityMeta {
@@ -3625,33 +3937,11 @@ static void write_classifier_response_reportable_profile_outputs(
       throw std::runtime_error(
           "Failed to open classifier-response profile: " + nativePath);
     }
-    out << "# profile_input=" << kProfileInput << "\n";
-    out << "# count_unit=" << primary_profile_scale_label(kScale) << "\n";
-    out << "# abundance_basis=reportability_constrained_response_normalized\n";
-    out << "# abundance_response_source=" << abundance_response_source << "\n";
-    out << "# classifier_response_effective_taxa=" << effective_taxa << "\n";
-    out << "# report_floor_policy=clamp(0.5/effective_taxa,0.01,0.05)\n";
-    out << "# dynamic_report_min_percent=" << report_floor_percent << "\n";
-    out << "# min_runtime_read_support=" << min_read_support << "\n";
-    out << "# source_profile_rows=" << rows.size() << "\n";
-    out << "# reportable_profile_rows="
-        << std::count_if(rows.begin(), rows.end(),
-                         [](const CandidateRow &row) { return row.kept; })
-        << "\n";
-    out << "# raw_biological_mass=" << raw_total << "\n";
-    out << "# kept_response_mass=" << kept_mass << "\n";
-    out << "# kept_observation_mass=" << kept_observation_mass << "\n";
-    out << "# nuisance_raw_mass=" << nuisance_mass << "\n";
-    out << "# single_source_limited_kept_mass=" << single_source_kept_mass
-        << "\n";
-    out << "# no_callable_exposure_rows=" << no_exposure_rows << "\n";
-    out << "# low_runtime_support_rows=" << low_support_rows << "\n";
-    out << "# below_dynamic_floor_rows=" << below_floor_rows << "\n";
-    out << "# reportable_without_response_rows="
-        << reportable_without_response_rows << "\n";
-    out << "rank\ttaxid\tname\tparent_taxid\trelative_abundance"
-        << "\tassigned_mass\teffective_yield\tread_support"
-        << "\tmeasurement_unit_support\tsingle_source_limited\treportability\n";
+    out << "rank\ttaxid\tname\trelative_abundance\tpercentage"
+        << "\tread_support\tassigned_mass\teffective_yield"
+        << "\tmeasurement_unit_support\tparent_taxid\tparent_name"
+        << "\tgenus_taxid\tgenus_name\tlineage_taxids\tlineage_names"
+        << "\tsingle_source_limited\treportability\n";
     out << std::setprecision(17);
     if (kept_mass > 0.0) {
       for (const CandidateRow &entry : rows) {
@@ -3659,14 +3949,30 @@ static void write_classifier_response_reportable_profile_outputs(
           continue;
         }
         const SeqProfileRow &row = *entry.row;
-        out << "species\t" << row.species_taxid << '\t'
+        const uint32_t parentTaxid =
+            profile_parent_taxid(row.species_taxid, ncbiTaxdump);
+        const uint32_t genusTaxid =
+            profile_genus_taxid(row.species_taxid, ncbiTaxdump);
+        const auto lineage = profile_lineage_taxids(row.species_taxid,
+                                                   ncbiTaxdump);
+        const double relative = entry.response_abundance / kept_mass;
+        out << profile_taxon_rank(row.species_taxid, ncbiTaxdump, "species")
+            << '\t' << row.species_taxid << '\t'
             << clean_profile_tsv_field(
                    profile_taxon_name(row.species_taxid, ncbiTaxdump))
-            << '\t' << profile_parent_taxid(row.species_taxid, ncbiTaxdump)
-            << '\t' << (entry.response_abundance / kept_mass) << '\t'
-            << entry.response_abundance << '\t'
-            << row.effective_callable_signatures << '\t'
-            << row.assigned_reads << '\t' << row.source_count << '\t'
+            << '\t' << relative << '\t' << (100.0 * relative) << '\t'
+            << row.assigned_reads << '\t' << entry.response_abundance << '\t'
+            << row.effective_callable_signatures << '\t' << row.source_count
+            << '\t' << parentTaxid << '\t'
+            << clean_profile_tsv_field(
+                   parentTaxid == 0 ? "" : profile_taxon_name(parentTaxid,
+                                                              ncbiTaxdump))
+            << '\t' << genusTaxid << '\t'
+            << clean_profile_tsv_field(
+                   genusTaxid == 0 ? "" : profile_taxon_name(genusTaxid,
+                                                             ncbiTaxdump))
+            << '\t' << join_profile_lineage_taxids(lineage) << '\t'
+            << join_profile_lineage_names(lineage, ncbiTaxdump) << '\t'
             << (row.source_count <= 1 ? 1 : 0) << '\t'
             << entry.reportability << '\n';
       }
@@ -3678,23 +3984,13 @@ static void write_classifier_response_reportable_profile_outputs(
     }
   }
 
-  ensure_parent(camiPath);
-  {
+  if (!camiPath.empty()) {
+    ensure_parent(camiPath);
     std::ofstream out(camiPath, std::ios::out | std::ios::binary);
     if (!out.is_open()) {
       throw std::runtime_error(
           "Failed to open classifier-response CAMI profile: " + camiPath);
     }
-    out << "# profile_input=" << kProfileInput << "\n";
-    out << "# count_unit=" << primary_profile_scale_label(kScale) << "\n";
-    out << "# abundance_basis=reportability_constrained_response_normalized\n";
-    out << "# abundance_response_source=" << abundance_response_source << "\n";
-    out << "# classifier_response_effective_taxa=" << effective_taxa << "\n";
-    out << "# dynamic_report_min_percent=" << report_floor_percent << "\n";
-    out << "# min_runtime_read_support=" << min_read_support << "\n";
-    out << "# kept_response_mass=" << kept_mass << "\n";
-    out << "# kept_observation_mass=" << kept_observation_mass << "\n";
-    out << "# nuisance_raw_mass=" << nuisance_mass << "\n";
     out << "@@TAXID\tRANK\tTAXPATH\tTAXPATHSN\tPERCENTAGE\n";
     out << std::setprecision(12);
     if (kept_mass > 0.0) {
@@ -3703,10 +3999,13 @@ static void write_classifier_response_reportable_profile_outputs(
           continue;
         }
         const SeqProfileRow &row = *entry.row;
+        const auto lineage = profile_lineage_taxids(row.species_taxid,
+                                                   ncbiTaxdump);
         const std::string taxid = std::to_string(row.species_taxid);
-        const std::string name =
-            profile_taxon_name(row.species_taxid, ncbiTaxdump);
-        out << taxid << "\tspecies\t" << taxid << '\t' << name << '\t'
+        out << taxid << '\t'
+            << profile_taxon_rank(row.species_taxid, ncbiTaxdump, "species")
+            << '\t' << join_profile_lineage_taxids(lineage) << '\t'
+            << join_profile_lineage_names(lineage, ncbiTaxdump) << '\t'
             << (100.0 * entry.response_abundance / kept_mass) << '\n';
       }
     }
@@ -3750,13 +4049,21 @@ static void write_classifier_response_reportable_profile_outputs(
     out << "\n";
     out << "taxid\tname\traw_percent\tresponse_percent\trelative_if_reported"
         << "\tassigned_reads\teffective_callable_exposure\tsource_count"
-        << "\tgenus_species_count\tcolumn_type\tkept\treportability\n";
+        << "\tgenus_species_count\tcolumn_type\tkept\treportability"
+        << "\tparent_taxid\tparent_name\tgenus_taxid\tgenus_name"
+        << "\tlineage_taxids\tlineage_names\n";
     out << std::setprecision(12);
     for (const CandidateRow &entry : rows) {
       if (entry.row == nullptr) {
         continue;
       }
       const SeqProfileRow &row = *entry.row;
+      const uint32_t parentTaxid =
+          profile_parent_taxid(row.species_taxid, ncbiTaxdump);
+      const uint32_t genusTaxid =
+          profile_genus_taxid(row.species_taxid, ncbiTaxdump);
+      const auto lineage = profile_lineage_taxids(row.species_taxid,
+                                                 ncbiTaxdump);
       out << row.species_taxid << '\t'
           << clean_profile_tsv_field(
                  profile_taxon_name(row.species_taxid, ncbiTaxdump))
@@ -3769,7 +4076,16 @@ static void write_classifier_response_reportable_profile_outputs(
           << row.effective_callable_signatures << '\t' << row.source_count
           << '\t' << entry.genus_species_count << '\t'
           << entry.column_type << '\t' << (entry.kept ? 1 : 0) << '\t'
-          << entry.reportability << '\n';
+          << entry.reportability << '\t' << parentTaxid << '\t'
+          << clean_profile_tsv_field(
+                 parentTaxid == 0 ? "" : profile_taxon_name(parentTaxid,
+                                                            ncbiTaxdump))
+          << '\t' << genusTaxid << '\t'
+          << clean_profile_tsv_field(
+                 genusTaxid == 0 ? "" : profile_taxon_name(genusTaxid,
+                                                           ncbiTaxdump))
+          << '\t' << join_profile_lineage_taxids(lineage) << '\t'
+          << join_profile_lineage_names(lineage, ncbiTaxdump) << '\n';
     }
     out.close();
     if (!out.good()) {
@@ -3777,8 +4093,12 @@ static void write_classifier_response_reportable_profile_outputs(
           "Failed to close classifier-response debug profile: " + path);
     }
   };
-  write_debug_like(debugPath, "debug");
-  write_debug_like(tracePath, "trace");
+  if (!debugPath.empty()) {
+    write_debug_like(debugPath, "debug");
+  }
+  if (!tracePath.empty()) {
+    write_debug_like(tracePath, "trace");
+  }
 }
 
 static ChimeraClassify::PresenceDecision presence_decision_from_table(
@@ -3884,27 +4204,23 @@ static void write_spool_em_results(
     ChimeraClassify::FileInfo &fileInfo,
     std::unordered_map<uint32_t, double> *profileClassTaxonPriors = nullptr) {
   const std::string outputFile = resolve_tsv_output_path(config.outputFile);
+  const bool classifyDebug = env_flag_enabled("CHIMERA_CLASSIFY_DEBUG");
 
   const size_t part_count = spoolPaths.size();
   std::vector<std::string> partPaths =
       make_output_part_paths(outputFile, part_count);
-  const std::string evidencePath = resolve_evidence_output_path(outputFile);
-  {
-    std::filesystem::path evidenceParent =
-        std::filesystem::path(evidencePath).parent_path();
-    if (!evidenceParent.empty()) {
-      std::filesystem::create_directories(evidenceParent);
-    }
+  ChimeraClassify::AbundanceAutoPolicy abundancePolicy{};
+  SpoolAbundanceFit abundanceFit;
+  if (classifyDebug) {
+    abundancePolicy = ChimeraClassify::derive_abundance_auto_policy(config, options);
+    std::cout << "[classify][debug] abundance-em"
+              << " prune_ratio=" << abundancePolicy.prune_ratio
+              << " iterations=" << abundancePolicy.iterations
+              << " dispersion_s=" << config.community_dispersion_s << "\n";
+    abundanceFit = fit_spool_abundance_em(spoolPaths, tax,
+                                          abundancePolicy.iterations, options,
+                                          abundancePolicy.prune_ratio);
   }
-  const ChimeraClassify::AbundanceAutoPolicy abundancePolicy =
-      ChimeraClassify::derive_abundance_auto_policy(config, options);
-  std::cout << "[classify][auto] abundance-em"
-            << " prune_ratio=" << abundancePolicy.prune_ratio
-            << " iterations=" << abundancePolicy.iterations
-            << " dispersion_s=" << config.community_dispersion_s << "\n";
-  SpoolAbundanceFit abundanceFit = fit_spool_abundance_em(
-      spoolPaths, tax, abundancePolicy.iterations, options,
-      abundancePolicy.prune_ratio);
   std::vector<EvidenceAggregateMap> postemPrimaryEvidenceAggregates(part_count);
   std::vector<EvidenceAggregateMap> postemDecisionEvidenceAggregates(part_count);
   std::vector<SpoolOutputPartStats> partStats(part_count);
@@ -3919,6 +4235,7 @@ static void write_spool_em_results(
             postemDecisionEvidenceAggregates[part_idx]);
       });
 
+  print_status_line(ConsoleStatusKind::Run, "writing output tables");
   try {
     merge_classify_output_parts(outputFile, partPaths, partStats, fileInfo);
   } catch (...) {
@@ -3974,37 +4291,37 @@ static void write_spool_em_results(
     profileOutputScale = PrimaryProfileScale::SequenceAbundance;
   }
   write_classifier_response_reportable_profile_outputs(
-      resolve_profile_variant_output_path(
-          outputFile, "ChimeraProfile.classifier_response.tsv",
-          ".profile.classifier_response.tsv"),
-      resolve_profile_variant_output_path(
-          outputFile, "ChimeraProfile.classifier_response.cami.tsv",
-          ".profile.classifier_response.cami.tsv"),
-      resolve_profile_variant_output_path(
-          outputFile, "ChimeraProfile.classifier_response.debug.tsv",
-          ".profile.classifier_response.debug.tsv"),
-      resolve_profile_variant_output_path(
-          outputFile, "ChimeraProfile.classifier_response.trace.tsv",
-          ".profile.classifier_response.trace.tsv"),
+      resolve_profile_output_path(outputFile),
+      config.write_cami_profile ? resolve_profile_cami_output_path(outputFile)
+                                : "",
+      classifyDebug ? resolve_native_profile_debug_output_path(outputFile) : "",
+      classifyDebug ? resolve_native_profile_trace_output_path(outputFile) : "",
       *profileOutputFit, ncbiTaxdump, coverageMeta, profileOutputLocalmixFit,
       profileResponseSourceOverride, profileOutputScale);
-  std::cout << "[classify][profile] classifier-response reportable profile"
-            << " path="
-            << resolve_profile_variant_output_path(
-                   outputFile, "ChimeraProfile.classifier_response.tsv",
-                   ".profile.classifier_response.tsv")
-            << "\n";
+  if (classifyDebug) {
+    std::cout << "[classify][debug] classifier-response profile"
+              << " path=" << resolve_profile_output_path(outputFile)
+              << "\n";
+  }
   EvidenceAggregateMap postemPrimaryEvidenceMass =
       merge_evidence_aggregates(postemPrimaryEvidenceAggregates);
   EvidenceAggregateMap postemDecisionEvidenceMass =
       merge_evidence_aggregates(postemDecisionEvidenceAggregates);
-  // ChimeraEvidence.tsv is the sample-level profiling evidence head.  It is
-  // intentionally aggregated before final selective readout rewrites per-read
-  // labels, so it must not be interpreted as a histogram of ChimeraClassify.tsv.
-  write_abundance_em_evidence(evidencePath, abundanceFit,
-                              postemPrimaryEvidenceMass,
-                              postemDecisionEvidenceMass, tax,
-                              abundancePolicy.abundance_weight);
+  if (classifyDebug) {
+    const std::string evidencePath = resolve_evidence_output_path(outputFile);
+    std::filesystem::path evidenceParent =
+        std::filesystem::path(evidencePath).parent_path();
+    if (!evidenceParent.empty()) {
+      std::filesystem::create_directories(evidenceParent);
+    }
+    // ChimeraEvidence.tsv is the sample-level profiling evidence head.  It is
+    // intentionally aggregated before final selective readout rewrites per-read
+    // labels, so it must not be interpreted as a histogram of ChimeraClassify.tsv.
+    write_abundance_em_evidence(evidencePath, abundanceFit,
+                                postemPrimaryEvidenceMass,
+                                postemDecisionEvidenceMass, tax,
+                                abundancePolicy.abundance_weight);
+  }
   cleanup_part_paths(partPaths);
 }
 
@@ -4200,12 +4517,28 @@ void run(ClassifyConfig config) {
   }
 
   omp_set_num_threads(config.threads);
+  const bool classifyDebug = env_flag_enabled("CHIMERA_CLASSIFY_DEBUG");
+  print_classify_configuration(config);
 
   std::vector<std::vector<std::string>> indexToTaxid;
   chimera::imcf::InterleavedMergedCuckooFilter imcf;
   ChimeraBuild::IMCFConfig imcfConfig;
   chimera::presence::CoverageMeta coverageMeta;
+  print_status_line(ConsoleStatusKind::Run, "loading database");
   loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid, &coverageMeta);
+  {
+    std::ostringstream msg;
+    msg << "database loaded (taxonomy: "
+        << (imcfConfig.taxonomyKind.empty() ? "ncbi"
+                                            : imcfConfig.taxonomyKind)
+        << ")";
+    print_status_line(ConsoleStatusKind::Ok, msg.str());
+  }
+  if (classifyDebug) {
+    std::cout << "[classify][debug] database"
+              << " bins=" << imcfConfig.binNum
+              << " bin_size=" << imcfConfig.binSize << "\n";
+  }
   const std::optional<LocalResolutionArtifacts> resolvedLocalArtifacts =
       config.local_resolution_enabled
           ? resolve_local_resolution_artifacts(config.dbFile)
@@ -4333,6 +4666,7 @@ void run(ClassifyConfig config) {
   config.community_dispersion_u = 1.0;
   config.community_dispersion_s = 1.0;
 
+  print_status_line(ConsoleStatusKind::Run, "scanning sample");
   CommunityDispersionStats dispersionStats = run_community_dispersion_calibration(
       imcfConfig, config, imcf, tax, feature_params, feature_min_len,
       weightCtx);
@@ -4343,18 +4677,21 @@ void run(ClassifyConfig config) {
   config.community_dispersion_s = communityPolicy.community_dispersion_s;
   config.firstFilterBeta = communityPolicy.first_filter_beta;
   config.em_conf_power = communityPolicy.em_conf_power;
-  std::cout << "[classify][auto] community-dispersion"
-            << " u=" << std::fixed << std::setprecision(4)
-            << config.community_dispersion_u
-            << " s=" << config.community_dispersion_s
-            << " top_mass=" << dispersionStats.top_mass
-            << " eff_species=" << dispersionStats.eff_species
-            << " simpson_species=" << dispersionStats.simpson_species
-            << " uncls=" << dispersionStats.unclassified << "\n";
-  std::cout << "[classify][auto] firstFilterBeta=" << config.firstFilterBeta
-            << " em_conf_power=" << config.em_conf_power
-            << " dispersion_gate=" << config.community_dispersion_s << "\n";
-  std::cout << std::defaultfloat;
+  print_status_line(ConsoleStatusKind::Ok, "sample scan complete");
+  if (classifyDebug) {
+    std::cout << "[classify][debug] community-dispersion"
+              << " u=" << std::fixed << std::setprecision(4)
+              << config.community_dispersion_u
+              << " s=" << config.community_dispersion_s
+              << " top_mass=" << dispersionStats.top_mass
+              << " eff_species=" << dispersionStats.eff_species
+              << " simpson_species=" << dispersionStats.simpson_species
+              << " uncls=" << dispersionStats.unclassified << "\n";
+    std::cout << "[classify][debug] firstFilterBeta=" << config.firstFilterBeta
+              << " em_conf_power=" << config.em_conf_power
+              << " dispersion_gate=" << config.community_dispersion_s << "\n";
+    std::cout << std::defaultfloat;
+  }
 
   FileInfo fileInfo;
   seqan3::contrib::bgzf_thread_count = config.threads;
@@ -4372,16 +4709,34 @@ void run(ClassifyConfig config) {
       make_spool_paths(spoolDir, readQueues.size());
 
   std::atomic<bool> producer_done{false};
+  ClassifyProgressCounters progressCounters;
+  std::atomic<bool> streaming_done{false};
+  const auto streamingStarted = std::chrono::steady_clock::now();
+  print_status_line(ConsoleStatusKind::Run, "classifying reads");
+  std::thread progressThread([&]() {
+    while (!streaming_done.load(std::memory_order_acquire)) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      if (!streaming_done.load(std::memory_order_acquire)) {
+        print_streaming_progress(
+            progressCounters, producer_done.load(std::memory_order_acquire),
+            streamingStarted, false);
+      }
+    }
+  });
   std::thread producer([&]() {
-    parseReads(readQueues, config, fileInfo, 0, &queueThrottles);
+    parseReads(readQueues, config, fileInfo, 0, &queueThrottles,
+               &progressCounters);
     producer_done.store(true, std::memory_order_release);
   });
 
   classify_streaming_spool(imcfConfig, readQueues, config, imcf, tax,
                            spoolPaths, fileInfo, producer_done, feature_params,
                            feature_min_len, weightCtx, presencePtr,
-                           &queueThrottles);
+                           &queueThrottles, &progressCounters);
   producer.join();
+  streaming_done.store(true, std::memory_order_release);
+  progressThread.join();
+  print_streaming_progress(progressCounters, true, streamingStarted, true);
   std::vector<moodycamel::ConcurrentQueue<batchReads>>().swap(readQueues);
   if (fileInfo.sequenceNum > 0) {
     fileInfo.avgLen = fileInfo.bpLength / fileInfo.sequenceNum;
@@ -4394,9 +4749,11 @@ void run(ClassifyConfig config) {
                                     presenceTotalReads, presenceMeanReadLen);
   PresenceDecision presenceDecision =
       presence_decision_from_table(presenceEvidence);
-  write_presence_evidence(
-      resolve_presence_output_path(resolve_tsv_output_path(config.outputFile)),
-      presenceEvidence, tax);
+  if (classifyDebug) {
+    write_presence_evidence(
+        resolve_presence_output_path(resolve_tsv_output_path(config.outputFile)),
+        presenceEvidence, tax);
+  }
   PresenceSummary().stats.swap(presenceSummary.stats);
   presenceSummary.sketchBits = 0;
   presenceSummary.sketchWords = 0;
@@ -4409,9 +4766,11 @@ void run(ClassifyConfig config) {
   options.temp = 1.05;
   options.prune_ratio = config.em_prune_ratio;
   options.conf_power = config.em_conf_power;
+  print_status_line(ConsoleStatusKind::Run, "estimating read assignments");
   SpoolEMFit speciesFit =
       fit_spool_em(spoolPaths, tax, config.emIter, options,
                    emPriorScale.empty() ? nullptr : &emPriorScale);
+  print_status_line(ConsoleStatusKind::Ok, "read assignments estimated");
   classWeights = speciesFit.class_weights;
   posteriorModelUsed = true;
   if (posteriorModelUsed) {
@@ -4419,26 +4778,31 @@ void run(ClassifyConfig config) {
     const PostPiAutoPolicy postPiPolicy = derive_post_pi_auto_policy(
         config, fileInfo, coverageMeta, dispersionStats, classWeights);
     decisionConfig.min_class_weight = postPiPolicy.tuned;
-    std::cout << "[classify][auto] post-pi"
-              << " s=" << std::fixed << std::setprecision(4)
-              << config.community_dispersion_s
-              << " dominance=" << postPiPolicy.dominance
-              << " relax=" << postPiPolicy.relax
-              << " base=" << config.post_pi_min
-              << " low_weight_mass=" << postPiPolicy.low_weight_mass
-              << " low_weight_target=" << postPiPolicy.low_weight_target
-              << " tuned=" << postPiPolicy.tuned
-              << " evidence_t=" << postPiPolicy.evidence_t
-              << " avg_len=" << fileInfo.avgLen
-              << " evidence_strength="
-              << postPiPolicy.sample_evidence_strength << "\n";
-    std::cout << std::defaultfloat;
+    if (classifyDebug) {
+      std::cout << "[classify][debug] post-pi"
+                << " s=" << std::fixed << std::setprecision(4)
+                << config.community_dispersion_s
+                << " dominance=" << postPiPolicy.dominance
+                << " relax=" << postPiPolicy.relax
+                << " base=" << config.post_pi_min
+                << " low_weight_mass=" << postPiPolicy.low_weight_mass
+                << " low_weight_target=" << postPiPolicy.low_weight_target
+                << " tuned=" << postPiPolicy.tuned
+                << " evidence_t=" << postPiPolicy.evidence_t
+                << " avg_len=" << fileInfo.avgLen
+                << " evidence_strength="
+                << postPiPolicy.sample_evidence_strength << "\n";
+      std::cout << std::defaultfloat;
+    }
+    print_status_line(ConsoleStatusKind::Run, "estimating profile");
     SpoolSampleMixtureFit sampleMixtureFit =
         fit_spool_sample_mixture_em(spoolPaths, config.emIter);
-    std::cout << "[classify][auto] sample-mixture"
-              << " reads=" << sampleMixtureFit.read_count
-              << " candidates=" << sampleMixtureFit.candidate_count
-              << " taxa=" << sampleMixtureFit.taxid_list.size() << "\n";
+    if (classifyDebug) {
+      std::cout << "[classify][debug] sample-mixture"
+                << " reads=" << sampleMixtureFit.read_count
+                << " candidates=" << sampleMixtureFit.candidate_count
+                << " taxa=" << sampleMixtureFit.taxid_list.size() << "\n";
+    }
 
     LocalResolutionCallMap localResolutionCalls;
     const LocalResolutionCallMap *localResolutionCallPtr = nullptr;
@@ -4451,38 +4815,54 @@ void run(ClassifyConfig config) {
           tax, &presenceDecision, weightCtx.ncbiTaxdump);
       const LocalResolutionEligibility localEligibility =
           derive_local_resolution_eligibility(postTopkScores);
+      const bool forceLocalResolution =
+          env_flag_enabled("CHIMERA_FORCE_LOCAL_RESOLUTION");
       const bool localMayChangeOutput =
-          (localResolutionDivergence >=
-           config.local_resolution_divergence_threshold) &&
-          localEligibility.hard_ambiguity;
+          forceLocalResolution ||
+          ((localResolutionDivergence >=
+            config.local_resolution_divergence_threshold) &&
+           localEligibility.hard_ambiguity);
       if (!localMayChangeOutput) {
-        write_local_resolution_profile_json(
-            localProfileOutput,
-            localResolutionDivergence <
-                    config.local_resolution_divergence_threshold
-                ? "skipped_low_sample_divergence"
-                : "skipped_not_hard_ambiguity",
-            localResolutionDivergence,
-            config.local_resolution_divergence_threshold, nullptr, nullptr,
-            0.0, 0.0, 0.0);
-        std::cout << "[classify][local-resolution]"
-                  << " skipped="
-                  << (localResolutionDivergence <
-                              config.local_resolution_divergence_threshold
-                          ? "low_sample_divergence"
-                          : "not_hard_ambiguity")
-                  << " sample_divergence=" << std::fixed
-                  << std::setprecision(4) << localResolutionDivergence
-                  << " divergence_threshold="
-                  << config.local_resolution_divergence_threshold
-                  << " mean_post_items="
-                  << localEligibility.mean_post_items
-                  << " singleton_rate="
-                  << localEligibility.singleton_rate
-                  << " mean_top1=" << localEligibility.mean_top1
-                  << " ambiguous_rate="
-                  << localEligibility.ambiguous_rate << "\n";
-        std::cout << std::defaultfloat;
+        if (classifyDebug) {
+          write_local_resolution_profile_json(
+              localProfileOutput,
+              localResolutionDivergence <
+                      config.local_resolution_divergence_threshold
+                  ? "skipped_low_sample_divergence"
+                  : "skipped_not_hard_ambiguity",
+              localResolutionDivergence,
+              config.local_resolution_divergence_threshold, nullptr, nullptr,
+              0.0, 0.0, 0.0);
+        }
+        {
+          std::string reason =
+              localResolutionDivergence <
+                      config.local_resolution_divergence_threshold
+                  ? "low sample divergence"
+                  : "not enough hard ambiguity";
+          print_status_line(ConsoleStatusKind::Skip,
+                            "local resolution (" + reason + ")");
+        }
+        if (classifyDebug) {
+          std::cout << "[classify][debug] local-resolution"
+                    << " skipped="
+                    << (localResolutionDivergence <
+                                config.local_resolution_divergence_threshold
+                            ? "low_sample_divergence"
+                            : "not_hard_ambiguity")
+                    << " sample_divergence=" << std::fixed
+                    << std::setprecision(4) << localResolutionDivergence
+                    << " divergence_threshold="
+                    << config.local_resolution_divergence_threshold
+                    << " mean_post_items="
+                    << localEligibility.mean_post_items
+                    << " singleton_rate="
+                    << localEligibility.singleton_rate
+                    << " mean_top1=" << localEligibility.mean_top1
+                    << " ambiguous_rate="
+                    << localEligibility.ambiguous_rate << "\n";
+          std::cout << std::defaultfloat;
+        }
       } else {
         if (resolvedLocalArtifacts.has_value()) {
           const std::filesystem::path localIndexPath =
@@ -4534,140 +4914,105 @@ void run(ClassifyConfig config) {
             const auto finished = std::chrono::steady_clock::now();
             const double seconds =
                 std::chrono::duration<double>(finished - started).count();
-            std::cout << "[classify][local-resolution]"
-                      << " sample_divergence=" << std::fixed
-                      << std::setprecision(4) << localResolutionDivergence
-                      << " divergence_threshold="
-                      << config.local_resolution_divergence_threshold
-                      << " hard_ambiguity="
-                      << (localEligibility.hard_ambiguity ? 1 : 0)
-                      << " mean_post_items="
-                      << localEligibility.mean_post_items
-                      << " singleton_rate="
-                      << localEligibility.singleton_rate
-                      << " mean_top1=" << localEligibility.mean_top1
-                      << " ambiguous_rate="
-                      << localEligibility.ambiguous_rate
-                      << " groups=" << panel.selected_groups
-                      << " species=" << panel.selected_species
-                      << " targets=" << panel.selected_targets
-                      << " post_topk_rows="
-                      << postTopkScores.rows_with_post_topk
-                      << " post_topk_items="
-                      << postTopkScores.usable_post_topk_items
-                      << " panel_anchor_records="
-                      << panel.selected_anchor_records
-                      << " panel_anchor_bytes="
-                      << panel.selected_anchor_bytes
-                      << " species_source_pairs="
-                      << panel.selected_species_source_pairs
-                      << " source_extra_targets="
-                      << panel.selected_source_extra_targets
-                      << " source_cap1_targets="
-                      << panel.source_cap1_targets
-                      << " source_cap1_anchor_bytes="
-                      << panel.source_cap1_anchor_bytes
-                      << " source_cap2_targets="
-                      << panel.source_cap2_targets
-                      << " source_cap2_anchor_bytes="
-                      << panel.source_cap2_anchor_bytes
-                      << " targets_per_species="
-                      << panel.targets_per_species
-                      << " max_targets_per_group="
-                      << panel.max_targets_per_group
-                      << " anchor_byte_budget="
-                      << panel.anchor_byte_budget
-                      << " group_cap_skipped_targets="
-                      << panel.group_cap_skipped_targets
-                      << " group_cap_skipped_anchor_bytes="
-                      << panel.group_cap_skipped_anchor_bytes
-                      << " budget_skipped_targets="
-                      << panel.budget_skipped_targets
-                      << " budget_skipped_anchor_bytes="
-                      << panel.budget_skipped_anchor_bytes
-                      << " reads=" << localResult.stats.reads
-                      << " query_hashes=" << localResult.stats.query_hashes
-                      << " target_filter=" << localResult.stats.target_filter
-                      << " selected_targets="
-                      << localResult.stats.selected_targets
-                      << " direct_targets=" << localResult.stats.direct_targets
-                      << " target_anchor_records_scanned="
-                      << localResult.stats.target_anchor_records_scanned
-                      << " target_anchor_bytes_read="
-                      << localResult.stats.target_anchor_bytes_read
-                      << " target_anchor_records_matched="
-                      << localResult.stats.target_anchor_records_matched
-                      << " target_hash_prefilter_rejects="
-                      << localResult.stats.target_hash_prefilter_rejects
-                      << " direct_load_batches="
-                      << localResult.stats.direct_load_batches
-                      << " pread_calls=" << localResult.stats.pread_calls
-                      << " pread_bytes=" << localResult.stats.pread_bytes
-                      << " raw_chain_records="
-                      << localResult.stats.raw_chain_records
-                      << " kept_chain_records="
-                      << localResult.stats.kept_chain_records
-                      << " index_hash_keys="
-                      << localResult.stats.index_hash_keys
-                      << " overflow_hash_keys="
-                      << localResult.stats.overflow_hash_keys
-                      << " dropped_broad_keys="
-                      << localResult.stats.dropped_broad_keys
-                      << " dropped_broad_records="
-                      << localResult.stats.dropped_broad_records
-                      << " local_hits=" << localResult.stats.local_hits
-                      << " local_absent=" << localResult.stats.local_absent
-                      << " metadata_seconds=" << metadataSeconds
-                      << " panel_seconds=" << panelSeconds
-                      << " read_seconds=" << localResult.stats.read_seconds
-                      << " ref_seconds=" << localResult.stats.ref_seconds
-                      << " target_io_seconds="
-                      << localResult.stats.target_io_seconds
-                      << " target_read_seconds="
-                      << localResult.stats.target_read_seconds
-                      << " target_filter_seconds="
-                      << localResult.stats.target_filter_seconds
-                      << " target_collect_seconds="
-                      << localResult.stats.target_collect_seconds
-                      << " posting_merge_seconds="
-                      << localResult.stats.posting_merge_seconds
-                      << " index_finalize_seconds="
-                      << localResult.stats.index_finalize_seconds
-                      << " chain_seconds=" << localResult.stats.chain_seconds
-                      << " seconds=" << seconds << "\n";
-            std::cout << std::defaultfloat;
-            write_local_resolution_profile_json(
-                localProfileOutput, "ran", localResolutionDivergence,
-                config.local_resolution_divergence_threshold, &panel,
-                &localResult.stats, metadataSeconds, panelSeconds, seconds);
+            {
+              std::ostringstream msg;
+              msg << "local resolution"
+                  << " groups=" << panel.selected_groups
+                  << " species=" << panel.selected_species
+                  << " targets=" << panel.selected_targets
+                  << " reads=" << localResult.stats.reads
+                  << " local_hits=" << localResult.stats.local_hits
+                  << " time=" << format_seconds(seconds);
+              print_status_line(ConsoleStatusKind::Ok, msg.str());
+            }
+            if (classifyDebug) {
+              std::cout << "[classify][debug] local-resolution"
+                        << " sample_divergence=" << std::fixed
+                        << std::setprecision(4) << localResolutionDivergence
+                        << " divergence_threshold="
+                        << config.local_resolution_divergence_threshold
+                        << " forced=" << (forceLocalResolution ? 1 : 0)
+                        << " hard_ambiguity="
+                        << (localEligibility.hard_ambiguity ? 1 : 0)
+                        << " mean_post_items="
+                        << localEligibility.mean_post_items
+                        << " singleton_rate="
+                        << localEligibility.singleton_rate
+                        << " mean_top1=" << localEligibility.mean_top1
+                        << " ambiguous_rate="
+                        << localEligibility.ambiguous_rate
+                        << " groups=" << panel.selected_groups
+                        << " species=" << panel.selected_species
+                        << " targets=" << panel.selected_targets
+                        << " post_topk_rows="
+                        << postTopkScores.rows_with_post_topk
+                        << " post_topk_items="
+                        << postTopkScores.usable_post_topk_items
+                        << " panel_anchor_records="
+                        << panel.selected_anchor_records
+                        << " panel_anchor_bytes="
+                        << panel.selected_anchor_bytes
+                        << " species_source_pairs="
+                        << panel.selected_species_source_pairs
+                        << " reads=" << localResult.stats.reads
+                        << " query_hashes=" << localResult.stats.query_hashes
+                        << " target_filter=" << localResult.stats.target_filter
+                        << " selected_targets="
+                        << localResult.stats.selected_targets
+                        << " direct_targets="
+                        << localResult.stats.direct_targets
+                        << " local_hits=" << localResult.stats.local_hits
+                        << " local_absent=" << localResult.stats.local_absent
+                        << " metadata_seconds=" << metadataSeconds
+                        << " panel_seconds=" << panelSeconds
+                        << " seconds=" << seconds << "\n";
+              std::cout << std::defaultfloat;
+            }
+            if (classifyDebug) {
+              write_local_resolution_profile_json(
+                  localProfileOutput, "ran", localResolutionDivergence,
+                  config.local_resolution_divergence_threshold, &panel,
+                  &localResult.stats, metadataSeconds, panelSeconds, seconds);
+            }
           } else {
-            write_local_resolution_profile_json(
-                localProfileOutput, "skipped_no_sample_targets",
-                localResolutionDivergence,
-                config.local_resolution_divergence_threshold, &panel, nullptr,
-                metadataSeconds, panelSeconds, 0.0);
-            std::cout << "[classify][local-resolution]"
-                      << " skipped=no_sample_targets"
-                      << " metadata_seconds=" << metadataSeconds
-                      << " panel_seconds=" << panelSeconds << "\n";
+            if (classifyDebug) {
+              write_local_resolution_profile_json(
+                  localProfileOutput, "skipped_no_sample_targets",
+                  localResolutionDivergence,
+                  config.local_resolution_divergence_threshold, &panel, nullptr,
+                  metadataSeconds, panelSeconds, 0.0);
+            }
+            print_status_line(ConsoleStatusKind::Skip,
+                              "local resolution (no sample targets)");
+            if (classifyDebug) {
+              std::cout << "[classify][debug] local-resolution"
+                        << " skipped=no_sample_targets"
+                        << " metadata_seconds=" << metadataSeconds
+                        << " panel_seconds=" << panelSeconds << "\n";
+            }
           }
         } else {
-          write_local_resolution_profile_json(
-              localProfileOutput, "skipped_no_local_resolution_data",
-              localResolutionDivergence,
-              config.local_resolution_divergence_threshold, nullptr, nullptr,
-              0.0, 0.0, 0.0);
-          std::cout << "[classify][local-resolution]"
-                    << " skipped=no_local_resolution_data\n";
+          if (classifyDebug) {
+            write_local_resolution_profile_json(
+                localProfileOutput, "skipped_no_local_resolution_data",
+                localResolutionDivergence,
+                config.local_resolution_divergence_threshold, nullptr, nullptr,
+                0.0, 0.0, 0.0);
+          }
+          print_status_line(
+              ConsoleStatusKind::Skip,
+              "local resolution (database has no local-resolution data)");
         }
       }
     } else if (config.local_resolution_enabled && !config.pairedFiles.empty()) {
-      write_local_resolution_profile_json(
-          localProfileOutput, "skipped_paired_input", localResolutionDivergence,
-          config.local_resolution_divergence_threshold, nullptr, nullptr, 0.0,
-          0.0, 0.0);
-      std::cout << "[classify][local-resolution]"
-                << " skipped=paired_input\n";
+      if (classifyDebug) {
+        write_local_resolution_profile_json(
+            localProfileOutput, "skipped_paired_input", localResolutionDivergence,
+            config.local_resolution_divergence_threshold, nullptr, nullptr, 0.0,
+            0.0, 0.0);
+      }
+      print_status_line(ConsoleStatusKind::Skip,
+                        "local resolution (paired input)");
     }
 
     write_spool_em_results(spoolPaths, speciesFit, sampleMixtureFit, options,
@@ -4681,28 +5026,31 @@ void run(ClassifyConfig config) {
   }
   {
     const std::string outputFile = resolve_tsv_output_path(config.outputFile);
-    copy_profile_file_or_throw(
-        resolve_profile_variant_output_path(
-            outputFile, "ChimeraProfile.classifier_response.tsv",
-            ".profile.classifier_response.tsv"),
-        resolve_profile_output_path(outputFile));
-    copy_profile_file_or_throw(
-        resolve_profile_variant_output_path(
-            outputFile, "ChimeraProfile.classifier_response.cami.tsv",
-            ".profile.classifier_response.cami.tsv"),
-        resolve_profile_cami_output_path(outputFile));
-    copy_profile_file_or_throw(
-        resolve_profile_variant_output_path(
-            outputFile, "ChimeraProfile.classifier_response.debug.tsv",
-            ".profile.classifier_response.debug.tsv"),
-        resolve_native_profile_debug_output_path(outputFile));
-    copy_profile_file_or_throw(
-        resolve_profile_variant_output_path(
-            outputFile, "ChimeraProfile.classifier_response.trace.tsv",
-            ".profile.classifier_response.trace.tsv"),
-        resolve_native_profile_trace_output_path(outputFile));
-    std::cout << "[classify][profile] classifier-response reportable default"
-              << " path=" << resolve_profile_output_path(outputFile) << "\n";
+    const double totalReads =
+        static_cast<double>(fileInfo.classifiedNum + fileInfo.unclassifiedNum);
+    const double classifiedRate =
+        totalReads > 0.0
+            ? 100.0 * static_cast<double>(fileInfo.classifiedNum) / totalReads
+            : 0.0;
+    print_status_line(ConsoleStatusKind::Ok, "output tables written");
+    std::cout << "\n" << section_title("Summary") << "\n";
+    std::cout << "  reads        "
+              << format_integer(fileInfo.classifiedNum + fileInfo.unclassifiedNum)
+              << "\n";
+    std::cout << "  classified   " << format_integer(fileInfo.classifiedNum)
+              << " (" << std::fixed << std::setprecision(2) << classifiedRate
+              << "%)\n";
+    std::cout << "  unclassified " << format_integer(fileInfo.unclassifiedNum)
+              << "\n";
+    std::cout << std::defaultfloat;
+    std::cout << "\n" << section_title("Output files") << "\n";
+    std::cout << "  classify    " << outputFile << "\n";
+    std::cout << "  profile     " << resolve_profile_output_path(outputFile)
+              << "\n";
+    if (config.write_cami_profile) {
+      std::cout << "  profile.cami "
+                << resolve_profile_cami_output_path(outputFile) << "\n";
+    }
   }
   std::vector<chimera::presence::CoverageEntry>().swap(coverageMeta.entries);
   if (keepClassifySpool) {

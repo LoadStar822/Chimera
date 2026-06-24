@@ -39,6 +39,11 @@ struct QueueThrottle {
   size_t max_pending_bytes{kClassifyQueueMaxPendingBytes};
 };
 
+struct ClassifyProgressCounters {
+  std::atomic<size_t> parsed_reads{0};
+  std::atomic<size_t> processed_reads{0};
+};
+
 inline size_t estimate_batch_bytes(const batchReads &batch) {
   size_t total = sizeof(batchReads);
   for (const auto &id : batch.ids) {
@@ -127,11 +132,13 @@ struct NcbiTaxdump {
   std::vector<uint32_t> parent;
   std::vector<uint8_t> is_species; // 1 if rank == species
   std::vector<uint8_t> is_genus;   // 1 if rank == genus
+  std::vector<std::string> rank_name;
   std::vector<std::string> scientific_name;
 
   bool enabled() const {
     return !parent.empty() && parent.size() == is_species.size() &&
-           parent.size() == is_genus.size();
+           parent.size() == is_genus.size() &&
+           parent.size() == rank_name.size();
   }
 
   uint32_t to_species(uint32_t tid) const {
@@ -633,7 +640,8 @@ bool read_spool_record(std::istream &is, SpoolReadRecord &record);
 void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
                 ClassifyConfig config, FileInfo &fileInfo,
                 size_t max_reads = 0,
-                std::vector<QueueThrottle> *queueThrottles = nullptr);
+                std::vector<QueueThrottle> *queueThrottles = nullptr,
+                ClassifyProgressCounters *progress = nullptr);
 
 void loadFilter(const std::string &input_file,
                 chimera::imcf::InterleavedMergedCuckooFilter &imcf,
@@ -838,7 +846,8 @@ void classify_streaming_spool(
     std::atomic<bool> &producer_done,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     const WeightingContext &weightCtx, PresenceSummary *presenceSummary,
-    std::vector<QueueThrottle> *queueThrottles = nullptr);
+    std::vector<QueueThrottle> *queueThrottles = nullptr,
+    ClassifyProgressCounters *progress = nullptr);
 
 void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,

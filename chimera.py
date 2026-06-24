@@ -13,11 +13,19 @@ NCBI_TAXDUMP_URL = "https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz"
 NCBI_TAXDUMP_MD5_URL = NCBI_TAXDUMP_URL + ".md5"
 
 
+def _format_bytes(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KiB"
+    return f"{size / (1024 * 1024):.1f} MiB"
+
+
 def default_threads():
     cpu = os.cpu_count()
     if not cpu or cpu <= 0:
         return 1
-    return min(cpu, 192)
+    return min(cpu, 64)
 
 
 def get_downloader():
@@ -144,7 +152,44 @@ def _download_url(url: str, destination: Path) -> None:
     partial = destination.with_name(destination.name + ".part")
     try:
         with urllib.request.urlopen(url, timeout=120) as response, partial.open("wb") as out:
-            shutil.copyfileobj(response, out)
+            total_header = response.headers.get("Content-Length")
+            try:
+                total_size = int(total_header) if total_header else 0
+            except ValueError:
+                total_size = 0
+            bytes_read = 0
+            last_reported_percent = -1
+            last_reported_bytes = 0
+            show_percent_progress = total_size >= 1024 * 1024
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                bytes_read += len(chunk)
+                if show_percent_progress:
+                    percent = int(bytes_read * 100 / total_size)
+                    if percent != last_reported_percent:
+                        last_reported_percent = percent
+                        print(
+                            f"\r  {destination.name}: {percent:3d}% "
+                            f"({_format_bytes(bytes_read)}/"
+                            f"{_format_bytes(total_size)})",
+                            end="",
+                            flush=True,
+                        )
+                elif bytes_read - last_reported_bytes >= 8 * 1024 * 1024:
+                    last_reported_bytes = bytes_read
+                    print(
+                        f"\r  {destination.name}: "
+                        f"{_format_bytes(bytes_read)}",
+                        end="",
+                        flush=True,
+                    )
+            if total_size > 0 and not show_percent_progress:
+                print(f"  {destination.name}: {_format_bytes(bytes_read)}", flush=True)
+            else:
+                print(flush=True)
         partial.replace(destination)
     finally:
         if partial.exists():
@@ -155,10 +200,12 @@ def _download_ncbi_taxdump_archive(cache_dir: Path) -> Path:
     archive_path = cache_dir / "taxdump.tar.gz"
     md5_path = cache_dir / "taxdump.tar.gz.md5"
     if not archive_path.is_file() or archive_path.stat().st_size == 0:
-        print(f"Downloading NCBI taxdump to {archive_path}")
+        print(f"Downloading NCBI taxdump to {archive_path}", flush=True)
         _download_url(NCBI_TAXDUMP_URL, archive_path)
     if not md5_path.is_file() or md5_path.stat().st_size == 0:
+        print(f"Downloading NCBI taxdump checksum to {md5_path}", flush=True)
         _download_url(NCBI_TAXDUMP_MD5_URL, md5_path)
+    print("Verifying NCBI taxdump checksum...", flush=True)
     expected = md5_path.read_text(encoding="utf-8").strip().split()[0].lower()
     digest = hashlib.md5()
     with archive_path.open("rb") as handle:
@@ -174,8 +221,6 @@ def _download_ncbi_taxdump_archive(cache_dir: Path) -> Path:
 
 
 def _prepare_build_taxonomy_dir(args) -> None:
-    if getattr(args, "no_local_resolution", False):
-        return
     _apply_build_taxonomy_meta_defaults(args)
     if getattr(args, "taxonomy_dir", None):
         taxonomy_dir = Path(args.taxonomy_dir).resolve()
@@ -184,6 +229,8 @@ def _prepare_build_taxonomy_dir(args) -> None:
                 f"--taxonomy-dir must contain nodes.dmp: {taxonomy_dir}"
             )
         args.taxonomy_dir = str(taxonomy_dir)
+        return
+    if getattr(args, "no_local_resolution", False):
         return
 
     kind = str(getattr(args, "taxonomy_kind", "auto") or "auto").strip().lower()
@@ -217,6 +264,56 @@ def _prepare_build_taxonomy_dir(args) -> None:
     args.taxonomy_dir = str(_extract_taxdump_archive(archive_path, extract_dir))
 
 
+def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _ensure_output_directory_available(
+    output_dir: Path,
+    purpose: str,
+    protected_dirs=None,
+) -> Path:
+    expanded = output_dir.expanduser()
+    resolved = expanded.resolve()
+    for protected in protected_dirs or []:
+        if protected is None:
+            continue
+        protected_path = Path(protected).expanduser().resolve()
+        if resolved == protected_path or _path_is_relative_to(resolved, protected_path):
+            raise RuntimeError(
+                f"{purpose} output directory must not be inside an input/database directory: "
+                f"{resolved}"
+            )
+    if resolved.exists() and not resolved.is_dir():
+        raise RuntimeError(
+            f"{purpose} output path exists and is not a directory: {resolved}"
+        )
+    if resolved.is_dir() and any(resolved.iterdir()):
+        raise RuntimeError(
+            f"{purpose} output directory already exists and is not empty: {resolved}. "
+            "Choose a new -o path or empty the directory first."
+        )
+    return expanded
+
+
+def _ensure_file_exists(path: Path, label: str) -> Path:
+    expanded = path.expanduser()
+    if not expanded.is_file():
+        raise FileNotFoundError(f"{label} does not exist: {expanded}")
+    return expanded
+
+
+def _ensure_path_exists(path: Path, label: str) -> Path:
+    expanded = path.expanduser()
+    if not expanded.exists():
+        raise FileNotFoundError(f"{label} does not exist: {expanded}")
+    return expanded
+
+
 def min_length_type(value: str):
     lowered = value.lower()
     if lowered == "auto":
@@ -236,7 +333,7 @@ def add_build_arguments(parser, require_input: bool) -> None:
             "-i", "--input", required=True, help="Input file for building"
         )
     parser.add_argument(
-        "-o", "--output", default="ChimeraDB", help="Output file for building"
+        "-o", "--output", default="ChimeraDB", help="Output database directory"
     )
     parser.add_argument(
         "--strobe-k",
@@ -289,14 +386,14 @@ def add_build_arguments(parser, require_input: bool) -> None:
         "--taxonomy-kind",
         dest="taxonomy_kind",
         default="auto",
-        choices=["auto", "ncbi", "gtdb"],
-        help="Taxonomy source identifier (auto/ncbi/gtdb)",
+        choices=["auto", "ncbi"],
+        help="Taxonomy source identifier (default: auto; supported: ncbi)",
     )
     parser.add_argument(
         "--taxonomy-version",
         dest="taxonomy_version",
         default="auto",
-        help="Taxonomy version label, for example ncbi-taxdump-2025-09-15 or gtdb-rs226",
+        help="Taxonomy version label, for example ncbi-taxdump-2025-09-15",
     )
     parser.add_argument(
         "--taxonomy-dir",
@@ -388,7 +485,7 @@ def parse_arguments():
         "-o",
         "--output",
         default="ChimeraOutput",
-        help="Output directory for classify, evidence, and profile results",
+        help="Output directory for classify and profile results",
     )
     classify_parser.add_argument(
         "-d", "--database", required=True, help="Database file for classifying"
@@ -407,6 +504,11 @@ def parse_arguments():
         "--no-local-resolution",
         action="store_true",
         help="Disable local read resolution (LPC) at classify time",
+    )
+    classify_parser.add_argument(
+        "--profile-cami",
+        action="store_true",
+        help="Also write ChimeraProfile.cami.tsv for CAMI/OPAL benchmark tools",
     )
     # Auxiliary profile utilities. Native abundance profiles are written by
     # `classify`; this command is for legacy aggregate conversion and Krona.
@@ -431,14 +533,14 @@ def parse_arguments():
         "--taxonomy-kind",
         dest="taxonomy_kind",
         default="auto",
-        choices=["auto", "ncbi", "gtdb"],
+        choices=["auto", "ncbi"],
         help="Taxonomy source for auxiliary profile conversion",
     )
     profile_parser.add_argument(
         "--taxonomy-info",
         dest="taxonomy_info",
         default=None,
-        help="Path to the tax.info file produced during build, used by GTDB and other custom taxonomies",
+        help="Path to the tax.info file produced during build",
     )
     profile_parser.add_argument(
         "--taxonomy-meta",
@@ -550,11 +652,21 @@ def run_chimera(args, chimera_path=None):
         command.append(args.command)
 
     if args.command == "build":
+        _ensure_file_exists(Path(args.input), "Build input file")
+        _ensure_output_directory_available(Path(args.output), "Build")
         _prepare_build_taxonomy_dir(args)
         append_build_command_args(command, args)
 
     elif args.command == "classify":
-        output_dir = Path(args.output)
+        database_path = Path(args.database).expanduser()
+        _ensure_path_exists(database_path, "Classify database")
+        for read_path in args.single or []:
+            _ensure_file_exists(Path(read_path), "Classify input file")
+        for read_path in args.paired or []:
+            _ensure_file_exists(Path(read_path), "Classify paired input file")
+        output_dir = _ensure_output_directory_available(
+            Path(args.output), "Classify", protected_dirs=[database_path]
+        )
         output_dir.mkdir(parents=True, exist_ok=True)
         classify_output = output_dir / "ChimeraClassify.tsv"
         profile_output = output_dir / "ChimeraProfile.tsv"
@@ -568,6 +680,8 @@ def run_chimera(args, chimera_path=None):
         command.extend(["-b", str(args.batch_size)])
         if getattr(args, "no_local_resolution", False):
             command.append("--no-local-resolution")
+        if getattr(args, "profile_cami", False):
+            command.append("--profile-cami")
     if args.command == "classify":
         result = subprocess.run(command)
         if result.returncode != 0:
@@ -585,7 +699,7 @@ def main():
     args = parse_arguments()
     try:
         raise SystemExit(run_chimera(args) or 0)
-    except (FileNotFoundError, RuntimeError) as exc:
+    except (FileNotFoundError, RuntimeError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(1)
 

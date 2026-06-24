@@ -2406,7 +2406,8 @@ void classify_streaming_spool(
     std::atomic<bool> &producer_done,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     const WeightingContext &weightCtx, PresenceSummary *presenceSummary,
-    std::vector<QueueThrottle> *queueThrottles) {
+    std::vector<QueueThrottle> *queueThrottles,
+    ClassifyProgressCounters *progress) {
 
 #pragma omp parallel
   {
@@ -2454,6 +2455,7 @@ void classify_streaming_spool(
 
     for (;;) {
       if (readQueue.try_dequeue(batch)) {
+        const size_t batch_size = batch.ids.size();
         release_queue_slot(queueThrottle, estimate_batch_bytes(batch));
         processBatchCompact(batch, imcfConfig, tax, config, imcf,
                             localClassifyResults, feature_params,
@@ -2461,6 +2463,10 @@ void classify_streaming_spool(
                             presencePtr, scratch);
         write_spool_results(localClassifyResults, spool);
         localClassifyResults.clear();
+        if (progress != nullptr) {
+          progress->processed_reads.fetch_add(batch_size,
+                                              std::memory_order_relaxed);
+        }
         continue;
       }
       if (producer_done.load(std::memory_order_acquire)) {

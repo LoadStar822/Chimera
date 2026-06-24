@@ -320,6 +320,8 @@ int main(int argc, char **argv) {
       ->default_val(400);
   classify->add_flag("--no-local-resolution", classifyNoLocalResolution,
                      "Disable local read resolution (LPC) at classify time");
+  classify->add_flag("--profile-cami", classifyConfig.write_cami_profile,
+                     "Write CAMI/OPAL-compatible profile table");
   classify->add_option("--em-iter", classifyConfig.emIter, "EM iteration")
       ->default_val(100);
   classify
