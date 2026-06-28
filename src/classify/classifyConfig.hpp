@@ -82,15 +82,17 @@ namespace ChimeraClassify {
 		std::unordered_set<std::string> uniqueTaxids;
 	};
 
-	struct batchReads {
-		std::vector< std::string >                 ids;
-		std::vector< std::vector< seqan3::dna4 > > seqs;
-		std::vector< std::vector< seqan3::dna4 > > seqs2{};
-	};
+		struct batchReads {
+			std::vector< std::string >                 ids;
+			std::vector< uint64_t >                    ordinals;
+			std::vector< std::vector< seqan3::dna4 > > seqs;
+			std::vector< std::vector< seqan3::dna4 > > seqs2{};
+		};
 
-			struct classifyResult {
-				std::string id;
-				std::vector<std::pair<std::string, double>> taxidCount;
+				struct classifyResult {
+					std::string id;
+					uint64_t read_ordinal{ 0 };
+					std::vector<std::pair<std::string, double>> taxidCount;
 				std::vector<std::pair<std::string, double>> posteriors;
 				double evaluated{ 0.0 }; // 实际参与判别的 feature 数，用于归一化
 				uint32_t query_length{ 0 };

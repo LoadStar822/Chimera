@@ -16,7 +16,15 @@ namespace ChimeraClassify {
 
 namespace {
 
-constexpr char kSpoolMagic[] = {'C', 'H', 'S', 'P', '4', '\0', '\0', '\0'};
+constexpr char kSpoolMagic[] = {'C', 'H', 'S', 'P', '6', '\0', '\0', '\0'};
+
+struct SpoolCandidateLite {
+  uint32_t tid{0};
+  double score{0.0};
+};
+
+static_assert(sizeof(SpoolCandidateLite) == 16,
+              "SpoolCandidateLite must stay a compact 16-byte disk record");
 
 template <typename T>
 void write_pod(std::ostream &os, const T &value) {
@@ -30,6 +38,17 @@ template <typename T>
 bool read_pod(std::istream &is, T &value) {
   is.read(reinterpret_cast<char *>(&value), sizeof(T));
   return static_cast<bool>(is);
+}
+
+void skip_bytes(std::istream &is, std::streamoff bytes,
+                const std::string &what) {
+  if (bytes <= 0) {
+    return;
+  }
+  is.seekg(bytes, std::ios::cur);
+  if (!is) {
+    throw std::runtime_error("Truncated classify spool " + what);
+  }
 }
 
 void write_string(std::ostream &os, const std::string &value) {
@@ -58,6 +77,32 @@ void read_string(std::istream &is, std::string &value,
   }
 }
 
+void write_candidates(std::ostream &os,
+                      const std::vector<SpoolCandidate> &candidates,
+                      const char *what) {
+  for (const auto &cand : candidates) {
+    const SpoolCandidateLite lite{cand.tid, cand.score};
+    os.write(reinterpret_cast<const char *>(&lite), sizeof(lite));
+    if (!os) {
+      throw std::runtime_error(std::string("Failed to write classify spool ") +
+                               what);
+    }
+  }
+}
+
+void read_candidates(std::istream &is, std::vector<SpoolCandidate> &candidates,
+                     uint32_t count, const char *what) {
+  candidates.resize(count);
+  SpoolCandidateLite lite;
+  for (uint32_t i = 0; i < count; ++i) {
+    is.read(reinterpret_cast<char *>(&lite), sizeof(lite));
+    if (!is) {
+      throw std::runtime_error(std::string("Truncated classify spool ") + what);
+    }
+    candidates[i] = SpoolCandidate{lite.tid, lite.score, lite.score};
+  }
+}
+
 } // namespace
 
 void write_spool_header(std::ostream &os) {
@@ -78,6 +123,7 @@ void read_spool_header(std::istream &is, const std::string &path) {
 
 void write_spool_record(std::ostream &os, const SpoolReadRecord &record) {
   write_string(os, record.id);
+  write_pod(os, record.read_ordinal);
   write_pod(os, record.evaluated);
   write_pod(os, record.query_length);
   write_pod(os, record.best_taxid_hint);
@@ -86,41 +132,27 @@ void write_spool_record(std::ostream &os, const SpoolReadRecord &record) {
   const uint32_t cand_len = static_cast<uint32_t>(record.candidates.size());
   write_pod(os, cand_len);
   if (cand_len > 0) {
-    os.write(reinterpret_cast<const char *>(record.candidates.data()),
-             static_cast<std::streamsize>(cand_len * sizeof(SpoolCandidate)));
-    if (!os) {
-      throw std::runtime_error("Failed to write classify spool candidates");
-    }
+    write_candidates(os, record.candidates, "candidates");
   }
   const uint32_t abundance_len =
       static_cast<uint32_t>(record.abundance_candidates.size());
   write_pod(os, abundance_len);
   if (abundance_len > 0) {
-    os.write(reinterpret_cast<const char *>(record.abundance_candidates.data()),
-             static_cast<std::streamsize>(abundance_len *
-                                          sizeof(SpoolCandidate)));
-    if (!os) {
-      throw std::runtime_error(
-          "Failed to write classify spool abundance candidates");
-    }
+    write_candidates(os, record.abundance_candidates, "abundance candidates");
   }
   const uint32_t mixture_len =
       static_cast<uint32_t>(record.sample_mixture_candidates.size());
   write_pod(os, mixture_len);
   if (mixture_len > 0) {
-    os.write(
-        reinterpret_cast<const char *>(record.sample_mixture_candidates.data()),
-        static_cast<std::streamsize>(mixture_len * sizeof(SpoolCandidate)));
-    if (!os) {
-      throw std::runtime_error(
-          "Failed to write classify spool sample mixture candidates");
-    }
+    write_candidates(os, record.sample_mixture_candidates,
+                     "sample mixture candidates");
   }
 }
 
 void write_spool_record(std::ostream &os,
                         const CompactClassifyResult &record) {
   write_string(os, record.id);
+  write_pod(os, record.read_ordinal);
   write_pod(os, record.evaluated);
   write_pod(os, record.query_length);
   write_pod(os, record.best_taxid_hint);
@@ -129,52 +161,84 @@ void write_spool_record(std::ostream &os,
   const uint32_t cand_len = static_cast<uint32_t>(record.candidates.size());
   write_pod(os, cand_len);
   if (cand_len > 0) {
-    os.write(reinterpret_cast<const char *>(record.candidates.data()),
-             static_cast<std::streamsize>(cand_len * sizeof(SpoolCandidate)));
-    if (!os) {
-      throw std::runtime_error("Failed to write classify spool candidates");
-    }
+    write_candidates(os, record.candidates, "candidates");
   }
   const uint32_t abundance_len =
       static_cast<uint32_t>(record.abundance_candidates.size());
   write_pod(os, abundance_len);
   if (abundance_len > 0) {
-    os.write(reinterpret_cast<const char *>(record.abundance_candidates.data()),
-             static_cast<std::streamsize>(abundance_len *
-                                          sizeof(SpoolCandidate)));
-    if (!os) {
-      throw std::runtime_error(
-          "Failed to write classify spool abundance candidates");
-    }
+    write_candidates(os, record.abundance_candidates, "abundance candidates");
   }
   const uint32_t mixture_len =
       static_cast<uint32_t>(record.sample_mixture_candidates.size());
   write_pod(os, mixture_len);
   if (mixture_len > 0) {
-    os.write(
-        reinterpret_cast<const char *>(record.sample_mixture_candidates.data()),
-        static_cast<std::streamsize>(mixture_len * sizeof(SpoolCandidate)));
-    if (!os) {
-      throw std::runtime_error(
-          "Failed to write classify spool sample mixture candidates");
-    }
+    write_candidates(os, record.sample_mixture_candidates,
+                     "sample mixture candidates");
   }
 }
 
-bool read_spool_record(std::istream &is, SpoolReadRecord &record) {
+void write_spool_candidate_record(std::ostream &os,
+                                  const CompactClassifyResult &record) {
+  write_string(os, record.id);
+  write_pod(os, record.read_ordinal);
+  write_pod(os, record.evaluated);
+  write_pod(os, record.query_length);
+  write_pod(os, record.best_taxid_hint);
+  write_pod(os, record.profile_response_taxid);
+  write_string(os, record.reject_reason);
+  const uint32_t cand_len = static_cast<uint32_t>(record.candidates.size());
+  write_pod(os, cand_len);
+  if (cand_len > 0) {
+    write_candidates(os, record.candidates, "candidate spool candidates");
+  }
+  const uint32_t zero_len = 0;
+  write_pod(os, zero_len);
+  write_pod(os, zero_len);
+}
+
+void write_spool_sample_mixture_record(
+    std::ostream &os, const CompactClassifyResult &record) {
+  write_string(os, record.id);
+  write_pod(os, record.read_ordinal);
+  write_pod(os, record.evaluated);
+  write_pod(os, record.query_length);
+  write_pod(os, record.best_taxid_hint);
+  write_pod(os, record.profile_response_taxid);
+  write_string(os, record.reject_reason);
+  const uint32_t zero_len = 0;
+  write_pod(os, zero_len);
+  write_pod(os, zero_len);
+  const uint32_t mixture_len =
+      static_cast<uint32_t>(record.sample_mixture_candidates.size());
+  write_pod(os, mixture_len);
+  if (mixture_len > 0) {
+    write_candidates(os, record.sample_mixture_candidates,
+                     "sample mixture spool candidates");
+  }
+}
+
+bool read_spool_record(std::istream &is, SpoolReadRecord &record,
+                       const SpoolReadOptions &options) {
   uint32_t id_len = 0;
   is.read(reinterpret_cast<char *>(&id_len), sizeof(id_len));
   if (!is) {
     return false;
   }
-  record.id.resize(id_len);
-  if (id_len > 0) {
+  record.id.clear();
+  if (options.id) {
+    record.id.resize(id_len);
+  }
+  if (id_len > 0 && options.id) {
     is.read(record.id.data(), static_cast<std::streamsize>(id_len));
     if (!is) {
       throw std::runtime_error("Truncated classify spool record id");
     }
+  } else if (id_len > 0) {
+    skip_bytes(is, static_cast<std::streamoff>(id_len), "record id");
   }
-  if (!read_pod(is, record.evaluated) ||
+  if (!read_pod(is, record.read_ordinal) ||
+      !read_pod(is, record.evaluated) ||
       !read_pod(is, record.query_length) ||
       !read_pod(is, record.best_taxid_hint) ||
       !read_pod(is, record.profile_response_taxid)) {
@@ -184,54 +248,65 @@ bool read_spool_record(std::istream &is, SpoolReadRecord &record) {
   if (!read_pod(is, reject_len)) {
     throw std::runtime_error("Truncated classify spool reject length");
   }
-  record.reject_reason.resize(reject_len);
-  if (reject_len > 0) {
+  record.reject_reason.clear();
+  if (options.reject_reason) {
+    record.reject_reason.resize(reject_len);
+  }
+  if (reject_len > 0 && options.reject_reason) {
     is.read(record.reject_reason.data(),
             static_cast<std::streamsize>(reject_len));
     if (!is) {
       throw std::runtime_error("Truncated classify spool reject reason");
     }
+  } else if (reject_len > 0) {
+    skip_bytes(is, static_cast<std::streamoff>(reject_len), "reject reason");
   }
   uint32_t cand_len = 0;
   if (!read_pod(is, cand_len)) {
     throw std::runtime_error("Truncated classify spool candidate length");
   }
-  record.candidates.resize(cand_len);
-  if (cand_len > 0) {
-    is.read(reinterpret_cast<char *>(record.candidates.data()),
-            static_cast<std::streamsize>(cand_len * sizeof(SpoolCandidate)));
-    if (!is) {
-      throw std::runtime_error("Truncated classify spool candidates");
-    }
+  record.candidates.clear();
+  if (cand_len > 0 && options.candidates) {
+    read_candidates(is, record.candidates, cand_len, "candidates");
+  } else if (cand_len > 0) {
+    skip_bytes(is,
+               static_cast<std::streamoff>(cand_len *
+                                           sizeof(SpoolCandidateLite)),
+               "candidates");
   }
   uint32_t abundance_len = 0;
   if (!read_pod(is, abundance_len)) {
     throw std::runtime_error("Truncated classify spool abundance length");
   }
-  record.abundance_candidates.resize(abundance_len);
-  if (abundance_len > 0) {
-    is.read(reinterpret_cast<char *>(record.abundance_candidates.data()),
-            static_cast<std::streamsize>(abundance_len *
-                                         sizeof(SpoolCandidate)));
-    if (!is) {
-      throw std::runtime_error("Truncated classify spool abundance candidates");
-    }
+  record.abundance_candidates.clear();
+  if (abundance_len > 0 && options.abundance_candidates) {
+    read_candidates(is, record.abundance_candidates, abundance_len,
+                    "abundance candidates");
+  } else if (abundance_len > 0) {
+    skip_bytes(is,
+               static_cast<std::streamoff>(abundance_len *
+                                           sizeof(SpoolCandidateLite)),
+               "abundance candidates");
   }
   uint32_t mixture_len = 0;
   if (!read_pod(is, mixture_len)) {
     throw std::runtime_error("Truncated classify spool sample mixture length");
   }
-  record.sample_mixture_candidates.resize(mixture_len);
-  if (mixture_len > 0) {
-    is.read(reinterpret_cast<char *>(record.sample_mixture_candidates.data()),
-            static_cast<std::streamsize>(mixture_len *
-                                         sizeof(SpoolCandidate)));
-    if (!is) {
-      throw std::runtime_error(
-          "Truncated classify spool sample mixture candidates");
-    }
+  record.sample_mixture_candidates.clear();
+  if (mixture_len > 0 && options.sample_mixture_candidates) {
+    read_candidates(is, record.sample_mixture_candidates, mixture_len,
+                    "sample mixture candidates");
+  } else if (mixture_len > 0) {
+    skip_bytes(is,
+               static_cast<std::streamoff>(mixture_len *
+                                           sizeof(SpoolCandidateLite)),
+               "sample mixture candidates");
   }
   return true;
+}
+
+bool read_spool_record(std::istream &is, SpoolReadRecord &record) {
+  return read_spool_record(is, record, kSpoolReadAll);
 }
 
 void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
@@ -248,6 +323,7 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
 
   auto init_batch = [&](batchReads &batch, bool paired) {
     batch.ids.reserve(config.batchSize);
+    batch.ordinals.reserve(config.batchSize);
     batch.seqs.reserve(config.batchSize);
     if (paired) {
       batch.seqs2.reserve(config.batchSize);
@@ -292,11 +368,13 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
           fin{file};
 
       for (auto &&r : fin) {
-        std::string id = std::move(r.id());
-        size_t shard = hasher(id) % shardCount;
-        auto &batch = pending[shard];
-        batch.ids.emplace_back(std::move(id));
-        batch.seqs.emplace_back(std::move(r.sequence()));
+	        std::string id = std::move(r.id());
+	        const uint64_t ordinal = static_cast<uint64_t>(totalSequences);
+	        size_t shard = hasher(id) % shardCount;
+	        auto &batch = pending[shard];
+	        batch.ids.emplace_back(std::move(id));
+	        batch.ordinals.emplace_back(ordinal);
+	        batch.seqs.emplace_back(std::move(r.sequence()));
         ++totalSequences;
         if (max_reads > 0 && totalSequences >= max_reads) {
           reached_limit = true;
@@ -340,11 +418,13 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
       for (; it1 != end1 && it2 != end2; ++it1, ++it2) {
         auto rec1 = *it1;
         auto rec2 = *it2;
-        std::string id = std::move(rec1.id());
-        size_t shard = hasher(id) % shardCount;
-        auto &batch = pending[shard];
-        batch.ids.emplace_back(std::move(id));
-        batch.seqs.emplace_back(std::move(rec1.sequence()));
+	        std::string id = std::move(rec1.id());
+	        const uint64_t ordinal = static_cast<uint64_t>(totalSequences);
+	        size_t shard = hasher(id) % shardCount;
+	        auto &batch = pending[shard];
+	        batch.ids.emplace_back(std::move(id));
+	        batch.ordinals.emplace_back(ordinal);
+	        batch.seqs.emplace_back(std::move(rec1.sequence()));
         batch.seqs2.emplace_back(std::move(rec2.sequence()));
         ++totalSequences;
         if (max_reads > 0 && totalSequences >= max_reads) {

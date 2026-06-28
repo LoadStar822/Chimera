@@ -37,9 +37,16 @@
 namespace {
 
 constexpr size_t kMaxChainTokensPerRead = 256;
+constexpr size_t kLocalResolutionReadBatchSize = 4096;
+
+struct PendingRead {
+  uint64_t ordinal{};
+  uint32_t length{};
+  std::vector<seqan3::dna4> sequence;
+};
 
 struct ReadRecord {
-  std::string name;
+  uint64_t ordinal{};
   uint32_t anchor_count{};
   std::vector<chimera::native_bounded::Anchor> anchors;
   std::vector<uint32_t> anchor_qids;
@@ -49,7 +56,7 @@ struct ReadRecord {
 struct TargetRecord {
   std::string name;
   uint32_t len{};
-  std::string species;
+  uint32_t species{};
 };
 
 struct Posting {
@@ -134,7 +141,7 @@ struct HitOut {
 };
 
 struct TaxonScore {
-  std::string taxid;
+  uint32_t taxid{};
   uint32_t score{};
 };
 
@@ -352,12 +359,20 @@ private:
 
   void rehash(size_t requested) {
     const size_t new_capacity = round_capacity(requested);
-    const std::vector<uint64_t> dense_keys = dense_keys_;
-    keys_.assign(new_capacity, 0);
-    ids_.assign(new_capacity, kNotFound);
-    for (uint32_t id = 0; id < dense_keys.size(); ++id) {
-      insert_existing_no_grow(dense_keys[id], id);
+    std::vector<uint64_t> new_keys(new_capacity, 0);
+    std::vector<uint32_t> new_ids(new_capacity, kNotFound);
+    const size_t mask = new_capacity - 1;
+    for (uint32_t id = 0; id < dense_keys_.size(); ++id) {
+      const uint64_t key = dense_keys_[id];
+      size_t slot = static_cast<size_t>(mix(key)) & mask;
+      while (new_ids[slot] != kNotFound) {
+        slot = (slot + 1) & mask;
+      }
+      new_keys[slot] = key;
+      new_ids[slot] = id;
     }
+    keys_.swap(new_keys);
+    ids_.swap(new_ids);
   }
 
   uint32_t insert_no_grow(uint64_t key) {
@@ -464,7 +479,7 @@ ChimeraClassify::LocalResolutionReadCall
 make_local_resolution_call(const ReadRecord &read,
                            const std::vector<TaxonScore> &scores) {
   ChimeraClassify::LocalResolutionReadCall call;
-  call.read_id = read.name;
+  call.read_ordinal = read.ordinal;
   call.candidates.reserve(scores.size());
   for (const auto &score : scores) {
     call.candidates.push_back(
@@ -632,11 +647,139 @@ void insert_query_hashes(ReadRecord &read,
   }
 }
 
+void assign_query_hashes(ReadRecord &read, const QueryHashIndex &query_hashes) {
+  read.anchor_qids.clear();
+  read.anchor_qids.reserve(read.anchors.size());
+  for (const auto &anchor : read.anchors) {
+    const uint32_t qid = query_hashes.find_id(anchor.hash);
+    if (qid == QueryHashIndex::kNotFound) {
+      throw std::runtime_error(
+          "local resolution query hash missing from first pass");
+    }
+    read.anchor_qids.push_back(qid);
+  }
+}
+
+std::vector<ReadRecord>
+extract_read_records(const std::vector<PendingRead> &pending_reads, uint32_t k,
+                     uint32_t w, uint32_t threads) {
+  std::vector<ReadRecord> reads(pending_reads.size());
+  if (pending_reads.empty()) {
+    return reads;
+  }
+  const uint32_t worker_count = std::max<uint32_t>(
+      1, std::min<uint32_t>(
+             threads == 0 ? 1 : threads,
+             static_cast<uint32_t>(std::max<size_t>(1, pending_reads.size()))));
+  std::atomic<size_t> next_read{0};
+  auto worker = [&]() {
+    while (true) {
+      const size_t idx = next_read.fetch_add(1, std::memory_order_relaxed);
+      if (idx >= pending_reads.size()) {
+        break;
+      }
+      const auto &pending = pending_reads[idx];
+      ReadRecord read;
+      read.ordinal = pending.ordinal;
+      read.length = pending.length;
+      auto anchors =
+          chimera::native_bounded::extract_minimizers(pending.sequence, k, w);
+      read.anchor_count = static_cast<uint32_t>(
+          std::min<size_t>(anchors.size(), std::numeric_limits<uint32_t>::max()));
+      read.anchors = select_chain_anchors(anchors);
+      reads[idx] = std::move(read);
+    }
+  };
+
+  std::vector<std::thread> workers;
+  workers.reserve(worker_count);
+  for (uint32_t i = 0; i < worker_count; ++i) {
+    workers.emplace_back(worker);
+  }
+  for (auto &worker_thread : workers) {
+    worker_thread.join();
+  }
+  return reads;
+}
+
+ReadRecord make_read_record_from_pending(const PendingRead &pending, uint32_t k,
+                                         uint32_t w) {
+  ReadRecord read;
+  read.ordinal = pending.ordinal;
+  read.length = pending.length;
+  auto anchors =
+      chimera::native_bounded::extract_minimizers(pending.sequence, k, w);
+  read.anchor_count = static_cast<uint32_t>(
+      std::min<size_t>(anchors.size(), std::numeric_limits<uint32_t>::max()));
+  read.anchors = select_chain_anchors(anchors);
+  return read;
+}
+
+template <typename BatchConsumer>
+uint64_t for_each_pending_read_batch(const std::vector<std::string> &paths,
+                                     size_t batch_size,
+                                     BatchConsumer &&consume_batch) {
+  std::vector<PendingRead> pending;
+  pending.reserve(batch_size);
+  uint64_t ordinal = 0;
+  auto flush = [&]() {
+    if (pending.empty()) {
+      return;
+    }
+    consume_batch(pending);
+    std::vector<PendingRead> fresh;
+    fresh.reserve(batch_size);
+    pending = std::move(fresh);
+  };
+
+  for (const auto &path : paths) {
+    seqan3::sequence_file_input<raptor::dna4_traits,
+                                seqan3::fields<seqan3::field::seq>>
+        input{path};
+    for (auto &record : input) {
+      PendingRead pending_read;
+      pending_read.ordinal = ordinal++;
+      pending_read.length = static_cast<uint32_t>(
+          std::min<size_t>(record.sequence().size(),
+                           std::numeric_limits<uint32_t>::max()));
+      pending_read.sequence = std::move(record.sequence());
+      pending.push_back(std::move(pending_read));
+      if (pending.size() >= batch_size) {
+        flush();
+      }
+    }
+  }
+  flush();
+  return ordinal;
+}
+
+uint64_t collect_query_hashes_from_reads(
+    const std::vector<std::string> &paths, uint32_t k, uint32_t w,
+    QueryHashIndex &query_hashes, uint32_t threads) {
+  return for_each_pending_read_batch(
+      paths, kLocalResolutionReadBatchSize,
+      [&](const std::vector<PendingRead> &pending) {
+        auto reads = extract_read_records(pending, k, w, threads);
+        for (auto &read : reads) {
+          insert_query_hashes(read, query_hashes);
+        }
+      });
+}
+
+void append_local_resolution_scores(
+    ChimeraClassify::LocalResolutionCallStore &store,
+    const std::vector<TaxonScore> &scores) {
+  for (const auto &score : scores) {
+    store.candidates.push_back(
+        ChimeraClassify::LocalResolutionCandidate{score.taxid, score.score});
+  }
+  store.offsets.push_back(static_cast<uint64_t>(store.candidates.size()));
+}
+
 std::vector<ReadRecord> load_reads(
     const std::vector<std::string> &paths, uint32_t k, uint32_t w,
     QueryHashIndex &query_hashes, uint32_t threads) {
   struct PendingRead {
-    std::string name;
     uint32_t length{};
     std::vector<seqan3::dna4> sequence;
   };
@@ -645,11 +788,10 @@ std::vector<ReadRecord> load_reads(
   for (const auto &path : paths) {
     seqan3::sequence_file_input<
         raptor::dna4_traits,
-        seqan3::fields<seqan3::field::id, seqan3::field::seq>>
+        seqan3::fields<seqan3::field::seq>>
         input{path};
     for (auto &record : input) {
       PendingRead pending;
-      pending.name = first_token(std::string(record.id()));
       pending.length = static_cast<uint32_t>(
           std::min<size_t>(record.sequence().size(),
                            std::numeric_limits<uint32_t>::max()));
@@ -672,7 +814,6 @@ std::vector<ReadRecord> load_reads(
       }
       auto &pending = pending_reads[idx];
       ReadRecord read;
-      read.name = std::move(pending.name);
       read.length = pending.length;
       auto anchors = chimera::native_bounded::extract_minimizers(
           pending.sequence, k, w);
@@ -717,8 +858,7 @@ void add_target_records(
       continue;
     }
     const uint32_t tid = static_cast<uint32_t>(targets.size());
-    targets.push_back(
-        TargetRecord{source.name, source.len, std::to_string(source.species)});
+    targets.push_back(TargetRecord{source.name, source.len, source.species});
     ++stats.selected_targets;
     const auto read_started = std::chrono::steady_clock::now();
     const auto anchors =
@@ -892,8 +1032,7 @@ DirectTargetLoad scan_direct_target(
     DirectShardReader &reader, const DirectTargetWork &work,
     const QueryHashIndex &query_hashes, MatchConsumer &&consume_match) {
   DirectTargetLoad out;
-  out.target = TargetRecord{work.name, work.route.len,
-                            std::to_string(work.route.species)};
+  out.target = TargetRecord{work.name, work.route.len, work.route.species};
   const size_t anchor_record_bytes =
       chimera::native_bounded::anchor_record_bytes(work.k);
   const uint64_t target_byte_size =
@@ -1168,8 +1307,8 @@ bool build_direct_target_plan(
       return lhs.name < rhs.name;
     });
     for (const auto &entry : group) {
-      plan.targets[entry.tid] = TargetRecord{
-          entry.name, entry.route.len, std::to_string(entry.route.species)};
+      plan.targets[entry.tid] =
+          TargetRecord{entry.name, entry.route.len, entry.route.species};
       plan.work_items.push_back(DirectTargetWork{
           shard_found->second.path, entry.name, entry.route, entry.tid,
           root_meta.k, root_meta.version});
@@ -1580,16 +1719,20 @@ void sort_chain_hits(std::vector<HitOut> &hits) {
   });
 }
 
-std::vector<HitOut> chain_read_fast(
-    const ReadRecord &read,
-    const CompactPostingIndex &index,
-    const std::vector<TargetRecord> &targets, int diag_bin,
-    uint32_t min_chain) {
+void chain_read_fast_into(const ReadRecord &read, const CompactPostingIndex &index,
+                          const std::vector<TargetRecord> &targets,
+                          int diag_bin, uint32_t min_chain,
+                          std::vector<HitOut> &hits) {
   if (read.anchor_qids.size() != read.anchors.size()) {
     throw std::runtime_error("local query token id invariant violated");
   }
-  std::unordered_map<ChainKey, ChainStats, ChainKeyHash> chains;
-  chains.reserve(read.anchors.size() * 16 + 1);
+  hits.clear();
+  thread_local std::unordered_map<ChainKey, ChainStats, ChainKeyHash> chains;
+  chains.clear();
+  const size_t desired_chain_capacity = read.anchors.size() * 16 + 1;
+  if (chains.bucket_count() < desired_chain_capacity) {
+    chains.reserve(desired_chain_capacity);
+  }
   for (size_t token_idx = 0; token_idx < read.anchors.size(); ++token_idx) {
     const auto &query = read.anchors[token_idx];
     const uint32_t qid = read.anchor_qids[token_idx];
@@ -1615,7 +1758,6 @@ std::vector<HitOut> chain_read_fast(
     }
   }
 
-  std::vector<HitOut> hits;
   hits.reserve(chains.size());
   for (const auto &[key, stats] : chains) {
     if (stats.count < min_chain) {
@@ -1642,15 +1784,18 @@ std::vector<HitOut> chain_read_fast(
         key.diag});
   }
   sort_chain_hits(hits);
-  return hits;
 }
 
 std::vector<TaxonScore> aggregate_species_scores(
     const std::vector<HitOut> &hits, const std::vector<TargetRecord> &targets) {
-  std::unordered_map<std::string, uint64_t> mass_by_species;
+  thread_local std::unordered_map<uint32_t, uint64_t> mass_by_species;
+  mass_by_species.clear();
+  if (mass_by_species.bucket_count() < hits.size()) {
+    mass_by_species.reserve(hits.size());
+  }
   for (const auto &hit : hits) {
     const auto &target = targets[hit.tid];
-    if (target.species.empty() || target.species == "0") {
+    if (target.species == 0) {
       continue;
     }
     mass_by_species[target.species] += hit.score;
@@ -1662,14 +1807,66 @@ std::vector<TaxonScore> aggregate_species_scores(
                       static_cast<uint32_t>(std::min<uint64_t>(
                           score, std::numeric_limits<uint32_t>::max()))});
   }
-  std::sort(scores.begin(), scores.end(),
-            [](const TaxonScore &a, const TaxonScore &b) {
-              if (a.score != b.score) {
-                return a.score > b.score;
-              }
-              return a.taxid < b.taxid;
-            });
+	  std::sort(scores.begin(), scores.end(),
+	            [](const TaxonScore &a, const TaxonScore &b) {
+	              if (a.score != b.score) {
+	                return a.score > b.score;
+	              }
+	              return std::to_string(a.taxid) < std::to_string(b.taxid);
+	            });
   return scores;
+}
+
+void chain_reads_to_call_store(
+    const std::vector<std::string> &read_files, uint32_t k, uint32_t w,
+    const QueryHashIndex &query_hashes, const CompactPostingIndex &index,
+    const std::vector<TargetRecord> &targets, int diag_bin, uint32_t min_chain,
+    uint32_t threads, ChimeraClassify::LocalResolutionCallStore &store,
+    std::atomic<uint64_t> &local_hits, std::atomic<uint64_t> &local_absent) {
+  for_each_pending_read_batch(
+      read_files, kLocalResolutionReadBatchSize,
+      [&](const std::vector<PendingRead> &pending) {
+        std::vector<std::vector<TaxonScore>> batch_scores(pending.size());
+        const uint32_t worker_count = std::max<uint32_t>(
+            1, std::min<uint32_t>(
+                   threads == 0 ? 1 : threads,
+                   static_cast<uint32_t>(std::max<size_t>(1, pending.size()))));
+        std::atomic<size_t> next{0};
+        auto worker = [&]() {
+          std::vector<HitOut> hit_scratch;
+          while (true) {
+            const size_t idx = next.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= pending.size()) {
+              break;
+            }
+            auto read = make_read_record_from_pending(pending[idx], k, w);
+            assign_query_hashes(read, query_hashes);
+            chain_read_fast_into(read, index, targets, diag_bin, min_chain,
+                                 hit_scratch);
+            batch_scores[idx] = aggregate_species_scores(hit_scratch, targets);
+          }
+        };
+        std::vector<std::thread> workers;
+        workers.reserve(worker_count);
+        for (uint32_t i = 0; i < worker_count; ++i) {
+          workers.emplace_back(worker);
+        }
+        for (auto &worker_thread : workers) {
+          worker_thread.join();
+        }
+        for (size_t i = 0; i < pending.size(); ++i) {
+          if (pending[i].ordinal != store.read_count()) {
+            throw std::runtime_error(
+                "local resolution read ordinal stream is not contiguous");
+          }
+          if (batch_scores[i].empty()) {
+            local_absent.fetch_add(1, std::memory_order_relaxed);
+          } else {
+            local_hits.fetch_add(1, std::memory_order_relaxed);
+          }
+          append_local_resolution_scores(store, batch_scores[i]);
+        }
+      });
 }
 
 } // namespace
@@ -1696,12 +1893,12 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
         "Local resolution route requires a shard manifest file");
   }
 
-  const auto started = std::chrono::steady_clock::now();
-  const auto root_meta = chimera::native_bounded::read_index_header(index_path);
-  QueryHashIndex query_hashes;
-  auto reads =
-      load_reads(read_files, root_meta.k, root_meta.w, query_hashes, threads);
-  const auto reads_loaded = std::chrono::steady_clock::now();
+	  const auto started = std::chrono::steady_clock::now();
+	  const auto root_meta = chimera::native_bounded::read_index_header(index_path);
+	  QueryHashIndex query_hashes;
+	  const uint64_t read_count = collect_query_hashes_from_reads(
+	      read_files, root_meta.k, root_meta.w, query_hashes, threads);
+	  const auto reads_loaded = std::chrono::steady_clock::now();
 
   LoadStats stats;
   std::vector<TargetRecord> targets;
@@ -1724,45 +1921,25 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
   }
   const auto refs_loaded = std::chrono::steady_clock::now();
 
-  const uint32_t worker_count = std::max<uint32_t>(
-      1, std::min<uint32_t>(
-             threads == 0 ? 1 : threads,
-             static_cast<uint32_t>(std::max<size_t>(1, reads.size()))));
-  LocalResolutionResult result;
-  result.reads.resize(reads.size());
-  std::atomic<size_t> next{0};
-  std::atomic<uint64_t> local_hits{0};
-  std::atomic<uint64_t> local_absent{0};
+	  LocalResolutionResult result;
+	  result.calls.offsets.reserve(static_cast<size_t>(
+	      std::min<uint64_t>(read_count + 1,
+	                         static_cast<uint64_t>(
+	                             std::numeric_limits<size_t>::max()))));
+	  result.calls.offsets.clear();
+	  result.calls.offsets.push_back(0);
+	  std::atomic<uint64_t> local_hits{0};
+	  std::atomic<uint64_t> local_absent{0};
+	  chain_reads_to_call_store(read_files, root_meta.k, root_meta.w, query_hashes,
+	                            index, targets, diag_bin, min_chain, threads,
+	                            result.calls, local_hits, local_absent);
+	  if (result.calls.read_count() != read_count) {
+	    throw std::runtime_error(
+	        "local resolution call store read count mismatch");
+	  }
+	  const auto chained = std::chrono::steady_clock::now();
 
-  auto worker = [&]() {
-    while (true) {
-      const size_t idx = next.fetch_add(1, std::memory_order_relaxed);
-      if (idx >= reads.size()) {
-        break;
-      }
-      const auto hits = chain_read_fast(reads[idx], index, targets, diag_bin,
-                                        min_chain);
-      const auto scores = aggregate_species_scores(hits, targets);
-      if (scores.empty()) {
-        local_absent.fetch_add(1, std::memory_order_relaxed);
-      } else {
-        local_hits.fetch_add(1, std::memory_order_relaxed);
-      }
-      result.reads[idx] = make_local_resolution_call(reads[idx], scores);
-    }
-  };
-
-  std::vector<std::thread> workers;
-  workers.reserve(worker_count);
-  for (uint32_t i = 0; i < worker_count; ++i) {
-    workers.emplace_back(worker);
-  }
-  for (auto &worker_thread : workers) {
-    worker_thread.join();
-  }
-  const auto chained = std::chrono::steady_clock::now();
-
-  result.stats.reads = reads.size();
+	  result.stats.reads = read_count;
   result.stats.query_hashes = query_hashes.size();
   result.stats.target_filter = target_filter.names.size();
   result.stats.target_routes = target_filter.route_by_name.size();
@@ -1789,7 +1966,7 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
   result.stats.dropped_broad_records = stats.dropped_broad_records;
   result.stats.local_hits = local_hits.load(std::memory_order_relaxed);
   result.stats.local_absent = local_absent.load(std::memory_order_relaxed);
-  result.stats.threads = worker_count;
+	  result.stats.threads = std::max<uint32_t>(1, threads == 0 ? 1 : threads);
   result.stats.k = root_meta.k;
   result.stats.w = root_meta.w;
   result.stats.read_seconds =

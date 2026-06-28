@@ -639,15 +639,17 @@ static bool prepare_spool_sample_mixture_candidates(
 }
 
 template <typename RecordConsumer>
-static void for_each_spool_record(const std::string &path,
-                                  RecordConsumer consume_record) {
+static void for_each_spool_record(
+    const std::string &path, RecordConsumer consume_record,
+    const ChimeraClassify::SpoolReadOptions &readOptions =
+        ChimeraClassify::kSpoolReadAll) {
   std::ifstream is(path, std::ios::binary);
   if (!is.is_open()) {
     throw std::runtime_error("Failed to open classify spool: " + path);
   }
   ChimeraClassify::read_spool_header(is, path);
   ChimeraClassify::SpoolReadRecord record;
-  while (ChimeraClassify::read_spool_record(is, record)) {
+  while (ChimeraClassify::read_spool_record(is, record, readOptions)) {
     consume_record(record);
   }
 }
@@ -686,7 +688,8 @@ static SpoolEMFit fit_spool_em(
               }
             }
           }
-        });
+        },
+        ChimeraClassify::kSpoolReadCandidatesOnly);
   }
 
   fit.taxid_list.reserve(taxid_set.size());
@@ -822,7 +825,8 @@ static SpoolEMFit fit_spool_em(
                 local_expected[log_components[k].first] +=
                     weight * q_values[k];
               }
-            });
+            },
+            ChimeraClassify::kSpoolReadCandidatesOnly);
       }
     }
 
@@ -907,7 +911,8 @@ static SpoolAbundanceFit fit_spool_abundance_em(
           for (uint32_t tid : seen_in_read) {
             read_support_by_tid[tid] += 1.0;
           }
-        });
+        },
+        ChimeraClassify::kSpoolReadAbundanceOnly);
   }
 
   fit.taxid_list.reserve(taxid_set.size());
@@ -997,7 +1002,8 @@ static SpoolAbundanceFit fit_spool_abundance_em(
                 const double q = (prior * cand.score) / denom;
                 local_expected[cand.idx] += read_weight * q;
               }
-            });
+            },
+            ChimeraClassify::kSpoolReadAbundanceOnly);
       }
     }
 
@@ -1251,7 +1257,8 @@ static SeqProfileFit fit_spool_sequence_profile(
               feature_unique[kept.front().first] += feature_weight;
             }
           }
-        });
+        },
+        ChimeraClassify::kSpoolReadAbundanceOnly);
   }
 
   fit.assigned_reads = 0.0;
@@ -1431,7 +1438,8 @@ static SpoolSampleMixtureFit fit_spool_sample_mixture_em(
             taxid_set.insert(cand.tid);
             local_evidence_by_tid[cand.tid] += cand.score * inv_total;
           }
-        });
+        },
+        ChimeraClassify::kSpoolReadSampleMixtureOnly);
   }
 
   fit.taxid_list.reserve(taxid_set.size());
@@ -1519,7 +1527,8 @@ static SpoolSampleMixtureFit fit_spool_sample_mixture_em(
                     cand.likelihood * fit.class_pi_vec[cand.idx] * inv_denom;
                 local_expected[cand.idx] += q;
               }
-            });
+            },
+            ChimeraClassify::kSpoolReadSampleMixtureOnly);
       }
     }
 
@@ -1825,6 +1834,7 @@ materialize_spool_result(const ChimeraClassify::SpoolReadRecord &record,
                          const ChimeraClassify::EMOptions &options) {
   ChimeraClassify::classifyResult result;
   result.id = record.id;
+  result.read_ordinal = record.read_ordinal;
   result.evaluated = record.evaluated;
   result.query_length = record.query_length;
   result.reject_reason = record.reject_reason;
@@ -2205,37 +2215,335 @@ static uint32_t taxid_text_to_u32_or_zero(const std::string &taxidText) {
 }
 
 using EvidenceAggregateMap = std::unordered_map<std::string, double>;
-using LocalResolutionCallMap =
-    std::unordered_map<std::string, ChimeraClassify::LocalResolutionReadCall>;
+using LocalResolutionCallStore = ChimeraClassify::LocalResolutionCallStore;
+
+struct SpeciesPosteriorSummary {
+  uint32_t top_species{};
+  double top_mass{};
+  uint32_t second_species{};
+  double second_mass{};
+  std::unordered_map<uint32_t, double> mass_by_species;
+};
+
+struct LocalCertificateDecision {
+  bool has_local_call{};
+  bool has_certificate{};
+  bool applied{};
+  std::string reason;
+  uint32_t current_taxid{};
+  uint32_t current_species{};
+  uint32_t current_genus{};
+  uint32_t output_taxid{};
+  uint32_t output_species{};
+  uint32_t output_genus{};
+  uint32_t local_taxid{};
+  uint32_t local_species{};
+  uint32_t local_genus{};
+  uint32_t local_top_score{};
+  uint32_t local_second_score{};
+  uint32_t posterior_top_species{};
+  uint32_t posterior_second_species{};
+  double posterior_top_mass{};
+  double posterior_second_mass{};
+  double posterior_local_mass{};
+  double posterior_current_mass{};
+};
 
 static uint32_t taxid_text_to_species(
     const std::string &taxidText,
     const ChimeraClassify::NcbiTaxdump *ncbiTaxdump);
 
-static const ChimeraClassify::LocalResolutionReadCall *
-find_local_resolution_call(const LocalResolutionCallMap *localCalls,
-                           const std::string &readId) {
+static std::optional<ChimeraClassify::LocalResolutionReadCall>
+find_local_resolution_call(const LocalResolutionCallStore *localCalls,
+                           uint64_t readOrdinal) {
   if (localCalls == nullptr) {
-    return nullptr;
+    return std::nullopt;
   }
-  const auto found = localCalls->find(readId);
-  if (found == localCalls->end()) {
-    size_t firstTokenEnd = 0;
-    while (firstTokenEnd < readId.size() &&
-           std::isspace(static_cast<unsigned char>(readId[firstTokenEnd])) ==
-               0) {
-      ++firstTokenEnd;
-    }
-    if (firstTokenEnd == readId.size()) {
-      return nullptr;
-    }
-    const auto tokenFound = localCalls->find(readId.substr(0, firstTokenEnd));
-    if (tokenFound == localCalls->end()) {
-      return nullptr;
-    }
-    return &tokenFound->second;
+  if (!localCalls->contains(readOrdinal)) {
+    return std::nullopt;
   }
-  return &found->second;
+  return localCalls->materialize(readOrdinal);
+}
+
+static SpeciesPosteriorSummary summarize_species_posteriors(
+    const ChimeraClassify::classifyResult &result,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
+  SpeciesPosteriorSummary summary;
+  if (ncbiTaxdump == nullptr || !ncbiTaxdump->enabled()) {
+    return summary;
+  }
+  for (const auto &[taxidText, mass] : result.posteriors) {
+    if (!(mass > 0.0)) {
+      continue;
+    }
+    uint32_t taxid = 0;
+    if (!chimera::utils::try_parse_u32(taxidText, taxid) || taxid == 0) {
+      continue;
+    }
+    const uint32_t species = ncbiTaxdump->to_species(taxid);
+    if (species == 0) {
+      continue;
+    }
+    summary.mass_by_species[species] += mass;
+  }
+  for (const auto &[species, mass] : summary.mass_by_species) {
+    if (mass > summary.top_mass ||
+        (mass == summary.top_mass && species < summary.top_species)) {
+      summary.second_species = summary.top_species;
+      summary.second_mass = summary.top_mass;
+      summary.top_species = species;
+      summary.top_mass = mass;
+    } else if (mass > summary.second_mass ||
+               (mass == summary.second_mass &&
+                species < summary.second_species)) {
+      summary.second_species = species;
+      summary.second_mass = mass;
+    }
+  }
+  return summary;
+}
+
+static void replace_result_with_local_candidate(
+    ChimeraClassify::classifyResult &result,
+    const ChimeraClassify::LocalResolutionReadCall &call) {
+  const auto &top = call.candidates.front();
+  result.taxidCount.clear();
+  result.taxidCount.emplace_back(std::to_string(top.taxid),
+                                 static_cast<double>(top.score));
+  result.posteriors.clear();
+  const double denom = static_cast<double>(std::max<uint32_t>(1, top.score));
+  const size_t topk = std::min<size_t>(16, call.candidates.size());
+  result.posteriors.reserve(topk);
+  for (size_t i = 0; i < topk; ++i) {
+    result.posteriors.emplace_back(
+        std::to_string(call.candidates[i].taxid),
+        static_cast<double>(call.candidates[i].score) / denom);
+  }
+  result.reject_reason.clear();
+}
+
+static bool local_candidate_has_certificate(
+    const ChimeraClassify::LocalResolutionReadCall &call) {
+  if (call.candidates.empty() || call.candidates.front().score == 0) {
+    return false;
+  }
+  const uint32_t top_score = call.candidates.front().score;
+  const uint32_t second_score =
+      call.candidates.size() >= 2 ? call.candidates[1].score : 0;
+  if (top_score < 2) {
+    return false;
+  }
+  if (second_score == 0) {
+    return true;
+  }
+  return static_cast<double>(top_score) >=
+         1.5 * static_cast<double>(second_score);
+}
+
+static bool apply_local_resolution_certificate_result(
+    ChimeraClassify::classifyResult &result,
+    const LocalResolutionCallStore *localCalls,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
+    LocalCertificateDecision *decision = nullptr) {
+  auto set_reason = [&](const char *reason) {
+    if (decision != nullptr) {
+      decision->reason = reason;
+    }
+    return false;
+  };
+  if (localCalls == nullptr || ncbiTaxdump == nullptr ||
+      !ncbiTaxdump->enabled()) {
+    return set_reason("taxdump_or_local_calls_unavailable");
+  }
+  uint32_t currentTaxid = 0;
+  const bool currentClassified =
+      !result.taxidCount.empty() &&
+      result.taxidCount.front().first != "unclassified" &&
+      chimera::utils::try_parse_u32(result.taxidCount.front().first,
+                                    currentTaxid) &&
+      currentTaxid != 0;
+  const uint32_t currentSpecies =
+      currentClassified ? ncbiTaxdump->to_species(currentTaxid) : 0;
+  if (decision != nullptr) {
+    decision->current_taxid = currentTaxid;
+    decision->current_species = currentSpecies;
+    decision->current_genus =
+        currentClassified ? ncbiTaxdump->to_genus(currentTaxid) : 0;
+  }
+  auto callOpt = find_local_resolution_call(localCalls, result.read_ordinal);
+  if (!callOpt.has_value()) {
+    return set_reason("no_local_call");
+  }
+  if (decision != nullptr) {
+    decision->has_local_call = true;
+    if (!callOpt->candidates.empty()) {
+      decision->local_top_score = callOpt->candidates.front().score;
+      decision->local_second_score =
+          callOpt->candidates.size() >= 2 ? callOpt->candidates[1].score : 0;
+    }
+  }
+  const auto &call = *callOpt;
+  if (call.candidates.empty()) {
+    return set_reason("no_local_candidates");
+  }
+  const auto &top = call.candidates.front();
+  const uint32_t localTaxid = top.taxid;
+  if (localTaxid == 0) {
+    return set_reason("invalid_local_taxid");
+  }
+  const uint32_t localSpecies = ncbiTaxdump->to_species(localTaxid);
+  const uint32_t localGenus = ncbiTaxdump->to_genus(localTaxid);
+  if (decision != nullptr) {
+    decision->local_taxid = localTaxid;
+    decision->local_species = localSpecies;
+    decision->local_genus = localGenus;
+  }
+  if (localSpecies == 0 || localGenus == 0) {
+    return set_reason("local_lineage_unresolved");
+  }
+  if (!local_candidate_has_certificate(call)) {
+    return set_reason("weak_local_certificate");
+  }
+  if (decision != nullptr) {
+    decision->has_certificate = true;
+  }
+
+  if (currentSpecies == localSpecies) {
+    if (localTaxid == localSpecies && currentTaxid != localTaxid) {
+      replace_result_with_local_candidate(result, call);
+      if (decision != nullptr) {
+        decision->applied = true;
+        decision->reason = "same_species_canonicalized";
+      }
+      return true;
+    }
+    return set_reason("same_species_no_change");
+  }
+
+  const SpeciesPosteriorSummary posterior =
+      summarize_species_posteriors(result, ncbiTaxdump);
+  const auto localMassIt = posterior.mass_by_species.find(localSpecies);
+  const double localPosteriorMass =
+      localMassIt == posterior.mass_by_species.end() ? 0.0
+                                                     : localMassIt->second;
+  if (decision != nullptr) {
+    decision->posterior_top_species = posterior.top_species;
+    decision->posterior_second_species = posterior.second_species;
+    decision->posterior_top_mass = posterior.top_mass;
+    decision->posterior_second_mass = posterior.second_mass;
+    decision->posterior_local_mass = localPosteriorMass;
+    const auto currentMassIt = posterior.mass_by_species.find(currentSpecies);
+    decision->posterior_current_mass =
+        currentMassIt == posterior.mass_by_species.end()
+            ? 0.0
+            : currentMassIt->second;
+  }
+  const bool allowCrossGenusSwitch =
+      env_flag_enabled("CHIMERA_LOCAL_CERTIFICATE_CROSS_GENUS_SWITCH");
+  bool crossGenusLocalArbitration = false;
+  if (posterior.top_species != localSpecies) {
+    if (!allowCrossGenusSwitch || !currentClassified) {
+      return set_reason("posterior_top_species_differs");
+    }
+    const uint32_t currentGenus = ncbiTaxdump->to_genus(currentTaxid);
+    if (currentGenus == 0 || currentGenus == localGenus) {
+      return set_reason("posterior_top_species_differs");
+    }
+    const uint32_t common = ncbiTaxdump->lca(currentTaxid, localTaxid);
+    const bool sameFamily =
+        common != 0 && common < ncbiTaxdump->rank_name.size() &&
+        ncbiTaxdump->rank_name[common] == "family";
+    if (!sameFamily || !(localPosteriorMass >= 0.25) ||
+        !(posterior.top_mass < 1.75 * localPosteriorMass)) {
+      return set_reason("posterior_top_species_differs");
+    }
+    crossGenusLocalArbitration = true;
+  } else {
+    if (!(posterior.top_mass >= 0.60)) {
+      return set_reason("posterior_top_mass_weak");
+    }
+    if (posterior.second_mass > 0.0 &&
+        posterior.top_mass < 1.25 * posterior.second_mass) {
+      return set_reason("posterior_species_margin_weak");
+    }
+  }
+
+  if (currentClassified) {
+    const uint32_t currentGenus = ncbiTaxdump->to_genus(currentTaxid);
+    if (!crossGenusLocalArbitration && currentGenus != 0 &&
+        currentGenus != localGenus) {
+      return set_reason("cross_genus_rejected");
+    }
+    const auto currentMassIt = posterior.mass_by_species.find(currentSpecies);
+    const double currentMass =
+        currentMassIt == posterior.mass_by_species.end()
+            ? 0.0
+            : currentMassIt->second;
+    if (!crossGenusLocalArbitration && currentMass > 0.0 &&
+        posterior.top_mass < 1.75 * currentMass) {
+      return set_reason("current_species_still_supported");
+    }
+  }
+
+  replace_result_with_local_candidate(result, call);
+  if (decision != nullptr) {
+    decision->applied = true;
+    decision->reason = crossGenusLocalArbitration
+                           ? "cross_genus_local_certificate_applied"
+                           : "posterior_local_species_applied";
+  }
+  return true;
+}
+
+static void fill_local_certificate_output(
+    LocalCertificateDecision &decision,
+    const ChimeraClassify::classifyResult &result,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
+  if (result.taxidCount.empty() ||
+      result.taxidCount.front().first == "unclassified") {
+    decision.output_taxid = 0;
+    decision.output_species = 0;
+    decision.output_genus = 0;
+    return;
+  }
+  decision.output_taxid =
+      taxid_text_to_u32_or_zero(result.taxidCount.front().first);
+  if (decision.output_taxid == 0 || ncbiTaxdump == nullptr ||
+      !ncbiTaxdump->enabled()) {
+    decision.output_species = 0;
+    decision.output_genus = 0;
+    return;
+  }
+  decision.output_species = ncbiTaxdump->to_species(decision.output_taxid);
+  decision.output_genus = ncbiTaxdump->to_genus(decision.output_taxid);
+}
+
+static void write_local_certificate_audit_header(std::ostream &os) {
+  os << "read_id\tcurrent_taxid\tcurrent_species\tcurrent_genus"
+     << "\toutput_taxid\toutput_species\toutput_genus"
+     << "\tlocal_taxid\tlocal_species\tlocal_genus"
+     << "\tlocal_top_score\tlocal_second_score\thas_certificate"
+     << "\tposterior_top_species\tposterior_top_mass"
+     << "\tposterior_second_species\tposterior_second_mass"
+     << "\tposterior_local_mass\tposterior_current_mass\tapplied\treason\n";
+}
+
+static void write_local_certificate_audit_row(
+    std::ostream &os, const std::string &readId,
+    const LocalCertificateDecision &decision) {
+  os << readId << '\t' << decision.current_taxid << '\t'
+     << decision.current_species << '\t' << decision.current_genus << '\t'
+     << decision.output_taxid << '\t' << decision.output_species << '\t'
+     << decision.output_genus << '\t' << decision.local_taxid << '\t'
+     << decision.local_species << '\t' << decision.local_genus << '\t'
+     << decision.local_top_score << '\t' << decision.local_second_score << '\t'
+     << (decision.has_certificate ? 1 : 0) << '\t'
+     << decision.posterior_top_species << '\t' << decision.posterior_top_mass
+     << '\t' << decision.posterior_second_species << '\t'
+     << decision.posterior_second_mass << '\t' << decision.posterior_local_mass
+     << '\t'
+     << decision.posterior_current_mass << '\t'
+     << (decision.applied ? 1 : 0) << '\t' << decision.reason << '\n';
 }
 
 static void accumulate_localmix_profile_candidates(
@@ -2778,21 +3086,9 @@ static LocalResolutionPanel build_local_resolution_panel(
   return panel;
 }
 
-static LocalResolutionCallMap make_local_resolution_call_map(
-    const ChimeraClassify::LocalResolutionResult &localResult) {
-  LocalResolutionCallMap out;
-  out.reserve(localResult.reads.size());
-  for (const auto &call : localResult.reads) {
-    if (!call.read_id.empty()) {
-      out.emplace(call.read_id, call);
-    }
-  }
-  return out;
-}
-
 static bool apply_local_resolution_result(
     ChimeraClassify::classifyResult &result,
-    const LocalResolutionCallMap *localCalls, double sampleDivergence,
+    const LocalResolutionCallStore *localCalls, double sampleDivergence,
     double divergenceThreshold) {
   if (localCalls == nullptr) {
     return false;
@@ -2800,11 +3096,11 @@ static bool apply_local_resolution_result(
   if (sampleDivergence < divergenceThreshold) {
     return false;
   }
-  const auto *callPtr = find_local_resolution_call(localCalls, result.id);
-  if (callPtr == nullptr) {
+  auto callOpt = find_local_resolution_call(localCalls, result.read_ordinal);
+  if (!callOpt.has_value()) {
     return false;
   }
-  const auto &call = *callPtr;
+  const auto &call = *callOpt;
   if (call.candidates.empty()) {
     std::string hint;
     if (!result.taxidCount.empty()) {
@@ -2821,18 +3117,19 @@ static bool apply_local_resolution_result(
   }
 
   const auto &top = call.candidates.front();
-  if (top.taxid.empty() || top.taxid == "0") {
+  if (top.taxid == 0) {
     return false;
   }
   result.taxidCount.clear();
-  result.taxidCount.emplace_back(top.taxid, static_cast<double>(top.score));
+  result.taxidCount.emplace_back(std::to_string(top.taxid),
+                                 static_cast<double>(top.score));
   result.posteriors.clear();
   const double denom = std::max<uint32_t>(1, top.score);
   const size_t topk = std::min<size_t>(16, call.candidates.size());
   result.posteriors.reserve(topk);
   for (size_t i = 0; i < topk; ++i) {
     result.posteriors.emplace_back(
-        call.candidates[i].taxid,
+        std::to_string(call.candidates[i].taxid),
         static_cast<double>(call.candidates[i].score) /
             static_cast<double>(denom));
   }
@@ -2888,6 +3185,83 @@ static void for_each_spool_postem_chunk(
           flush_chunk();
         }
       });
+  flush_chunk();
+}
+
+template <typename ChunkConsumer>
+static void for_each_sidecar_postem_chunk(
+    const std::string &candidateSpoolPath,
+    const std::string &sampleMixtureSpoolPath, const SpoolEMFit &fit,
+    const SpoolSampleMixtureFit &sampleMixtureFit,
+    const ChimeraClassify::EMOptions &options,
+    const ChimeraClassify::DecisionConfig &decisionConfig,
+    const ChimeraClassify::TaxDict &tax,
+    const ChimeraClassify::PresenceDecision *presenceDecision,
+    bool keepRecords, ChunkConsumer consume_chunk) {
+  constexpr size_t kSpoolOutputChunkSize = 4096;
+  std::vector<ChimeraClassify::SpoolReadRecord> chunkRecords;
+  std::vector<ChimeraClassify::classifyResult> chunk;
+  if (keepRecords) {
+    chunkRecords.reserve(kSpoolOutputChunkSize);
+  }
+  chunk.reserve(kSpoolOutputChunkSize);
+
+  auto flush_chunk = [&]() {
+    if (chunk.empty()) {
+      return;
+    }
+    ChimeraClassify::postEmDecision(chunk, decisionConfig, fit.class_weights,
+                                    tax, presenceDecision);
+    consume_chunk(keepRecords ? &chunkRecords : nullptr, chunk);
+    if (keepRecords) {
+      chunkRecords.clear();
+    }
+    chunk.clear();
+  };
+
+  std::ifstream candidateIs(candidateSpoolPath, std::ios::binary);
+  if (!candidateIs.is_open()) {
+    throw std::runtime_error("Failed to open classify candidate spool: " +
+                             candidateSpoolPath);
+  }
+  std::ifstream mixtureIs(sampleMixtureSpoolPath, std::ios::binary);
+  if (!mixtureIs.is_open()) {
+    throw std::runtime_error("Failed to open classify sample-mixture spool: " +
+                             sampleMixtureSpoolPath);
+  }
+  ChimeraClassify::read_spool_header(candidateIs, candidateSpoolPath);
+  ChimeraClassify::read_spool_header(mixtureIs, sampleMixtureSpoolPath);
+
+  ChimeraClassify::SpoolReadRecord candidateRecord;
+  ChimeraClassify::SpoolReadRecord mixtureRecord;
+  for (;;) {
+    const bool haveCandidate = ChimeraClassify::read_spool_record(
+        candidateIs, candidateRecord,
+        ChimeraClassify::kSpoolReadHeaderAndCandidates);
+    const bool haveMixture = ChimeraClassify::read_spool_record(
+        mixtureIs, mixtureRecord, ChimeraClassify::kSpoolReadSampleMixtureOnly);
+    if (haveCandidate != haveMixture) {
+      throw std::runtime_error(
+          "Internal error: candidate and sample-mixture spools are out of sync");
+    }
+    if (!haveCandidate) {
+      break;
+    }
+    if (candidateRecord.read_ordinal != mixtureRecord.read_ordinal) {
+      throw std::runtime_error(
+          "Internal error: candidate and sample-mixture spool records differ");
+    }
+    candidateRecord.sample_mixture_candidates =
+        std::move(mixtureRecord.sample_mixture_candidates);
+    if (keepRecords) {
+      chunkRecords.push_back(candidateRecord);
+    }
+    chunk.push_back(materialize_spool_result(candidateRecord, fit,
+                                            sampleMixtureFit, tax, options));
+    if (chunk.size() >= kSpoolOutputChunkSize) {
+      flush_chunk();
+    }
+  }
   flush_chunk();
 }
 
@@ -2959,6 +3333,163 @@ static LocalResolutionPostTopkScores collect_local_resolution_post_topk_scores(
   return scores;
 }
 
+static LocalResolutionPostTopkScores
+collect_local_resolution_post_topk_scores(
+    const std::vector<std::string> &candidateSpoolPaths,
+    const std::vector<std::string> &sampleMixtureSpoolPaths,
+    const SpoolEMFit &fit, const SpoolSampleMixtureFit &sampleMixtureFit,
+    const ChimeraClassify::EMOptions &options,
+    const ChimeraClassify::DecisionConfig &decisionConfig,
+    const ChimeraClassify::TaxDict &tax,
+    const ChimeraClassify::PresenceDecision *presenceDecision,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
+  if (candidateSpoolPaths.size() != sampleMixtureSpoolPaths.size()) {
+    throw std::runtime_error(
+        "Internal error: candidate and sample-mixture spool counts differ");
+  }
+
+  constexpr size_t kSpoolOutputChunkSize = 4096;
+  const size_t path_count = candidateSpoolPaths.size();
+  std::vector<LocalResolutionPostTopkScores> partial(path_count);
+
+  auto merge_scores = [](LocalResolutionPostTopkScores &dst,
+                         const LocalResolutionPostTopkScores &src) {
+    dst.rows += src.rows;
+    dst.rows_with_post_topk += src.rows_with_post_topk;
+    dst.post_topk_items += src.post_topk_items;
+    dst.usable_post_topk_items += src.usable_post_topk_items;
+    dst.singleton_rows += src.singleton_rows;
+    dst.ambiguous_rows += src.ambiguous_rows;
+    dst.top1_sum += src.top1_sum;
+    for (const auto &[species, score] : src.species_scores) {
+      dst.species_scores[species] += score;
+    }
+    for (const auto &[species, support] : src.species_read_support) {
+      dst.species_read_support[species] += support;
+    }
+  };
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic)
+#endif
+  for (std::int64_t path_i = 0;
+       path_i < static_cast<std::int64_t>(path_count); ++path_i) {
+    const size_t path_idx = static_cast<size_t>(path_i);
+    LocalResolutionPostTopkScores localScores;
+    std::vector<ChimeraClassify::classifyResult> chunk;
+    chunk.reserve(kSpoolOutputChunkSize);
+
+    auto consume_chunk = [&]() {
+      if (chunk.empty()) {
+        return;
+      }
+      ChimeraClassify::postEmDecision(chunk, decisionConfig,
+                                      fit.class_weights, tax,
+                                      presenceDecision);
+      for (auto &result : chunk) {
+        ++localScores.rows;
+        ChimeraClassify::readout::apply_selective_readout(result, ncbiTaxdump);
+        if (result.posteriors.empty()) {
+          continue;
+        }
+        ++localScores.rows_with_post_topk;
+        uint64_t positive_items = 0;
+        double top1 = 0.0;
+        std::unordered_set<uint32_t> seenSpecies;
+        seenSpecies.reserve(result.posteriors.size());
+        for (const auto &[taxidText, weight] : result.posteriors) {
+          ++localScores.post_topk_items;
+          if (!(weight > 0.0)) {
+            continue;
+          }
+          ++positive_items;
+          if (weight > top1) {
+            top1 = weight;
+          }
+          uint32_t taxid = 0;
+          if (!chimera::utils::try_parse_u32(taxidText, taxid) ||
+              taxid == 0) {
+            continue;
+          }
+          uint32_t species = taxid;
+          if (ncbiTaxdump && ncbiTaxdump->enabled()) {
+            species = ncbiTaxdump->to_species(taxid);
+          }
+          if (species == 0) {
+            continue;
+          }
+          ++localScores.usable_post_topk_items;
+          localScores.species_scores[species] += weight;
+          seenSpecies.insert(species);
+        }
+        localScores.top1_sum += top1;
+        if (positive_items == 1) {
+          ++localScores.singleton_rows;
+        }
+        if (positive_items > 1 || top1 < 0.95) {
+          ++localScores.ambiguous_rows;
+        }
+        for (uint32_t species : seenSpecies) {
+          ++localScores.species_read_support[species];
+        }
+      }
+      chunk.clear();
+    };
+
+    std::ifstream candidateIs(candidateSpoolPaths[path_idx], std::ios::binary);
+    if (!candidateIs.is_open()) {
+      throw std::runtime_error("Failed to open classify candidate spool: " +
+                               candidateSpoolPaths[path_idx]);
+    }
+    std::ifstream mixtureIs(sampleMixtureSpoolPaths[path_idx],
+                            std::ios::binary);
+    if (!mixtureIs.is_open()) {
+      throw std::runtime_error(
+          "Failed to open classify sample-mixture spool: " +
+          sampleMixtureSpoolPaths[path_idx]);
+    }
+    ChimeraClassify::read_spool_header(candidateIs,
+                                       candidateSpoolPaths[path_idx]);
+    ChimeraClassify::read_spool_header(mixtureIs,
+                                       sampleMixtureSpoolPaths[path_idx]);
+
+    ChimeraClassify::SpoolReadRecord candidateRecord;
+    ChimeraClassify::SpoolReadRecord mixtureRecord;
+    for (;;) {
+      const bool haveCandidate = ChimeraClassify::read_spool_record(
+          candidateIs, candidateRecord, ChimeraClassify::kSpoolReadCandidatesOnly);
+      const bool haveMixture = ChimeraClassify::read_spool_record(
+          mixtureIs, mixtureRecord, ChimeraClassify::kSpoolReadSampleMixtureOnly);
+      if (haveCandidate != haveMixture) {
+        throw std::runtime_error(
+            "Internal error: candidate and sample-mixture spools are out of sync");
+      }
+      if (!haveCandidate) {
+        break;
+      }
+      if (candidateRecord.read_ordinal != mixtureRecord.read_ordinal) {
+        throw std::runtime_error(
+            "Internal error: candidate and sample-mixture spool records differ");
+      }
+      candidateRecord.sample_mixture_candidates =
+          std::move(mixtureRecord.sample_mixture_candidates);
+      chunk.push_back(materialize_spool_result(candidateRecord, fit,
+                                              sampleMixtureFit, tax, options));
+      if (chunk.size() >= kSpoolOutputChunkSize) {
+        consume_chunk();
+      }
+    }
+    consume_chunk();
+    partial[path_idx] = std::move(localScores);
+  }
+
+  LocalResolutionPostTopkScores scores;
+  for (const auto &local : partial) {
+    merge_scores(scores, local);
+  }
+  return scores;
+}
+
 static LocalResolutionEligibility derive_local_resolution_eligibility(
     const LocalResolutionPostTopkScores &scores) {
   LocalResolutionEligibility eligibility;
@@ -3018,7 +3549,8 @@ static void write_spool_parts_parallel(
 }
 
 static void write_spool_output_part(
-    const std::string &spoolPath, const std::string &partPath,
+    const std::string &candidateSpoolPath,
+    const std::string &sampleMixtureSpoolPath, const std::string &partPath,
     const SpoolEMFit &fit,
     const SpoolSampleMixtureFit &sampleMixtureFit,
     const ChimeraClassify::EMOptions &options,
@@ -3026,11 +3558,12 @@ static void write_spool_output_part(
     const ChimeraClassify::TaxDict &tax,
     const ChimeraClassify::PresenceDecision *presenceDecision,
     const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
-    const LocalResolutionCallMap *localCalls, double sampleDivergence,
+    const LocalResolutionCallStore *localCalls, double sampleDivergence,
     double divergenceThreshold,
     SpoolOutputPartStats &partStats,
-    EvidenceAggregateMap &postemPrimaryEvidenceAggregate,
-    EvidenceAggregateMap &postemDecisionEvidenceAggregate) {
+    EvidenceAggregateMap *postemPrimaryEvidenceAggregate,
+    EvidenceAggregateMap *postemDecisionEvidenceAggregate,
+    bool collectLocalmixProfile) {
   std::ofstream partOs(partPath, std::ios::out | std::ios::binary);
   if (!partOs.is_open()) {
     throw std::runtime_error("Failed to open classify output part: " +
@@ -3040,10 +3573,26 @@ static void write_spool_output_part(
   partOs.rdbuf()->pubsetbuf(
       partBuffer.data(), static_cast<std::streamsize>(partBuffer.size()));
   std::ostringstream postTopkOss;
+  const bool useLocalCertificateApply =
+      env_flag_enabled("CHIMERA_LOCAL_CERTIFICATE_APPLY");
+  const bool writeLocalCertificateAudit =
+      useLocalCertificateApply &&
+      env_flag_enabled("CHIMERA_LOCAL_CERTIFICATE_AUDIT");
+  std::ofstream localCertificateAuditOs;
+  if (writeLocalCertificateAudit) {
+    const std::string auditPath = partPath + ".local_certificate_audit.tsv";
+    localCertificateAuditOs.open(auditPath, std::ios::out | std::ios::binary);
+    if (!localCertificateAuditOs.is_open()) {
+      throw std::runtime_error("Failed to open local certificate audit: " +
+                               auditPath);
+    }
+    localCertificateAuditOs << std::setprecision(17);
+    write_local_certificate_audit_header(localCertificateAuditOs);
+  }
 
-  for_each_spool_postem_chunk(
-      spoolPath, fit, sampleMixtureFit, options, decisionConfig, tax,
-      presenceDecision, true,
+  for_each_sidecar_postem_chunk(
+      candidateSpoolPath, sampleMixtureSpoolPath, fit, sampleMixtureFit,
+      options, decisionConfig, tax, presenceDecision, true,
       [&](const std::vector<ChimeraClassify::SpoolReadRecord> *records,
           std::vector<ChimeraClassify::classifyResult> &chunk) {
         for (size_t resultIndex = 0; resultIndex < chunk.size();
@@ -3058,21 +3607,43 @@ static void write_spool_output_part(
           }
           for (const auto &[taxid, count] : result.taxidCount) {
             if (!taxid.empty() && taxid != "unclassified" && count > 0.0) {
-              postemPrimaryEvidenceAggregate[taxid] += count;
+              if (postemPrimaryEvidenceAggregate != nullptr) {
+                (*postemPrimaryEvidenceAggregate)[taxid] += count;
+              }
             }
           }
           if (!result.taxidCount.empty()) {
             const std::string &decisionTaxid = result.taxidCount.front().first;
             if (!decisionTaxid.empty() && decisionTaxid != "unclassified") {
-              postemDecisionEvidenceAggregate[decisionTaxid] += 1.0;
+              if (postemDecisionEvidenceAggregate != nullptr) {
+                (*postemDecisionEvidenceAggregate)[decisionTaxid] += 1.0;
+              }
             }
           }
           ChimeraClassify::readout::apply_selective_readout(result,
                                                             ncbiTaxdump);
-          apply_local_resolution_result(result, localCalls, sampleDivergence,
-                                        divergenceThreshold);
-          accumulate_localmix_profile_candidates(
-              result, ncbiTaxdump, partStats.localmix_masses);
+          if (useLocalCertificateApply) {
+            LocalCertificateDecision certificateDecision;
+            apply_local_resolution_certificate_result(result, localCalls,
+                                                      ncbiTaxdump,
+                                                      writeLocalCertificateAudit
+                                                          ? &certificateDecision
+                                                          : nullptr);
+            if (writeLocalCertificateAudit &&
+                certificateDecision.has_local_call) {
+              fill_local_certificate_output(certificateDecision, result,
+                                            ncbiTaxdump);
+              write_local_certificate_audit_row(
+                  localCertificateAuditOs, result.id, certificateDecision);
+            }
+          } else {
+            apply_local_resolution_result(result, localCalls, sampleDivergence,
+                                          divergenceThreshold);
+          }
+          if (collectLocalmixProfile) {
+            accumulate_localmix_profile_candidates(
+                result, ncbiTaxdump, partStats.localmix_masses);
+          }
           if (!result.taxidCount.empty() &&
               result.taxidCount.front().first == "unclassified") {
             ++partStats.unclassified;
@@ -3099,6 +3670,13 @@ static void write_spool_output_part(
   if (!partOs.good()) {
     throw std::runtime_error("Failed to close classify output part: " +
                              partPath);
+  }
+  if (writeLocalCertificateAudit) {
+    localCertificateAuditOs.close();
+    if (!localCertificateAuditOs.good()) {
+      throw std::runtime_error("Failed to close local certificate audit for: " +
+                               partPath);
+    }
   }
 }
 
@@ -4191,7 +4769,10 @@ static bool classify_inputs_are_unweighted_fasta(
 }
 
 static void write_spool_em_results(
-    const std::vector<std::string> &spoolPaths, const SpoolEMFit &fit,
+    const std::vector<std::string> &spoolPaths,
+    const std::vector<std::string> &candidateSpoolPaths,
+    const std::vector<std::string> &sampleMixtureSpoolPaths,
+    const SpoolEMFit &fit,
     const SpoolSampleMixtureFit &sampleMixtureFit,
     const ChimeraClassify::EMOptions &options,
     const ChimeraClassify::DecisionConfig &decisionConfig,
@@ -4200,18 +4781,32 @@ static void write_spool_em_results(
     const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
     const chimera::presence::CoverageMeta &coverageMeta,
     const ChimeraClassify::ClassifyConfig &config,
-    const LocalResolutionCallMap *localCalls, double sampleDivergence,
+    const LocalResolutionCallStore *localCalls, double sampleDivergence,
     ChimeraClassify::FileInfo &fileInfo,
     std::unordered_map<uint32_t, double> *profileClassTaxonPriors = nullptr) {
   const std::string outputFile = resolve_tsv_output_path(config.outputFile);
   const bool classifyDebug = env_flag_enabled("CHIMERA_CLASSIFY_DEBUG");
+  const bool useLocalCertificateApply =
+      env_flag_enabled("CHIMERA_LOCAL_CERTIFICATE_APPLY");
+  const bool useLpcReadcountProfile =
+      !useLocalCertificateApply && localCalls != nullptr &&
+      sampleDivergence >= config.local_resolution_divergence_threshold;
+  const bool collectLocalmixProfile = !useLpcReadcountProfile;
 
-  const size_t part_count = spoolPaths.size();
+  if (candidateSpoolPaths.size() != sampleMixtureSpoolPaths.size()) {
+    throw std::runtime_error(
+        "Internal error: candidate and sample-mixture spool counts differ");
+  }
+  const size_t part_count = candidateSpoolPaths.size();
   std::vector<std::string> partPaths =
       make_output_part_paths(outputFile, part_count);
   ChimeraClassify::AbundanceAutoPolicy abundancePolicy{};
   SpoolAbundanceFit abundanceFit;
   if (classifyDebug) {
+    if (spoolPaths.empty()) {
+      throw std::runtime_error(
+          "Internal error: debug abundance evidence requires full spool");
+    }
     abundancePolicy = ChimeraClassify::derive_abundance_auto_policy(config, options);
     std::cout << "[classify][debug] abundance-em"
               << " prune_ratio=" << abundancePolicy.prune_ratio
@@ -4221,18 +4816,28 @@ static void write_spool_em_results(
                                           abundancePolicy.iterations, options,
                                           abundancePolicy.prune_ratio);
   }
-  std::vector<EvidenceAggregateMap> postemPrimaryEvidenceAggregates(part_count);
-  std::vector<EvidenceAggregateMap> postemDecisionEvidenceAggregates(part_count);
+  std::vector<EvidenceAggregateMap> postemPrimaryEvidenceAggregates;
+  std::vector<EvidenceAggregateMap> postemDecisionEvidenceAggregates;
+  if (classifyDebug) {
+    postemPrimaryEvidenceAggregates.resize(part_count);
+    postemDecisionEvidenceAggregates.resize(part_count);
+  }
   std::vector<SpoolOutputPartStats> partStats(part_count);
   write_spool_parts_parallel(
-      spoolPaths, partPaths, [&](size_t part_idx) {
+      candidateSpoolPaths, partPaths, [&](size_t part_idx) {
+        EvidenceAggregateMap *primaryEvidence =
+            classifyDebug ? &postemPrimaryEvidenceAggregates[part_idx]
+                          : nullptr;
+        EvidenceAggregateMap *decisionEvidence =
+            classifyDebug ? &postemDecisionEvidenceAggregates[part_idx]
+                          : nullptr;
         write_spool_output_part(
-            spoolPaths[part_idx], partPaths[part_idx], fit, sampleMixtureFit,
-            options, decisionConfig, tax, presenceDecision, ncbiTaxdump,
-            localCalls, sampleDivergence,
+            candidateSpoolPaths[part_idx], sampleMixtureSpoolPaths[part_idx],
+            partPaths[part_idx], fit, sampleMixtureFit, options,
+            decisionConfig, tax, presenceDecision, ncbiTaxdump, localCalls,
+            sampleDivergence,
             config.local_resolution_divergence_threshold, partStats[part_idx],
-            postemPrimaryEvidenceAggregates[part_idx],
-            postemDecisionEvidenceAggregates[part_idx]);
+            primaryEvidence, decisionEvidence, collectLocalmixProfile);
       });
 
   print_status_line(ConsoleStatusKind::Run, "writing output tables");
@@ -4274,21 +4879,22 @@ static void write_spool_em_results(
       }
     }
   }
-  SpeciesProfileMasses localmixMasses =
-      merge_localmix_profile_masses(partStats);
-  SeqProfileFit localmixProfile =
-      make_profile_from_species_masses(localmixMasses, coverageMeta,
-                                       ncbiTaxdump);
   const SeqProfileFit *profileOutputFit = &classifyDecisionProfile;
-  const SeqProfileFit *profileOutputLocalmixFit = &localmixProfile;
+  SeqProfileFit localmixProfile;
+  const SeqProfileFit *profileOutputLocalmixFit = nullptr;
   const char *profileResponseSourceOverride = nullptr;
   PrimaryProfileScale profileOutputScale =
       PrimaryProfileScale::CallableNormalized;
-  if (localCalls != nullptr && sampleDivergence >=
-                                  config.local_resolution_divergence_threshold) {
-    profileOutputLocalmixFit = nullptr;
+  if (useLpcReadcountProfile) {
     profileResponseSourceOverride = "lpc_final_readcount";
     profileOutputScale = PrimaryProfileScale::SequenceAbundance;
+  } else {
+    SpeciesProfileMasses localmixMasses =
+        merge_localmix_profile_masses(partStats);
+    localmixProfile = make_profile_from_species_masses(localmixMasses,
+                                                       coverageMeta,
+                                                       ncbiTaxdump);
+    profileOutputLocalmixFit = &localmixProfile;
   }
   write_classifier_response_reportable_profile_outputs(
       resolve_profile_output_path(outputFile),
@@ -4303,11 +4909,11 @@ static void write_spool_em_results(
               << " path=" << resolve_profile_output_path(outputFile)
               << "\n";
   }
-  EvidenceAggregateMap postemPrimaryEvidenceMass =
-      merge_evidence_aggregates(postemPrimaryEvidenceAggregates);
-  EvidenceAggregateMap postemDecisionEvidenceMass =
-      merge_evidence_aggregates(postemDecisionEvidenceAggregates);
   if (classifyDebug) {
+    EvidenceAggregateMap postemPrimaryEvidenceMass =
+        merge_evidence_aggregates(postemPrimaryEvidenceAggregates);
+    EvidenceAggregateMap postemDecisionEvidenceMass =
+        merge_evidence_aggregates(postemDecisionEvidenceAggregates);
     const std::string evidencePath = resolve_evidence_output_path(outputFile);
     std::filesystem::path evidenceParent =
         std::filesystem::path(evidencePath).parent_path();
@@ -4703,10 +5309,19 @@ void run(ClassifyConfig config) {
   const std::filesystem::path spoolDir = make_spool_dir(config.outputFile);
   const bool keepClassifySpool =
       env_flag_enabled("CHIMERA_KEEP_CLASSIFY_SPOOL");
+  const bool writeFullSpool = classifyDebug || keepClassifySpool;
   std::filesystem::remove_all(spoolDir);
   std::filesystem::create_directories(spoolDir);
   const std::vector<std::string> spoolPaths =
       make_spool_paths(spoolDir, readQueues.size());
+  const std::filesystem::path candidateSpoolDir = spoolDir / "candidate";
+  std::filesystem::create_directories(candidateSpoolDir);
+  const std::vector<std::string> candidateSpoolPaths =
+      make_spool_paths(candidateSpoolDir, readQueues.size());
+  const std::filesystem::path sampleMixtureSpoolDir = spoolDir / "mixture";
+  std::filesystem::create_directories(sampleMixtureSpoolDir);
+  const std::vector<std::string> sampleMixtureSpoolPaths =
+      make_spool_paths(sampleMixtureSpoolDir, readQueues.size());
 
   std::atomic<bool> producer_done{false};
   ClassifyProgressCounters progressCounters;
@@ -4730,9 +5345,11 @@ void run(ClassifyConfig config) {
   });
 
   classify_streaming_spool(imcfConfig, readQueues, config, imcf, tax,
-                           spoolPaths, fileInfo, producer_done, feature_params,
-                           feature_min_len, weightCtx, presencePtr,
-                           &queueThrottles, &progressCounters);
+                           spoolPaths, candidateSpoolPaths,
+                           sampleMixtureSpoolPaths, writeFullSpool, fileInfo,
+                           producer_done, feature_params, feature_min_len,
+                           weightCtx, presencePtr, &queueThrottles,
+                           &progressCounters);
   producer.join();
   streaming_done.store(true, std::memory_order_release);
   progressThread.join();
@@ -4768,7 +5385,7 @@ void run(ClassifyConfig config) {
   options.conf_power = config.em_conf_power;
   print_status_line(ConsoleStatusKind::Run, "estimating read assignments");
   SpoolEMFit speciesFit =
-      fit_spool_em(spoolPaths, tax, config.emIter, options,
+      fit_spool_em(candidateSpoolPaths, tax, config.emIter, options,
                    emPriorScale.empty() ? nullptr : &emPriorScale);
   print_status_line(ConsoleStatusKind::Ok, "read assignments estimated");
   classWeights = speciesFit.class_weights;
@@ -4795,8 +5412,11 @@ void run(ClassifyConfig config) {
       std::cout << std::defaultfloat;
     }
     print_status_line(ConsoleStatusKind::Run, "estimating profile");
+    const size_t sampleMixtureIter = std::max<size_t>(
+        1, static_cast<size_t>(
+               std::ceil(std::sqrt(static_cast<double>(config.emIter)))));
     SpoolSampleMixtureFit sampleMixtureFit =
-        fit_spool_sample_mixture_em(spoolPaths, config.emIter);
+        fit_spool_sample_mixture_em(sampleMixtureSpoolPaths, sampleMixtureIter);
     if (classifyDebug) {
       std::cout << "[classify][debug] sample-mixture"
                 << " reads=" << sampleMixtureFit.read_count
@@ -4804,21 +5424,24 @@ void run(ClassifyConfig config) {
                 << " taxa=" << sampleMixtureFit.taxid_list.size() << "\n";
     }
 
-    LocalResolutionCallMap localResolutionCalls;
-    const LocalResolutionCallMap *localResolutionCallPtr = nullptr;
+    LocalResolutionCallStore localResolutionCalls;
+    const LocalResolutionCallStore *localResolutionCallPtr = nullptr;
     double localResolutionDivergence = config.community_dispersion_s;
     const std::string localProfileOutput =
         resolve_tsv_output_path(config.outputFile);
     if (config.local_resolution_enabled && config.pairedFiles.empty()) {
       const auto postTopkScores = collect_local_resolution_post_topk_scores(
-          spoolPaths, speciesFit, sampleMixtureFit, options, decisionConfig,
-          tax, &presenceDecision, weightCtx.ncbiTaxdump);
+          candidateSpoolPaths, sampleMixtureSpoolPaths, speciesFit,
+          sampleMixtureFit, options, decisionConfig, tax, &presenceDecision,
+          weightCtx.ncbiTaxdump);
       const LocalResolutionEligibility localEligibility =
           derive_local_resolution_eligibility(postTopkScores);
       const bool forceLocalResolution =
           env_flag_enabled("CHIMERA_FORCE_LOCAL_RESOLUTION");
+      const bool useLocalCertificateApply =
+          env_flag_enabled("CHIMERA_LOCAL_CERTIFICATE_APPLY");
       const bool localMayChangeOutput =
-          forceLocalResolution ||
+          forceLocalResolution || useLocalCertificateApply ||
           ((localResolutionDivergence >=
             config.local_resolution_divergence_threshold) &&
            localEligibility.hard_ambiguity);
@@ -4907,10 +5530,10 @@ void run(ClassifyConfig config) {
             localRequest.min_chain = config.lpc_min_chain;
             localRequest.threads = config.threads;
             const auto started = std::chrono::steady_clock::now();
-            ChimeraClassify::LocalResolutionResult localResult =
-                run_local_resolution_engine(localRequest);
-            localResolutionCalls = make_local_resolution_call_map(localResult);
-            localResolutionCallPtr = &localResolutionCalls;
+	            ChimeraClassify::LocalResolutionResult localResult =
+	                run_local_resolution_engine(localRequest);
+	            localResolutionCalls = std::move(localResult.calls);
+	            localResolutionCallPtr = &localResolutionCalls;
             const auto finished = std::chrono::steady_clock::now();
             const double seconds =
                 std::chrono::duration<double>(finished - started).count();
@@ -5015,8 +5638,10 @@ void run(ClassifyConfig config) {
                         "local resolution (paired input)");
     }
 
-    write_spool_em_results(spoolPaths, speciesFit, sampleMixtureFit, options,
-                           decisionConfig, tax, &presenceDecision,
+    write_spool_em_results(spoolPaths, candidateSpoolPaths,
+                           sampleMixtureSpoolPaths, speciesFit,
+                           sampleMixtureFit, options, decisionConfig, tax,
+                           &presenceDecision,
                            profileTaxdump && profileTaxdump->enabled()
                                ? profileTaxdump.get()
                                : weightCtx.ncbiTaxdump,

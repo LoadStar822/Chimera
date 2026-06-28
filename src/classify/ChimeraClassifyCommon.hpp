@@ -49,6 +49,7 @@ inline size_t estimate_batch_bytes(const batchReads &batch) {
   for (const auto &id : batch.ids) {
     total += id.size();
   }
+  total += batch.ordinals.size() * sizeof(uint64_t);
   for (const auto &seq : batch.seqs) {
     total += seq.size() * sizeof(seqan3::dna4);
   }
@@ -605,6 +606,7 @@ struct SpoolCandidate {
 
 struct SpoolReadRecord {
   std::string id;
+  uint64_t read_ordinal{0};
   double evaluated{0.0};
   uint32_t query_length{0};
   uint32_t best_taxid_hint{0};
@@ -620,6 +622,7 @@ inline constexpr uint32_t kSpoolUnclassifiedTid =
 
 struct CompactClassifyResult {
   std::string id;
+  uint64_t read_ordinal{0};
   double evaluated{0.0};
   uint32_t query_length{0};
   uint32_t best_taxid_hint{kSpoolUnclassifiedTid};
@@ -635,7 +638,33 @@ void read_spool_header(std::istream &is, const std::string &path);
 void write_spool_record(std::ostream &os, const SpoolReadRecord &record);
 void write_spool_record(std::ostream &os,
                         const CompactClassifyResult &record);
+void write_spool_candidate_record(std::ostream &os,
+                                  const CompactClassifyResult &record);
+void write_spool_sample_mixture_record(std::ostream &os,
+                                       const CompactClassifyResult &record);
+struct SpoolReadOptions {
+  bool id{true};
+  bool reject_reason{true};
+  bool candidates{true};
+  bool abundance_candidates{true};
+  bool sample_mixture_candidates{true};
+};
+
+inline constexpr SpoolReadOptions kSpoolReadAll{};
+inline constexpr SpoolReadOptions kSpoolReadCandidatesOnly{
+    false, false, true, false, false};
+inline constexpr SpoolReadOptions kSpoolReadSampleMixtureOnly{
+    false, false, false, false, true};
+inline constexpr SpoolReadOptions kSpoolReadAbundanceOnly{
+    false, false, false, true, false};
+inline constexpr SpoolReadOptions kSpoolReadHeaderAndCandidates{
+    true, true, true, false, false};
+inline constexpr SpoolReadOptions kSpoolReadHeaderCandidatesMixture{
+    true, true, true, false, true};
+
 bool read_spool_record(std::istream &is, SpoolReadRecord &record);
+bool read_spool_record(std::istream &is, SpoolReadRecord &record,
+                       const SpoolReadOptions &options);
 
 void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
                 ClassifyConfig config, FileInfo &fileInfo,
@@ -842,7 +871,11 @@ void classify_streaming_spool(
     std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
     ClassifyConfig &config,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const TaxDict &tax,
-    const std::vector<std::string> &spoolPaths, FileInfo &fileInfo,
+    const std::vector<std::string> &spoolPaths,
+    const std::vector<std::string> &candidateSpoolPaths,
+    const std::vector<std::string> &sampleMixtureSpoolPaths,
+    bool writeFullSpool,
+    FileInfo &fileInfo,
     std::atomic<bool> &producer_done,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     const WeightingContext &weightCtx, PresenceSummary *presenceSummary,

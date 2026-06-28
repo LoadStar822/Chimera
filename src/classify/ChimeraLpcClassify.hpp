@@ -2,6 +2,7 @@
 
 #include "classifyConfig.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -9,13 +10,41 @@
 namespace ChimeraClassify {
 
 struct LocalResolutionCandidate {
-  std::string taxid;
+  uint32_t taxid{};
   uint32_t score{};
 };
 
 struct LocalResolutionReadCall {
-  std::string read_id;
+  uint64_t read_ordinal{};
   std::vector<LocalResolutionCandidate> candidates;
+};
+
+struct LocalResolutionCallStore {
+  std::vector<uint64_t> offsets{0};
+  std::vector<LocalResolutionCandidate> candidates;
+
+  uint64_t read_count() const {
+    return offsets.empty() ? 0 : static_cast<uint64_t>(offsets.size() - 1);
+  }
+
+  bool contains(uint64_t ordinal) const {
+    return ordinal + 1 < offsets.size();
+  }
+
+  LocalResolutionReadCall materialize(uint64_t ordinal) const {
+    LocalResolutionReadCall call;
+    call.read_ordinal = ordinal;
+    if (!contains(ordinal)) {
+      return call;
+    }
+    const uint64_t begin = offsets[ordinal];
+    const uint64_t end = offsets[ordinal + 1];
+    if (end > begin) {
+      call.candidates.assign(candidates.begin() + static_cast<std::ptrdiff_t>(begin),
+                             candidates.begin() + static_cast<std::ptrdiff_t>(end));
+    }
+    return call;
+  }
 };
 
 struct LocalResolutionStats {
@@ -59,7 +88,7 @@ struct LocalResolutionStats {
 };
 
 struct LocalResolutionResult {
-  std::vector<LocalResolutionReadCall> reads;
+  LocalResolutionCallStore calls;
   LocalResolutionStats stats;
 };
 

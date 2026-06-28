@@ -1533,7 +1533,7 @@ static ResultCandidateSelection select_result_candidates_from_scores(
 }
 
 static void finalize_read_record(
-    const std::string &id, const TaxDict &tax, FileInfo &fileInfo,
+    const std::string &id, uint64_t readOrdinal, const TaxDict &tax, FileInfo &fileInfo,
     PresenceAccumulator *presenceAcc, double uniqueCount, double uniqueRatio,
     double eff_eval, size_t readLen, uint32_t bestTaxidHintTid,
     const std::string &bestTaxidStr, bool maxCountValid,
@@ -1582,9 +1582,10 @@ static void finalize_read_record(
     }
   }
 
-  if (compactResults != nullptr) {
-    CompactClassifyResult result;
-    result.evaluated = eff_eval;
+	  if (compactResults != nullptr) {
+	    CompactClassifyResult result;
+	    result.read_ordinal = readOrdinal;
+	    result.evaluated = eff_eval;
     result.query_length = static_cast<uint32_t>(
         std::min<size_t>(readLen, std::numeric_limits<uint32_t>::max()));
     result.id = id;
@@ -1595,9 +1596,10 @@ static void finalize_read_record(
     result.abundance_candidates = std::move(abundanceCandidates);
     result.sample_mixture_candidates = std::move(sampleMixtureCandidates);
     compactResults->emplace_back(std::move(result));
-  } else if (classifyResults != nullptr) {
-    classifyResult result;
-    result.evaluated = eff_eval;
+	  } else if (classifyResults != nullptr) {
+	    classifyResult result;
+	    result.read_ordinal = readOrdinal;
+	    result.evaluated = eff_eval;
     result.query_length = static_cast<uint32_t>(
         std::min<size_t>(readLen, std::numeric_limits<uint32_t>::max()));
     result.id = id;
@@ -1629,6 +1631,7 @@ void processSequence(
     ChimeraBuild::IMCFConfig &imcfConfig, const TaxDict &tax,
     ClassifyConfig &config, const WeightingContext &weightCtx, GroupHeat &heat,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
+    uint64_t readOrdinal,
     std::vector<classifyResult> *classifyResults,
     std::vector<CompactClassifyResult> *compactResults, FileInfo &fileInfo,
     PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
@@ -2150,7 +2153,7 @@ void processSequence(
                                                          tax.id2str.size());
 
   finalize_read_record(
-      id, tax, fileInfo, presenceAcc, uniqueCount, uniqueRatio, eff_eval,
+      id, readOrdinal, tax, fileInfo, presenceAcc, uniqueCount, uniqueRatio, eff_eval,
       readLen,
       bestTaxidHintTid, bestTaxidStr, maxCountValid, maxCountTid,
       maxCountScore, maxCountRawScore, scoring.tid_score.empty(),
@@ -2196,10 +2199,12 @@ void processBatch(
 	        std::sort(hashs1.begin(), hashs1.end());
 	        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
 	      }
-      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
-                      heat, imcf, batch.ids[i],
-                      &classifyResults,
-                      nullptr, fileInfo, presenceAcc, scratch);
+	      const uint64_t ordinal =
+	          i < batch.ordinals.size() ? batch.ordinals[i] : 0;
+	      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
+	                      heat, imcf, batch.ids[i], ordinal,
+	                      &classifyResults,
+	                      nullptr, fileInfo, presenceAcc, scratch);
 	    }
 	  } else {
 	    for (size_t i = 0; i < batch.seqs.size(); i++) {
@@ -2221,10 +2226,12 @@ void processBatch(
 	        std::sort(hashs1.begin(), hashs1.end());
 	        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
 	      }
-      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
-                      heat, imcf, batch.ids[i],
-                      &classifyResults,
-                      nullptr, fileInfo, presenceAcc, scratch);
+	      const uint64_t ordinal =
+	          i < batch.ordinals.size() ? batch.ordinals[i] : 0;
+	      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
+	                      heat, imcf, batch.ids[i], ordinal,
+	                      &classifyResults,
+	                      nullptr, fileInfo, presenceAcc, scratch);
 	    }
   }
 }
@@ -2266,9 +2273,11 @@ void processBatchCompact(
 	        std::sort(hashs1.begin(), hashs1.end());
 	        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
 	      }
-      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
-                      heat, imcf, batch.ids[i], nullptr,
-                      &classifyResults, fileInfo, presenceAcc, scratch);
+	      const uint64_t ordinal =
+	          i < batch.ordinals.size() ? batch.ordinals[i] : 0;
+	      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
+	                      heat, imcf, batch.ids[i], ordinal, nullptr,
+	                      &classifyResults, fileInfo, presenceAcc, scratch);
 	    }
 	  } else {
 	    for (size_t i = 0; i < batch.seqs.size(); i++) {
@@ -2290,9 +2299,11 @@ void processBatchCompact(
 	        std::sort(hashs1.begin(), hashs1.end());
 	        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
 	      }
-      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
-                      heat, imcf, batch.ids[i], nullptr,
-                      &classifyResults, fileInfo, presenceAcc, scratch);
+	      const uint64_t ordinal =
+	          i < batch.ordinals.size() ? batch.ordinals[i] : 0;
+	      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
+	                      heat, imcf, batch.ids[i], ordinal, nullptr,
+	                      &classifyResults, fileInfo, presenceAcc, scratch);
 	    }
   }
 }
@@ -2389,9 +2400,18 @@ void classify_streaming(
 namespace {
 
 void write_spool_results(const std::vector<CompactClassifyResult> &results,
-                         std::ostream &os) {
+                         std::ostream *os, std::ostream *candidate_os,
+                         std::ostream *sample_mixture_os) {
   for (const auto &result : results) {
-    write_spool_record(os, result);
+    if (os != nullptr) {
+      write_spool_record(*os, result);
+    }
+    if (candidate_os != nullptr) {
+      write_spool_candidate_record(*candidate_os, result);
+    }
+    if (sample_mixture_os != nullptr) {
+      write_spool_sample_mixture_record(*sample_mixture_os, result);
+    }
   }
 }
 
@@ -2402,7 +2422,11 @@ void classify_streaming_spool(
     std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
     ClassifyConfig &config,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const TaxDict &tax,
-    const std::vector<std::string> &spoolPaths, FileInfo &fileInfo,
+    const std::vector<std::string> &spoolPaths,
+    const std::vector<std::string> &candidateSpoolPaths,
+    const std::vector<std::string> &sampleMixtureSpoolPaths,
+    bool writeFullSpool,
+    FileInfo &fileInfo,
     std::atomic<bool> &producer_done,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     const WeightingContext &weightCtx, PresenceSummary *presenceSummary,
@@ -2427,16 +2451,51 @@ void classify_streaming_spool(
 
     const size_t spool_index = static_cast<size_t>(std::clamp<int>(
         thread_id, 0, static_cast<int>(spoolPaths.size() - 1)));
-    std::vector<char> spoolBuffer(1 << 20);
+    const bool write_candidate_spool =
+        candidateSpoolPaths.size() == spoolPaths.size();
+    const bool write_sample_mixture_spool =
+        sampleMixtureSpoolPaths.size() == spoolPaths.size();
     std::ofstream spool;
-    spool.rdbuf()->pubsetbuf(spoolBuffer.data(),
-                             static_cast<std::streamsize>(spoolBuffer.size()));
-    spool.open(spoolPaths[spool_index], std::ios::binary);
-    if (!spool.is_open()) {
-      throw std::runtime_error("Failed to open classify spool: " +
-                               spoolPaths[spool_index]);
+    std::vector<char> spoolBuffer;
+    if (writeFullSpool) {
+      spoolBuffer.assign(1 << 20, '\0');
+      spool.rdbuf()->pubsetbuf(
+          spoolBuffer.data(), static_cast<std::streamsize>(spoolBuffer.size()));
+      spool.open(spoolPaths[spool_index], std::ios::binary);
+      if (!spool.is_open()) {
+        throw std::runtime_error("Failed to open classify spool: " +
+                                 spoolPaths[spool_index]);
+      }
+      write_spool_header(spool);
     }
-    write_spool_header(spool);
+    std::vector<char> candidateSpoolBuffer(1 << 20);
+    std::ofstream candidateSpool;
+    if (write_candidate_spool) {
+      candidateSpool.rdbuf()->pubsetbuf(
+          candidateSpoolBuffer.data(),
+          static_cast<std::streamsize>(candidateSpoolBuffer.size()));
+      candidateSpool.open(candidateSpoolPaths[spool_index], std::ios::binary);
+      if (!candidateSpool.is_open()) {
+        throw std::runtime_error("Failed to open classify candidate spool: " +
+                                 candidateSpoolPaths[spool_index]);
+      }
+      write_spool_header(candidateSpool);
+    }
+    std::vector<char> sampleMixtureSpoolBuffer(1 << 20);
+    std::ofstream sampleMixtureSpool;
+    if (write_sample_mixture_spool) {
+      sampleMixtureSpool.rdbuf()->pubsetbuf(
+          sampleMixtureSpoolBuffer.data(),
+          static_cast<std::streamsize>(sampleMixtureSpoolBuffer.size()));
+      sampleMixtureSpool.open(sampleMixtureSpoolPaths[spool_index],
+                              std::ios::binary);
+      if (!sampleMixtureSpool.is_open()) {
+        throw std::runtime_error(
+            "Failed to open classify sample mixture spool: " +
+            sampleMixtureSpoolPaths[spool_index]);
+      }
+      write_spool_header(sampleMixtureSpool);
+    }
 
     batchReads batch;
     FileInfo localFileInfo;
@@ -2461,7 +2520,11 @@ void classify_streaming_spool(
                             localClassifyResults, feature_params,
                             feature_min_len, localFileInfo, heat, weightCtx,
                             presencePtr, scratch);
-        write_spool_results(localClassifyResults, spool);
+        write_spool_results(localClassifyResults,
+                            writeFullSpool ? &spool : nullptr,
+                            write_candidate_spool ? &candidateSpool : nullptr,
+                            write_sample_mixture_spool ? &sampleMixtureSpool
+                                                       : nullptr);
         localClassifyResults.clear();
         if (progress != nullptr) {
           progress->processed_reads.fetch_add(batch_size,
