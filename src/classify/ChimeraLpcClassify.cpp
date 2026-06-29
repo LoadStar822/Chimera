@@ -307,8 +307,11 @@ public:
     if (prefilter_.empty()) {
       return false;
     }
-    const size_t bit = static_cast<size_t>(mix(key)) & kPrefilterMask;
-    return (prefilter_[bit >> 6] & (uint64_t{1} << (bit & 63))) != 0;
+    const size_t bit1 = static_cast<size_t>(mix(key)) & prefilter_mask_;
+    const size_t bit2 =
+        static_cast<size_t>(mix(key ^ kSecondPrefilterSalt)) & prefilter_mask_;
+    return ((prefilter_[bit1 >> 6] & (uint64_t{1} << (bit1 & 63))) != 0) &&
+           ((prefilter_[bit2 >> 6] & (uint64_t{1} << (bit2 & 63))) != 0);
   }
 
   uint32_t find_id_in_table(uint64_t key) const {
@@ -331,6 +334,19 @@ public:
   size_t size() const { return dense_keys_.size(); }
 
   uint64_t hash_at(uint32_t id) const { return dense_keys_.at(id); }
+
+  void optimize_prefilter() {
+    const size_t desired_bits = round_capacity(std::max<size_t>(
+        kDefaultPrefilterBitCount, std::max<size_t>(1, dense_keys_.size()) * 8));
+    if (prefilter_.size() * 64 == desired_bits) {
+      return;
+    }
+    prefilter_mask_ = desired_bits - 1;
+    prefilter_.assign(desired_bits / 64, 0);
+    for (uint64_t key : dense_keys_) {
+      set_prefilter_bit(key);
+    }
+  }
 
   void reserve_slots(size_t requested_slots) {
     if (requested_slots <= keys_.size()) {
@@ -404,19 +420,24 @@ private:
 
   void set_prefilter_bit(uint64_t key) {
     if (prefilter_.empty()) {
-      prefilter_.assign(kPrefilterBitCount / 64, 0);
+      prefilter_mask_ = kDefaultPrefilterBitCount - 1;
+      prefilter_.assign(kDefaultPrefilterBitCount / 64, 0);
     }
-    const size_t bit = static_cast<size_t>(mix(key)) & kPrefilterMask;
-    prefilter_[bit >> 6] |= uint64_t{1} << (bit & 63);
+    const size_t bit1 = static_cast<size_t>(mix(key)) & prefilter_mask_;
+    const size_t bit2 =
+        static_cast<size_t>(mix(key ^ kSecondPrefilterSalt)) & prefilter_mask_;
+    prefilter_[bit1 >> 6] |= uint64_t{1} << (bit1 & 63);
+    prefilter_[bit2 >> 6] |= uint64_t{1} << (bit2 & 63);
   }
 
-  static constexpr size_t kPrefilterBitCount = size_t{1} << 24;
-  static constexpr size_t kPrefilterMask = kPrefilterBitCount - 1;
+  static constexpr size_t kDefaultPrefilterBitCount = size_t{1} << 24;
+  static constexpr uint64_t kSecondPrefilterSalt = 0x9e3779b97f4a7c15ULL;
 
   std::vector<uint64_t> keys_;
   std::vector<uint32_t> ids_;
   std::vector<uint64_t> dense_keys_;
   std::vector<uint64_t> prefilter_;
+  size_t prefilter_mask_{kDefaultPrefilterBitCount - 1};
 };
 
 std::string trim_copy(std::string s) {
@@ -623,19 +644,18 @@ load_shard_manifest(const std::filesystem::path &manifest_path) {
   return out;
 }
 
-std::vector<chimera::native_bounded::Anchor> select_chain_anchors(
-    const std::vector<chimera::native_bounded::Anchor> &anchors) {
+void select_chain_anchors_inplace(
+    std::vector<chimera::native_bounded::Anchor> &anchors) {
   const size_t token_budget = std::min(anchors.size(), kMaxChainTokensPerRead);
-  std::vector<chimera::native_bounded::Anchor> selected;
-  selected.reserve(token_budget);
-  for (size_t i = 0; i < token_budget; ++i) {
-    const size_t token_index =
-        token_budget == anchors.size()
-            ? i
-            : (i * anchors.size()) / token_budget;
-    selected.push_back(anchors[token_index]);
+  if (token_budget == anchors.size()) {
+    return;
   }
-  return selected;
+  const size_t total = anchors.size();
+  for (size_t i = 0; i < token_budget; ++i) {
+    const size_t token_index = (i * total) / token_budget;
+    anchors[i] = anchors[token_index];
+  }
+  anchors.resize(token_budget);
 }
 
 void insert_query_hashes(ReadRecord &read,
@@ -644,6 +664,14 @@ void insert_query_hashes(ReadRecord &read,
   read.anchor_qids.reserve(read.anchors.size());
   for (const auto &anchor : read.anchors) {
     read.anchor_qids.push_back(query_hashes.insert_or_get(anchor.hash));
+  }
+}
+
+void insert_query_hash_keys_only(
+    const std::vector<chimera::native_bounded::Anchor> &anchors,
+    QueryHashIndex &query_hashes) {
+  for (const auto &anchor : anchors) {
+    query_hashes.insert_or_get(anchor.hash);
   }
 }
 
@@ -686,7 +714,8 @@ extract_read_records(const std::vector<PendingRead> &pending_reads, uint32_t k,
           chimera::native_bounded::extract_minimizers(pending.sequence, k, w);
       read.anchor_count = static_cast<uint32_t>(
           std::min<size_t>(anchors.size(), std::numeric_limits<uint32_t>::max()));
-      read.anchors = select_chain_anchors(anchors);
+      select_chain_anchors_inplace(anchors);
+      read.anchors = std::move(anchors);
       reads[idx] = std::move(read);
     }
   };
@@ -711,7 +740,8 @@ ReadRecord make_read_record_from_pending(const PendingRead &pending, uint32_t k,
       chimera::native_bounded::extract_minimizers(pending.sequence, k, w);
   read.anchor_count = static_cast<uint32_t>(
       std::min<size_t>(anchors.size(), std::numeric_limits<uint32_t>::max()));
-  read.anchors = select_chain_anchors(anchors);
+  select_chain_anchors_inplace(anchors);
+  read.anchors = std::move(anchors);
   return read;
 }
 
@@ -761,7 +791,7 @@ uint64_t collect_query_hashes_from_reads(
       [&](const std::vector<PendingRead> &pending) {
         auto reads = extract_read_records(pending, k, w, threads);
         for (auto &read : reads) {
-          insert_query_hashes(read, query_hashes);
+          insert_query_hash_keys_only(read.anchors, query_hashes);
         }
       });
 }
@@ -819,7 +849,8 @@ std::vector<ReadRecord> load_reads(
           pending.sequence, k, w);
       read.anchor_count = static_cast<uint32_t>(
           std::min<size_t>(anchors.size(), std::numeric_limits<uint32_t>::max()));
-      read.anchors = select_chain_anchors(anchors);
+      select_chain_anchors_inplace(anchors);
+      read.anchors = std::move(anchors);
       reads[idx] = std::move(read);
     }
   };
@@ -1719,6 +1750,42 @@ void sort_chain_hits(std::vector<HitOut> &hits) {
   });
 }
 
+uint32_t decimal_digit_count(uint32_t value) {
+  uint32_t digits = 1;
+  while (value >= 10) {
+    value /= 10;
+    ++digits;
+  }
+  return digits;
+}
+
+uint32_t decimal_power10(uint32_t exponent) {
+  uint32_t value = 1;
+  while (exponent-- > 0) {
+    value *= 10;
+  }
+  return value;
+}
+
+bool taxid_decimal_lex_less(uint32_t lhs, uint32_t rhs) {
+  uint32_t lhs_digits = decimal_digit_count(lhs);
+  uint32_t rhs_digits = decimal_digit_count(rhs);
+  uint32_t lhs_divisor = decimal_power10(lhs_digits - 1);
+  uint32_t rhs_divisor = decimal_power10(rhs_digits - 1);
+  while (lhs_divisor != 0 && rhs_divisor != 0) {
+    const uint32_t lhs_digit = lhs / lhs_divisor;
+    const uint32_t rhs_digit = rhs / rhs_divisor;
+    if (lhs_digit != rhs_digit) {
+      return lhs_digit < rhs_digit;
+    }
+    lhs %= lhs_divisor;
+    rhs %= rhs_divisor;
+    lhs_divisor /= 10;
+    rhs_divisor /= 10;
+  }
+  return lhs_digits < rhs_digits;
+}
+
 void chain_read_fast_into(const ReadRecord &read, const CompactPostingIndex &index,
                           const std::vector<TargetRecord> &targets,
                           int diag_bin, uint32_t min_chain,
@@ -1812,7 +1879,7 @@ std::vector<TaxonScore> aggregate_species_scores(
 	              if (a.score != b.score) {
 	                return a.score > b.score;
 	              }
-	              return std::to_string(a.taxid) < std::to_string(b.taxid);
+	              return taxid_decimal_lex_less(a.taxid, b.taxid);
 	            });
   return scores;
 }
@@ -1898,6 +1965,7 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
 	  QueryHashIndex query_hashes;
 	  const uint64_t read_count = collect_query_hashes_from_reads(
 	      read_files, root_meta.k, root_meta.w, query_hashes, threads);
+	  query_hashes.optimize_prefilter();
 	  const auto reads_loaded = std::chrono::steady_clock::now();
 
   LoadStats stats;

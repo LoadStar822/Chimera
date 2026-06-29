@@ -152,26 +152,33 @@ inline void append_kept_hash(uint32_t taxidIndex, uint64_t hash,
                              bool isUnique,
                              std::vector<uint64_t> &threadBuffer,
                              std::vector<PendingBufferChunk> &pendingChunks,
-                             uint64_t *totalSignatures,
-                             uint64_t *uniqueSignatures) {
+                             uint64_t &totalSignatures,
+                             uint64_t &uniqueSignatures) {
   if (pendingChunks.empty() || pendingChunks.back().taxidIndex != taxidIndex) {
     pendingChunks.push_back(
         {taxidIndex, static_cast<uint64_t>(threadBuffer.size()), 0});
   }
   threadBuffer.push_back(hash);
   ++pendingChunks.back().count;
-  ++totalSignatures[taxidIndex];
+  ++totalSignatures;
   if (isUnique) {
-    ++uniqueSignatures[taxidIndex];
+    ++uniqueSignatures;
   }
 }
+
+struct ThreadTaxonCounters {
+  uint64_t hash_count{0};
+  uint64_t bp_count{0};
+  uint64_t total_signatures{0};
+  uint64_t unique_signatures{0};
+};
 
 inline void flush_feature_thread_buffer(
     DirectSpoolWriter &spoolWriter, uint16_t threadId,
     std::vector<uint64_t> &threadBuffer,
     std::vector<PendingBufferChunk> &pendingChunks,
     uint64_t &localSpoolOffset, std::vector<SpoolChunkRecord> &localChunks,
-    uint64_t *localHashCounts) {
+    ThreadTaxonCounters *localCounters) {
   if (threadBuffer.empty()) {
     return;
   }
@@ -197,7 +204,7 @@ inline void flush_feature_thread_buffer(
   for (const auto &chunk : flush_chunks) {
     localChunks.push_back(
         {chunk.taxidIndex, chunk_offset + chunk.bufferOffset, chunk.count});
-    localHashCounts[chunk.taxidIndex] += chunk.count;
+    localCounters[chunk.taxidIndex].hash_count += chunk.count;
   }
   localSpoolOffset += static_cast<uint64_t>(buffer_size);
   threadBuffer.clear();
@@ -272,10 +279,8 @@ void feature_count(
       resolve_thread_buffer_flush_bytes(worker_hint);
   const size_t taxidCount = index_to_taxid.size();
 
-  std::vector<uint64_t> threadHashCounts(taxidCount * worker_hint, 0u);
-  std::vector<uint64_t> threadBpCounts(worker_hint * taxidCount, 0u);
-  std::vector<uint64_t> threadTotalSignatures(worker_hint * taxidCount, 0u);
-  std::vector<uint64_t> threadUniqueSignatures(worker_hint * taxidCount, 0u);
+  std::vector<ThreadTaxonCounters> threadTaxonCounters(taxidCount *
+                                                       worker_hint);
   std::vector<FileInfo> threadFileInfos(worker_hint);
   std::vector<uint64_t> threadPassBTotal(worker_hint, 0u);
   std::vector<uint64_t> threadPassBFiltered(worker_hint, 0u);
@@ -303,17 +308,12 @@ void feature_count(
   {
     std::vector<uint64_t> thread_buffer;
     thread_buffer.reserve(8192);
+    chimera::feature::FeatureHashScratch featureScratch;
     std::vector<PendingBufferChunk> pending_buffer_chunks;
     pending_buffer_chunks.reserve(256);
     const int tid = omp_get_thread_num();
-    uint64_t *local_bp_counts =
-        threadBpCounts.data() + static_cast<size_t>(tid) * taxidCount;
-    uint64_t *local_hash_counts =
-        threadHashCounts.data() + static_cast<size_t>(tid) * taxidCount;
-    uint64_t *local_total_signatures =
-        threadTotalSignatures.data() + static_cast<size_t>(tid) * taxidCount;
-    uint64_t *local_unique_signatures =
-        threadUniqueSignatures.data() + static_cast<size_t>(tid) * taxidCount;
+    ThreadTaxonCounters *local_counters =
+        threadTaxonCounters.data() + static_cast<size_t>(tid) * taxidCount;
     FileInfo localThreadInfo{};
     uint64_t localPassBTotal = 0;
     uint64_t localPassBFiltered = 0;
@@ -346,7 +346,8 @@ void feature_count(
         }
         auto &seq = record.sequence();
         const uint64_t seq_len = seq.size();
-        local_bp_counts[taxid_index] += seq_len;
+        auto &taxon_counters = local_counters[taxid_index];
+        taxon_counters.bp_count += seq_len;
         if (seq_len < min_required) {
           localThreadInfo.skippedSeqNum++;
           continue;
@@ -355,25 +356,28 @@ void feature_count(
         localThreadInfo.bpLength += seq_len;
 
         hashes.clear();
-        chimera::feature::compute_hashes_append(seq, feature_params, hashes);
+        chimera::feature::compute_hashes_append(seq, feature_params, hashes,
+                                                featureScratch);
         if (hashes.empty()) {
           continue;
         }
 
         size_t appended = 0;
         for (uint64_t hash : hashes) {
+          bool unique_signature = true;
           if (has_freq_sketch) {
             ++localPassBTotal;
-            if (hashFreqContext->should_filter_hash(hash)) {
+            const auto decision = hashFreqContext->decide_hash(hash);
+            if (decision.filtered) {
               ++localPassBFiltered;
               continue;
             }
+            unique_signature = decision.unique;
           }
-          append_kept_hash(task.taxidIndex, hash,
-                           !has_freq_sketch ||
-                               hashFreqContext->is_unique_signature(hash),
+          append_kept_hash(task.taxidIndex, hash, unique_signature,
                            thread_buffer, pending_buffer_chunks,
-                           local_total_signatures, local_unique_signatures);
+                           taxon_counters.total_signatures,
+                           taxon_counters.unique_signatures);
           ++appended;
         }
         if (appended == 0) {
@@ -384,7 +388,7 @@ void feature_count(
           flush_feature_thread_buffer(
               spoolWriter, static_cast<uint16_t>(tid), thread_buffer,
               pending_buffer_chunks, localSpoolOffset, localChunks,
-              local_hash_counts);
+              local_counters);
         }
       }
     }
@@ -393,7 +397,7 @@ void feature_count(
       flush_feature_thread_buffer(spoolWriter, static_cast<uint16_t>(tid),
                                   thread_buffer, pending_buffer_chunks,
                                   localSpoolOffset, localChunks,
-                                  local_hash_counts);
+                                  local_counters);
     }
     threadFileInfos[static_cast<size_t>(tid)] = localThreadInfo;
     threadPassBTotal[static_cast<size_t>(tid)] = localPassBTotal;
@@ -444,11 +448,11 @@ void feature_count(
     uint64_t total_signatures = 0;
     uint64_t unique_signatures = 0;
     for (size_t tid = 0; tid < static_cast<size_t>(used_threads); ++tid) {
-      total_hashes += threadHashCounts[idx + tid * taxidCount];
-      const size_t thread_offset = tid * taxidCount + idx;
-      genome_bp += threadBpCounts[thread_offset];
-      total_signatures += threadTotalSignatures[thread_offset];
-      unique_signatures += threadUniqueSignatures[thread_offset];
+      const auto &counters = threadTaxonCounters[tid * taxidCount + idx];
+      total_hashes += counters.hash_count;
+      genome_bp += counters.bp_count;
+      total_signatures += counters.total_signatures;
+      unique_signatures += counters.unique_signatures;
     }
     hashCount[taxid] = total_hashes;
     if (bpCount) {

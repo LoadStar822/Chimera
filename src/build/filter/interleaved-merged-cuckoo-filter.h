@@ -964,7 +964,8 @@ public:
 
   inline uint64_t write_qidx_block_entries_by_bucket(
       int entriesFd, const std::vector<uint64_t> &bucketBase,
-      size_t globalBinOffset, bool include_stash = true) const {
+      size_t globalBinOffset, bool include_stash = true,
+      const std::vector<uint32_t> *precomputedGroupCounts = nullptr) const {
     constexpr uint8_t kQidxGroupBits = 8;
     constexpr uint32_t kGroupSize = 1u << kQidxGroupBits;
     constexpr uint8_t kFpHiBits = QueryIndex::FP_BITS - kQidxGroupBits;
@@ -972,6 +973,12 @@ public:
     const uint32_t groupMask = kGroupSize - 1;
     if (bucketBase.size() != hashSize + 1) {
       throw std::runtime_error("QIMCF block bucket base has invalid size");
+    }
+    if (precomputedGroupCounts != nullptr &&
+        precomputedGroupCounts->size() !=
+            static_cast<uint64_t>(hashSize) * kGroupSize) {
+      throw std::runtime_error(
+          "QIMCF block precomputed count buffer has invalid size");
     }
 
     std::vector<StashFlat> stashFlat;
@@ -1037,28 +1044,35 @@ public:
         }
         const size_t bucket = static_cast<size_t>(bucket_i);
         const uint64_t expected = bucketBase[bucket + 1] - bucketBase[bucket];
-        std::fill(counts.begin(), counts.end(), 0u);
-        for (size_t bin = 0; bin < binNum; ++bin) {
-          uint64_t q = readBucket64(bucket, bin);
-          if (q == 0) {
-            continue;
-          }
-          for (int lane = 0; lane < static_cast<int>(tagNum); ++lane) {
-            uint16_t tag =
-                static_cast<uint16_t>((q >> (lane * 16)) & 0xFFFFu);
-            if (tag == 0u) {
+        if (precomputedGroupCounts != nullptr) {
+          const uint64_t offset =
+              static_cast<uint64_t>(bucket) * static_cast<uint64_t>(kGroupSize);
+          std::copy_n(precomputedGroupCounts->data() + offset, kGroupSize,
+                      counts.begin());
+        } else {
+          std::fill(counts.begin(), counts.end(), 0u);
+          for (size_t bin = 0; bin < binNum; ++bin) {
+            uint64_t q = readBucket64(bucket, bin);
+            if (q == 0) {
               continue;
             }
-            uint16_t fp = static_cast<uint16_t>(tag & 0x0FFFu);
-            ++counts[static_cast<uint32_t>(fp & groupMask)];
+            for (int lane = 0; lane < static_cast<int>(tagNum); ++lane) {
+              uint16_t tag =
+                  static_cast<uint16_t>((q >> (lane * 16)) & 0xFFFFu);
+              if (tag == 0u) {
+                continue;
+              }
+              uint16_t fp = static_cast<uint16_t>(tag & 0x0FFFu);
+              ++counts[static_cast<uint32_t>(fp & groupMask)];
+            }
           }
-        }
-        if (include_stash) {
-          for (size_t idx = stashBucketStart[bucket];
-               idx < stashBucketEnd[bucket]; ++idx) {
-            uint16_t fp = stashFlat[idx].fp;
-            counts[static_cast<uint32_t>(fp & groupMask)] +=
-                popcount16(stashFlat[idx].mask);
+          if (include_stash) {
+            for (size_t idx = stashBucketStart[bucket];
+                 idx < stashBucketEnd[bucket]; ++idx) {
+              uint16_t fp = stashFlat[idx].fp;
+              counts[static_cast<uint32_t>(fp & groupMask)] +=
+                  popcount16(stashFlat[idx].mask);
+            }
           }
         }
 

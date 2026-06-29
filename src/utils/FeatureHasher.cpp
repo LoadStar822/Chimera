@@ -223,7 +223,8 @@ bool append_randstrobes_from_syncmers(const std::vector<Syncmer> & syncmers,
 
 bool compute_hashes_strobemer_append_(const std::vector<seqan3::dna4> & seq,
                                       const StrobemerParams & params,
-                                      std::vector<uint64_t> & out)
+                                      std::vector<uint64_t> & out,
+                                      FeatureHashScratch *scratch = nullptr)
 {
 #ifdef CHIMERA_HAS_STROBEMERS
     if (params.order != 2)
@@ -253,7 +254,9 @@ bool compute_hashes_strobemer_append_(const std::vector<seqan3::dna4> & seq,
                                          w_max,
                                          main_hash_mask};
 
-        std::vector<Syncmer> syncmers;
+        std::vector<Syncmer> local_syncmers;
+        std::vector<Syncmer> &syncmers =
+            scratch ? scratch->syncmers : local_syncmers;
         const size_t syncmer_reserve =
             sequence_length / std::max<size_t>(1, static_cast<size_t>(k - s_value + 1));
         if (syncmer_reserve > 0)
@@ -302,6 +305,14 @@ void compute_hashes_append(const std::vector<seqan3::dna4> &seq,
                            std::vector<uint64_t> &out)
 {
     compute_hashes_strobemer_append_(seq, p.strobe, out);
+}
+
+void compute_hashes_append(const std::vector<seqan3::dna4> &seq,
+                           const Params &p,
+                           std::vector<uint64_t> &out,
+                           FeatureHashScratch &scratch)
+{
+    compute_hashes_strobemer_append_(seq, p.strobe, out, &scratch);
 }
 
 bool strobemer_available() noexcept

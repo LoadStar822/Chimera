@@ -395,12 +395,18 @@ void write_all_at(int fd, const char *data, size_t size, uint64_t offset,
 void write_anchors_at(int fd, uint64_t byte_offset,
                       const std::vector<chimera::native_bounded::Anchor>
                           &anchors,
-                      uint32_t k,
+                      uint32_t k, uint64_t expectedBytes,
+                      std::vector<char> &encodeBuffer,
                       const std::filesystem::path &path) {
-  const std::vector<char> encoded =
-      chimera::native_bounded::encode_anchor_block(anchors, k);
-  if (!encoded.empty()) {
-    write_all_at(fd, encoded.data(), encoded.size(), byte_offset, path);
+  chimera::native_bounded::encode_anchor_block_into(anchors, k, expectedBytes,
+                                                    encodeBuffer);
+  if (encodeBuffer.size() != expectedBytes) {
+    throw std::runtime_error(
+        "native bounded direct build encoded anchor size changed");
+  }
+  if (!encodeBuffer.empty()) {
+    write_all_at(fd, encodeBuffer.data(), encodeBuffer.size(), byte_offset,
+                 path);
   }
 }
 
@@ -742,8 +748,11 @@ NativeBoundedBuildStats build_native_bounded_index_direct_final(
     nextTask.store(0);
     stopWorkers.store(false);
     workerError = nullptr;
+    const size_t shardFdCacheMaxOpen =
+        std::min<size_t>(64, std::max<size_t>(8, shardOutputs.size()));
     auto writeWorker = [&]() {
-      ShardFdCache fdCache(shardOutputs, 4);
+      ShardFdCache fdCache(shardOutputs, shardFdCacheMaxOpen);
+      std::vector<char> encodeBuffer;
       while (true) {
         if (stopWorkers.load(std::memory_order_relaxed)) {
           break;
@@ -790,15 +799,10 @@ NativeBoundedBuildStats build_native_bounded_index_direct_final(
             const uint64_t byteOffset =
                 output->second.anchor_data_offset +
                 plan.anchor_offset;
-            const uint64_t encodedBytes =
-                chimera::native_bounded::encoded_anchor_bytes(
-                    anchors, config.native_bounded_k);
-            if (encodedBytes != plan.anchor_bytes) {
-              throw std::runtime_error(
-                  "native bounded direct build encoded anchor size changed");
-            }
             write_anchors_at(fdCache.fd_for(plan.genus), byteOffset, anchors,
-                             config.native_bounded_k, output->second.path);
+                             config.native_bounded_k, plan.anchor_bytes,
+                             encodeBuffer,
+                             output->second.path);
             ++planCursor;
             ++contig;
           }

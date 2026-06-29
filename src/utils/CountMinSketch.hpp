@@ -14,6 +14,7 @@ public:
   static uint32_t column_index(uint32_t row, uint64_t key, uint32_t width);
 
   void add(uint64_t key);
+  void add_many(const std::vector<uint64_t> &keys);
   uint32_t estimate(uint64_t key) const;
   void freeze();
 

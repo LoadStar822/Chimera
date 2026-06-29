@@ -781,6 +781,7 @@ struct AdaptiveSurfaceGenusPick {
 };
 
 struct ProcessScratch {
+  chimera::feature::FeatureHashScratch featureHashScratch;
   std::vector<uint64_t> hashs1;
   std::vector<uint64_t> sampleVals;
   std::vector<uint64_t> routeVals;
@@ -838,7 +839,7 @@ void processSequence(
     PresenceAccumulator *presenceAcc, ProcessScratch &scratch);
 
 void processBatch(
-    batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
+    const batchReads &batch, ChimeraBuild::IMCFConfig &imcfConfig,
     const TaxDict &tax, ClassifyConfig &config,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf,
     std::vector<classifyResult> &classifyResults,
@@ -847,7 +848,7 @@ void processBatch(
     PresenceAccumulator *presenceAcc, ProcessScratch &scratch);
 
 void processBatchCompact(
-    batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
+    const batchReads &batch, ChimeraBuild::IMCFConfig &imcfConfig,
     const TaxDict &tax, ClassifyConfig &config,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf,
     std::vector<CompactClassifyResult> &classifyResults,

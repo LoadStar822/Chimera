@@ -65,6 +65,32 @@ void CountMinSketch::add(uint64_t key) {
   }
 }
 
+void CountMinSketch::add_many(const std::vector<uint64_t> &keys) {
+  if (!atomic_table_) {
+    throw std::logic_error("CountMinSketch::add_many called after freeze");
+  }
+  if (d_ == 4) {
+    const size_t row1 = static_cast<size_t>(w_);
+    const size_t row2 = static_cast<size_t>(w_) * 2u;
+    const size_t row3 = static_cast<size_t>(w_) * 3u;
+    for (uint64_t key : keys) {
+      increment_counter(index(0, key));
+      increment_counter(row1 + index(1, key));
+      increment_counter(row2 + index(2, key));
+      increment_counter(row3 + index(3, key));
+    }
+    return;
+  }
+  for (uint64_t key : keys) {
+    for (uint32_t row = 0; row < d_; ++row) {
+      const uint32_t column = index(row, key);
+      const size_t offset =
+          static_cast<size_t>(row) * static_cast<size_t>(w_) + column;
+      increment_counter(offset);
+    }
+  }
+}
+
 uint32_t CountMinSketch::estimate(uint64_t key) const {
   if (d_ == 4) {
     const uint32_t v0 = load_counter(index(0, key));

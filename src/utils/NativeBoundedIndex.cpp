@@ -284,10 +284,6 @@ std::vector<Anchor> extract_minimizers_impl(size_t seq_size, int k, int w,
   if (k > 31) {
     throw std::runtime_error("native bounded k must be <= 31");
   }
-  constexpr size_t kStreamedSequenceThreshold = 64 * 1024;
-  if (seq_size < kStreamedSequenceThreshold) {
-    return extract_minimizers_buffered(seq_size, k, w, base_bits_at);
-  }
   return extract_minimizers_streamed(seq_size, k, w, base_bits_at);
 }
 
@@ -310,9 +306,15 @@ uint64_t anchor_record_bytes(uint32_t k) {
   return k <= 16 ? 9ULL : 13ULL;
 }
 
-std::vector<char> encode_anchor_block(const std::vector<Anchor> &anchors,
-                                      uint32_t k) {
-  std::vector<char> out;
+void encode_anchor_block_into(const std::vector<Anchor> &anchors, uint32_t k,
+                              std::vector<char> &out) {
+  encode_anchor_block_into(anchors, k, encoded_anchor_bytes(anchors, k), out);
+}
+
+void encode_anchor_block_into(const std::vector<Anchor> &anchors, uint32_t k,
+                              uint64_t reserve_bytes,
+                              std::vector<char> &out) {
+  out.clear();
   const uint32_t key_bits = key_bits_for_k(k);
   if (k <= 16) {
     out.assign(static_cast<size_t>(
@@ -320,7 +322,7 @@ std::vector<char> encode_anchor_block(const std::vector<Anchor> &anchors,
                                        k)),
                0);
   }
-  out.reserve(static_cast<size_t>(encoded_anchor_bytes(anchors, k)));
+  out.reserve(static_cast<size_t>(reserve_bytes));
   uint32_t previous_pos = 0;
   bool first = true;
   for (size_t i = 0; i < anchors.size(); ++i) {
@@ -348,6 +350,12 @@ std::vector<char> encode_anchor_block(const std::vector<Anchor> &anchors,
     previous_pos = anchor.pos;
     first = false;
   }
+}
+
+std::vector<char> encode_anchor_block(const std::vector<Anchor> &anchors,
+                                      uint32_t k) {
+  std::vector<char> out;
+  encode_anchor_block_into(anchors, k, out);
   return out;
 }
 

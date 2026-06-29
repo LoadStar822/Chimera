@@ -49,26 +49,42 @@ namespace ChimeraBuild {
 	static bool map_virtual_range_to_chunks(const TaxidFeatureLayout& layout,
 	                                       uint64_t virtualOffset,
 	                                       uint64_t count,
-	                                       std::vector<SpoolSegmentRef>& out)
+	                                       std::vector<SpoolSegmentRef>& out,
+	                                       size_t& chunkCursor,
+	                                       uint64_t& chunkBase)
 	{
 		out.clear();
 		uint64_t remaining = count;
-		uint64_t offset = virtualOffset;
-		for (const auto& chunk : layout.chunkRefs) {
-			if (remaining == 0) {
-				break;
-			}
-			if (offset >= chunk.count) {
-				offset -= chunk.count;
-				continue;
-			}
+		if (remaining == 0) {
+			return true;
+		}
+		if (virtualOffset < chunkBase) {
+			chunkCursor = 0;
+			chunkBase = 0;
+		}
+		while (chunkCursor < layout.chunkRefs.size() &&
+		       virtualOffset >= chunkBase + layout.chunkRefs[chunkCursor].count) {
+			chunkBase += layout.chunkRefs[chunkCursor].count;
+			++chunkCursor;
+		}
+		size_t cursor = chunkCursor;
+		uint64_t base = chunkBase;
+		while (remaining != 0 && cursor < layout.chunkRefs.size()) {
+			const auto& chunk = layout.chunkRefs[cursor];
+			const uint64_t offset = virtualOffset > base ? virtualOffset - base : 0;
 			const uint64_t available = chunk.count - offset;
 			const uint64_t take = std::min<uint64_t>(remaining, available);
 			out.push_back(
 			    {chunk.threadId, chunk.spoolOffset + offset, take});
 			remaining -= take;
-			offset = 0;
+			virtualOffset += take;
+			if (offset + take >= chunk.count) {
+				base += chunk.count;
+				++cursor;
+			}
 		}
+		chunkCursor = cursor;
+		chunkBase = base;
 		return remaining == 0;
 	}
 
@@ -262,9 +278,18 @@ namespace ChimeraBuild {
 		size_t groupIndexOffset,
 		bool verifyShardTotals,
 		const robin_hood::unordered_flat_map<std::string, uint64_t>*
-		    shardOffsetBase)
+		    shardOffsetBase,
+		size_t groupRangeBegin,
+		size_t groupRangeEnd)
 	{
-		std::vector<std::vector<std::string>> indexToTaxid(groups.size());
+		if (groupRangeEnd == 0) {
+			groupRangeEnd = groups.size();
+		}
+		if (groupRangeBegin > groupRangeEnd || groupRangeEnd > groups.size()) {
+			throw std::runtime_error("IMCF build: invalid group range");
+		}
+		const size_t groupCount = groupRangeEnd - groupRangeBegin;
+		std::vector<std::vector<std::string>> indexToTaxid(groupCount);
 		robin_hood::unordered_flat_map<std::string, std::vector<TaxidShardPlan>> shardPlan;
 		shardPlan.reserve(hashCount.size());
 		robin_hood::unordered_flat_map<std::string, uint64_t> shardOffset;
@@ -284,9 +309,9 @@ namespace ChimeraBuild {
 			}
 		}
 
-		for (size_t groupIdx = 0; groupIdx < groups.size(); ++groupIdx) {
-			const auto& group = groups[groupIdx];
-			indexToTaxid[groupIdx] = group.taxids;
+		for (size_t localGroupIdx = 0; localGroupIdx < groupCount; ++localGroupIdx) {
+			const auto& group = groups[groupRangeBegin + localGroupIdx];
+			indexToTaxid[localGroupIdx] = group.taxids;
 			if (group.taxids.size() != group.assignedHashes.size()) {
 				throw std::runtime_error("IMCF build: taxid list and assigned hash quotas length mismatch");
 			}
@@ -301,7 +326,7 @@ namespace ChimeraBuild {
 				if (itOff != shardOffset.end()) {
 					offset = itOff->second;
 				}
-				plans.push_back({ groupIdx, slot, count, offset });
+				plans.push_back({ localGroupIdx, slot, count, offset });
 				shardOffset[group.taxids[slot]] = offset + count;
 			}
 		}
@@ -351,7 +376,7 @@ namespace ChimeraBuild {
 			taxidNameToId.emplace(kv.first, taxidId);
 			taxidNames.push_back(kv.first);
 		}
-		std::vector<std::vector<ShardEntry>> groupShardEntries(groups.size());
+		std::vector<std::vector<ShardEntry>> groupShardEntries(groupCount);
 
 		for (const auto& kv : shardPlan) {
 			const std::string& taxid = kv.first;
@@ -371,6 +396,8 @@ namespace ChimeraBuild {
 			}
 			const auto& layout = featureLayout->perTaxid[itLayout->second];
 			const uint32_t taxidId = itTaxidId->second;
+			size_t chunkCursor = 0;
+			uint64_t chunkBase = 0;
 			for (const auto& plan : plans) {
 				if (plan.count == 0) {
 					continue;
@@ -381,7 +408,7 @@ namespace ChimeraBuild {
 				entry.fileOffset = plan.fileOffsetStart;
 				entry.nHashes = plan.count;
 					if (!map_virtual_range_to_chunks(layout, plan.fileOffsetStart, plan.count,
-					                                entry.segments)) {
+					                                entry.segments, chunkCursor, chunkBase)) {
 						throw std::runtime_error("IMCF build: chunk layout underflow for taxid " + taxid);
 					}
 					if (plan.groupIndex < groupShardEntries.size()) {
@@ -416,12 +443,12 @@ namespace ChimeraBuild {
 #endif
 		const size_t readBlockBytes = resolve_read_block_bytes(workerCount);
 
-		std::vector<uint64_t> groupSuccess(groups.size(), 0);
-		std::vector<uint64_t> groupFailures(groups.size(), 0);
-		std::vector<std::vector<uint64_t>> slotSuccess(groups.size());
-		std::vector<std::vector<uint64_t>> slotFailures(groups.size());
-		for (size_t g = 0; g < groups.size(); ++g) {
-			size_t slotCount = groups[g].taxids.size();
+		std::vector<uint64_t> groupSuccess(groupCount, 0);
+		std::vector<uint64_t> groupFailures(groupCount, 0);
+		std::vector<std::vector<uint64_t>> slotSuccess(groupCount);
+		std::vector<std::vector<uint64_t>> slotFailures(groupCount);
+		for (size_t g = 0; g < groupCount; ++g) {
+			size_t slotCount = groups[groupRangeBegin + g].taxids.size();
 			slotSuccess[g].assign(slotCount, 0);
 			slotFailures[g].assign(slotCount, 0);
 		}
@@ -431,7 +458,7 @@ namespace ChimeraBuild {
 			std::vector<uint64_t> readBlock(readBlockBytes / sizeof(uint64_t));
 
 #pragma omp for schedule(dynamic, 1)
-			for (size_t groupIdx = 0; groupIdx < groups.size(); ++groupIdx) {
+			for (size_t groupIdx = 0; groupIdx < groupCount; ++groupIdx) {
 				const auto &entries = groupShardEntries[groupIdx];
 				if (entries.empty()) {
 					continue;

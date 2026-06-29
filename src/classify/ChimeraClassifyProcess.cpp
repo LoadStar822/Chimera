@@ -496,18 +496,21 @@ static void prepare_hash_sample_and_route(
         const uint64_t v = hashs.back();
         scored.emplace_back(weightCtx.freqSketch->estimate(v), v);
       }
-      std::sort(scored.begin(), scored.end(), [](const auto &a,
-                                                 const auto &b) {
+      auto rare_first = [](const auto &a, const auto &b) {
         if (a.first != b.first) {
           return a.first < b.first;
         }
         return a.second < b.second;
-      });
+      };
+      if (scored.size() > rareQuota) {
+        auto rare_end = scored.begin() + static_cast<std::ptrdiff_t>(rareQuota);
+        std::partial_sort(scored.begin(), rare_end, scored.end(), rare_first);
+        scored.resize(rareQuota);
+      } else {
+        std::sort(scored.begin(), scored.end(), rare_first);
+      }
       for (const auto &kv : scored) {
         sampleVals.push_back(kv.second);
-        if (sampleVals.size() >= rareQuota) {
-          break;
-        }
       }
 
       const size_t step2 = std::max<size_t>(1, hashs.size() / sampleBudget);
@@ -851,6 +854,24 @@ static void dump_preem_candidate_retention(
             << bestTaxidStr << '\t' << best_genus_id << '\t' << cand_genus_id
             << '\t' << (baseline_kept ? 1 : 0) << '\n';
   }
+}
+
+struct DumpPreemRuntimeConfig {
+  bool enabled{false};
+  std::string path;
+};
+
+static const DumpPreemRuntimeConfig &dump_preem_runtime_config() {
+  static const DumpPreemRuntimeConfig cfg = [] {
+    DumpPreemRuntimeConfig out;
+    const char *env = std::getenv("CHIMERA_DUMP_PREEM_TSV");
+    if (env != nullptr && env[0] != '\0') {
+      out.enabled = true;
+      out.path = env;
+    }
+    return out;
+  }();
+  return cfg;
 }
 
 struct EvidenceStats {
@@ -1661,10 +1682,7 @@ void processSequence(
   constexpr double kUniqueEdgeBonus = 3.0;
   double presence_weight = 1.0;
 
-  const char *dump_preem_env = std::getenv("CHIMERA_DUMP_PREEM_TSV");
-  const bool dump_preem_enabled = (dump_preem_env && dump_preem_env[0] != '\0');
-  const std::string dump_preem_path =
-      dump_preem_enabled ? std::string(dump_preem_env) : std::string();
+  const auto &dump_preem = dump_preem_runtime_config();
   prepare_hash_sample_and_route(hashs1, config, weightCtx, scratch);
   uint32_t profileResponseTaxid = 0;
   auto &sampleVals = scratch.sampleVals;
@@ -2134,7 +2152,7 @@ void processSequence(
   auto selection = select_result_candidates_from_scores(
       id, tax, weightCtx, config, scratch, scoring.tid_score, highConfPre,
       dispersion_hi, eff_eval, n_eval, bestTid, best, uniqueRatio,
-      bestTaxidStr, dump_preem_enabled, dump_preem_path);
+      bestTaxidStr, dump_preem.enabled, dump_preem.path);
   std::vector<SpoolCandidate> resultCandidates =
       std::move(selection.candidates);
   profileResponseTaxid =
@@ -2163,7 +2181,7 @@ void processSequence(
 }
 
 void processBatch(
-    batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
+    const batchReads &batch, ChimeraBuild::IMCFConfig &imcfConfig,
     const TaxDict &tax, ClassifyConfig &config,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf,
     std::vector<classifyResult> &classifyResults,
@@ -2186,14 +2204,16 @@ void processBatch(
         if (readLen > fileInfo.maxLen)
           fileInfo.maxLen = readLen;
         fileInfo.bpLength += readLen;
-	      }
+      }
       if (i < batch.seqs.size() && batch.seqs[i].size() >= feature_min_len) {
         chimera::feature::compute_hashes_append(batch.seqs[i], feature_params,
-                                                hashs1);
+                                                hashs1,
+                                                scratch.featureHashScratch);
       }
       if (i < batch.seqs2.size() && batch.seqs2[i].size() >= feature_min_len) {
         chimera::feature::compute_hashes_append(batch.seqs2[i], feature_params,
-                                                hashs1);
+                                                hashs1,
+                                                scratch.featureHashScratch);
       }
 	      if (hashs1.size() > 2048) {
 	        std::sort(hashs1.begin(), hashs1.end());
@@ -2217,10 +2237,11 @@ void processBatch(
         if (readLen > fileInfo.maxLen)
           fileInfo.maxLen = readLen;
         fileInfo.bpLength += readLen;
-	      }
+      }
       if (batch.seqs[i].size() >= feature_min_len) {
         chimera::feature::compute_hashes_append(batch.seqs[i], feature_params,
-                                                hashs1);
+                                                hashs1,
+                                                scratch.featureHashScratch);
       }
 	      if (hashs1.size() > 2048) {
 	        std::sort(hashs1.begin(), hashs1.end());
@@ -2236,75 +2257,113 @@ void processBatch(
   }
 }
 
+static void process_compact_batch_read(
+    const batchReads &batch, size_t i,
+    ChimeraBuild::IMCFConfig &imcfConfig, const TaxDict &tax,
+    ClassifyConfig &config, chimera::imcf::InterleavedMergedCuckooFilter &imcf,
+    std::vector<CompactClassifyResult> &classifyResults,
+    const chimera::feature::Params &feature_params, size_t feature_min_len,
+    FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
+    PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
+  auto &hashs1 = scratch.hashs1;
+  hashs1.clear();
+  size_t readLen = 0;
+  if (!batch.seqs2.empty()) {
+    const size_t len1 = (i < batch.seqs.size()) ? batch.seqs[i].size() : 0;
+    const size_t len2 = (i < batch.seqs2.size()) ? batch.seqs2[i].size() : 0;
+    readLen = len1 + len2;
+    if (i < batch.seqs.size() && batch.seqs[i].size() >= feature_min_len) {
+      chimera::feature::compute_hashes_append(batch.seqs[i], feature_params,
+                                              hashs1,
+                                              scratch.featureHashScratch);
+    }
+    if (i < batch.seqs2.size() && batch.seqs2[i].size() >= feature_min_len) {
+      chimera::feature::compute_hashes_append(batch.seqs2[i], feature_params,
+                                              hashs1,
+                                              scratch.featureHashScratch);
+    }
+  } else {
+    readLen = batch.seqs[i].size();
+    if (batch.seqs[i].size() >= feature_min_len) {
+      chimera::feature::compute_hashes_append(batch.seqs[i], feature_params,
+                                              hashs1,
+                                              scratch.featureHashScratch);
+    }
+  }
+  if (readLen > 0) {
+    if (fileInfo.minLen == 0 || fileInfo.minLen == kInvalidLength ||
+        readLen < fileInfo.minLen)
+      fileInfo.minLen = readLen;
+    if (readLen > fileInfo.maxLen)
+      fileInfo.maxLen = readLen;
+    fileInfo.bpLength += readLen;
+  }
+  if (hashs1.size() > 2048) {
+    std::sort(hashs1.begin(), hashs1.end());
+    hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
+  }
+  const uint64_t ordinal = i < batch.ordinals.size() ? batch.ordinals[i] : 0;
+  processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx, heat,
+                  imcf, batch.ids[i], ordinal, nullptr, &classifyResults,
+                  fileInfo, presenceAcc, scratch);
+}
+
 void processBatchCompact(
-    batchReads batch, ChimeraBuild::IMCFConfig &imcfConfig,
+    const batchReads &batch, ChimeraBuild::IMCFConfig &imcfConfig,
     const TaxDict &tax, ClassifyConfig &config,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf,
     std::vector<CompactClassifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
     PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
-	  auto &hashs1 = scratch.hashs1;
-	  hashs1.clear();
-	  hashs1.reserve(2048);
-	  if (!batch.seqs2.empty()) {
-	    for (size_t i = 0; i < batch.ids.size(); ++i) {
-	      hashs1.clear();
-	      size_t len1 = (i < batch.seqs.size()) ? batch.seqs[i].size() : 0;
-	      size_t len2 = (i < batch.seqs2.size()) ? batch.seqs2[i].size() : 0;
-      size_t readLen = len1 + len2;
-      if (readLen > 0) {
-        if (fileInfo.minLen == 0 || fileInfo.minLen == kInvalidLength ||
-            readLen < fileInfo.minLen)
-          fileInfo.minLen = readLen;
-        if (readLen > fileInfo.maxLen)
-          fileInfo.maxLen = readLen;
-        fileInfo.bpLength += readLen;
-	      }
-      if (i < batch.seqs.size() && batch.seqs[i].size() >= feature_min_len) {
-        chimera::feature::compute_hashes_append(batch.seqs[i], feature_params,
-                                                hashs1);
-      }
-      if (i < batch.seqs2.size() && batch.seqs2[i].size() >= feature_min_len) {
-        chimera::feature::compute_hashes_append(batch.seqs2[i], feature_params,
-                                                hashs1);
-      }
-	      if (hashs1.size() > 2048) {
-	        std::sort(hashs1.begin(), hashs1.end());
-	        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
-	      }
-	      const uint64_t ordinal =
-	          i < batch.ordinals.size() ? batch.ordinals[i] : 0;
-	      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
-	                      heat, imcf, batch.ids[i], ordinal, nullptr,
-	                      &classifyResults, fileInfo, presenceAcc, scratch);
-	    }
-	  } else {
-	    for (size_t i = 0; i < batch.seqs.size(); i++) {
-	      hashs1.clear();
-	      size_t readLen = batch.seqs[i].size();
-      if (readLen > 0) {
-        if (fileInfo.minLen == 0 || fileInfo.minLen == kInvalidLength ||
-            readLen < fileInfo.minLen)
-          fileInfo.minLen = readLen;
-        if (readLen > fileInfo.maxLen)
-          fileInfo.maxLen = readLen;
-        fileInfo.bpLength += readLen;
-	      }
-      if (batch.seqs[i].size() >= feature_min_len) {
-        chimera::feature::compute_hashes_append(batch.seqs[i], feature_params,
-                                                hashs1);
-      }
-	      if (hashs1.size() > 2048) {
-	        std::sort(hashs1.begin(), hashs1.end());
-	        hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
-	      }
-	      const uint64_t ordinal =
-	          i < batch.ordinals.size() ? batch.ordinals[i] : 0;
-	      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
-	                      heat, imcf, batch.ids[i], ordinal, nullptr,
-	                      &classifyResults, fileInfo, presenceAcc, scratch);
-	    }
+  scratch.hashs1.reserve(2048);
+  const size_t count = !batch.seqs2.empty() ? batch.ids.size() : batch.seqs.size();
+  for (size_t i = 0; i < count; ++i) {
+    process_compact_batch_read(batch, i, imcfConfig, tax, config, imcf,
+                               classifyResults, feature_params,
+                               feature_min_len, fileInfo, heat, weightCtx,
+                               presenceAcc, scratch);
+  }
+}
+
+static void write_spool_result(const CompactClassifyResult &result,
+                               std::ostream *os,
+                               std::ostream *candidate_os,
+                               std::ostream *sample_mixture_os) {
+  if (os != nullptr) {
+    write_spool_record(*os, result);
+  }
+  if (candidate_os != nullptr) {
+    write_spool_candidate_record(*candidate_os, result);
+  }
+  if (sample_mixture_os != nullptr) {
+    write_spool_sample_mixture_record(*sample_mixture_os, result);
+  }
+}
+
+static void processBatchCompactToSpool(
+    const batchReads &batch, ChimeraBuild::IMCFConfig &imcfConfig,
+    const TaxDict &tax, ClassifyConfig &config,
+    chimera::imcf::InterleavedMergedCuckooFilter &imcf,
+    std::ostream *spool, std::ostream *candidateSpool,
+    std::ostream *sampleMixtureSpool,
+    const chimera::feature::Params &feature_params, size_t feature_min_len,
+    FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
+    PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
+  scratch.hashs1.reserve(2048);
+  std::vector<CompactClassifyResult> oneResult;
+  oneResult.reserve(1);
+  const size_t count = !batch.seqs2.empty() ? batch.ids.size() : batch.seqs.size();
+  for (size_t i = 0; i < count; ++i) {
+    oneResult.clear();
+    process_compact_batch_read(batch, i, imcfConfig, tax, config, imcf,
+                               oneResult, feature_params, feature_min_len,
+                               fileInfo, heat, weightCtx, presenceAcc,
+                               scratch);
+    if (!oneResult.empty()) {
+      write_spool_result(oneResult.front(), spool, candidateSpool,
+                         sampleMixtureSpool);
+    }
   }
 }
 
@@ -2337,6 +2396,7 @@ void classify_streaming(
 
     batchReads batch;
     std::vector<classifyResult> localClassifyResults;
+    localClassifyResults.reserve(config.batchSize);
     FileInfo localFileInfo;
     localFileInfo.avgLen = fileInfo.avgLen;
     localFileInfo.minLen = kInvalidLength;
@@ -2396,26 +2456,6 @@ void classify_streaming(
     }
   }
 }
-
-namespace {
-
-void write_spool_results(const std::vector<CompactClassifyResult> &results,
-                         std::ostream *os, std::ostream *candidate_os,
-                         std::ostream *sample_mixture_os) {
-  for (const auto &result : results) {
-    if (os != nullptr) {
-      write_spool_record(*os, result);
-    }
-    if (candidate_os != nullptr) {
-      write_spool_candidate_record(*candidate_os, result);
-    }
-    if (sample_mixture_os != nullptr) {
-      write_spool_sample_mixture_record(*sample_mixture_os, result);
-    }
-  }
-}
-
-} // namespace
 
 void classify_streaming_spool(
     ChimeraBuild::IMCFConfig &imcfConfig,
@@ -2510,22 +2550,18 @@ void classify_streaming_spool(
         presenceSummary ? presenceSummary->sketchBits : 0);
     PresenceAccumulator *presencePtr =
         presenceSummary ? &presenceLocal : nullptr;
-    std::vector<CompactClassifyResult> localClassifyResults;
 
     for (;;) {
       if (readQueue.try_dequeue(batch)) {
         const size_t batch_size = batch.ids.size();
         release_queue_slot(queueThrottle, estimate_batch_bytes(batch));
-        processBatchCompact(batch, imcfConfig, tax, config, imcf,
-                            localClassifyResults, feature_params,
-                            feature_min_len, localFileInfo, heat, weightCtx,
-                            presencePtr, scratch);
-        write_spool_results(localClassifyResults,
-                            writeFullSpool ? &spool : nullptr,
-                            write_candidate_spool ? &candidateSpool : nullptr,
-                            write_sample_mixture_spool ? &sampleMixtureSpool
-                                                       : nullptr);
-        localClassifyResults.clear();
+        processBatchCompactToSpool(
+            batch, imcfConfig, tax, config, imcf,
+            writeFullSpool ? &spool : nullptr,
+            write_candidate_spool ? &candidateSpool : nullptr,
+            write_sample_mixture_spool ? &sampleMixtureSpool : nullptr,
+            feature_params, feature_min_len, localFileInfo, heat, weightCtx,
+            presencePtr, scratch);
         if (progress != nullptr) {
           progress->processed_reads.fetch_add(batch_size,
                                               std::memory_order_relaxed);
@@ -2587,6 +2623,7 @@ void classify(
 
     batchReads batch;
     std::vector<classifyResult> localClassifyResults;
+    localClassifyResults.reserve(config.batchSize);
     FileInfo localFileInfo;
     localFileInfo.avgLen = fileInfo.avgLen;
     localFileInfo.minLen = kInvalidLength;

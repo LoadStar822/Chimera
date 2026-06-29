@@ -40,6 +40,11 @@ std::vector<Anchor> extract_minimizers(const std::vector<seqan3::dna4> &seq,
 
 uint64_t anchor_record_bytes(uint32_t k);
 uint64_t encoded_anchor_bytes(const std::vector<Anchor> &anchors, uint32_t k);
+void encode_anchor_block_into(const std::vector<Anchor> &anchors, uint32_t k,
+                              std::vector<char> &out);
+void encode_anchor_block_into(const std::vector<Anchor> &anchors, uint32_t k,
+                              uint64_t reserve_bytes,
+                              std::vector<char> &out);
 std::vector<char> encode_anchor_block(const std::vector<Anchor> &anchors,
                                       uint32_t k);
 std::vector<Anchor> decode_anchor_block(const char *data, size_t size,

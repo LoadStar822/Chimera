@@ -82,6 +82,11 @@ struct CmsThresholdBitmask {
 };
 
 struct HashFrequencyContext {
+  struct HashDecision {
+    bool filtered{false};
+    bool unique{true};
+  };
+
   double quantile{0.999};
   std::unique_ptr<CountMinSketch> sketch;
   chimera::presence::HashFreqStats stats{};
@@ -117,6 +122,27 @@ struct HashFrequencyContext {
 
   bool is_unique_signature(uint64_t hash) const {
     return gt_unique_mask.empty() || !mask_all_rows_set(gt_unique_mask, hash);
+  }
+
+  HashDecision decide_hash(uint64_t hash) const {
+    if (high_df_mask.empty() && gt_unique_mask.empty()) {
+      return {false, true};
+    }
+    if (!high_df_mask.empty() && !gt_unique_mask.empty() &&
+        high_df_mask.depth == gt_unique_mask.depth &&
+        high_df_mask.width == gt_unique_mask.width) {
+      bool highAll = true;
+      bool uniqueAll = true;
+      for (uint32_t row = 0; row < high_df_mask.depth; ++row) {
+        const uint64_t column =
+            CountMinSketch::column_index(row, hash, high_df_mask.width);
+        highAll = highAll && high_df_mask.test(row, column);
+        uniqueAll = uniqueAll && gt_unique_mask.test(row, column);
+      }
+      return {highAll, !uniqueAll};
+    }
+    const bool filtered = should_filter_hash(hash);
+    return {filtered, filtered ? false : is_unique_signature(hash)};
   }
 };
 
@@ -168,10 +194,12 @@ std::vector<std::vector<std::string>> buildIMCF(
     const FeatureBuildLayout *featureLayout,
     uint16_t effectiveSpan, uint16_t refReadLen, uint32_t uniqueDegThreshold,
     chimera::presence::CoverageMeta *coverageMeta,
-    size_t groupIndexOffset = 0,
-    bool verifyShardTotals = true,
+    size_t groupIndexOffset,
+    bool verifyShardTotals,
     const robin_hood::unordered_flat_map<std::string, uint64_t>
-        *shardOffsetBase = nullptr);
+        *shardOffsetBase,
+    size_t groupRangeBegin,
+    size_t groupRangeEnd);
 
 void populateCoverageMeta(const HashFrequencyContext *hashFreqContext,
                           const FeatureBuildLayout *featureLayout,

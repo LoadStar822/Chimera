@@ -57,24 +57,30 @@ compute_hash_freq_stats(const std::vector<uint32_t> &counters, double quantile) 
   return stats;
 }
 
-static void build_threshold_mask(const std::vector<uint32_t> &counters,
-                                 uint32_t depth, uint32_t width,
-                                 uint32_t threshold, bool strict_greater,
-                                 CmsThresholdBitmask &mask) {
-  if (threshold == std::numeric_limits<uint32_t>::max()) {
-    mask.clear();
-    return;
+static void build_threshold_masks(const std::vector<uint32_t> &counters,
+                                  uint32_t depth, uint32_t width,
+                                  uint32_t high_threshold,
+                                  uint32_t unique_threshold,
+                                  CmsThresholdBitmask &high_mask,
+                                  CmsThresholdBitmask &unique_mask) {
+  const bool high_enabled =
+      high_threshold != std::numeric_limits<uint32_t>::max();
+  if (!high_enabled) {
+    high_mask.clear();
+  } else {
+    high_mask.reset(depth, width);
   }
-  mask.reset(depth, width);
+  unique_mask.reset(depth, width);
   for (uint32_t row = 0; row < depth; ++row) {
     const size_t row_base =
         static_cast<size_t>(row) * static_cast<size_t>(width);
     for (uint32_t column = 0; column < width; ++column) {
       const uint32_t value = counters[row_base + column];
-      const bool set_bit =
-          strict_greater ? (value > threshold) : (value >= threshold);
-      if (set_bit) {
-        mask.set(row, column);
+      if (high_enabled && value >= high_threshold) {
+        high_mask.set(row, column);
+      }
+      if (value > unique_threshold) {
+        unique_mask.set(row, column);
       }
     }
   }
@@ -121,6 +127,7 @@ void build_hash_frequency_sketch(
   {
     std::vector<uint64_t> hashes;
     hashes.reserve(4096);
+    chimera::feature::FeatureHashScratch featureScratch;
     uint64_t local_hash_total = 0;
 
 #pragma omp for schedule(dynamic)
@@ -137,11 +144,10 @@ void build_hash_frequency_sketch(
             continue;
           }
           hashes.clear();
-          chimera::feature::compute_hashes_append(seq, feature_params, hashes);
+          chimera::feature::compute_hashes_append(seq, feature_params, hashes,
+                                                  featureScratch);
           local_hash_total += hashes.size();
-          for (uint64_t hash : hashes) {
-            context.sketch->add(hash);
-          }
+          context.sketch->add_many(hashes);
         }
       } catch (const std::exception &ex) {
 #pragma omp critical(sketch_log)
@@ -165,12 +171,10 @@ void build_hash_frequency_sketch(
   std::vector<uint32_t> sketch_counters;
   context.sketch->exportCounts(sketch_counters);
   context.stats = compute_hash_freq_stats(sketch_counters, context.quantile);
-  build_threshold_mask(sketch_counters, kSketchDepth, kSketchWidth,
-                       context.stats.df_high_threshold, false,
-                       context.high_df_mask);
-  build_threshold_mask(sketch_counters, kSketchDepth, kSketchWidth,
-                       context.unique_deg_threshold, true,
-                       context.gt_unique_mask);
+  build_threshold_masks(sketch_counters, kSketchDepth, kSketchWidth,
+                        context.stats.df_high_threshold,
+                        context.unique_deg_threshold, context.high_df_mask,
+                        context.gt_unique_mask);
   std::cout << "Hash frequency sketch time: " << sketch_time / 1000 << "s "
             << sketch_time % 1000 << "ms" << std::endl;
   const auto hashed =

@@ -178,18 +178,10 @@ build_index_to_taxid(const std::vector<chimera::imcf::Group> &groups) {
   return indexToTaxid;
 }
 
-std::vector<chimera::imcf::Group>
-slice_groups(const std::vector<chimera::imcf::Group> &groups, size_t begin,
-             size_t end) {
-  return std::vector<chimera::imcf::Group>(groups.begin() + begin,
-                                           groups.begin() + end);
-}
-
-robin_hood::unordered_flat_map<std::string, uint64_t>
-make_shard_offset_base(const std::vector<chimera::imcf::Group> &groups,
-                       size_t blockBegin) {
-  robin_hood::unordered_flat_map<std::string, uint64_t> offsets;
-  for (size_t groupIdx = 0; groupIdx < blockBegin; ++groupIdx) {
+void add_shard_offsets_for_group_range(
+    const std::vector<chimera::imcf::Group> &groups, size_t begin, size_t end,
+    robin_hood::unordered_flat_map<std::string, uint64_t> &offsets) {
+  for (size_t groupIdx = begin; groupIdx < end; ++groupIdx) {
     const auto &group = groups[groupIdx];
     if (group.taxids.size() != group.assignedHashes.size()) {
       throw std::runtime_error(
@@ -199,22 +191,22 @@ make_shard_offset_base(const std::vector<chimera::imcf::Group> &groups,
       offsets[group.taxids[slot]] += group.assignedHashes[slot];
     }
   }
-  return offsets;
 }
 
 void build_classic_block_imcf(
     chimera::imcf::InterleavedMergedCuckooFilter &blockImcf,
     const std::vector<chimera::imcf::Group> &groups,
     const robin_hood::unordered_flat_map<std::string, uint64_t> &hashCount,
+    const robin_hood::unordered_flat_map<std::string, uint64_t>
+        &shardOffsetBase,
     const FeatureBuildLayout &featureLayout, size_t blockBegin, size_t blockEnd,
     size_t globalBinSize, uint16_t effectiveSpan, uint16_t refReadLen,
     uint32_t presenceUniqueDeg) {
-  auto blockGroups = slice_groups(groups, blockBegin, blockEnd);
-  auto shardOffsetBase = make_shard_offset_base(groups, blockBegin);
-  blockImcf.initialize_classic_storage(blockGroups.size(), globalBinSize);
-  buildIMCF(blockImcf, blockGroups, hashCount, nullptr, &featureLayout,
+  blockImcf.initialize_classic_storage(blockEnd - blockBegin, globalBinSize);
+  buildIMCF(blockImcf, groups, hashCount, nullptr, &featureLayout,
             effectiveSpan, refReadLen, presenceUniqueDeg, nullptr, blockBegin,
-            /*verifyShardTotals=*/false, &shardOffsetBase);
+            /*verifyShardTotals=*/false, &shardOffsetBase, blockBegin,
+            blockEnd);
 }
 
 void write_prefix_spool_and_bucket_base(
@@ -683,12 +675,14 @@ void run(BuildConfig config) {
   std::vector<std::vector<uint32_t>> blockQidxCounts;
   blockQidxCounts.reserve(blockCount);
   std::vector<std::filesystem::path> blockEntryPaths(blockCount);
+  robin_hood::unordered_flat_map<std::string, uint64_t> shardOffsetBase;
+  shardOffsetBase.reserve(hashCount.size());
   for (size_t blockIdx = 0; blockIdx < blockCount; ++blockIdx) {
     const size_t blockBegin = blockIdx * blockBinCapacity;
     const size_t blockEnd = std::min(globalBinNum, blockBegin + blockBinCapacity);
     chimera::imcf::InterleavedMergedCuckooFilter blockImcf;
-    build_classic_block_imcf(blockImcf, groups, hashCount, featureLayout,
-                             blockBegin, blockEnd, globalBinSize,
+    build_classic_block_imcf(blockImcf, groups, hashCount, shardOffsetBase,
+                             featureLayout, blockBegin, blockEnd, globalBinSize,
                              effective_span, ref_read_len,
                              config.presence_unique_deg);
     std::vector<uint32_t> blockCounts(groupCountSize, 0u);
@@ -707,7 +701,7 @@ void run(BuildConfig config) {
     try {
       writtenBlockEntries = blockImcf.write_qidx_block_entries_by_bucket(
           blockEntriesFd, blockBucketBase, blockBegin,
-          /*include_stash=*/true);
+          /*include_stash=*/true, &blockCounts);
       close_entries_spool(blockEntriesFd);
       blockEntriesFd = -1;
     } catch (...) {
@@ -725,6 +719,8 @@ void run(BuildConfig config) {
           blockCounts[static_cast<size_t>(idx)];
     }
     blockQidxCounts.push_back(std::move(blockCounts));
+    add_shard_offsets_for_group_range(groups, blockBegin, blockEnd,
+                                      shardOffsetBase);
 #if defined(__GLIBC__)
     ::malloc_trim(0);
 #endif
@@ -745,6 +741,10 @@ void run(BuildConfig config) {
   if (config.verbose) {
     std::cout << "Building block QIMCF..." << std::endl;
   }
+  robin_hood::unordered_flat_map<std::string, uint64_t>().swap(hashCount);
+  robin_hood::unordered_flat_map<std::string, uint64_t>().swap(bpCount);
+  std::vector<chimera::imcf::Group>().swap(groups);
+  hashFreqContext.sketch.reset();
 #if defined(__GLIBC__)
   ::malloc_trim(0);
 #endif
@@ -786,10 +786,6 @@ void run(BuildConfig config) {
                                   std::move(bucketBase), prefixBits, entryBits,
                                   prefixSpoolPath, prefixSpoolCount,
                                   entriesSpoolPath, entriesCount);
-  robin_hood::unordered_flat_map<std::string, uint64_t>().swap(hashCount);
-  robin_hood::unordered_flat_map<std::string, uint64_t>().swap(bpCount);
-  std::vector<chimera::imcf::Group>().swap(groups);
-  hashFreqContext.sketch.reset();
 #if defined(__GLIBC__)
   ::malloc_trim(0);
 #endif
