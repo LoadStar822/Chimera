@@ -1,11 +1,13 @@
-﻿cmake_minimum_required(VERSION 3.10)
-project(Chimera VERSION 1.6.3)
+cmake_minimum_required(VERSION 3.10)
+project(Chimera VERSION 1.7)
 add_definitions(-DCHIMERA_VERSION="${PROJECT_VERSION}")
 set(PROJECT_ROOT_DIR "${CMAKE_SOURCE_DIR}")
 add_definitions(-DPROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}")
 
 
-set(CMAKE_BUILD_TYPE Release)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
 
 set( CMAKE_CXX_STANDARD 20 )
 set( CMAKE_CXX_STANDARD_REQUIRED ON )
@@ -20,19 +22,50 @@ endif()
 
 
 
-# 设置编译选项
 include(CheckCXXCompilerFlag)
 
-# 检测是否支持 AVX2 指令集
-check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
+option(CHIMERA_ENABLE_NATIVE_AVX2 "Build Chimera with native AVX2 instructions" ON)
+option(CHIMERA_ENABLE_LTO "Build Chimera with link-time optimization" OFF)
 
-if(COMPILER_SUPPORTS_AVX2)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -DNDEBUG -mavx2 -flto")
-    message(STATUS "AVX2 instructions are supported and enabled.")
+if(CHIMERA_ENABLE_NATIVE_AVX2)
+    check_cxx_compiler_flag("-mavx2" CHIMERA_COMPILER_SUPPORTS_AVX2)
+    if(NOT CHIMERA_COMPILER_SUPPORTS_AVX2)
+        message(FATAL_ERROR "CHIMERA_ENABLE_NATIVE_AVX2=ON, but the compiler does not support -mavx2. Reconfigure with -DCHIMERA_ENABLE_NATIVE_AVX2=OFF for a portable build.")
+    endif()
+    message(STATUS "Native AVX2 build enabled. Prebuilt binaries require an AVX2-capable CPU.")
 else()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -DNDEBUG -flto")
-    message(WARNING "AVX2 instructions are not supported. Proceeding without AVX2 optimization.")
+    message(STATUS "Native AVX2 build disabled. SIMDe portable fallback will be used where applicable.")
 endif()
+
+if(CHIMERA_ENABLE_LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT CHIMERA_IPO_SUPPORTED OUTPUT CHIMERA_IPO_ERROR)
+    if(NOT CHIMERA_IPO_SUPPORTED)
+        message(FATAL_ERROR "CHIMERA_ENABLE_LTO=ON, but IPO/LTO is not supported: ${CHIMERA_IPO_ERROR}")
+    endif()
+    message(STATUS "Link-time optimization enabled.")
+else()
+    message(STATUS "Link-time optimization disabled.")
+endif()
+
+function(chimera_configure_compile_target target_name)
+    target_compile_options(${target_name}
+        PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wno-register>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wno-sign-compare>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wno-interference-size>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-declarations>
+    )
+    if(CHIMERA_ENABLE_NATIVE_AVX2)
+        target_compile_options(${target_name}
+            PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:-mavx2>
+        )
+    endif()
+    if(CHIMERA_ENABLE_LTO)
+        set_property(TARGET ${target_name} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    endif()
+endfunction()
 
 # 设置SeqAn3库的路径
 set(SEQAN3_DIR "${CMAKE_SOURCE_DIR}/libs/seqan3/share/cmake/seqan3")
@@ -103,6 +136,7 @@ target_include_directories(strobemers
     PUBLIC
     ${PROJECT_SOURCE_DIR}/libs/strobemers
 )
+chimera_configure_compile_target(strobemers)
 
 # 递归地查找头文件
 file(GLOB_RECURSE HEADERS
@@ -114,6 +148,7 @@ file(GLOB_RECURSE HEADERS
 
 # 添加可执行文件
 add_executable(Chimera ${SOURCES} "Chimera.cpp" "src/build/ChimeraBuild.cpp" "libs/xxhash.c" "libs/klib/kthread.c")
+chimera_configure_compile_target(Chimera)
 
 
 # 链接库和 OpenSSL
@@ -165,6 +200,7 @@ add_executable(imcf_filter_tests
     libs/xxhash.c
     libs/klib/kthread.c
 )
+chimera_configure_compile_target(imcf_filter_tests)
 
 # 复用与主程序相同的依赖与包含路径
 target_link_libraries(imcf_filter_tests
@@ -652,6 +688,7 @@ target_include_directories(post_em_reject_override_tests
 add_executable(preem_topk_tests
     tests/utils/preem_topk_test.cpp
 )
+chimera_configure_compile_target(preem_topk_tests)
 
 target_link_libraries(preem_topk_tests
     PRIVATE
@@ -677,13 +714,6 @@ target_include_directories(preem_topk_tests
 )
 
 endif()
-
-# 忽略 register 关键字警告
-if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    add_compile_options(-Wno-register)
-    add_compile_options(-Wno-sign-compare) # 忽略 signed/unsigned 比较警告
-endif()
-
 
 # 安装规则
 install(TARGETS Chimera

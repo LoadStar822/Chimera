@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "If you use Chimera, please cite the preferred citation below."
+title: "Chimera"
+version: "1.7"
+type: software
+license: "MIT"
+repository-code: "https://github.com/LoadStar822/Chimera"
+url: "https://github.com/LoadStar822/Chimera"
+authors:
+  - family-names: "Tian"
+    given-names: "Qinzhong"
+preferred-citation:
+  type: article
+  title: "Chimera: Ultrafast and Memory-efficient Database Construction for High-Accuracy Taxonomic Classification in the Age of Expanding Genomic Data"
+  doi: "10.1101/2025.03.26.645388"
+  url: "https://www.biorxiv.org/content/10.1101/2025.03.26.645388v1"
+  journal: "bioRxiv"
+  date-published: 2025-03-28
+  authors:
+    - family-names: "Tian"
+      given-names: "Qinzhong"
+    - family-names: "Zhang"
+      given-names: "Pinglu"
+    - family-names: "Wei"
+      given-names: "Yanming"
+    - family-names: "Zou"
+      given-names: "Quan"
+    - family-names: "Wang"
+      given-names: "Yansu"
+    - family-names: "Luo"
+      given-names: "Ximei"

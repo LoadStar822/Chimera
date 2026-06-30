@@ -46,7 +46,6 @@
 /chimera_image.tar
 /CMakeSettings.json
 /.dockerignore
-/pyproject.toml
 /ChimeraClassify.tsv
 /ChimeraProfile_profile.tsv
 /test.cpp

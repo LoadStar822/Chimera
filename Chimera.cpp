@@ -1,4 +1,4 @@
-﻿/*
+/*
  * -----------------------------------------------------------------------------
  * Filename:      Chimera.cpp
  *
@@ -99,7 +99,7 @@ uint16_t default_cli_threads() {
   if (hardware_threads > max_threads) {
     hardware_threads = max_threads;
   }
-  return static_cast<uint16_t>(std::min<unsigned int>(hardware_threads, 192u));
+  return static_cast<uint16_t>(std::min<unsigned int>(hardware_threads, 64u));
 }
 
 std::string validate_min_length_option(std::string &input) {

@@ -2253,7 +2253,7 @@ static uint32_t taxid_text_to_species(
     const std::string &taxidText,
     const ChimeraClassify::NcbiTaxdump *ncbiTaxdump);
 
-static std::optional<ChimeraClassify::LocalResolutionReadCall>
+static std::optional<ChimeraClassify::LocalResolutionReadCallView>
 find_local_resolution_call(const LocalResolutionCallStore *localCalls,
                            uint64_t readOrdinal) {
   if (localCalls == nullptr) {
@@ -2262,7 +2262,7 @@ find_local_resolution_call(const LocalResolutionCallStore *localCalls,
   if (!localCalls->contains(readOrdinal)) {
     return std::nullopt;
   }
-  return localCalls->materialize(readOrdinal);
+  return localCalls->view(readOrdinal);
 }
 
 static SpeciesPosteriorSummary summarize_species_posteriors(
@@ -2305,7 +2305,7 @@ static SpeciesPosteriorSummary summarize_species_posteriors(
 
 static void replace_result_with_local_candidate(
     ChimeraClassify::classifyResult &result,
-    const ChimeraClassify::LocalResolutionReadCall &call) {
+    const ChimeraClassify::LocalResolutionReadCallView &call) {
   const auto &top = call.candidates.front();
   result.taxidCount.clear();
   result.taxidCount.emplace_back(std::to_string(top.taxid),
@@ -2323,7 +2323,7 @@ static void replace_result_with_local_candidate(
 }
 
 static bool local_candidate_has_certificate(
-    const ChimeraClassify::LocalResolutionReadCall &call) {
+    const ChimeraClassify::LocalResolutionReadCallView &call) {
   if (call.candidates.empty() || call.candidates.front().score == 0) {
     return false;
   }
@@ -4319,8 +4319,13 @@ static double classifier_response_dynamic_report_floor_percent(
 static uint64_t classifier_response_min_read_support(const SeqProfileFit &fit) {
   const uint64_t reads = fit.reads_with_candidates > 0 ? fit.reads_with_candidates
                                                        : fit.input_reads;
+  if (reads == 0) {
+    return 0;
+  }
   const double support = 0.01 * std::sqrt(static_cast<double>(reads));
-  return static_cast<uint64_t>(std::max<double>(3.0, std::ceil(support)));
+  const auto floor =
+      static_cast<uint64_t>(std::max<double>(3.0, std::ceil(support)));
+  return std::min<uint64_t>(floor, reads);
 }
 
 static std::unordered_map<uint32_t, double>

@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -17,6 +18,11 @@ struct LocalResolutionCandidate {
 struct LocalResolutionReadCall {
   uint64_t read_ordinal{};
   std::vector<LocalResolutionCandidate> candidates;
+};
+
+struct LocalResolutionReadCallView {
+  uint64_t read_ordinal{};
+  std::span<const LocalResolutionCandidate> candidates;
 };
 
 struct LocalResolutionCallStore {
@@ -42,6 +48,23 @@ struct LocalResolutionCallStore {
     if (end > begin) {
       call.candidates.assign(candidates.begin() + static_cast<std::ptrdiff_t>(begin),
                              candidates.begin() + static_cast<std::ptrdiff_t>(end));
+    }
+    return call;
+  }
+
+  LocalResolutionReadCallView view(uint64_t ordinal) const {
+    LocalResolutionReadCallView call;
+    call.read_ordinal = ordinal;
+    if (!contains(ordinal)) {
+      return call;
+    }
+    const uint64_t begin = offsets[ordinal];
+    const uint64_t end = offsets[ordinal + 1];
+    if (end > begin) {
+      const auto begin_offset = static_cast<std::ptrdiff_t>(begin);
+      call.candidates = std::span<const LocalResolutionCandidate>(
+          candidates.data() + begin_offset,
+          static_cast<size_t>(end - begin));
     }
     return call;
   }

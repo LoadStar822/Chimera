@@ -1,0 +1,30 @@
+[tool.poetry]
+name = "chimera"
+version = "1.7"
+description = "A versatile tool for metagenomic classification"
+authors = ["Qinzhong Tian"]
+license = "MIT License"
+readme = "README.md"
+
+packages = [
+    { include = "src" },
+    { include = "chimera.py" }
+]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+pandas = "*"
+multitax = "*"
+rich = "*"
+questionary = "*"
+ete3 = { version = "*", optional = true }
+
+[tool.poetry.extras]
+legacy-profile = ["ete3"]
+
+[tool.poetry.scripts]
+chimera = "chimera:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -834,6 +834,7 @@ void processSequence(
     ChimeraBuild::IMCFConfig &imcfConfig, const TaxDict &tax,
     ClassifyConfig &config, const WeightingContext &weightCtx, GroupHeat &heat,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
+    uint64_t readOrdinal,
     std::vector<classifyResult> *classifyResults,
     std::vector<CompactClassifyResult> *compactResults, FileInfo &fileInfo,
     PresenceAccumulator *presenceAcc, ProcessScratch &scratch);

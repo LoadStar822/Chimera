@@ -1,729 +1,386 @@
-# Chimera: Ultrafast Database Construction with Interleaved Merged Cuckoo Filter and High-Accuracy Taxonomic Classification for Metagenomic Studies
+# Chimera
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/MalabZ/Chimera)
-[![Conda](https://img.shields.io/conda/vn/MALAB/chimera)](https://anaconda.org/MALAB/chimera)
+**Ultrafast and memory-efficient database construction for high-accuracy metagenomic taxonomic classification and profiling.**
+
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-linux--64-lightgrey)](https://www.linux.org/)
-[![Docker Pulls](https://img.shields.io/docker/pulls/tianqinzhong/chimera)](https://hub.docker.com/r/tianqinzhong/chimera)
+[![Conda](https://img.shields.io/conda/vn/malab/chimera)](https://anaconda.org/malab/chimera)
+[![Preprint](https://img.shields.io/badge/preprint-bioRxiv-orange)](https://doi.org/10.1101/2025.03.26.645388)
+
+Chimera is a reference-database metagenomic classifier designed for fast custom database construction, accurate read-level taxonomic assignment, and abundance profiling in the same run. It supports both long and short reads, builds databases from NCBI genomes or custom references, and can apply local near-neighbor resolution for difficult strain-like assignments.
+
+<p align="center">
+  <img src="assets/chimera_usage_demo.gif" alt="Chimera build, classify, and profile demo" width="900">
+</p>
 
+<p align="center">
+  <em>Database build, read classification, and profile generation with Chimera.</em>
+</p>
 
-## Table of Contents
-- [Project Overview](#project-overview)
-- [Installation](#installation)
-   1. [Source Installation](#1-source-installation)
-   2. [Conda Installation](#2-conda-installation)
-   3. [Docker Installation](#3-docker-installation)
-- [Usage Guide](#usage-guide)
-   1. [Download](#1-download)
-   2. [Build](#2-build)
-   3. [Download and Build](#3-download-and-build)
-   4. [Classify](#4-classify)
-   5. [Profile](#5-profile)
-- [Input/Output Formats](#inputoutput-formats)
-- [Performance Optimization](#performance-optimization)
-- [FAQ](#faq)
-- [References & Acknowledgements](#references--acknowledgements)
-- [Publication](#publication)
-- [License](#license)
-- [Contact & Support](#contact--support)
+## Highlights
+
+- **Fast custom database construction** from downloaded NCBI genomes or a user-provided `target.tsv`.
+- **High-accuracy read classification** for large reference-database workflows.
+- **Profile output during classification**: `chimera classify` writes both per-read assignments and `ChimeraProfile.tsv`.
+- **Interactive NCBI download wizard** for users who do not want to hand-write genome download commands.
+- **Automatic NCBI taxdump handling** during build when the Python wrapper can infer or download the taxonomy data.
+- **Optional local read resolution (LPC)** for near-neighbor or strain-like ambiguity when the database contains LPC data.
+- **Simple user workflow**: interactive genome download, automatic taxonomy handling, minimal required parameters, and classify/profile output in one command.
 
----
+## Quick Links
 
-## Project Overview  
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [Download Genomes](#download-genomes)
+- [Build a Database](#build-a-database)
+- [Classify and Profile](#classify-and-profile)
+- [Custom `target.tsv`](#custom-targettsv)
+- [Output Files](#output-files)
+- [Citation](#citation)
 
-**Chimera** is a versatile **metagenomic classification tool** developed by **Qinzhong Tian**, designed to simplify and accelerate the process of analyzing large-scale metagenomic datasets. Chimera integrates efficient algorithms and user-friendly features to deliver fast, accurate, and scalable metagenomic classification.
+## Install
 
-The current version (1.6) introduces the **Interleaved Merged Cuckoo Filter (IMCF)**, which dramatically reduces database construction memory usage and significantly increases classification speed, all while maintaining nearly unchanged classification accuracy. Version 1.5 previously added the **Hierarchical Interleaved Cuckoo Filter (HICF)**, though it proved less practical compared to the new IMCF. Version 1.4 enhanced classification accuracy by upgrading the previous **Expectation-Maximization (EM) algorithm** to the more advanced **Variational EM algorithm**, improving convergence speed and robustness in complex datasets. **SIMD (Single Instruction, Multiple Data) acceleration** using the **AVX2** instruction set, introduced in version 1.3, continues to further enhance performance by providing compatibility across a range of modern processors. These optimizations significantly speed up computational tasks, improving Chimera’s ability to handle large datasets quickly and efficiently. Version 1.2 brought significant enhancements in classification accuracy and performance through the introduction of a **16-bit interleaved cuckoo filter**. Version 1.1 introduced **abundance analysis**, diversity indices, and the **LCA (Lowest Common Ancestor) algorithm** for more precise classification.
+Conda is the recommended installation route for normal use. The Chimera package is currently published on the `malab` Anaconda channel; `conda-forge` and `bioconda` are used for dependencies.
 
-For a detailed comparison of Chimera’s performance against other metagenomic classification tools, please visit our **[benchmark repository](https://github.com/LoadStar822/ChimeraBenchmark)**.
+```bash
+conda create -n chimera -c malab -c conda-forge -c bioconda chimera
+conda activate chimera
+chimera -v
+```
 
-### 🔍 Interactive NCBI Dataset Downloads
+The prebuilt Conda binary targets Linux x86-64 machines with AVX2 support. If your machine does not support AVX2, build from source with portable SIMD settings:
 
-One of Chimera’s standout features is its **interactive data downloading** capability from NCBI databases. Users can easily download and process large metagenomic datasets **within the Chimera environment**. The tool automatically handles preprocessing of downloaded datasets, streamlining the workflow from data acquisition to database construction.
+```bash
+git clone --recursive https://github.com/LoadStar822/Chimera.git
+cd Chimera
 
-Chimera offers flexibility by supporting **custom parameter configurations**, while also providing **default settings** for users seeking a simpler setup.
+python -m pip install -e .
 
-### ⚡ Fast and Accurate Species Classification
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCHIMERA_ENABLE_NATIVE_AVX2=OFF
+cmake --build build -j 32
 
-Chimera is optimized for both **speed and scalability**. The classification engine is **multi-threaded**, making it highly effective at processing large datasets in a short time. Version 1.6's **IMCF** marks a major advancement in speed and memory efficiency. Version 1.4 upgraded the **EM algorithm** to the **Variational EM algorithm**, further improving classification accuracy in challenging datasets. Version 1.3 introduced **SIMD acceleration** with **AVX2** instructions, boosting computational efficiency across platforms. **Version 1.2** introduced the **16-bit interleaved cuckoo filter**, and **version 1.1** added the **LCA algorithm**, enhancing accuracy by resolving ambiguous taxonomic assignments through the use of the Lowest Common Ancestor method.
+export CHIMERA_BIN="$PWD/build/Chimera"
+chimera -v
+```
 
-Supported input formats include:
-- Standard formats: **FASTA**, **FASTQ**
-- Compressed formats: **.gz**, **.bz2**
-- **Paired-end reads** for more complex data inputs
+For AVX2-capable source builds, omit `-DCHIMERA_ENABLE_NATIVE_AVX2=OFF`. Link-time optimization is disabled by default for portability and can be enabled with `-DCHIMERA_ENABLE_LTO=ON`.
 
-### 📊 Abundance and Diversity Analysis
+## Quick Start
 
-Chimera version 1.1 introduced **abundance analysis**, allowing users to calculate the relative abundance of taxa across multiple taxonomic levels. The tool also calculates the **Shannon index** and **Simpson index**, providing valuable insights into species diversity and community evenness. These features continue to play a key role in Chimera’s functionality.
+The Python `chimera` command is the standard user-facing entry point. It wraps download, build, output directory checks, and taxonomy handling around the native Chimera engine.
 
-### 📊 Integrated Krona Visualization
+```bash
+# 1. Download reference genomes from NCBI.
+#    With no arguments, this opens the interactive downloader.
+chimera download
 
-Chimera comes with built-in **Krona integration** for visualizing taxonomic classification results. Using the **profile function**, users can easily convert their classification data into interactive **Krona charts**, allowing for **intuitive exploration** of metagenomic data.
+# 2. Build an indexed Chimera database.
+chimera build \
+  -i genome_output/target.tsv \
+  -o ChimeraDB \
+  -t 32
 
-### 🔄 Continual Updates and Customization
+# 3. Classify reads and write an abundance profile.
+chimera classify \
+  -i reads.fastq.gz \
+  -d ChimeraDB \
+  -o results \
+  -t 32
+```
 
-Chimera is under active development, with plans for **regular updates** to introduce new features and improvements. While Chimera offers **extensive customization** for advanced users, its **default settings** ensure a simple and accessible experience for beginners. This balance makes Chimera a tool suitable for both experienced bioinformaticians and those new to metagenomic analysis.
+After classification, the output directory contains:
 
+```text
+results/
+  ChimeraClassify.tsv
+  ChimeraProfile.tsv
+```
 
+For CAMI/OPAL-compatible benchmark output, add `--profile-cami`:
 
+```bash
+chimera classify \
+  -i reads.fastq.gz \
+  -d ChimeraDB \
+  -o results \
+  -t 32 \
+  --profile-cami
+```
 
+This additionally writes `ChimeraProfile.cami.tsv`.
 
----
+## Typical Workflow
 
-## Installation
+| Step | Command | Main result |
+| --- | --- | --- |
+| Download genomes | `chimera download` | `genome_output/target.tsv`, `taxdump/`, genome files |
+| Build database | `chimera build -i genome_output/target.tsv -o ChimeraDB` | `ChimeraDB/` |
+| Classify reads | `chimera classify -i reads.fastq.gz -d ChimeraDB -o results` | `ChimeraClassify.tsv`, `ChimeraProfile.tsv` |
+| Benchmark export | add `--profile-cami` | `ChimeraProfile.cami.tsv` |
 
-Chimera offers three installation methods: building from source, Conda installation, and Docker. We recommend using **Conda** or **source installation** for optimal performance, as Docker might introduce some overhead and reduce speed.
+## Download Genomes
 
-### 1. Source Installation
+Run:
 
-For users who prefer to build Chimera from source, here are the detailed steps. This method requires installing necessary dependencies and building Chimera manually.
-
-#### Prerequisites
-
-Before building Chimera, ensure you have the following dependencies installed:
-
-- **Ubuntu 20.04** (or equivalent Linux distribution)
-- **Python 3.8** (required, installable via PPA for older distributions)
-- **CMake** (for compiling C++ components)
-- **Krona Tools** (for visualization)
-- **Essential build tools** (e.g., GCC, Make)
-
-#### Steps
-
-1. **Install dependencies**:
-
-   First, update the package list and install the required build tools, Python 3.8, and other necessary libraries:
-
-   ```bash
-   sudo apt-get update
-   sudo apt-get install -y software-properties-common
-   sudo add-apt-repository ppa:deadsnakes/ppa
-   sudo apt-get update
-   sudo apt-get install -y python3.8 python3.8-dev python3.8-distutils python3-pip build-essential cmake git libbz2-dev zlib1g-dev libgcc-11-dev libstdc++-11-dev openssl libssl-dev wget bc parallel locales
-   ```
-
-2. **Install Python libraries**:
-
-   Upgrade `pip` and install the required Python packages:
-
-   ```bash
-   python3.8 -m pip install --upgrade pip
-   python3.8 -m pip install pandas multitax
-   ```
-
-3. **Install Krona Tools**:
-
-   Download and install **Krona Tools** for visualizing classification results:
-
-   ```bash
-   wget https://github.com/marbl/Krona/releases/download/v2.8.1/KronaTools-2.8.1.tar -O /tmp/KronaTools.tar
-   sudo tar -xvf /tmp/KronaTools.tar -C /opt/
-   sudo mkdir -p /opt/krona
-   sudo chmod +x /opt/KronaTools-2.8.1/install.pl
-   sudo /opt/KronaTools-2.8.1/install.pl --prefix /opt/krona
-   sudo ln -s /opt/krona/bin/* /usr/local/bin/
-   sudo ln -sf /opt/KronaTools-2.8.1/scripts/ImportText.pl /opt/krona/bin/ktImportText
-   ```
-
-4. **Clone the Chimera repository**:
-
-   Clone the Chimera source code repository:
-
-   ```bash
-   git clone https://github.com/MalabZ/Chimera.git
-   cd Chimera
-   ```
-
-5. **Build the project**:
-
-   Create a build directory, compile Chimera, and install it:
-
-   ```bash
-   mkdir build
-   cd build
-   cmake ..
-   make
-   sudo make install
-   cd ..
-   ```
-
-6. **Run Chimera**:
-
-   After installation, you can run Chimera from the source directory using Python:
-
-   ```bash
-   python3.8 -m chimera -v
-   ```
-
-Alternatively, after installing, you can run Chimera globally using the installed `chimera.py`:
-
-   ```bash
-   chimera.py -v
-   ```
-
-This completes the source installation. You should now be able to use Chimera for metagenomic classification tasks.
-
-### 2. Conda Installation
-
-To install Chimera via Conda, follow these steps:
-
-1. Create a new Conda environment with Python 3.8:
-   ```bash
-   conda create -n chimera python=3.8
-   conda activate chimera
-   ```
-
-2. Install Chimera from the **malab** channel:
-   ```bash
-   conda install chimera -c malab
-   ```
-
-This method automatically resolves dependencies and is the simplest way to get Chimera running.
-
-### 3. Docker Installation
-
-For users preferring Docker, you can use the following commands to install and run Chimera. Note that Docker might introduce performance overhead, so for best speed, consider Conda or source installation.
-
-1. Pull the Docker image:
-   ```bash
-   docker pull tianqinzhong/chimera
-   ```
-
-2. Run a test to check the installation:
-   ```bash
-   docker run -it --rm -v "$(pwd):/app/data" tianqinzhong/chimera -v
-   ```
-
-3. Run Chimera in Docker:
-   ```bash
-   docker run -it --rm -v "$(pwd):/app/data" tianqinzhong/chimera command
-   ```
-
-Replace `command` with the specific Chimera command you want to execute, such as running an analysis or building a database.
-
-
----
-
-## Usage Guide
-
-Chimera provides five main functions to facilitate metagenomic data processing: `download`, `build`, `download_and_build`, `classify`, and `profile`. Below are brief descriptions of each function and example usage.
-
-### 1. Download
-
-The `download` function allows users to fetch datasets from NCBI or other sources. Chimera supports both **interactive mode** and **command-line parameter mode** for downloading datasets.
-
-#### Interactive Mode
-
-Running `chimera download` without additional parameters enters an **interactive mode** where users can specify datasets to download through a guided process.
-
-**Example:**
 ```bash
 chimera download
 ```
-This command starts the interactive session for dataset downloading.
 
-#### Command-Line Parameter Mode
+Without additional arguments, Chimera starts an interactive NCBI download wizard. It asks for the source database, organism group, assembly filters, output directory, thread count, and optional taxid filters.
 
-Chimera also supports direct command-line parameters for automated or scripted downloads:
+The downloader writes a build-ready directory:
 
-**Available Parameters:**
-- `-d` or `--database`: Database to download from (default: `refseq`)
-  - Options: `genbank`, `refseq`
-- `-g` or `--organism-group`: Organism groups to download (comma-separated)
-  - Options: `archaea`, `bacteria`, `fungi`, `human`, `invertebrate`, `metagenomes`, `other`, `plant`, `protozoa`, `vertebrate_mammalian`, `vertebrate_other`, `viral`
-- `-T` or `--taxid`: Taxonomy IDs to download (comma-separated)
-  - Example: `562,623`
-- `-f` or `--file-types`: File types to download (default: `genomic.fna.gz`)
-  - Options: `genomic.fna.gz`, `assembly_report.txt`, `protein.faa.gz`, `genomic.gbff.gz`
-- `-l` or `--assembly-level`: Assembly levels to download (default: `complete genome`)
-  - Options: `complete genome`, `chromosome`, `scaffold`, `contig`
-- `-c` or `--refseq-category`: RefSeq categories to download (default: `reference genome`)
-  - Options: `reference genome`, `na`
-- `-A` or `--limit-assembly`: Limit number of assemblies to download (default: `0` for unlimited)
-- `-o` or `--output-dir`: Output directory path (default: `./genome_output`)
-- `-t` or `--threads`: Number of download threads (default: `1`)
-- `-k` or `--dry-run`: Enable dry run mode (no actual downloads)
-- `-i` or `--fix-mode`: Only re-download incomplete or failed files
-- `-m` or `--md5-check`: Check MD5 of downloaded files (default: `True`)
-- `-q` or `--quiet`: Suppress output messages
-- `-v` or `--verbose`: Show detailed progress messages
-
-**Example with Command-Line Parameters:**
-```bash
-chimera download -d refseq -g "bacteria,archaea" -l "complete genome" -f genomic.fna.gz -o ./my_genomes -t 4
-```
-This command downloads complete bacterial and archaeal genomes from RefSeq, saving them to the `./my_genomes` directory using 4 download threads.
-
-### 2. Build
-
-The `build` function is used to construct a classification database from the downloaded datasets. It requires specifying the **input file** (usually `target.tsv` located in the downloaded folder) and allows customization of other parameters, though most parameters have sensible defaults.
-
-**Available Parameters:** 
-- `-i` or `--input` (required): Input file (e.g., `target.tsv`). This file specifies the sequences and their corresponding taxonomic identifiers for building the database.
-- `-o` or `--output`: Output database file name (default: `ChimeraDB`). The resulting database will be saved as a binary file with this name.
-- `--strobe-k`: Randstrobe-based strobemer k-mer length (default: `28`).
-- `--strobe-order`: Strobemer order (default: `2`). Only order `2` is currently supported.
-- `--strobe-w-min`: Minimum strobe window (default: `12`).
-- `--strobe-w-max`: Maximum strobe window (default: `32`).
-- `-l` or `--min-length`: Minimum sequence length. `auto` uses the minimum span required by the selected strobemer configuration.
-- `-t` or `--threads`: Number of threads for parallel processing.
-- `--load-factor`: Load factor for the interleaved merged cuckoo filter (IMCF).
-- `--presence-unique-deg`: Degree cutoff treated as unique signature evidence in coverage metadata.
-- `--taxonomy-kind`: Taxonomy source identifier (`auto|ncbi|gtdb`).
-- `--taxonomy-version`: Taxonomy version label carried into the built database metadata.
-- `-q` or `--quiet`: Suppresses verbose output. Use this option to minimize output during the building process.
-
-**Example:**
-```bash
-chimera build -i data/target.tsv -o ChimeraDB
-```
-This command builds a classification database from the `target.tsv` file located in the `data/` directory and outputs the database as a single file named `ChimeraDB`.
-
-### 3. Download and Build
-
-The `download_and_build` function simplifies the process by downloading the required dataset and immediately building a classification database. Unlike `build`, this function does not require an input file, and the default output database name is `ChimeraDB`, though it can be customized.
-
-**Available Parameters:**
-- `-o` or `--output`: Output database file name (default: `ChimeraDB`).
-- Other parameters are the same as those in the `build` function.
-
-**Example:**
-```bash
-chimera download_and_build -o ChimeraDB
-```
-This command downloads the necessary data and directly constructs the classification database, outputting it as a single file named `ChimeraDB`.
-
-### 4. Classify
-
-The `classify` function allows users to perform taxonomic classification on single or paired input sequence files using the specified classification database. It supports multiple files for both single-end and paired-end reads. For paired-end reads, the number of input files must be even.
-
-**Available Parameters:** 
-- `-i` or `--single`: Input files for classification (supports multiple files).
-- `-p` or `--paired`: Paired input files for classification (supports multiple paired files, must be an even number).
-- `-o` or `--output`: Output file name for classification results (default: `ChimeraClassify`).
-- `-d` or `--database` (required): The classification database file (e.g., `ChimeraDB`).
-- `-s` or `--shot-threshold`: Shot threshold for classification accuracy (default: `0.7`).
-- `-t` or `--threads`: Number of threads to use during classification (default: `32`).
-- `-m` or `--mode`: Classification mode, either:
-- **fast**: Prioritizes speed, returning the top hit.
-- **normal** (default): Provides a more comprehensive classification, including all taxids that meet the threshold.
-- `-b` or `--batch-size`: Batch size for processing sequences (default: `400`). Larger batches may improve performance, but require more memory.
-  
-#### Algorithm Selection (Mutually Exclusive Options):
-You can select one of the following classification algorithms:
-
-- `-e` or `--em`: Use the **EM (Expectation-Maximization)** algorithm for classification.
-- `-V` or `--vem` : Use the **Variational EM** algorithm for classification. This is the default classification method if no other algorithm is specified.
-- `--em-iter`: Number of EM iterations (default: `100`).
-- `--em-threshold`: Convergence threshold for EM algorithm (default: `0.001`).
-- `--none`: Do not use LCA or EM for classification. In this case, classification is based solely on the top hit from the database.
-- `-f` or `--filter`: Select the type of filter to use (ICF, HICF, IMCF) and default to `IMCF`
-- `-q` or `--quiet`: Suppresses verbose output.
-
-> ⚠️ 注意：`-l/--lca`、`--lca-fallback` 以及 `--skip-postfilter/--no-skip-postfilter` 参数暂时废弃，当前版本的 CLI 不再提供这些开关，内部行为保持原有默认逻辑。
-
-**Examples:**
-For single-end input files:
-```bash
-chimera classify -i input1.fasta input2.fasta -o results.txt -d ChimeraDB
-```
-This command classifies the sequences in `input1.fasta` and `input2.fasta` using the `ChimeraDB` database, and saves the results to `results.txt`.
-
-For paired-end input files (must be an even number):
-```bash
-chimera classify -p paired1_1.fasta paired1_2.fasta paired2_1.fasta paired2_2.fasta -o results.txt -d ChimeraDB
-```
-This command classifies the paired-end sequences using the `ChimeraDB` database, saving the output to `results.txt`.
-
-### 5. Profile
-
-The `profile` function generates a taxonomic profile from `ChimeraEvidence.tsv`, the aggregate evidence file produced by `classify`. `ChimeraClassify.tsv` is the per-read selective classification output and is not used as the abundance input. By default, `profile` calculates abundance, Shannon index, and Simpson index at different taxonomic levels (e.g., kingdom, phylum, class, order, family, genus, and species). Additionally, the `-k` option can be used to generate a **Krona chart** for interactive visualization.
-
-**Available Parameters:**
-- `-i` or `--input` (required): Input file(s) containing `ChimeraEvidence.tsv` aggregate evidence.
-- `-o` or `--output`: Output file name for the profile (default: `ChimeraProfile`).
-- `-k` or `--krona`: Generate a Krona chart for interactive visualization.
-
-By default, Chimera calculates:
-- **Taxonomic abundance** at different levels.
-- **Shannon index**: A measure of diversity within a community.
-- **Simpson index**: A measure of dominance in the community.
-
-**Example:**
-```bash
-chimera profile -i ChimeraEvidence.tsv
-```
-This command generates a taxonomic profile with abundance, Shannon index, and Simpson index from the aggregate evidence in `ChimeraEvidence.tsv`.
-
-To generate a Krona chart:
-```bash
-chimera profile -i ChimeraEvidence.tsv -k
-```
-This command generates both the taxonomic profile and a Krona chart (`ChimeraProfile.html`) for visualizing the results.
-
----
-
-
-## Input/Output Formats
-
-Chimera supports a variety of input and output formats to handle sequence data and results from classification tasks. This section provides details on the accepted formats for both input files and output results.
-
-### Database Input and Construction
-
-To construct a classification database, Chimera requires a specific input format for the database construction process.
-
-- **Database input (`target.tsv`)**: To build a classification database, Chimera requires a `target.tsv` file. Each line in this file should contain the path to a species-specific FASTA file and the corresponding taxonomic ID (taxid), separated by a tab (`\t`).
-
-**Example of `target.tsv` format**:
-```
-/path/to/species1.fasta   12345
-/path/to/species2.fasta   67890
+```text
+genome_output/
+  target.tsv
+  tax.info
+  taxonomy.meta
+  taxdump/
+  2026-.../
+    files/
+      ...
 ```
 
-Once the database is constructed, Chimera stores it as a **binary file** using the **Cereal library**. This binary format allows for efficient storage and quick access during classification tasks.
-
-**Example:**
-```bash
-chimera build -i target.tsv -o ChimeraDB
-```
-This command constructs a database from the `target.tsv` file and outputs a binary file `ChimeraDB` using the Cereal library.
-
-### Classification Input and Output
-
-Chimera accepts various sequence file formats for classification and generates results in a tab-separated values (TSV) format.
-
-- **Input formats**:
-  - **FASTA/FASTQ**: Chimera supports plain text FASTA and FASTQ files, as well as compressed `.gz` and `.bz2` formats.
-  - **Paired-end reads**: When providing paired-end reads, an even number of input files must be specified with the `--paired` option.
-
-**Example of valid input files**:
-- `input.fasta`
-- `input.fasta.gz`
-- `input1.fastq`, `input2.fastq` (paired)
-
-**Classification output format** (`classify` function):
-- **TSV (Tab-Separated Values)**: Classification results are written to a TSV file. Each line includes the sequence identifier, the taxid with the highest hit count, followed by other taxids that meet the threshold.
-
-    **Format**:
-    ```
-    sequence_identifier   highest_hit_taxid:hit_count   ...other_taxid:hit_count_above_threshold
-    ```
-    In **fast mode**, only the highest hit taxid and hit count are reported. Example:
-    ```
-    seq1    12345:10   67890:5
-    seq2    12345:8
-    ```
-    If **LCA mode** is selected, the taxid classified using LCA will be represented as `taxid:0`. This indicates that the LCA algorithm was applied for classification.
-    
-    If **EM mode** is selected, the taxid classified using the EM algorithm will be represented as `taxid:1`.
-
-**Example:**
-```bash
-chimera classify -i input.fasta -d ChimeraDB -o results.tsv
-```
-This command classifies the sequences in `input.fasta` using the `ChimeraDB` database and outputs the results in `results.tsv`.
-
-### Profiling Output
-
-Chimera’s `profile` function consumes `ChimeraEvidence.tsv`, not the final per-read labels in `ChimeraClassify.tsv`. This keeps read-level primary labels and sample-level abundance evidence as separate outputs. The generated profile reports taxonomic abundance at various levels (e.g., superkingdom, clade, phylum, class, order, family, genus, species). The output includes the count, relative abundance, Shannon index, and Simpson index for each taxonomic level.
-
-**Output format:**
-The output is divided by taxonomic levels, and each section contains the following columns:
-- **Level**: The taxonomic level (e.g., superkingdom, clade, phylum).
-- **Taxon**: The name of the taxon at the specified level.
-- **Count**: The number of sequences classified under that taxon.
-- **Relative Abundance (%)**: The percentage of sequences relative to the total.
-- **Shannon Index**: A measure of diversity.
-- **Simpson Index**: A measure of dominance.
-
-**Example Output:**
-
-```
-Level   Taxon             Count   Relative Abundance (%)  Shannon Index  Simpson Index
-
-## Superkingdom Level ##
-superkingdom    Archaea    110671   99.43   0.0353   0.0114
-superkingdom    unclassified   639   0.57   0.0353   0.0114
-
-## Clade Level ##
-clade   TACK group    110671   99.43   0.0353   0.0114
-clade   unclassified   639   0.57   0.0353   0.0114
-
-## Phylum Level ##
-phylum   Thermoproteota   110671   99.43   0.0353   0.0114
-phylum   unclassified   639   0.57   0.0353   0.0114
-
-## Class Level ##
-class   Thermoprotei   110671   99.43   0.0353   0.0114
-class   unclassified   639   0.57   0.0353   0.0114
-
-## Order Level ##
-order   Desulfurococcales   110671   99.43   0.0353   0.0114
-order   unclassified   639   0.57   0.0353   0.0114
-
-## Family Level ##
-family   Desulfurococcaceae   110671   99.43   0.0353   0.0114
-family   unclassified   639   0.57   0.0353   0.0114
-
-## Genus Level ##
-genus   Aeropyrum   110669   99.42   0.0356   0.0115
-genus   unclassified   639   0.57   0.0356   0.0115
-genus   Staphylothermus   2   0.00   0.0356   0.0115
-
-## Species Level ##
-species   Aeropyrum pernix   110610   99.37   0.0401   0.0125
-species   unclassified   639   0.57   0.0401   0.0125
-species   Aeropyrum camini   59   0.05   0.0401   0.0125
-species   Staphylothermus hellenicus   2   0.00   0.0401   0.0125
-```
-
-This output provides detailed information on the distribution and diversity of sequences across various taxonomic levels.
-
-**Krona Chart Option**:
-Additionally, you can generate a Krona chart for interactive visualization using the `-k` option.
-
-**Example:**
-```bash
-chimera profile -i ChimeraEvidence.tsv -o krona_chart -k
-```
-This command generates a `krona_chart.html` file from the aggregate evidence, which can be opened for visualizing the taxonomic profile.
-
-You can see an example of Krona chart visualization here: [Krona example chart](https://telatin.github.io/microbiome-bioinformatics/data/krona/krona-test.html).
-
----
-
-
-## Performance Optimization
-
-Chimera is designed to handle large-scale metagenomic data efficiently, but performance can vary based on system configuration and dataset size. Below are some tips and recommendations for optimizing Chimera's performance during database construction, classification, and profiling.
-
-### 1. Utilize Multi-threading
-
-Chimera supports multi-threading, which can significantly reduce the time required for database construction and classification. You can control the number of threads using the `-t` or `--threads` parameter. The default is set to `32`, but you can adjust it based on the available CPU cores on your system.
-
-**Example:**
-```bash
-chimera classify -i input.fasta -d ChimeraDB -o results.tsv -t 64
-```
-In this example, `64` threads are used, which can dramatically improve speed if your system has sufficient cores.
-
-**Tip**: Set the number of threads to match or slightly exceed the number of physical CPU cores for optimal performance.
-
-### 2. Adjust Batch Size
-
-For classification tasks, Chimera processes sequences in batches. By default, the batch size is set to `400` sequences. Increasing the batch size can improve performance, especially when processing large datasets, as it reduces the overhead of repeatedly loading data.
-
-You can adjust the batch size using the `-b` or `--batch-size` parameter.
-
-**Example:**
-```bash
-chimera classify -i input.fasta -d ChimeraDB -o results.tsv -b 1000
-```
-Increasing the batch size to `1000` sequences can result in faster processing times, but be mindful of system memory limitations when dealing with very large batch sizes.
-
-### 3. Optimize Database Construction Parameters
-
-When building a classification database, you can adjust several parameters to optimize the process for your dataset:
-
-- **K-mer size (`-k`)**: The default k-mer size is `19`, but you can adjust it based on the nature of your data. Smaller k-mer sizes might increase sensitivity but could also introduce more noise.
-- **Window size (`-w`)**: Increasing the window size can reduce false positives but might slow down the construction process. The default is `31`, which works well for most datasets.
-- **Minimum sequence length (`-l`)**: If your dataset contains very short sequences, consider adjusting the minimum sequence length to exclude them from the analysis. This can save processing time and improve accuracy.
-
-**Example:**
-```bash
-chimera build -i target.tsv -o ChimeraDB -k 21 -w 35 -l 100
-```
-In this example, the k-mer size is increased to `21`, the window size to `35`, and sequences shorter than `100` base pairs are excluded.
-
-### 4. Use Appropriate Classification Mode
-
-Chimera offers two classification modes: `fast` and `normal`. The `fast` mode prioritizes speed by only reporting the top hit, whereas `normal` mode provides a more comprehensive result by including all taxids above the threshold.
-
-- **Fast Mode**: Use `fast` mode (`-m fast`) when speed is a priority, and you only need the top classification hit.
-- **Normal Mode**: Use `normal` mode (`-m normal`) for more detailed results, but be prepared for longer processing times.
-
-**Example:**
-```bash
-chimera classify -i input.fasta -d ChimeraDB -o results.tsv -m fast
-```
-This example runs the classification in `fast` mode, optimizing for speed.
-
-### 5. Manage Memory and Disk I/O
-
-Large datasets can be memory-intensive, especially during database construction and classification. To avoid memory-related issues or performance bottlenecks:
-
-- **Ensure sufficient RAM**: For large datasets, having more RAM allows Chimera to load and process data more efficiently.
-- **Use SSDs**: If possible, store input files and the Chimera database on SSDs rather than HDDs. This can significantly reduce disk I/O bottlenecks and improve overall performance.
-
-### 6. Adjust the Load Factor
-
-During database construction, the **load factor** (`--load-factor`) controls the fill ratio of the internal interleaved cuckoo filter. The default value is `0.95`, but you can lower it to improve query performance at the expense of slightly larger database size.
-
-**Example:**
-```bash
-chimera build -i target.tsv -o ChimeraDB --load-factor 0.85
-```
-In this example, a load factor of `0.85` is used, which can speed up classification queries at the cost of increasing the database size.
-
----
-
-## FAQ
-
-### 1. What should I do if the database download is interrupted or fails?
-
-If your database download is interrupted or fails during the interactive mode, you can choose to re-download the incomplete or failed data by enabling the fix-only mode. When prompted, type `y` to proceed.
-
-**Example prompt:**
-```
-Enable fix-only mode (re-download incomplete or failed data) [y/N]:
-```
-Enter `y` to resume and fix the download.
-
-
-### 2. Can I use Chimera without Python?
-
-Yes, you can use Chimera without relying on Python. Python is primarily used to provide functionality for downloading datasets and generating profiles. If you have built Chimera using Conda, you can simply use the following command to view available options:
+For scripted downloads, pass the same choices as command-line options:
 
 ```bash
-Chimera -h
+chimera download \
+  -d refseq \
+  -g archaea,bacteria \
+  -l "complete genome" \
+  -c "reference genome" \
+  -f genomic.fna.gz \
+  -o genome_output \
+  -t 16
 ```
 
-For source code builds, the `Chimera` executable is generated directly and can be run without Python:
+Useful options:
+
+| Option | Meaning |
+| --- | --- |
+| `-d refseq` | Use RefSeq. |
+| `-g archaea,bacteria` | Select organism groups. |
+| `-T 562,623` | Restrict to NCBI taxids. |
+| `-A 100` | Cap assemblies for a small test. |
+| `-k` | Dry run. |
+
+The documented workflow in this README uses NCBI taxonomy.
+
+## Build a Database
+
+Build from downloader output:
 
 ```bash
-./Chimera -h
+chimera build \
+  -i genome_output/target.tsv \
+  -o ChimeraDB \
+  -t 32
 ```
 
-For Docker, Chimera is the default entry point. To skip the default `chimera` command and access the Docker container's shell, use the following command:
+`ChimeraDB` is a directory. Pass the directory itself to `classify`:
 
 ```bash
-docker run -it --rm -v "$(pwd):/app/data" --entrypoint Chimera tianqinzhong/chimera -h
+chimera classify -i reads.fastq.gz -d ChimeraDB -o results
 ```
 
-### 3. Where is the taxfile required for LCA, and how do I interpret LCA results or EM reuslts?
+When `target.tsv` comes from `chimera download`, the wrapper finds the adjacent `taxdump/`. If NCBI taxdump is missing, the wrapper can download and verify it automatically before invoking the native build.
 
-If you are using Chimera's built-in `download` function, the `taxfile` is located in the downloaded dataset folder as `tax.info`. For custom datasets, you will need to manually create a `taxfile` in a specific format. Each line of the file represents a taxonomic rank and includes the following fields, separated by tabs:
+### Local Read Resolution
 
-```
-<taxid>   <parent taxid>   <rank>   <name>
-```
+For NCBI databases, Chimera builds local read resolution data by default when usable taxonomy data are available. LPC is used by `classify` only when the database contains the required data and the sample contains eligible local ambiguity.
 
-- **taxid**: The unique identifier for the taxonomic entity.
-- **parent taxid**: The taxid of the parent taxon in the hierarchy.
-- **rank**: The taxonomic rank (e.g., species, genus, family, etc.).
-- **name**: The scientific name of the taxon.
+Disable LPC during build if you want a smaller database or do not want this extra build step:
 
-For example:
-```
-1       0           no rank        root
-2157    131567      superkingdom   Archaea
-2158    183925      order          Methanobacteriales
-2159    2158        family         Methanobacteriaceae
-2160    2159        genus          Methanobacterium
-2162    2160        species        Methanobacterium formicicum
+```bash
+chimera build \
+  -i genome_output/target.tsv \
+  -o ChimeraDB \
+  --no-local-resolution
 ```
 
-This example defines a taxonomic hierarchy starting from `root` (no rank) down to the species **Methanobacterium formicicum**.
+Disable LPC during classification if you want to force the main classifier path:
 
-- **taxid 1** is the root of the hierarchy with no parent (`parent taxid = 0`).
-- **taxid 2157** represents the **Archaea** superkingdom, which belongs to the parent taxon **131567**.
-- Similarly, **taxid 2162** represents the species **Methanobacterium formicicum**, which is a descendant of the genus **Methanobacterium** (`taxid 2160`).
-
-### Interpreting LCA and EM Results
-
-In the classification output:
-- Any result classified using the **LCA algorithm** will be shown as `taxid:0`. This indicates that the Lowest Common Ancestor (LCA) method was applied.
-- Any result classified using the **EM algorithm** will be shown as `taxid:1`. This indicates that the Expectation-Maximization (EM) algorithm was applied for more accurate classification.
-
-Both algorithms aim to improve classification accuracy when direct classification to a specific taxonomic level is challenging.
-
-### 4. What should I do if I encounter the error message: 
-
-```
-terminate called after throwing an instance of 'std::runtime_error'
-what(): Filter is full. Cannot insert more tags.
+```bash
+chimera classify \
+  -i reads.fastq.gz \
+  -d ChimeraDB \
+  -o results \
+  --no-local-resolution
 ```
 
-This error occurs when the cuckoo filter reaches its capacity and fails to insert a feature hash within the allowed number of relocation attempts. This situation often arises when the load factor is too high for the dataset being used.
+## Custom `target.tsv`
 
-**Solution**:
-- **Lower the Load Factor**: Adjust the `--load-factor` parameter to a lower value when constructing your database. This change increases the space available for new entries, helping to avoid the filter becoming full and preventing infinite relocation attempts.
-- **Experiment with Different Values**: The optimal load factor can vary depending on the dataset. You may need to try multiple values to find the best setting that balances space utilization and performance.
-- **Improved Accuracy**: Using a lower load factor can also lead to higher classification accuracy, as it reduces the likelihood of collisions and increases the robustness of the filter.
+You can build Chimera databases from your own references. Write a two-column `target.tsv` with no header:
 
-### 5. How do I choose an appropriate load factor and maximum number of hashes?
+```text
+/absolute/path/to/reference_1.fna.gz    562
+/absolute/path/to/reference_2.fna.gz    562
+/absolute/path/to/reference_3.fna.gz    623
+```
 
-Selecting the right **load factor** and **maximum number of hashes** is crucial for optimizing both the performance and accuracy of database construction.
+Column 1 is a FASTA/FASTQ file path. Column 2 is the taxid assigned to all sequences in that file. Tabs are recommended; any whitespace separator is accepted by the build parser. Multiple files can use the same taxid.
 
-**Recommendations**:
-- **Load Factor**: The optimal load factor can depend on the characteristics of your dataset. Below are examples from our own usage:
-  - **Archaea (2024.10.10)**: We used a load factor of `0.95`.
-  - **CompleteONE (2024.9.26)**: We used a load factor of `0.6`.
-  - **Complete (2024.10.7)**: We used a load factor of `0.58`.
+For NCBI builds, use NCBI taxids. If you provide a custom `target.tsv`, either place a matching `taxdump/` beside it or pass `--taxonomy-dir`:
 
-  Adjusting the load factor impacts how densely packed the cuckoo filter is. A higher load factor can improve space efficiency but may increase the risk of insertion failures, while a lower load factor provides more room for new entries and can enhance accuracy at the cost of increased space usage.
+```bash
+chimera build \
+  -i target.tsv \
+  -o ChimeraDB \
+  --taxonomy-kind ncbi \
+  --taxonomy-dir /path/to/taxdump \
+  -t 32
+```
 
-- **Maximum Number of Hashes**: We recommend using the default value of **2,000,000** hashes. Increasing the maximum hash count beyond this value generally yields minimal improvements in classification accuracy but can significantly impact performance, potentially causing longer build times and increased memory usage.
+If `--taxonomy-dir` is omitted and the build uses NCBI taxonomy, the Python wrapper can download NCBI taxdump automatically.
 
-By using these settings as guidelines, you can tailor the load factor and maximum number of hashes to suit your specific data and performance requirements.
+## Classify and Profile
 
-<br/>By carefully adjusting the load factor, you can ensure that the database construction completes without hitting the capacity limits of the cuckoo filter.
+Single-end reads:
 
----
-## References & Acknowledgements
+```bash
+chimera classify \
+  -i reads.fastq.gz \
+  -d ChimeraDB \
+  -o results \
+  -t 32
+```
 
-We would like to acknowledge the following repositories and libraries that contributed to the development of Chimera:
+Paired-end reads:
 
-- **[klib](https://github.com/attractivechaos/klib)**: This lightweight library was used for its highly efficient implementations of `khash` (a fast hash table) and `kvector` (a dynamic array). These data structures were integral in handling sequence data and managing the large volumes of information necessary for metagenomic classification.
+```bash
+chimera classify \
+  -p sample_R1.fastq.gz sample_R2.fastq.gz \
+  -d ChimeraDB \
+  -o results \
+  -t 32
+```
 
-- **[seqan3](https://github.com/seqan/seqan3)**: SeqAn3 supplies the modern C++ sequence-analysis infrastructure (alphabets, range adaptors, I/O, etc.) that lets Chimera stand up a stable strobemer-based feature pipeline quickly.
+With the Python wrapper, `-o` is an output directory. The directory must be empty or absent; Chimera will not write into a non-empty existing output directory.
 
-- **[strobealign](https://github.com/ksahlin/strobealign)**: Chimera’s strobemer/randstrobe module borrows the sampling strategy from strobealign, yielding high-quality k-mer subsampling and hash features in the current strobemer pipeline.
+`classify` already writes `ChimeraProfile.tsv`. A separate `profile` command is only needed for auxiliary conversion from an existing aggregate table:
 
-- **[CLI11](https://github.com/CLIUtils/CLI11)**: This header-only library was used to provide Chimera's flexible and intuitive command-line interface. CLI11 allows users to easily specify options, input files, and configurations, enabling the tool to handle complex workflows with minimal user friction.
+```bash
+chimera profile -i existing_aggregate.tsv -o ChimeraProfile
+chimera profile -i existing_aggregate.tsv -o ChimeraProfile -k
+```
 
-- **[moodycamel::ConcurrentQueue](https://github.com/cameron314/concurrentqueue)**: This library provides a lock-free queue implementation that significantly accelerates multi-threaded processing. In Chimera, it is utilized to efficiently manage task queues, enabling parallel processing of large datasets and improving overall throughput.
+The `-k` option requests Krona output. Krona Tools are optional and are not installed by the default Chimera Conda package; install Krona separately if you need HTML Krona plots.
 
-- **[genome_updater](https://github.com/pirovc/genome_updater)**: Genome Updater is used to quickly and efficiently download genomic data from public databases. By integrating this tool, Chimera can retrieve and update datasets from sources like NCBI, automating the data acquisition step and ensuring users always have access to the latest reference genomes.
+## Output Files
 
-- **[robin_hood unordered map & set](https://github.com/martinus/robin-hood-hashing)**: This library provides an optimized hash map implementation with Robin Hood hashing, ensuring highly efficient memory usage and fast lookups. It is used in Chimera to manage large datasets and provide fast access to taxonomic information.
+| File | Written by default | Purpose |
+| --- | --- | --- |
+| `ChimeraClassify.tsv` | yes | Per-read taxonomic assignments and read-level metadata. |
+| `ChimeraProfile.tsv` | yes | Default abundance profile for normal Chimera use. |
+| `ChimeraProfile.cami.tsv` | only with `--profile-cami` | CAMI/OPAL-compatible exchange format for benchmark tools. |
 
-- **[cuckoo filter](https://github.com/efficient/cuckoofilter)**: While Chimera's implementation of the cuckoo filter differs significantly, the original **cuckoo filter** provided the initial inspiration for efficient membership testing, which helped shape Chimera’s approach to fast and scalable classification.
+### `ChimeraClassify.tsv`
 
-- **[ganon](https://github.com/pirovc/ganon)**: Ganon’s implementation of the **LCA (Lowest Common Ancestor)** algorithm was integrated into Chimera to resolve ambiguous classifications by identifying the most specific shared taxonomic ancestor. This feature improves classification accuracy, particularly in complex datasets with shared sequences across multiple taxa.
+Per-read classification output. Each row reports the read identifier, selected taxonomic assignment, and optional metadata such as posterior top-k entries or rejection reasons.
 
-- **[cereal](https://github.com/USCiLab/cereal)**: **cereal** is a C++11 library for serialization, used in Chimera for saving and loading large taxonomic databases efficiently. Its flexibility and ease of integration have made managing persistent data straightforward.
+Example shape:
 
-- **[sdsl-lite](https://github.com/simongog/sdsl-lite)**: Chimera uses **sdsl** (Succinct Data Structure Library) mainly for its **bit_vector** functionality, which helps in efficiently representing binary data and manipulating large sets of information with minimal memory overhead.
+```text
+read_id    taxid:score    POST_TOPK=...
+read_id    unclassified   REJECT=...   HINT=...
+```
 
-- **[SIMDe](https://github.com/simd-everywhere/simde)**: **SIMDe** (Single Instruction, Multiple Data Everywhere) was used to enable portable SIMD (vectorized) instructions across multiple platforms, enhancing the speed of computational tasks without sacrificing compatibility.
+This file is for read-level inspection and downstream filtering. It is not the abundance profile, and `ChimeraProfile.tsv` should not be reconstructed by simply counting final labels.
 
+### `ChimeraProfile.tsv`
 
+Taxonomic abundance profile produced by `classify`.
 
-We are grateful to the open-source community for providing these valuable resources!
+Main columns:
 
----
+| Column | Meaning |
+| --- | --- |
+| `rank` | Taxonomic rank of the reported row. |
+| `taxid` | NCBI taxid. |
+| `name` | Scientific name. |
+| `relative_abundance` | Abundance fraction. |
+| `percentage` | Abundance percentage. |
+| `read_support` | Count-like profile support; not a direct histogram of final labels. |
+| `parent_taxid`, `parent_name` | Parent lineage context. |
+| `genus_taxid`, `genus_name` | Genus-level context when available. |
+| `lineage_taxids`, `lineage_names` | Semicolon-separated lineage. |
+| `single_source_limited` | Whether the row is supported by only one reference/source context in the profile readout. |
+| `reportability` | Why the row is reportable in the default profile. |
 
-## Publication
+### `ChimeraProfile.cami.tsv`
 
-Chimera has been preprinted on **BioRxiv**, providing an in-depth analysis of its methodology and performance.
+CAMI/OPAL-compatible profile output. It is written only when `--profile-cami` is requested.
 
-📄 **Title:** *Chimera: Ultrafast and Memory-efficient Database Construction for High-Accuracy Taxonomic Classification in the Age of Expanding Genomic Data*  
-🔗 **BioRxiv Link:** [https://www.biorxiv.org/content/10.1101/2025.03.26.645388v1](https://www.biorxiv.org/content/10.1101/2025.03.26.645388v1)  
-📌 **DOI:** [https://doi.org/10.1101/2025.03.26.645388](https://doi.org/10.1101/2025.03.26.645388)  
-📅 **Preprint Date:** March 28, 2025
+## Database Layout
 
-This publication presents the latest findings and validation results of Chimera. If you find this work useful, please consider citing it.
+A Chimera database is a directory containing the core index, taxonomy metadata, and optional LPC data:
 
+```text
+ChimeraDB/
+  core.imcf
+  manifest.tsv
+  ...
+```
+
+Internal filenames may change between releases. For reproducibility, keep the whole database directory together rather than moving only `core.imcf`.
+
+## Performance Notes
+
+- Put the database and reads on SSD storage when possible.
+- Use `-t` to set thread count. The wrapper default is `min(os.cpu_count(), 64)`. You can pass a higher value explicitly, but more threads are not always faster.
+- Large reference databases can require substantial RAM during both build and classify.
+- LPC can improve difficult local assignments but adds runtime and memory cost.
+- Prebuilt binaries target AVX2-capable x86-64 machines. Use a portable source build on older CPUs.
+
+## Benchmarking
+
+Larger tool comparisons are maintained in a separate repository:
+
+```text
+https://github.com/LoadStar822/ChimeraBenchmark
+```
+
+The benchmark repository is optional and is not required for normal download, build, or classify workflows. If you clone Chimera with `--recursive`, Git may initialize the benchmark submodule under `third_party/`; ordinary users can ignore it.
+
+For benchmark tools that require CAMI format, run `classify` with `--profile-cami`.
+
+## Citation
+
+If you use Chimera, please cite:
+
+**Chimera: Ultrafast and Memory-efficient Database Construction for High-Accuracy Taxonomic Classification in the Age of Expanding Genomic Data**
+
+- BioRxiv: <https://www.biorxiv.org/content/10.1101/2025.03.26.645388v1>
+- DOI: <https://doi.org/10.1101/2025.03.26.645388>
+
+GitHub also reads the repository `CITATION.cff` file.
+
+## References and Acknowledgements
+
+Chimera builds on several open-source projects:
+
+- [SeqAn3](https://github.com/seqan/seqan3) provides modern sequence I/O, sequence alphabets, and BGZF-aware stream support used throughout the build and classify pipeline.
+- [CLI11](https://github.com/CLIUtils/CLI11) provides the C++ command-line parser.
+- [cereal](https://github.com/USCiLab/cereal) and [SDSL-lite](https://github.com/simongog/sdsl-lite), distributed with SeqAn3, support serialization and succinct data-structure components used by Chimera indexes.
+- [robin-hood hashing](https://github.com/martinus/robin-hood-hashing) is used for fast hash tables in classification and local-resolution code paths.
+- [xxHash](https://github.com/Cyan4973/xxHash) is used for fast non-cryptographic hashing.
+- [SIMDe](https://github.com/simd-everywhere/simde) provides portable SIMD interfaces used when building Chimera without AVX2-specific code.
+- [strobemers](https://github.com/ksahlin/strobemers) and ideas from [strobealign](https://github.com/ksahlin/strobealign) inform Chimera's strobemer/randstrobe feature construction.
+- [genome_updater](https://github.com/pirovc/genome_updater) is bundled for NCBI genome download workflows.
+- [Krona Tools](https://github.com/marbl/Krona) can be used by the auxiliary profile conversion command when Krona output is requested.
+- [klib](https://github.com/attractivechaos/klib) contributes low-level C utilities used in the C/C++ codebase.
+- [OpenMP](https://www.openmp.org/), [zlib](https://zlib.net/), [bzip2](https://sourceware.org/bzip2/), and [OpenSSL](https://github.com/openssl/openssl) provide parallel execution, compressed file support, and checksum/download infrastructure.
+
+We thank the maintainers of these projects and the broader open-source bioinformatics community.
 
 ## License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
+Chimera is released under the MIT License. See [LICENSE](LICENSE).
 
+## Contact
 
-
-## Contact & Support
-For any questions or support, feel free to reach out to us:
-- **Website**: [MalabZ](http://lab.malab.cn/~cjt/MSA/)
-- **Personal Homepage**: [Qinzhong Tian](https://loadstar822.github.io/)
-- **Email**: tianqinzhong@qq.com
+- GitHub: <https://github.com/LoadStar822/Chimera>
+- Author: Qinzhong Tian
+- Homepage: <https://loadstar822.github.io/>

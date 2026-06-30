@@ -128,18 +128,6 @@ struct ChainStats {
   uint32_t t_max{};
 };
 
-struct HitOut {
-  uint32_t tid{};
-  uint32_t score{};
-  uint32_t count{};
-  uint32_t q_start{};
-  uint32_t q_end{};
-  uint32_t t_start{};
-  uint32_t t_end{};
-  uint8_t orient{};
-  int32_t diag{};
-};
-
 struct TaxonScore {
   uint32_t taxid{};
   uint32_t score{};
@@ -1723,33 +1711,6 @@ bool try_load_direct_lpc_targets_compact(
   return true;
 }
 
-void sort_chain_hits(std::vector<HitOut> &hits) {
-  std::sort(hits.begin(), hits.end(), [](const HitOut &a, const HitOut &b) {
-    if (a.score != b.score) {
-      return a.score > b.score;
-    }
-    if (a.count != b.count) {
-      return a.count > b.count;
-    }
-    if (a.tid != b.tid) {
-      return a.tid < b.tid;
-    }
-    if (a.q_start != b.q_start) {
-      return a.q_start < b.q_start;
-    }
-    if (a.q_end != b.q_end) {
-      return a.q_end < b.q_end;
-    }
-    if (a.t_start != b.t_start) {
-      return a.t_start < b.t_start;
-    }
-    if (a.t_end != b.t_end) {
-      return a.t_end < b.t_end;
-    }
-    return a.orient < b.orient;
-  });
-}
-
 uint32_t decimal_digit_count(uint32_t value) {
   uint32_t digits = 1;
   while (value >= 10) {
@@ -1786,14 +1747,14 @@ bool taxid_decimal_lex_less(uint32_t lhs, uint32_t rhs) {
   return lhs_digits < rhs_digits;
 }
 
-void chain_read_fast_into(const ReadRecord &read, const CompactPostingIndex &index,
+std::vector<TaxonScore>
+chain_read_species_scores(const ReadRecord &read,
+                          const CompactPostingIndex &index,
                           const std::vector<TargetRecord> &targets,
-                          int diag_bin, uint32_t min_chain,
-                          std::vector<HitOut> &hits) {
+                          int diag_bin, uint32_t min_chain) {
   if (read.anchor_qids.size() != read.anchors.size()) {
     throw std::runtime_error("local query token id invariant violated");
   }
-  hits.clear();
   thread_local std::unordered_map<ChainKey, ChainStats, ChainKeyHash> chains;
   chains.clear();
   const size_t desired_chain_capacity = read.anchors.size() * 16 + 1;
@@ -1825,7 +1786,11 @@ void chain_read_fast_into(const ReadRecord &read, const CompactPostingIndex &ind
     }
   }
 
-  hits.reserve(chains.size());
+  thread_local std::unordered_map<uint32_t, uint64_t> mass_by_species;
+  mass_by_species.clear();
+  if (mass_by_species.bucket_count() < chains.size()) {
+    mass_by_species.reserve(chains.size());
+  }
   for (const auto &[key, stats] : chains) {
     if (stats.count < min_chain) {
       continue;
@@ -1839,33 +1804,11 @@ void chain_read_fast_into(const ReadRecord &read, const CompactPostingIndex &ind
         static_cast<uint64_t>(std::min(q_span, t_span)) / 20ULL;
     const uint32_t score = static_cast<uint32_t>(
         std::min<uint64_t>(score64, std::numeric_limits<uint32_t>::max()));
-    hits.push_back(HitOut{
-        key.tid,
-        score,
-        stats.count,
-        stats.q_min,
-        std::min<uint32_t>(read.length, stats.q_max + 15),
-        stats.t_min,
-        std::min<uint32_t>(targets[key.tid].len, stats.t_max + 15),
-        key.orient,
-        key.diag});
-  }
-  sort_chain_hits(hits);
-}
-
-std::vector<TaxonScore> aggregate_species_scores(
-    const std::vector<HitOut> &hits, const std::vector<TargetRecord> &targets) {
-  thread_local std::unordered_map<uint32_t, uint64_t> mass_by_species;
-  mass_by_species.clear();
-  if (mass_by_species.bucket_count() < hits.size()) {
-    mass_by_species.reserve(hits.size());
-  }
-  for (const auto &hit : hits) {
-    const auto &target = targets[hit.tid];
+    const auto &target = targets[key.tid];
     if (target.species == 0) {
       continue;
     }
-    mass_by_species[target.species] += hit.score;
+    mass_by_species[target.species] += score;
   }
   std::vector<TaxonScore> scores;
   scores.reserve(mass_by_species.size());
@@ -1874,13 +1817,13 @@ std::vector<TaxonScore> aggregate_species_scores(
                       static_cast<uint32_t>(std::min<uint64_t>(
                           score, std::numeric_limits<uint32_t>::max()))});
   }
-	  std::sort(scores.begin(), scores.end(),
-	            [](const TaxonScore &a, const TaxonScore &b) {
-	              if (a.score != b.score) {
-	                return a.score > b.score;
-	              }
-	              return taxid_decimal_lex_less(a.taxid, b.taxid);
-	            });
+  std::sort(scores.begin(), scores.end(),
+            [](const TaxonScore &a, const TaxonScore &b) {
+              if (a.score != b.score) {
+                return a.score > b.score;
+              }
+              return taxid_decimal_lex_less(a.taxid, b.taxid);
+            });
   return scores;
 }
 
@@ -1900,7 +1843,6 @@ void chain_reads_to_call_store(
                    static_cast<uint32_t>(std::max<size_t>(1, pending.size()))));
         std::atomic<size_t> next{0};
         auto worker = [&]() {
-          std::vector<HitOut> hit_scratch;
           while (true) {
             const size_t idx = next.fetch_add(1, std::memory_order_relaxed);
             if (idx >= pending.size()) {
@@ -1908,9 +1850,9 @@ void chain_reads_to_call_store(
             }
             auto read = make_read_record_from_pending(pending[idx], k, w);
             assign_query_hashes(read, query_hashes);
-            chain_read_fast_into(read, index, targets, diag_bin, min_chain,
-                                 hit_scratch);
-            batch_scores[idx] = aggregate_species_scores(hit_scratch, targets);
+            batch_scores[idx] =
+                chain_read_species_scores(read, index, targets, diag_bin,
+                                          min_chain);
           }
         };
         std::vector<std::thread> workers;

@@ -33,6 +33,87 @@ def get_downloader():
     return downloader
 
 
+def _download_help_parser():
+    parser = argparse.ArgumentParser(
+        prog="chimera download",
+        description="Download NCBI genomes and taxonomy files for Chimera database building.",
+    )
+    parser.add_argument(
+        "-d",
+        "--database",
+        help="Source database (default: refseq; options: genbank, refseq)",
+    )
+    parser.add_argument(
+        "-g",
+        "--organism-group",
+        help="NCBI organism groups, comma-separated (for example: archaea,bacteria)",
+    )
+    parser.add_argument(
+        "-T",
+        "--taxid",
+        help="NCBI taxonomy IDs to download, comma-separated (for example: 562,623)",
+    )
+    parser.add_argument(
+        "-f",
+        "--file-types",
+        help="File types to download (default: genomic.fna.gz)",
+    )
+    parser.add_argument(
+        "-c",
+        "--refseq-category",
+        help="RefSeq category filter (default: reference genome)",
+    )
+    parser.add_argument(
+        "-l",
+        "--assembly-level",
+        help="Assembly level filter (default: complete genome)",
+    )
+    parser.add_argument(
+        "-A",
+        "--limit-assembly",
+        help="Limit assemblies per selected taxon; 0 keeps all",
+    )
+    parser.add_argument(
+        "-o",
+        "--output-dir",
+        help="Output directory (default: ./genome_output)",
+    )
+    parser.add_argument(
+        "-t",
+        "--threads",
+        help="Number of download threads (default: 1)",
+    )
+    parser.add_argument(
+        "-k",
+        "--dry-run",
+        action="store_true",
+        help="Print planned actions without downloading",
+    )
+    parser.add_argument(
+        "-m",
+        "--md5-check",
+        action="store_true",
+        help="Check MD5 files after download",
+    )
+    parser.add_argument(
+        "-R",
+        "--retry-attempts",
+        help="Number of retry attempts for failed downloads",
+    )
+    parser.add_argument(
+        "-L",
+        "--downloader",
+        help="Downloader to use (default: wget; options: wget, curl)",
+    )
+    parser.add_argument(
+        "-V",
+        "--verbose",
+        action="store_true",
+        help="Print verbose download logs",
+    )
+    return parser
+
+
 def get_chimera_path():
     env_path = os.environ.get("CHIMERA_BIN")
     if env_path:
@@ -430,6 +511,10 @@ def append_build_command_args(command, args) -> None:
 
 def parse_arguments():
     if len(sys.argv) > 1 and sys.argv[1] == "download":
+        if any(arg in ("-h", "--help") for arg in sys.argv[2:]):
+            return argparse.Namespace(
+                command="download", download_help=True, version=False
+            )
         parser = argparse.ArgumentParser(
             description="Chimera - A versatile tool for metagenomic classification"
         )
@@ -461,13 +546,6 @@ def parse_arguments():
         "build", help="Build a taxonomic sequence database"
     )
     add_build_arguments(build_parser, require_input=True)
-
-    # Download and Build combined subcommand
-    download_build_parser = subparsers.add_parser(
-        "download_and_build",
-        help="Download NCBI database sequences and resources and build a taxonomic sequence database",
-    )
-    add_build_arguments(download_build_parser, require_input=False)
 
     # Classify subcommand
     classify_parser = subparsers.add_parser("classify", help="Classify sequences")
@@ -558,6 +636,15 @@ def parse_arguments():
 
 
 def run_chimera(args, chimera_path=None):
+    if getattr(args, "version", False) and getattr(args, "command", None) is None:
+        if chimera_path is None:
+            chimera_path = get_chimera_path()
+        return subprocess.run([chimera_path, "--version"]).returncode
+
+    if args.command == "download" and getattr(args, "download_help", False):
+        _download_help_parser().print_help()
+        return 0
+
     if args.command == "download":
         downloader = get_downloader()
         cmd_args = sys.argv
@@ -572,24 +659,6 @@ def run_chimera(args, chimera_path=None):
         except ValueError:
             downloader.download(interactive=True)
         return 0
-
-    if args.command == "download_and_build":
-        downloader = get_downloader()
-        options = downloader.download(interactive=True)
-        args.command = "build"
-        args.input = os.path.join(options.output_dir, "target.tsv")
-        resolved_kind = getattr(options, "taxonomy_kind_resolved", None)
-        if resolved_kind is None:
-            resolved_kind = getattr(options, "taxonomy_mode", None)
-        if resolved_kind is None:
-            resolved_kind = "auto"
-        args.taxonomy_kind = resolved_kind
-        resolved_version = getattr(options, "taxonomy_version_resolved", None)
-        if resolved_version is None:
-            resolved_version = getattr(options, "version_label", None)
-        if not resolved_version:
-            resolved_version = "auto"
-        args.taxonomy_version = resolved_version
 
     if args.command == "profile":
         from src.profile import profile
@@ -611,6 +680,11 @@ def run_chimera(args, chimera_path=None):
         if isinstance(args.output, str) and args.output.lower().endswith(".tsv"):
             args.output = args.output[: -len(".tsv")]
         if args.krona:
+            if shutil.which("ktImportText") is None:
+                raise RuntimeError(
+                    "Krona output requires Krona Tools (`ktImportText`) on PATH. "
+                    "Install Krona separately, or rerun without `-k`."
+                )
             downloader = get_downloader()
             from src.profile import conversion2Krona
 

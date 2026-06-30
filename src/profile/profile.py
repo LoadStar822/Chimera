@@ -1,9 +1,6 @@
-import warnings
 from collections import Counter
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Optional, Tuple
-
-from ete3 import NCBITaxa
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 from .taxonomy_utils import (
     GtdbTaxonomy,
@@ -16,7 +13,7 @@ UNCLASSIFIED = "unclassified"
 
 
 def _ncbi_taxid_to_species(
-    tax: Optional[NCBITaxa], taxid: int, cache: Dict[int, Optional[str]]
+    tax: Optional[Any], taxid: int, cache: Dict[int, Optional[str]]
 ) -> Optional[str]:
     if tax is None:
         return None
@@ -165,7 +162,7 @@ def _aggregate_species_counts(
 
 
 def _aggregate_levels(
-    tax: Optional[NCBITaxa],
+    tax: Optional[Any],
     taxid_counts: Counter[int],
     base_unclassified: float,
 ) -> Dict[str, Counter[str]]:
@@ -195,6 +192,20 @@ def _aggregate_gtdb_levels(
     )
 
 
+def _load_ncbi_taxonomy() -> Any:
+    try:
+        from ete3 import NCBITaxa
+    except ImportError as exc:
+        raise RuntimeError(
+            "The auxiliary `chimera profile` command requires ete3 for NCBI "
+            "taxonomy lookup. Install it separately, for example "
+            "`conda install -c conda-forge ete3` or "
+            "`pip install chimera[legacy-profile]`, or use the native "
+            "`chimera classify` profile output instead."
+        ) from exc
+    return NCBITaxa()
+
+
 def process_file(
     input_files: Iterable[str],
     output_file: str,
@@ -216,21 +227,14 @@ def process_file(
         input_files, expect_numeric=expect_numeric
     )
 
-    tax: Optional[NCBITaxa] = None
+    tax: Optional[Any] = None
     gtdb_taxonomy: Optional[GtdbTaxonomy] = None
     if resolved_kind == "gtdb":
         if not taxonomy_info:
             raise ValueError("GTDB mode requires --taxonomy-info (path to tax.info)")
         gtdb_taxonomy = load_gtdb_taxonomy(taxonomy_info)
     else:
-        try:
-            tax = NCBITaxa()
-        except Exception as exc:  # pragma: no cover
-            warnings.warn(
-                "Failed to initialize NCBITaxa; all entries will be marked as "
-                f"unclassified: {exc}"
-            )
-            tax = None
+        tax = _load_ncbi_taxonomy()
 
     def aggregate_levels_for_counts(
         counts: Counter[str], unclassified_reads: int

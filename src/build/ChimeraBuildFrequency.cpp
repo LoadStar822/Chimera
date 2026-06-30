@@ -171,6 +171,12 @@ void build_hash_frequency_sketch(
   std::vector<uint32_t> sketch_counters;
   context.sketch->exportCounts(sketch_counters);
   context.stats = compute_hash_freq_stats(sketch_counters, context.quantile);
+  const bool threshold_would_drop_unique_hashes =
+      context.stats.df_high_threshold <= context.unique_deg_threshold;
+  if (threshold_would_drop_unique_hashes ||
+      context.stats.df_max_observed <= context.unique_deg_threshold) {
+    context.stats.df_high_threshold = std::numeric_limits<uint32_t>::max();
+  }
   build_threshold_masks(sketch_counters, kSketchDepth, kSketchWidth,
                         context.stats.df_high_threshold,
                         context.unique_deg_threshold, context.high_df_mask,
