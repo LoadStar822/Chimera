@@ -331,6 +331,14 @@ Internal filenames may change between releases. For reproducibility, keep the wh
 - Put the database and reads on SSD storage when possible.
 - Use `-t` to set thread count. The wrapper default is `min(os.cpu_count(), 64)`. You can pass a higher value explicitly, but more threads are not always faster.
 - Large reference databases can require substantial RAM during both build and classify.
+- Very large builds may open many reference, shard, and temporary files. If `chimera build` fails with messages such as `too many open files`, check and raise the open-file limit before rebuilding:
+
+  ```bash
+  ulimit -n
+  ulimit -n 1048576
+  ```
+
+  On managed clusters, the hard limit may be controlled by the scheduler or system administrator.
 - LPC can improve difficult local assignments but adds runtime and memory cost.
 - Prebuilt binaries target AVX2-capable x86-64 machines. Use a portable source build on older CPUs.
 
