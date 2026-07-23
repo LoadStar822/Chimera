@@ -12,9 +12,13 @@ namespace chimera::native_bounded {
 namespace {
 
 constexpr char kMagic[] = "CHIMERA_NBCIDX_V1";
-constexpr uint32_t kIndexVersion = 4;
+constexpr uint32_t kIndexVersion = 5;
 constexpr uint32_t kMinSupportedIndexVersion = 2;
+constexpr uint32_t kContinuityEscapeCode = 15;
+constexpr uint32_t kContinuityCodeBits = 4;
 
+// v5 uses code 0..14 for deltas 1..15 plus appended forward bases.
+// Code 15 stores a full position delta, canonical k-mer, and strand.
 uint64_t mix64(uint64_t x) {
   x ^= x >> 33;
   x *= 0xff51afd7ed558ccdULL;
@@ -55,23 +59,6 @@ template <class T> T read_raw(std::istream &in) {
   return value;
 }
 
-void append_varuint(std::vector<char> &out, uint64_t value) {
-  while (value >= 0x80) {
-    out.push_back(static_cast<char>((value & 0x7fU) | 0x80U));
-    value >>= 7;
-  }
-  out.push_back(static_cast<char>(value));
-}
-
-uint32_t varuint_size(uint64_t value) {
-  uint32_t size = 1;
-  while (value >= 0x80) {
-    value >>= 7;
-    ++size;
-  }
-  return size;
-}
-
 bool read_varuint(const char *&cursor, const char *end, uint64_t &value) {
   value = 0;
   uint32_t shift = 0;
@@ -88,6 +75,108 @@ bool read_varuint(const char *&cursor, const char *end, uint64_t &value) {
 
 uint32_t key_bits_for_k(uint32_t k) {
   return k <= 16 ? static_cast<uint32_t>(2U * k) : 64U;
+}
+
+uint32_t continuity_key_bits_for_k(uint32_t k) {
+  if (k == 0 || k > 31) {
+    throw std::runtime_error("native bounded k must be in 1..31");
+  }
+  return static_cast<uint32_t>(2U * k);
+}
+
+uint64_t low_bit_mask(uint32_t bits) {
+  if (bits == 0) {
+    return 0;
+  }
+  if (bits >= 64) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return (1ULL << bits) - 1ULL;
+}
+
+uint64_t reverse_complement_key(uint64_t key, uint32_t k) {
+  key = ~key;
+  key = ((key & 0x3333333333333333ULL) << 2U) |
+        ((key >> 2U) & 0x3333333333333333ULL);
+  key = ((key & 0x0f0f0f0f0f0f0f0fULL) << 4U) |
+        ((key >> 4U) & 0x0f0f0f0f0f0f0f0fULL);
+  key = ((key & 0x00ff00ff00ff00ffULL) << 8U) |
+        ((key >> 8U) & 0x00ff00ff00ff00ffULL);
+  key = ((key & 0x0000ffff0000ffffULL) << 16U) |
+        ((key >> 16U) & 0x0000ffff0000ffffULL);
+  key = (key << 32U) | (key >> 32U);
+  return key >> (64U - static_cast<uint32_t>(2U * k));
+}
+
+uint64_t forward_key(const Anchor &anchor, uint32_t k) {
+  const uint32_t key_bits = continuity_key_bits_for_k(k);
+  if (anchor.hash > low_bit_mask(key_bits)) {
+    throw std::runtime_error("native bounded anchor key exceeds k-mer width");
+  }
+  if (anchor.strand > 1) {
+    throw std::runtime_error("native bounded anchor strand must be 0 or 1");
+  }
+  return anchor.strand == 0 ? anchor.hash
+                            : reverse_complement_key(anchor.hash, k);
+}
+
+Anchor canonical_anchor(uint64_t forward, uint32_t pos, uint32_t k) {
+  const uint64_t reverse = reverse_complement_key(forward, k);
+  if (forward <= reverse) {
+    return Anchor{forward, pos, 0};
+  }
+  return Anchor{reverse, pos, 1};
+}
+
+bool continuity_record(const Anchor &previous, uint64_t previous_forward,
+                       const Anchor &current, uint64_t current_forward,
+                       uint32_t k, uint32_t &delta) {
+  if (current.pos <= previous.pos) {
+    return false;
+  }
+  delta = current.pos - previous.pos;
+  if (delta == 0 || delta >= k || delta > kContinuityEscapeCode) {
+    return false;
+  }
+  const uint32_t overlap_bits = static_cast<uint32_t>(2U * (k - delta));
+  const uint64_t previous_suffix =
+      previous_forward & low_bit_mask(overlap_bits);
+  const uint64_t current_prefix =
+      current_forward >> static_cast<uint32_t>(2U * delta);
+  return previous_suffix == current_prefix;
+}
+
+uint64_t continuity_encoded_bits(const std::vector<Anchor> &anchors,
+                                 uint32_t k) {
+  const uint32_t key_bits = continuity_key_bits_for_k(k);
+  uint64_t bits = 0;
+  Anchor previous{};
+  uint64_t previous_forward = 0;
+  bool first = true;
+  for (const auto &anchor : anchors) {
+    if (!first && anchor.pos < previous.pos) {
+      throw std::runtime_error("native bounded anchors are not position sorted");
+    }
+    const uint64_t current_forward = forward_key(anchor, k);
+    const Anchor canonical = canonical_anchor(current_forward, anchor.pos, k);
+    if (canonical.hash != anchor.hash || canonical.strand != anchor.strand) {
+      throw std::runtime_error("native bounded anchor is not canonical");
+    }
+    uint32_t delta = 0;
+    const bool compact =
+        !first && continuity_record(previous, previous_forward, anchor,
+                                    current_forward, k, delta);
+    bits += kContinuityCodeBits;
+    if (compact) {
+      bits += static_cast<uint64_t>(2U * delta);
+    } else {
+      bits += 32ULL + key_bits + 1ULL;
+    }
+    previous = anchor;
+    previous_forward = current_forward;
+    first = false;
+  }
+  return bits;
 }
 
 uint64_t bitpacked_key_bytes(uint32_t anchor_count, uint32_t k) {
@@ -127,6 +216,22 @@ uint64_t read_bits(const char *data, uint64_t bit_offset, uint32_t bits) {
     remaining -= take;
   }
   return value;
+}
+
+uint64_t read_continuity_bits(const char *data, size_t size,
+                              uint64_t bit_offset, uint32_t bits) {
+  const size_t byte_index = static_cast<size_t>(bit_offset / 8ULL);
+  const uint32_t shift = static_cast<uint32_t>(bit_offset % 8ULL);
+  const size_t remaining = size - byte_index;
+  uint64_t word = 0;
+  std::memcpy(&word, data + byte_index, std::min<size_t>(remaining, 8));
+  uint64_t value = word >> shift;
+  if (shift + bits > 64U) {
+    value |= static_cast<uint64_t>(
+                 static_cast<uint8_t>(data[byte_index + 8]))
+             << (64U - shift);
+  }
+  return value & low_bit_mask(bits);
 }
 
 void write_string(std::ostream &out, const std::string &value) {
@@ -314,41 +419,55 @@ void encode_anchor_block_into(const std::vector<Anchor> &anchors, uint32_t k,
 void encode_anchor_block_into(const std::vector<Anchor> &anchors, uint32_t k,
                               uint64_t reserve_bytes,
                               std::vector<char> &out) {
-  out.clear();
-  const uint32_t key_bits = key_bits_for_k(k);
-  if (k <= 16) {
-    out.assign(static_cast<size_t>(
-                   bitpacked_key_bytes(static_cast<uint32_t>(anchors.size()),
-                                       k)),
-               0);
+  const uint64_t encoded_bits = continuity_encoded_bits(anchors, k);
+  const uint64_t encoded_bytes = (encoded_bits + 7ULL) / 8ULL;
+  if (encoded_bytes != reserve_bytes) {
+    throw std::runtime_error(
+        "native bounded continuity size changed between build passes");
   }
-  out.reserve(static_cast<size_t>(reserve_bytes));
-  uint32_t previous_pos = 0;
+  if (encoded_bytes >
+      static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+    throw std::runtime_error("native bounded anchor block is too large");
+  }
+  out.assign(static_cast<size_t>(encoded_bytes), 0);
+
+  const uint32_t key_bits = continuity_key_bits_for_k(k);
+  uint64_t bit_offset = 0;
+  Anchor previous{};
+  uint64_t previous_forward = 0;
   bool first = true;
-  for (size_t i = 0; i < anchors.size(); ++i) {
-    const auto &anchor = anchors[i];
-    if (k <= 16) {
-      const uint64_t max_key =
-          key_bits == 64 ? std::numeric_limits<uint64_t>::max()
-                         : ((1ULL << key_bits) - 1ULL);
-      if (anchor.hash > max_key) {
-        throw std::runtime_error("native bounded anchor key does not fit uint32");
-      }
-      write_bits(out, static_cast<uint64_t>(i) * key_bits, anchor.hash,
-                 key_bits);
+  for (const auto &anchor : anchors) {
+    const uint64_t current_forward = forward_key(anchor, k);
+    uint32_t delta = 0;
+    const bool compact =
+        !first && continuity_record(previous, previous_forward, anchor,
+                                    current_forward, k, delta);
+    if (compact) {
+      write_bits(out, bit_offset, delta - 1U, kContinuityCodeBits);
+      bit_offset += kContinuityCodeBits;
+      const uint32_t suffix_bits = static_cast<uint32_t>(2U * delta);
+      write_bits(out, bit_offset,
+                 current_forward & low_bit_mask(suffix_bits), suffix_bits);
+      bit_offset += suffix_bits;
     } else {
-      const auto *ptr = reinterpret_cast<const char *>(&anchor.hash);
-      out.insert(out.end(), ptr, ptr + sizeof(anchor.hash));
+      const uint32_t position_delta =
+          first ? anchor.pos : anchor.pos - previous.pos;
+      write_bits(out, bit_offset, kContinuityEscapeCode,
+                 kContinuityCodeBits);
+      bit_offset += kContinuityCodeBits;
+      write_bits(out, bit_offset, position_delta, 32);
+      bit_offset += 32;
+      write_bits(out, bit_offset, anchor.hash, key_bits);
+      bit_offset += key_bits;
+      write_bits(out, bit_offset, anchor.strand, 1);
+      ++bit_offset;
     }
-    if (!first && anchor.pos < previous_pos) {
-      throw std::runtime_error("native bounded anchors are not position sorted");
-    }
-    const uint32_t delta = first ? anchor.pos : anchor.pos - previous_pos;
-    const uint64_t packed =
-        (static_cast<uint64_t>(delta) << 1) | static_cast<uint64_t>(anchor.strand & 1U);
-    append_varuint(out, packed);
-    previous_pos = anchor.pos;
+    previous = anchor;
+    previous_forward = current_forward;
     first = false;
+  }
+  if ((bit_offset + 7ULL) / 8ULL != encoded_bytes) {
+    throw std::runtime_error("native bounded continuity encoding size mismatch");
   }
 }
 
@@ -360,26 +479,7 @@ std::vector<char> encode_anchor_block(const std::vector<Anchor> &anchors,
 }
 
 uint64_t encoded_anchor_bytes(const std::vector<Anchor> &anchors, uint32_t k) {
-  uint64_t bytes = k <= 16
-                       ? bitpacked_key_bytes(
-                             static_cast<uint32_t>(anchors.size()), k)
-                       : static_cast<uint64_t>(anchors.size()) *
-                             sizeof(uint64_t);
-  uint32_t previous_pos = 0;
-  bool first = true;
-  for (const auto &anchor : anchors) {
-    if (!first && anchor.pos < previous_pos) {
-      throw std::runtime_error("native bounded anchors are not position sorted");
-    }
-    const uint32_t delta = first ? anchor.pos : anchor.pos - previous_pos;
-    const uint64_t packed =
-        (static_cast<uint64_t>(delta) << 1) |
-        static_cast<uint64_t>(anchor.strand & 1U);
-    bytes += varuint_size(packed);
-    previous_pos = anchor.pos;
-    first = false;
-  }
-  return bytes;
+  return (continuity_encoded_bits(anchors, k) + 7ULL) / 8ULL;
 }
 
 std::vector<Anchor> decode_anchor_block(const char *data, size_t size,
@@ -387,6 +487,88 @@ std::vector<Anchor> decode_anchor_block(const char *data, size_t size,
                                         uint32_t version) {
   std::vector<Anchor> anchors;
   anchors.reserve(anchor_count);
+  if (version >= 5) {
+    const uint32_t key_bits = continuity_key_bits_for_k(k);
+    const uint64_t total_bits = static_cast<uint64_t>(size) * 8ULL;
+    uint64_t bit_offset = 0;
+    uint32_t previous_pos = 0;
+    uint64_t previous_forward = 0;
+    for (uint32_t i = 0; i < anchor_count; ++i) {
+      auto read_checked = [&](uint32_t bits) {
+        if (bits > total_bits - std::min(bit_offset, total_bits)) {
+          throw std::runtime_error(
+              "truncated native bounded continuity record");
+        }
+        const uint64_t value =
+            read_continuity_bits(data, size, bit_offset, bits);
+        bit_offset += bits;
+        return value;
+      };
+      const uint32_t code =
+          static_cast<uint32_t>(read_checked(kContinuityCodeBits));
+      Anchor anchor;
+      uint64_t current_forward = 0;
+      if (code == kContinuityEscapeCode) {
+        const uint32_t delta = static_cast<uint32_t>(read_checked(32));
+        anchor.hash = read_checked(key_bits);
+        anchor.strand = static_cast<uint8_t>(read_checked(1));
+        if (i == 0) {
+          anchor.pos = delta;
+        } else {
+          if (delta > std::numeric_limits<uint32_t>::max() - previous_pos) {
+            throw std::runtime_error(
+                "native bounded anchor position overflow");
+          }
+          anchor.pos = previous_pos + delta;
+        }
+        current_forward = forward_key(anchor, k);
+        const Anchor canonical =
+            canonical_anchor(current_forward, anchor.pos, k);
+        if (canonical.hash != anchor.hash ||
+            canonical.strand != anchor.strand) {
+          throw std::runtime_error(
+              "native bounded continuity anchor is not canonical");
+        }
+      } else {
+        if (i == 0) {
+          throw std::runtime_error(
+              "native bounded continuity block does not start with escape");
+        }
+        const uint32_t delta = code + 1U;
+        if (delta >= k) {
+          throw std::runtime_error(
+              "invalid native bounded continuity delta");
+        }
+        const uint32_t suffix_bits = static_cast<uint32_t>(2U * delta);
+        const uint64_t suffix = read_checked(suffix_bits);
+        current_forward =
+            ((previous_forward << suffix_bits) & low_bit_mask(key_bits)) |
+            suffix;
+        if (delta > std::numeric_limits<uint32_t>::max() - previous_pos) {
+          throw std::runtime_error(
+              "native bounded anchor position overflow");
+        }
+        anchor =
+            canonical_anchor(current_forward, previous_pos + delta, k);
+      }
+      anchors.push_back(anchor);
+      previous_pos = anchor.pos;
+      previous_forward = current_forward;
+    }
+    if ((bit_offset + 7ULL) / 8ULL != size) {
+      throw std::runtime_error(
+          "native bounded continuity block has trailing bytes");
+    }
+    while (bit_offset < total_bits) {
+      if (read_bits(data, bit_offset, 1) != 0) {
+        throw std::runtime_error(
+            "native bounded continuity block has nonzero padding");
+      }
+      ++bit_offset;
+    }
+    return anchors;
+  }
+
   const uint32_t key_bits = key_bits_for_k(k);
   const uint64_t key_bytes =
       version >= 4 && k <= 16 ? bitpacked_key_bytes(anchor_count, k) : 0;

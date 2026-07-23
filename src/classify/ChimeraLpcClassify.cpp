@@ -949,6 +949,46 @@ uint64_t local_bitpacked_key_bytes(uint32_t anchor_count, uint32_t k) {
   return (static_cast<uint64_t>(anchor_count) * key_bits + 7ULL) / 8ULL;
 }
 
+uint64_t local_low_bit_mask(uint32_t bits) {
+  if (bits == 0) {
+    return 0;
+  }
+  if (bits >= 64) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return (1ULL << bits) - 1ULL;
+}
+
+uint64_t local_reverse_complement_key(uint64_t key, uint32_t k) {
+  key = ~key;
+  key = ((key & 0x3333333333333333ULL) << 2U) |
+        ((key >> 2U) & 0x3333333333333333ULL);
+  key = ((key & 0x0f0f0f0f0f0f0f0fULL) << 4U) |
+        ((key >> 4U) & 0x0f0f0f0f0f0f0f0fULL);
+  key = ((key & 0x00ff00ff00ff00ffULL) << 8U) |
+        ((key >> 8U) & 0x00ff00ff00ff00ffULL);
+  key = ((key & 0x0000ffff0000ffffULL) << 16U) |
+        ((key >> 16U) & 0x0000ffff0000ffffULL);
+  key = (key << 32U) | (key >> 32U);
+  return key >> (64U - static_cast<uint32_t>(2U * k));
+}
+
+uint64_t read_local_continuity_bits(const char *data, size_t size,
+                                    uint64_t bit_offset, uint32_t bits) {
+  const size_t byte_index = static_cast<size_t>(bit_offset / 8ULL);
+  const uint32_t shift = static_cast<uint32_t>(bit_offset % 8ULL);
+  const size_t remaining = size - byte_index;
+  uint64_t word = 0;
+  std::memcpy(&word, data + byte_index, std::min<size_t>(remaining, 8));
+  uint64_t value = word >> shift;
+  if (shift + bits > 64U) {
+    value |= static_cast<uint64_t>(
+                 static_cast<uint8_t>(data[byte_index + 8]))
+             << (64U - shift);
+  }
+  return value & local_low_bit_mask(bits);
+}
+
 template <typename AnchorConsumer>
 void for_each_encoded_anchor(const char *data, size_t size,
                              uint32_t anchor_count, uint32_t k,
@@ -986,6 +1026,98 @@ void for_each_encoded_anchor(const char *data, size_t size,
     }
     if (cursor != end) {
       throw std::runtime_error("native bounded anchor block has trailing bytes");
+    }
+    return;
+  }
+
+  if (version >= 5) {
+    constexpr uint32_t kContinuityEscapeCode = 15;
+    constexpr uint32_t kContinuityCodeBits = 4;
+    if (k == 0 || k > 31) {
+      throw std::runtime_error("invalid native bounded continuity k");
+    }
+    const uint32_t key_bits = static_cast<uint32_t>(2U * k);
+    const uint64_t total_bits = static_cast<uint64_t>(size) * 8ULL;
+    uint64_t bit_offset = 0;
+    uint32_t previous_pos = 0;
+    uint64_t previous_forward = 0;
+    for (uint32_t i = 0; i < anchor_count; ++i) {
+      auto read_checked = [&](uint32_t bits) {
+        if (bits > total_bits - std::min(bit_offset, total_bits)) {
+          throw std::runtime_error(
+              "truncated native bounded continuity record");
+        }
+        const uint64_t value =
+            read_local_continuity_bits(data, size, bit_offset, bits);
+        bit_offset += bits;
+        return value;
+      };
+      const uint32_t code =
+          static_cast<uint32_t>(read_checked(kContinuityCodeBits));
+      chimera::native_bounded::Anchor anchor;
+      uint64_t current_forward = 0;
+      if (code == kContinuityEscapeCode) {
+        const uint32_t delta = static_cast<uint32_t>(read_checked(32));
+        anchor.hash = read_checked(key_bits);
+        anchor.strand = static_cast<uint8_t>(read_checked(1));
+        if (i == 0) {
+          anchor.pos = delta;
+        } else {
+          if (delta > std::numeric_limits<uint32_t>::max() - previous_pos) {
+            throw std::runtime_error(
+                "native bounded anchor position overflow");
+          }
+          anchor.pos = previous_pos + delta;
+        }
+        current_forward =
+            anchor.strand == 0
+                ? anchor.hash
+                : local_reverse_complement_key(anchor.hash, k);
+      } else {
+        if (i == 0) {
+          throw std::runtime_error(
+              "native bounded continuity block does not start with escape");
+        }
+        const uint32_t delta = code + 1U;
+        if (delta >= k) {
+          throw std::runtime_error(
+              "invalid native bounded continuity delta");
+        }
+        const uint32_t suffix_bits = static_cast<uint32_t>(2U * delta);
+        const uint64_t suffix = read_checked(suffix_bits);
+        current_forward =
+            ((previous_forward << suffix_bits) &
+             local_low_bit_mask(key_bits)) |
+            suffix;
+        if (delta > std::numeric_limits<uint32_t>::max() - previous_pos) {
+          throw std::runtime_error(
+              "native bounded anchor position overflow");
+        }
+        anchor.pos = previous_pos + delta;
+        const uint64_t reverse =
+            local_reverse_complement_key(current_forward, k);
+        if (current_forward <= reverse) {
+          anchor.hash = current_forward;
+          anchor.strand = 0;
+        } else {
+          anchor.hash = reverse;
+          anchor.strand = 1;
+        }
+      }
+      consume_anchor(anchor);
+      previous_pos = anchor.pos;
+      previous_forward = current_forward;
+    }
+    if ((bit_offset + 7ULL) / 8ULL != size) {
+      throw std::runtime_error(
+          "native bounded continuity block has trailing bytes");
+    }
+    while (bit_offset < total_bits) {
+      if (read_local_bits(data, bit_offset, 1) != 0) {
+        throw std::runtime_error(
+            "native bounded continuity block has nonzero padding");
+      }
+      ++bit_offset;
     }
     return;
   }
