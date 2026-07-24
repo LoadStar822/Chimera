@@ -277,14 +277,19 @@ inline std::vector<Group> partitionHashCount(
       minHeap.push(i);
     }
 
+    std::vector<size_t> popped;
     for (const auto &chunk : chunks) {
       size_t target = std::numeric_limits<size_t>::max();
-      std::vector<size_t> popped;
+      popped.clear();
       while (!minHeap.empty()) {
         size_t cand = minHeap.top();
         minHeap.pop();
-        if (groups[cand].taxids.size() >= maxTaxids ||
-            used[cand].contains(chunk.taxid)) {
+        // A full group can never become eligible again. Keeping it out of the
+        // heap avoids repeatedly popping the same permanent rejection.
+        if (groups[cand].taxids.size() >= maxTaxids) {
+          continue;
+        }
+        if (used[cand].contains(chunk.taxid)) {
           popped.push_back(cand);
           continue;
         }
@@ -305,7 +310,9 @@ inline std::vector<Group> partitionHashCount(
       groups[target].assignedHashes.push_back(chunk.hashCount);
       groups[target].totalHash += chunk.hashCount;
       used[target].insert(chunk.taxid);
-      minHeap.push(target);
+      if (groups[target].taxids.size() < maxTaxids) {
+        minHeap.push(target);
+      }
     }
 
     std::vector<Group> compact;

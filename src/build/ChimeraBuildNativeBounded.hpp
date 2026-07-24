@@ -13,10 +13,8 @@ struct NativeBoundedBuildStats {
   uint64_t anchors{0};
   uint64_t activeRecords{0};
   uint64_t representativeRecords{0};
-  double count_seconds{0.0};
-  double selection_seconds{0.0};
+  double anchor_build_seconds{0.0};
   double layout_seconds{0.0};
-  double write_seconds{0.0};
 };
 
 struct NativeBoundedOutputPaths {

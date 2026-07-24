@@ -218,18 +218,8 @@ std::string shard_filename(uint32_t genus) {
   return "g" + std::to_string(genus) + ".nbcidx";
 }
 
-struct WorkerBuildState {
-  std::unordered_map<uint32_t,
-                     std::vector<chimera::native_bounded::TargetMeta>>
-      shardTargets;
-  std::unordered_map<uint32_t, uint64_t> shardOffsets;
-  uint64_t targets{};
-  uint64_t sequences{};
-  uint64_t bp{};
-  uint64_t anchors{};
-};
-
 struct TargetPlan {
+  size_t source_index{};
   uint32_t species{};
   uint32_t genus{};
   uint32_t contig_index{};
@@ -240,14 +230,14 @@ struct TargetPlan {
   std::string name;
 };
 
-bool target_plan_rank_less(const TargetPlan *lhs, const TargetPlan *rhs) {
-  if (lhs->anchor_count != rhs->anchor_count) {
-    return lhs->anchor_count > rhs->anchor_count;
+bool target_plan_rank_less(const TargetPlan &lhs, const TargetPlan &rhs) {
+  if (lhs.anchor_count != rhs.anchor_count) {
+    return lhs.anchor_count > rhs.anchor_count;
   }
-  if (lhs->len != rhs->len) {
-    return lhs->len > rhs->len;
+  if (lhs.len != rhs.len) {
+    return lhs.len > rhs.len;
   }
-  return lhs->name < rhs->name;
+  return lhs.name < rhs.name;
 }
 
 std::string local_resolution_source_key(const std::string &targetName) {
@@ -258,114 +248,98 @@ std::string local_resolution_source_key(const std::string &targetName) {
   return targetName.substr(0, pos);
 }
 
-void limit_target_plans_per_species(
-    std::vector<std::vector<TargetPlan>> &taskPlans, uint32_t cap) {
-  if (cap == 0) {
+struct EncodedTarget {
+  TargetPlan plan;
+  std::vector<char> anchors;
+};
+
+size_t worst_target_index(const std::vector<EncodedTarget> &targets) {
+  size_t worst = 0;
+  for (size_t i = 1; i < targets.size(); ++i) {
+    if (target_plan_rank_less(targets[worst].plan, targets[i].plan)) {
+      worst = i;
+    }
+  }
+  return worst;
+}
+
+bool target_would_be_retained(const std::vector<EncodedTarget> &targets,
+                              const TargetPlan &plan, uint32_t cap,
+                              size_t &replaceIndex) {
+  if (cap == 0 || targets.size() < cap) {
+    replaceIndex = targets.size();
+    return true;
+  }
+  replaceIndex = worst_target_index(targets);
+  return target_plan_rank_less(plan, targets[replaceIndex].plan);
+}
+
+void retain_target(std::vector<EncodedTarget> &targets,
+                   EncodedTarget target, uint32_t cap) {
+  size_t replaceIndex = 0;
+  if (!target_would_be_retained(targets, target.plan, cap, replaceIndex)) {
     return;
   }
-
-  std::unordered_map<uint32_t, std::vector<TargetPlan *>> bySpecies;
-  for (auto &plans : taskPlans) {
-    for (auto &plan : plans) {
-      bySpecies[plan.species].push_back(&plan);
-    }
-  }
-
-  std::unordered_set<std::string> keep;
-  for (auto &[_, plans] : bySpecies) {
-    std::sort(plans.begin(), plans.end(), target_plan_rank_less);
-    const size_t kept = std::min<size_t>(plans.size(), cap);
-    for (size_t i = 0; i < kept; ++i) {
-      keep.insert(plans[i]->name);
-    }
-  }
-
-  for (auto &plans : taskPlans) {
-    plans.erase(std::remove_if(plans.begin(), plans.end(),
-                               [&](const TargetPlan &plan) {
-                                 return !keep.contains(plan.name);
-                               }),
-                plans.end());
+  if (replaceIndex == targets.size()) {
+    targets.push_back(std::move(target));
+  } else {
+    targets[replaceIndex] = std::move(target);
   }
 }
 
-void limit_target_plan_sources_per_species(
-    std::vector<std::vector<TargetPlan>> &taskPlans, uint32_t sourceCap) {
-  if (sourceCap == 0) {
-    return;
-  }
-
-  std::unordered_map<uint32_t, std::vector<TargetPlan *>> bySpecies;
-  for (auto &plans : taskPlans) {
-    for (auto &plan : plans) {
-      bySpecies[plan.species].push_back(&plan);
-    }
-  }
-
-  std::unordered_set<std::string> keep;
-  for (auto &[_, plans] : bySpecies) {
-    std::sort(plans.begin(), plans.end(), target_plan_rank_less);
+std::vector<EncodedTarget>
+finalize_species_targets(std::vector<EncodedTarget> targets,
+                         uint32_t sourceCap, uint32_t targetCap) {
+  std::sort(targets.begin(), targets.end(),
+            [](const EncodedTarget &lhs, const EncodedTarget &rhs) {
+              return target_plan_rank_less(lhs.plan, rhs.plan);
+            });
+  if (sourceCap > 0) {
     std::unordered_set<std::string> selectedSources;
     selectedSources.reserve(sourceCap);
-    for (const TargetPlan *plan : plans) {
-      const std::string source = local_resolution_source_key(plan->name);
-      if (selectedSources.contains(source)) {
-        keep.insert(plan->name);
-        continue;
-      }
-      if (selectedSources.size() >= sourceCap) {
-        continue;
-      }
-      selectedSources.insert(source);
-      keep.insert(plan->name);
-    }
+    targets.erase(
+        std::remove_if(
+            targets.begin(), targets.end(), [&](const EncodedTarget &target) {
+              const std::string source =
+                  local_resolution_source_key(target.plan.name);
+              if (selectedSources.contains(source)) {
+                return false;
+              }
+              if (selectedSources.size() >= sourceCap) {
+                return true;
+              }
+              selectedSources.insert(source);
+              return false;
+            }),
+        targets.end());
   }
-
-  for (auto &plans : taskPlans) {
-    plans.erase(std::remove_if(plans.begin(), plans.end(),
-                               [&](const TargetPlan &plan) {
-                                 return !keep.contains(plan.name);
-                               }),
-                plans.end());
+  if (targetCap > 0) {
+    std::unordered_map<std::string, uint32_t> sourceCounts;
+    targets.erase(
+        std::remove_if(
+            targets.begin(), targets.end(), [&](const EncodedTarget &target) {
+              const std::string source =
+                  local_resolution_source_key(target.plan.name);
+              return sourceCounts[source]++ >= targetCap;
+            }),
+        targets.end());
   }
-}
-
-void limit_target_plans_per_species_source(
-    std::vector<std::vector<TargetPlan>> &taskPlans, uint32_t targetCap) {
-  if (targetCap == 0) {
-    return;
-  }
-
-  std::unordered_map<std::string, std::vector<TargetPlan *>> bySpeciesSource;
-  for (auto &plans : taskPlans) {
-    for (auto &plan : plans) {
-      bySpeciesSource[std::to_string(plan.species) + "\t" +
-                      local_resolution_source_key(plan.name)]
-          .push_back(&plan);
-    }
-  }
-
-  std::unordered_set<std::string> keep;
-  for (auto &[_, plans] : bySpeciesSource) {
-    std::sort(plans.begin(), plans.end(), target_plan_rank_less);
-    const size_t kept = std::min<size_t>(plans.size(), targetCap);
-    for (size_t i = 0; i < kept; ++i) {
-      keep.insert(plans[i]->name);
-    }
-  }
-
-  for (auto &plans : taskPlans) {
-    plans.erase(std::remove_if(plans.begin(), plans.end(),
-                               [&](const TargetPlan &plan) {
-                                 return !keep.contains(plan.name);
-                               }),
-                plans.end());
-  }
+  std::sort(targets.begin(), targets.end(),
+            [](const EncodedTarget &lhs, const EncodedTarget &rhs) {
+              if (lhs.plan.source_index != rhs.plan.source_index) {
+                return lhs.plan.source_index < rhs.plan.source_index;
+              }
+              return lhs.plan.contig_index < rhs.plan.contig_index;
+            });
+  return targets;
 }
 
 struct ShardOutput {
   std::filesystem::path path;
-  uint64_t anchor_data_offset{};
+  std::atomic<uint64_t> next_offset{0};
+
+  explicit ShardOutput(std::filesystem::path outputPath)
+      : path(std::move(outputPath)) {}
 };
 
 void write_all_at(int fd, const char *data, size_t size, uint64_t offset,
@@ -392,33 +366,11 @@ void write_all_at(int fd, const char *data, size_t size, uint64_t offset,
   }
 }
 
-void write_anchors_at(int fd, uint64_t byte_offset,
-                      const std::vector<chimera::native_bounded::Anchor>
-                          &anchors,
-                      uint32_t k, uint64_t expectedBytes,
-                      std::vector<char> &encodeBuffer,
-                      const std::filesystem::path &path) {
-  chimera::native_bounded::encode_anchor_block_into(anchors, k, expectedBytes,
-                                                    encodeBuffer);
-  if (encodeBuffer.size() != expectedBytes) {
-    throw std::runtime_error(
-        "native bounded direct build encoded anchor size changed");
-  }
-  if (!encodeBuffer.empty()) {
-    write_all_at(fd, encodeBuffer.data(), encodeBuffer.size(), byte_offset,
-                 path);
-  }
-}
-
-void close_shard_outputs(std::unordered_map<uint32_t, ShardOutput> &outputs) {
-  for (auto &[_, output] : outputs) {
-  }
-}
-
 class ShardFdCache {
 public:
-  ShardFdCache(const std::unordered_map<uint32_t, ShardOutput> &outputs,
-               size_t max_open)
+  ShardFdCache(
+      const std::unordered_map<uint32_t, std::unique_ptr<ShardOutput>> &outputs,
+      size_t max_open)
       : outputs_(outputs), max_open_(std::max<size_t>(1, max_open)) {}
 
   int fd_for(uint32_t genus) {
@@ -434,11 +386,12 @@ public:
       throw std::runtime_error(
           "native bounded direct build missing shard output");
     }
-    const int fd = ::open(output->second.path.c_str(), O_WRONLY);
+    const int fd =
+        ::open(output->second->path.c_str(), O_WRONLY | O_CREAT, 0644);
     if (fd < 0) {
       throw std::runtime_error("failed to open native bounded shard for "
                                "direct write: " +
-                               output->second.path.string() + " errno=" +
+                               output->second->path.string() + " errno=" +
                                std::to_string(errno) + " " +
                                std::strerror(errno));
     }
@@ -474,7 +427,7 @@ private:
     }
   }
 
-  const std::unordered_map<uint32_t, ShardOutput> &outputs_;
+  const std::unordered_map<uint32_t, std::unique_ptr<ShardOutput>> &outputs_;
   size_t max_open_;
   std::unordered_map<uint32_t, int> fds_;
   std::deque<uint32_t> order_;
@@ -564,10 +517,25 @@ uint64_t write_representative_pool_for_genus(
   return written;
 }
 
-NativeBoundedBuildStats build_native_bounded_index_direct_final(
+struct SpeciesBuildState {
+  uint32_t species{};
+  uint32_t genus{};
+  size_t remaining_tasks{};
+  std::mutex mutex;
+  std::vector<EncodedTarget> candidates;
+  std::vector<TargetPlan> selected;
+};
+
+struct ResolvedInputTask {
+  size_t species_state{};
+  uint32_t species{};
+  uint32_t genus{};
+};
+
+NativeBoundedBuildStats build_native_bounded_index_fused(
     const BuildConfig &config, const std::vector<InputTask> &tasks,
     const NativeBoundedOutputPaths &paths) {
-  const auto countStarted = std::chrono::steady_clock::now();
+  const auto anchorBuildStarted = std::chrono::steady_clock::now();
   std::filesystem::create_directories(paths.metadata_index.parent_path().empty()
                                           ? std::filesystem::path(".")
                                           : paths.metadata_index.parent_path());
@@ -584,15 +552,55 @@ NativeBoundedBuildStats build_native_bounded_index_direct_final(
   NativeBoundedBuildStats stats;
   const size_t workerCount =
       std::max<size_t>(1, std::min<size_t>(config.threads, tasks.size()));
-  std::vector<WorkerBuildState> workerStates(workerCount);
-  std::vector<std::vector<TargetPlan>> taskPlans(tasks.size());
+
+  std::vector<std::unique_ptr<SpeciesBuildState>> speciesStates;
+  std::unordered_map<uint32_t, size_t> speciesStateIndex;
+  std::vector<ResolvedInputTask> resolvedTasks(tasks.size());
+  speciesStateIndex.reserve(tasks.size());
+  for (size_t taskIndex = 0; taskIndex < tasks.size(); ++taskIndex) {
+    const uint32_t species = taxdump.to_species(tasks[taskIndex].species);
+    uint32_t genus = taxdump.to_genus(species);
+    if (genus == 0) {
+      genus = species;
+    }
+    auto [found, inserted] =
+        speciesStateIndex.emplace(species, speciesStates.size());
+    if (inserted) {
+      auto state = std::make_unique<SpeciesBuildState>();
+      state->species = species;
+      state->genus = genus;
+      speciesStates.push_back(std::move(state));
+    } else if (speciesStates[found->second]->genus != genus) {
+      throw std::runtime_error(
+          "native bounded species maps to multiple genera");
+    }
+    auto &state = *speciesStates[found->second];
+    ++state.remaining_tasks;
+    resolvedTasks[taskIndex] =
+        ResolvedInputTask{found->second, species, genus};
+  }
+
+  std::unordered_map<uint32_t, std::unique_ptr<ShardOutput>> shardOutputs;
+  shardOutputs.reserve(speciesStates.size());
+  for (const auto &state : speciesStates) {
+    if (shardOutputs.contains(state->genus)) {
+      continue;
+    }
+    const std::filesystem::path path =
+        paths.shard_dir / shard_filename(state->genus);
+    std::filesystem::remove(path);
+    shardOutputs.emplace(state->genus,
+                         std::make_unique<ShardOutput>(path));
+  }
 
   std::atomic<size_t> nextTask{0};
   std::atomic<bool> stopWorkers{false};
   std::exception_ptr workerError;
   std::mutex errorMutex;
-  auto countWorker = [&](size_t workerId) {
-    auto &state = workerStates[workerId];
+  const size_t shardFdCacheMaxOpen =
+      std::min<size_t>(64, std::max<size_t>(8, shardOutputs.size()));
+  auto buildWorker = [&]() {
+    ShardFdCache fdCache(shardOutputs, shardFdCacheMaxOpen);
     while (true) {
       if (stopWorkers.load(std::memory_order_relaxed)) {
         break;
@@ -603,40 +611,113 @@ NativeBoundedBuildStats build_native_bounded_index_direct_final(
       }
       try {
         const auto &task = tasks[taskIndex];
-        const uint32_t species = taxdump.to_species(task.species);
-        uint32_t genus = taxdump.to_genus(species);
-        if (genus == 0) {
-          genus = species;
-        }
+        const auto &resolved = resolvedTasks[taskIndex];
+        std::vector<EncodedTarget> taskCandidates;
+        taskCandidates.reserve(config.native_bounded_targets_per_species == 0
+                                   ? 32
+                                   : config.native_bounded_targets_per_species);
         seqan3::sequence_file_input<
             raptor::dna4_traits,
             seqan3::fields<seqan3::field::id, seqan3::field::seq>>
             input{task.filename};
         uint32_t contig = 0;
-        auto &plans = taskPlans[taskIndex];
         for (auto &record : input) {
           auto &seq = record.sequence();
           (void)record.id();
-	          const std::string targetName =
-	              make_target_name(taskIndex, contig, species);
-	          auto anchors = chimera::native_bounded::extract_minimizers(
-              seq, config.native_bounded_k, config.native_bounded_w);
           TargetPlan plan;
-          plan.species = species;
-          plan.genus = genus;
+          plan.source_index = taskIndex;
+          plan.species = resolved.species;
+          plan.genus = resolved.genus;
           plan.contig_index = contig;
           plan.len = static_cast<uint32_t>(seq.size());
+          plan.name =
+              make_target_name(taskIndex, contig, resolved.species);
+          auto anchors = chimera::native_bounded::extract_minimizers(
+              seq, config.native_bounded_k, config.native_bounded_w);
           plan.anchor_count = static_cast<uint32_t>(anchors.size());
-          plan.anchor_bytes =
-              chimera::native_bounded::encoded_anchor_bytes(
-                  anchors, config.native_bounded_k);
-          plan.name = targetName;
-          plans.push_back(std::move(plan));
+
+          size_t replaceIndex = 0;
+          if (target_would_be_retained(
+                  taskCandidates, plan,
+                  config.native_bounded_targets_per_species, replaceIndex)) {
+            auto encoded = chimera::native_bounded::encode_anchor_block(
+                anchors, config.native_bounded_k);
+            plan.anchor_bytes = encoded.size();
+            retain_target(
+                taskCandidates,
+                EncodedTarget{std::move(plan), std::move(encoded)},
+                config.native_bounded_targets_per_species);
+          }
           ++contig;
-          ++state.targets;
-          ++state.sequences;
-          state.bp += seq.size();
-          state.anchors += anchors.size();
+        }
+
+        auto &speciesState = *speciesStates[resolved.species_state];
+        std::vector<EncodedTarget> speciesTargets;
+        bool finalizeSpecies = false;
+        {
+          std::lock_guard<std::mutex> lock(speciesState.mutex);
+          for (auto &candidate : taskCandidates) {
+            retain_target(speciesState.candidates, std::move(candidate),
+                          config.native_bounded_targets_per_species);
+          }
+          if (speciesState.remaining_tasks == 0) {
+            throw std::runtime_error(
+                "native bounded species task accounting underflow");
+          }
+          --speciesState.remaining_tasks;
+          if (speciesState.remaining_tasks == 0) {
+            speciesTargets = std::move(speciesState.candidates);
+            finalizeSpecies = true;
+          }
+        }
+
+        if (finalizeSpecies) {
+          speciesTargets = finalize_species_targets(
+              std::move(speciesTargets),
+              config.native_bounded_sources_per_species,
+              config.native_bounded_targets_per_source);
+          uint64_t speciesBytes = 0;
+          for (const auto &target : speciesTargets) {
+            if (target.anchors.size() >
+                std::numeric_limits<uint64_t>::max() - speciesBytes) {
+              throw std::runtime_error(
+                  "native bounded species anchor size overflow");
+            }
+            speciesBytes += target.anchors.size();
+          }
+          auto output = shardOutputs.find(resolved.genus);
+          if (output == shardOutputs.end()) {
+            throw std::runtime_error(
+                "native bounded direct build missing shard output");
+          }
+          const uint64_t speciesOffset =
+              output->second->next_offset.fetch_add(
+                  speciesBytes, std::memory_order_relaxed);
+          if (speciesBytes >
+              std::numeric_limits<uint64_t>::max() - speciesOffset) {
+            throw std::runtime_error(
+                "native bounded shard anchor size overflow");
+          }
+          uint64_t relativeOffset = 0;
+          int fd = -1;
+          if (speciesBytes > 0) {
+            fd = fdCache.fd_for(resolved.genus);
+          }
+          speciesState.selected.reserve(speciesTargets.size());
+          for (auto &target : speciesTargets) {
+            target.plan.anchor_offset = speciesOffset + relativeOffset;
+            if (!target.anchors.empty()) {
+              write_all_at(fd, target.anchors.data(), target.anchors.size(),
+                           target.plan.anchor_offset,
+                           output->second->path);
+            }
+            relativeOffset += target.anchors.size();
+            speciesState.selected.push_back(std::move(target.plan));
+          }
+          if (relativeOffset != speciesBytes) {
+            throw std::runtime_error(
+                "native bounded species anchor size mismatch");
+          }
         }
       } catch (...) {
         std::lock_guard<std::mutex> lock(errorMutex);
@@ -652,7 +733,7 @@ NativeBoundedBuildStats build_native_bounded_index_direct_final(
   std::vector<std::thread> workers;
   workers.reserve(workerCount);
   for (size_t worker = 0; worker < workerCount; ++worker) {
-    workers.emplace_back(countWorker, worker);
+    workers.emplace_back(buildWorker);
   }
   for (auto &worker : workers) {
     worker.join();
@@ -660,44 +741,49 @@ NativeBoundedBuildStats build_native_bounded_index_direct_final(
   if (workerError != nullptr) {
     std::rethrow_exception(workerError);
   }
-  const auto countFinished = std::chrono::steady_clock::now();
-  stats.count_seconds =
-      std::chrono::duration<double>(countFinished - countStarted).count();
-
-	  const auto selectionStarted = std::chrono::steady_clock::now();
-	  limit_target_plans_per_species(taskPlans,
-	                                 config.native_bounded_targets_per_species);
-	  limit_target_plan_sources_per_species(
-	      taskPlans, config.native_bounded_sources_per_species);
-	  limit_target_plans_per_species_source(
-	      taskPlans, config.native_bounded_targets_per_source);
+  const auto anchorBuildFinished = std::chrono::steady_clock::now();
+  stats.anchor_build_seconds =
+      std::chrono::duration<double>(anchorBuildFinished - anchorBuildStarted)
+          .count();
 
   std::unordered_map<uint32_t, std::vector<TargetPlan *>> plansByGenus;
   std::vector<chimera::native_bounded::TargetMeta> rootTargets;
-  for (auto &plans : taskPlans) {
-    for (auto &plan : plans) {
-      rootTargets.push_back({plan.name, plan.species, plan.len, 0,
-                             plan.anchor_count, plan.anchor_bytes});
-      plansByGenus[plan.genus].push_back(&plan);
+  std::vector<TargetPlan *> selectedPlans;
+  for (auto &state : speciesStates) {
+    if (state->remaining_tasks != 0) {
+      throw std::runtime_error(
+          "native bounded species task accounting mismatch");
     }
+    for (auto &plan : state->selected) {
+      selectedPlans.push_back(&plan);
+    }
+  }
+  std::sort(selectedPlans.begin(), selectedPlans.end(),
+            [](const TargetPlan *lhs, const TargetPlan *rhs) {
+              if (lhs->source_index != rhs->source_index) {
+                return lhs->source_index < rhs->source_index;
+              }
+              return lhs->contig_index < rhs->contig_index;
+            });
+  rootTargets.reserve(selectedPlans.size());
+  for (auto *plan : selectedPlans) {
+    rootTargets.push_back({plan->name, plan->species, plan->len, 0,
+                           plan->anchor_count, plan->anchor_bytes});
+    plansByGenus[plan->genus].push_back(plan);
   }
   if (rootTargets.empty()) {
     throw std::runtime_error("native bounded direct build selected no targets");
   }
-  const auto selectionFinished = std::chrono::steady_clock::now();
-  stats.selection_seconds =
-      std::chrono::duration<double>(selectionFinished - selectionStarted)
-          .count();
 
   const auto layoutStarted = std::chrono::steady_clock::now();
   chimera::native_bounded::write_index_metadata_only(
       paths.metadata_index, config.native_bounded_k, config.native_bounded_w,
       rootTargets);
-	  std::ofstream manifestOut(paths.shard_manifest, std::ios::trunc);
-	  if (!manifestOut) {
-	    throw std::runtime_error("failed to open native bounded shard manifest");
-	  }
-	  manifestOut << "genus\tpath\ttargets\tanchors\n";
+  std::ofstream manifestOut(paths.shard_manifest, std::ios::trunc);
+  if (!manifestOut) {
+    throw std::runtime_error("failed to open native bounded shard manifest");
+  }
+  manifestOut << "genus\tpath\ttargets\tanchors\n";
 
   std::vector<uint32_t> shardGenera;
   shardGenera.reserve(plansByGenus.size());
@@ -706,147 +792,56 @@ NativeBoundedBuildStats build_native_bounded_index_direct_final(
   }
   std::sort(shardGenera.begin(), shardGenera.end());
 
-  std::unordered_map<uint32_t, ShardOutput> shardOutputs;
   std::vector<chimera::local_resolution::TargetRep> repMetadataRows;
-  try {
-    for (uint32_t genus : shardGenera) {
-      auto &plans = plansByGenus[genus];
-      std::vector<chimera::native_bounded::TargetMeta> mergedTargets;
-      mergedTargets.reserve(plans.size());
-      uint64_t mergedAnchors = 0;
-      uint64_t mergedAnchorBytes = 0;
-      for (auto *plan : plans) {
-        plan->anchor_offset = mergedAnchorBytes;
-        mergedTargets.push_back({plan->name, plan->species, plan->len,
-                                 plan->anchor_offset, plan->anchor_count,
-                                 plan->anchor_bytes});
-        mergedAnchors += plan->anchor_count;
-        mergedAnchorBytes += plan->anchor_bytes;
+  for (uint32_t genus : shardGenera) {
+    auto &plans = plansByGenus[genus];
+    std::vector<chimera::native_bounded::TargetMeta> mergedTargets;
+    mergedTargets.reserve(plans.size());
+    uint64_t mergedAnchors = 0;
+    for (auto *plan : plans) {
+      mergedTargets.push_back({plan->name, plan->species, plan->len,
+                               plan->anchor_offset, plan->anchor_count,
+                               plan->anchor_bytes});
+      mergedAnchors += plan->anchor_count;
+    }
+    auto output = shardOutputs.find(genus);
+    if (output == shardOutputs.end()) {
+      throw std::runtime_error(
+          "native bounded direct build missing shard output");
+    }
+    if (!std::filesystem::exists(output->second->path)) {
+      std::ofstream emptyShard(output->second->path,
+                               std::ios::binary | std::ios::trunc);
+      if (!emptyShard) {
+        throw std::runtime_error(
+            "failed to create empty native bounded shard");
       }
-      const std::filesystem::path shardPath =
-          paths.shard_dir / shard_filename(genus);
-      const uint64_t anchorDataOffset =
-          chimera::native_bounded::write_index_header(
-              shardPath, config.native_bounded_k, config.native_bounded_w,
-              mergedTargets, mergedAnchors);
-      shardOutputs.emplace(genus, ShardOutput{shardPath, anchorDataOffset});
-	      manifestOut << genus << '\t' << shardPath.filename().string() << '\t'
-	                  << mergedTargets.size() << '\t' << mergedAnchors << '\n';
-	      stats.representativeRecords += write_representative_pool_for_genus(
-	          nullptr, genus, mergedTargets,
-	          config.native_bounded_rep_pool_cap, anchorDataOffset,
-	          config.native_bounded_k,
-	          repMetadataRows);
-	    }
-	    chimera::local_resolution::write_rep_metadata(paths.rep_metadata,
-                                                  std::move(repMetadataRows));
-    const auto layoutFinished = std::chrono::steady_clock::now();
-    stats.layout_seconds =
-        std::chrono::duration<double>(layoutFinished - layoutStarted).count();
-
-    const auto writeStarted = std::chrono::steady_clock::now();
-    nextTask.store(0);
-    stopWorkers.store(false);
-    workerError = nullptr;
-    const size_t shardFdCacheMaxOpen =
-        std::min<size_t>(64, std::max<size_t>(8, shardOutputs.size()));
-    auto writeWorker = [&]() {
-      ShardFdCache fdCache(shardOutputs, shardFdCacheMaxOpen);
-      std::vector<char> encodeBuffer;
-      while (true) {
-        if (stopWorkers.load(std::memory_order_relaxed)) {
-          break;
-        }
-        const size_t taskIndex = nextTask.fetch_add(1);
-        if (taskIndex >= tasks.size()) {
-          break;
-        }
-        try {
-          const auto &task = tasks[taskIndex];
-          auto &plans = taskPlans[taskIndex];
-          if (plans.empty()) {
-            continue;
-          }
-          seqan3::sequence_file_input<
-              raptor::dna4_traits,
-              seqan3::fields<seqan3::field::id, seqan3::field::seq>>
-              input{task.filename};
-          uint32_t contig = 0;
-          size_t planCursor = 0;
-          for (auto &record : input) {
-            if (planCursor >= plans.size() ||
-                plans[planCursor].contig_index != contig) {
-              ++contig;
-              continue;
-            }
-            auto &plan = plans[planCursor];
-            auto &seq = record.sequence();
-            if (plan.len != seq.size()) {
-              throw std::runtime_error(
-                  "native bounded direct build target length changed");
-            }
-            auto anchors = chimera::native_bounded::extract_minimizers(
-                seq, config.native_bounded_k, config.native_bounded_w);
-            if (anchors.size() != plan.anchor_count) {
-              throw std::runtime_error(
-                  "native bounded direct build anchor count changed");
-            }
-            auto output = shardOutputs.find(plan.genus);
-            if (output == shardOutputs.end()) {
-              throw std::runtime_error(
-                  "native bounded direct build missing shard output");
-            }
-            const uint64_t byteOffset =
-                output->second.anchor_data_offset +
-                plan.anchor_offset;
-            write_anchors_at(fdCache.fd_for(plan.genus), byteOffset, anchors,
-                             config.native_bounded_k, plan.anchor_bytes,
-                             encodeBuffer,
-                             output->second.path);
-            ++planCursor;
-            ++contig;
-          }
-          if (planCursor != plans.size()) {
-            throw std::runtime_error(
-                "native bounded direct build target count changed");
-          }
-        } catch (...) {
-          std::lock_guard<std::mutex> lock(errorMutex);
-          if (workerError == nullptr) {
-            workerError = std::current_exception();
-            stopWorkers.store(true, std::memory_order_relaxed);
-          }
-          break;
-        }
-      }
-    };
-    workers.clear();
-    workers.reserve(workerCount);
-    for (size_t worker = 0; worker < workerCount; ++worker) {
-      workers.emplace_back(writeWorker);
     }
-    for (auto &worker : workers) {
-      worker.join();
+    const uint64_t expectedShardBytes =
+        output->second->next_offset.load(std::memory_order_relaxed);
+    if (std::filesystem::file_size(output->second->path) !=
+        expectedShardBytes) {
+      throw std::runtime_error(
+          "native bounded shard size does not match allocated anchor data");
     }
-    if (workerError != nullptr) {
-      std::rethrow_exception(workerError);
-    }
-    close_shard_outputs(shardOutputs);
-    const auto writeFinished = std::chrono::steady_clock::now();
-    stats.write_seconds =
-        std::chrono::duration<double>(writeFinished - writeStarted).count();
-  } catch (...) {
-    close_shard_outputs(shardOutputs);
-    throw;
+    manifestOut << genus << '\t' << output->second->path.filename().string()
+                << '\t' << mergedTargets.size() << '\t' << mergedAnchors
+                << '\n';
+    stats.representativeRecords += write_representative_pool_for_genus(
+        nullptr, genus, mergedTargets, config.native_bounded_rep_pool_cap, 0,
+        config.native_bounded_k, repMetadataRows);
   }
+  chimera::local_resolution::write_rep_metadata(paths.rep_metadata,
+                                                std::move(repMetadataRows));
+  const auto layoutFinished = std::chrono::steady_clock::now();
+  stats.layout_seconds =
+      std::chrono::duration<double>(layoutFinished - layoutStarted).count();
 
-  for (const auto &plans : taskPlans) {
-    for (const auto &plan : plans) {
-      ++stats.targets;
-      ++stats.sequences;
-      stats.bp += plan.len;
-      stats.anchors += plan.anchor_count;
-    }
+  for (const auto *plan : selectedPlans) {
+    ++stats.targets;
+    ++stats.sequences;
+    stats.bp += plan->len;
+    stats.anchors += plan->anchor_count;
   }
   return stats;
 }
@@ -859,10 +854,10 @@ NativeBoundedBuildStats build_native_bounded_index(
         &inputFiles,
     const NativeBoundedOutputPaths &paths) {
   const auto tasks = make_tasks(inputFiles);
-	  if (tasks.empty()) {
-	    throw std::runtime_error("native bounded index build has no valid inputs");
-	  }
-	  return build_native_bounded_index_direct_final(config, tasks, paths);
-	}
+  if (tasks.empty()) {
+    throw std::runtime_error("native bounded index build has no valid inputs");
+  }
+  return build_native_bounded_index_fused(config, tasks, paths);
+}
 
 } // namespace ChimeraBuild

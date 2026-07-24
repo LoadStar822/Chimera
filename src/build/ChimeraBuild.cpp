@@ -499,14 +499,12 @@ void run(BuildConfig config) {
       std::cout << "Local anchors: " << localStats.anchors << std::endl;
       std::cout << "Local representative records: "
                 << localStats.representativeRecords << std::endl;
-      std::cout << "Local count pass time: ";
-      print_build_time(static_cast<long long>(localStats.count_seconds * 1000.0));
-      std::cout << "Local selection time: ";
-      print_build_time(static_cast<long long>(localStats.selection_seconds * 1000.0));
+      std::cout << "Local anchor build time: ";
+      print_build_time(
+          static_cast<long long>(localStats.anchor_build_seconds * 1000.0));
       std::cout << "Local layout time: ";
-      print_build_time(static_cast<long long>(localStats.layout_seconds * 1000.0));
-      std::cout << "Local anchor write time: ";
-      print_build_time(static_cast<long long>(localStats.write_seconds * 1000.0));
+      print_build_time(
+          static_cast<long long>(localStats.layout_seconds * 1000.0));
       std::cout << "Local data: " << localRoot.string() << std::endl;
       std::cout << "Local data build time: ";
       print_build_time(local_total_time);
@@ -699,17 +697,24 @@ void run(BuildConfig config) {
   if (groupCountSize > std::numeric_limits<size_t>::max()) {
     throw std::runtime_error("QIMCF group count size exceeds address space");
   }
+  const bool needsAggregateGroupCounts = blockCount != 1;
   if (config.verbose) {
+    const uint64_t denseCountCopies =
+        static_cast<uint64_t>(blockCount) +
+        (needsAggregateGroupCounts ? 1u : 0u);
     const long double denseCountGiB =
         static_cast<long double>(groupCountSize) * sizeof(uint32_t) *
-        (static_cast<uint64_t>(blockCount) + 1u) /
+        denseCountCopies /
         static_cast<long double>(1ull << 30);
     std::cout << "QIMCF group bits: " << static_cast<unsigned>(qidxGroupBits)
               << " (dense count working set " << std::fixed
               << std::setprecision(2) << static_cast<double>(denseCountGiB)
               << " GiB)" << std::defaultfloat << std::endl;
   }
-  std::vector<uint32_t> qidxGroupCounts(groupCountSize, 0u);
+  std::vector<uint32_t> qidxGroupCounts;
+  if (needsAggregateGroupCounts) {
+    qidxGroupCounts.assign(groupCountSize, 0u);
+  }
   std::vector<std::vector<uint32_t>> blockQidxCounts;
   blockQidxCounts.reserve(blockCount);
   std::vector<std::filesystem::path> blockEntryPaths(blockCount);
@@ -751,10 +756,12 @@ void run(BuildConfig config) {
     if (writtenBlockEntries != blockEntryCount) {
       throw std::runtime_error("QIMCF block: block entry count mismatch");
     }
+    if (needsAggregateGroupCounts) {
 #pragma omp parallel for schedule(static)
-    for (int64_t idx = 0; idx < static_cast<int64_t>(groupCountSize); ++idx) {
-      qidxGroupCounts[static_cast<size_t>(idx)] +=
-          blockCounts[static_cast<size_t>(idx)];
+      for (int64_t idx = 0; idx < static_cast<int64_t>(groupCountSize); ++idx) {
+        qidxGroupCounts[static_cast<size_t>(idx)] +=
+            blockCounts[static_cast<size_t>(idx)];
+      }
     }
     blockQidxCounts.push_back(std::move(blockCounts));
     add_shard_offsets_for_group_range(groups, blockBegin, blockEnd,
@@ -792,7 +799,9 @@ void run(BuildConfig config) {
   std::vector<uint64_t> bucketBase;
   uint64_t entriesCount = 0;
   uint32_t maxBucketTotal = 0;
-  write_prefix_spool_and_bucket_base(prefixSpoolPath, qidxGroupCounts,
+  const std::vector<uint32_t> &prefixGroupCounts =
+      blockCount == 1 ? blockQidxCounts.front() : qidxGroupCounts;
+  write_prefix_spool_and_bucket_base(prefixSpoolPath, prefixGroupCounts,
                                      globalBinSize, qidxGroupSize, bucketBase,
                                      entriesCount, maxBucketTotal);
   const uint64_t prefixSpoolCount =

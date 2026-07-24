@@ -12,7 +12,9 @@ namespace chimera::native_bounded {
 namespace {
 
 constexpr char kMagic[] = "CHIMERA_NBCIDX_V1";
-constexpr uint32_t kIndexVersion = 5;
+// Version 6 permits direct-routed shard files whose anchor offsets are
+// relative to the shard itself rather than to an embedded target header.
+constexpr uint32_t kIndexVersion = 6;
 constexpr uint32_t kMinSupportedIndexVersion = 2;
 constexpr uint32_t kContinuityEscapeCode = 15;
 constexpr uint32_t kContinuityCodeBits = 4;
