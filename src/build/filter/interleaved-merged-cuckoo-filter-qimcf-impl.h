@@ -15,7 +15,7 @@ InterleavedMergedCuckooFilter::make_qidx_lookup_state(uint64_t value) const {
 
 inline void InterleavedMergedCuckooFilter::qidx_group_range(
     size_t bucket, uint32_t group, uint64_t &start, uint64_t &end) const {
-  const uint64_t base = qidx->bucketBase[bucket];
+  const uint64_t base = qidx_bucket_base(bucket);
   start = base + qidx_prefix(bucket, group);
   end = base + qidx_prefix(bucket, group + 1);
 }
@@ -34,7 +34,7 @@ inline void InterleavedMergedCuckooFilter::route_qidx(
     qidx_group_range(bucket, state.group, s, e);
     uint32_t last_bin = std::numeric_limits<uint32_t>::max();
     for (uint64_t i = s; i < e; ++i) {
-      uint64_t code = qidx->entries[i];
+      uint64_t code = qidx_entry(i);
       uint16_t hi2 = static_cast<uint16_t>((code >> 4) & state.hiMask);
       if (hi2 != state.hi) {
         continue;
@@ -125,19 +125,11 @@ inline void InterleavedMergedCuckooFilter::build_query_index(
       stashBucketEnd.assign(hashSize + 1, 0);
     }
 
-    qidx = std::make_unique<QueryIndex>();
-    constexpr uint8_t kQidxGroupBits = 8;
-    qidx->g = kQidxGroupBits;
-    qidx->refresh();
-
-    const uint32_t groupMask = qidx->groupSize - 1;
-    const uint64_t prefixSize = static_cast<uint64_t>(hashSize) * qidx->stride;
     std::vector<uint32_t> bucketTotal(hashSize, 0);
     uint32_t maxBucketTotal = 0;
 
 #pragma omp parallel
     {
-      std::vector<uint32_t> counts(qidx->groupSize, 0);
       std::vector<uint64_t> bucketWords(binNum, 0);
       uint32_t localMaxBucketTotal = 0;
 
@@ -145,8 +137,8 @@ inline void InterleavedMergedCuckooFilter::build_query_index(
       for (int64_t bucket_i = 0; bucket_i < static_cast<int64_t>(hashSize);
            ++bucket_i) {
         size_t bucket = static_cast<size_t>(bucket_i);
-        std::fill(counts.begin(), counts.end(), 0);
         loadBucketWords(bucket, bucketWords);
+        uint32_t running = 0;
         for (size_t bin = 0; bin < binNum; ++bin) {
           uint64_t q = bucketWords[bin];
           if (q == 0) {
@@ -157,24 +149,15 @@ inline void InterleavedMergedCuckooFilter::build_query_index(
             if (tag == 0u) {
               continue;
             }
-            uint16_t fp = static_cast<uint16_t>(tag & 0x0FFFu);
-            uint32_t lo = static_cast<uint32_t>(fp & groupMask);
-            ++counts[lo];
+            ++running;
           }
         }
         if (include_stash) {
           size_t s = stashBucketStart[bucket];
           size_t e = stashBucketEnd[bucket];
           for (size_t idx = s; idx < e; ++idx) {
-            uint16_t fp = stashFlat[idx].fp;
-            uint32_t lo = static_cast<uint32_t>(fp & groupMask);
-            counts[lo] += popcount16(stashFlat[idx].mask);
+            running += popcount16(stashFlat[idx].mask);
           }
-        }
-
-        uint32_t running = 0;
-        for (uint32_t lo = 0; lo < qidx->groupSize; ++lo) {
-          running += counts[lo];
         }
         bucketTotal[bucket] = running;
         if (running > localMaxBucketTotal) {
@@ -190,6 +173,7 @@ inline void InterleavedMergedCuckooFilter::build_query_index(
       }
     }
 
+    qidx = std::make_unique<QueryIndex>();
     qidx->bucketBase.resize(hashSize + 1);
     uint64_t acc = 0;
     for (size_t b = 0; b < hashSize; ++b) {
@@ -199,6 +183,12 @@ inline void InterleavedMergedCuckooFilter::build_query_index(
     qidx->bucketBase[hashSize] = acc;
 
     qidx->prefix_bits = bits_required_u64(maxBucketTotal);
+    qidx->g = choose_qidx_group_bits(hashSize, binNum, acc,
+                                     qidx->prefix_bits);
+    qidx->refresh();
+    const uint32_t groupMask = qidx->groupSize - 1;
+    const uint64_t prefixSize =
+        static_cast<uint64_t>(hashSize) * qidx->stride;
     const bool use_prefix_spool = low_peak_mode;
     if (!use_prefix_spool) {
       qidx->prefix = sdsl::int_vector<0>(prefixSize, 0, qidx->prefix_bits);
@@ -584,7 +574,7 @@ inline void InterleavedMergedCuckooFilter::bulkContain_events_qidx(
     uint64_t e = 0;
     qidx_group_range(bucket, state.group, s, e);
     for (uint64_t i = s; i < e; ++i) {
-      uint64_t code = qidx->entries[i];
+      uint64_t code = qidx_entry(i);
       uint16_t hi2 = static_cast<uint16_t>((code >> 4) & state.hiMask);
       if (hi2 != state.hi) {
         continue;
@@ -615,7 +605,7 @@ inline void InterleavedMergedCuckooFilter::bulkContain_events_subset_qidx(
     qidx_group_range(bucket, state.group, s, e);
     size_t j = 0;
     for (uint64_t i = s; i < e && j < binSubset.size(); ++i) {
-      uint64_t code = qidx->entries[i];
+      uint64_t code = qidx_entry(i);
       uint32_t bin = static_cast<uint32_t>(code >> (qidx->fpHiBits + 4));
       while (j < binSubset.size() && binSubset[j] < bin) {
         ++j;
@@ -655,7 +645,7 @@ inline void InterleavedMergedCuckooFilter::bulkContain_events_subset_qidx_mask(
     uint64_t e = 0;
     qidx_group_range(bucket, state.group, s, e);
     for (uint64_t i = s; i < e; ++i) {
-      uint64_t code = qidx->entries[i];
+      uint64_t code = qidx_entry(i);
       uint16_t hi2 = static_cast<uint16_t>((code >> 4) & state.hiMask);
       if (hi2 != state.hi) {
         continue;
@@ -691,7 +681,7 @@ inline void InterleavedMergedCuckooFilter::bulkContain_events_subset_qidx_marked
     uint64_t e = 0;
     qidx_group_range(bucket, state.group, s, e);
     for (uint64_t i = s; i < e; ++i) {
-      uint64_t code = qidx->entries[i];
+      uint64_t code = qidx_entry(i);
       uint16_t hi2 = static_cast<uint16_t>((code >> 4) & state.hiMask);
       if (hi2 != state.hi) {
         continue;

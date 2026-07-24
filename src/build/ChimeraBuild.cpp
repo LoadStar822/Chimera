@@ -38,9 +38,8 @@ namespace {
 
 constexpr uint64_t kBlockClassicTableTargetBytes =
     72ull * 1024ull * 1024ull * 1024ull;
-constexpr uint8_t kBlockQidxGroupBits = 8;
-constexpr uint32_t kBlockQidxGroupSize = 1u << kBlockQidxGroupBits;
-constexpr uint32_t kBlockQidxStride = kBlockQidxGroupSize + 1;
+constexpr uint64_t kBlockQidxDenseCountBudgetBytes =
+    16ull * 1024ull * 1024ull * 1024ull;
 constexpr const char *kTaxonomyMetaFilename = "taxonomy.meta";
 
 bool is_auto_or_empty(const std::string &value) {
@@ -212,6 +211,7 @@ void build_classic_block_imcf(
 void write_prefix_spool_and_bucket_base(
     const std::filesystem::path &prefixSpoolPath,
     const std::vector<uint32_t> &groupCounts, size_t hashSize,
+    uint32_t groupSize,
     std::vector<uint64_t> &bucketBase, uint64_t &entriesCount,
     uint32_t &maxBucketTotal) {
   std::ofstream prefix(prefixSpoolPath, std::ios::binary);
@@ -222,14 +222,14 @@ void write_prefix_spool_and_bucket_base(
   bucketBase.assign(hashSize + 1, 0);
   entriesCount = 0;
   maxBucketTotal = 0;
-  std::vector<uint32_t> prefixRow(kBlockQidxStride, 0);
+  std::vector<uint32_t> prefixRow(groupSize + 1, 0);
   for (size_t bucket = 0; bucket < hashSize; ++bucket) {
     bucketBase[bucket] = entriesCount;
     prefixRow[0] = 0;
     uint32_t running = 0;
     const uint64_t offset =
-        static_cast<uint64_t>(bucket) * kBlockQidxGroupSize;
-    for (uint32_t lo = 0; lo < kBlockQidxGroupSize; ++lo) {
+        static_cast<uint64_t>(bucket) * groupSize;
+    for (uint32_t lo = 0; lo < groupSize; ++lo) {
       running += groupCounts[offset + lo];
       prefixRow[lo + 1] = running;
     }
@@ -276,9 +276,9 @@ void close_entries_spool(int fd) {
 
 std::vector<uint64_t> make_bucket_base_from_group_counts(
     const std::vector<uint32_t> &groupCounts, size_t hashSize,
-    uint64_t &entriesCount) {
+    uint32_t groupSize, uint64_t &entriesCount) {
   const uint64_t expectedSize =
-      static_cast<uint64_t>(hashSize) * kBlockQidxGroupSize;
+      static_cast<uint64_t>(hashSize) * groupSize;
   if (groupCounts.size() != expectedSize) {
     throw std::runtime_error("QIMCF block: invalid group count size");
   }
@@ -287,9 +287,9 @@ std::vector<uint64_t> make_bucket_base_from_group_counts(
   for (size_t bucket = 0; bucket < hashSize; ++bucket) {
     bucketBase[bucket] = entriesCount;
     const uint64_t offset =
-        static_cast<uint64_t>(bucket) * kBlockQidxGroupSize;
+        static_cast<uint64_t>(bucket) * groupSize;
     uint32_t running = 0;
-    for (uint32_t lo = 0; lo < kBlockQidxGroupSize; ++lo) {
+    for (uint32_t lo = 0; lo < groupSize; ++lo) {
       running += groupCounts[offset + lo];
     }
     entriesCount += running;
@@ -334,13 +334,14 @@ void read_exact_u32(std::ifstream &input, const std::filesystem::path &path,
 void merge_block_entry_spools(
     const std::vector<std::filesystem::path> &blockEntryPaths,
     const std::vector<std::vector<uint32_t>> &blockGroupCounts,
-    size_t hashSize, int finalEntriesFd, uint64_t entriesCount) {
+    size_t hashSize, uint32_t groupSize, int finalEntriesFd,
+    uint64_t entriesCount) {
   const size_t blockCount = blockEntryPaths.size();
   if (blockGroupCounts.size() != blockCount) {
     throw std::runtime_error("QIMCF block: block entry merge input mismatch");
   }
   const uint64_t expectedGroupSize =
-      static_cast<uint64_t>(hashSize) * kBlockQidxGroupSize;
+      static_cast<uint64_t>(hashSize) * groupSize;
   std::vector<std::ifstream> inputs;
   inputs.reserve(blockCount);
   for (size_t blockIdx = 0; blockIdx < blockCount; ++blockIdx) {
@@ -372,11 +373,11 @@ void merge_block_entry_spools(
 
   for (size_t bucket = 0; bucket < hashSize; ++bucket) {
     const uint64_t groupBase =
-        static_cast<uint64_t>(bucket) * kBlockQidxGroupSize;
+        static_cast<uint64_t>(bucket) * groupSize;
     for (size_t blockIdx = 0; blockIdx < blockCount; ++blockIdx) {
       uint64_t bucketTotal = 0;
       const auto &counts = blockGroupCounts[blockIdx];
-      for (uint32_t lo = 0; lo < kBlockQidxGroupSize; ++lo) {
+      for (uint32_t lo = 0; lo < groupSize; ++lo) {
         bucketTotal += counts[groupBase + lo];
       }
       bucketBuffers[blockIdx].resize(bucketTotal);
@@ -385,7 +386,7 @@ void merge_block_entry_spools(
       bucketOffsets[blockIdx] = 0;
     }
 
-    for (uint32_t lo = 0; lo < kBlockQidxGroupSize; ++lo) {
+    for (uint32_t lo = 0; lo < groupSize; ++lo) {
       for (size_t blockIdx = 0; blockIdx < blockCount; ++blockIdx) {
         const uint32_t n = blockGroupCounts[blockIdx][groupBase + lo];
         if (n == 0) {
@@ -655,6 +656,30 @@ void run(BuildConfig config) {
                              (static_cast<uint64_t>(globalBinSize) * 8ull)));
   const size_t blockCount =
       (globalBinNum + blockBinCapacity - 1) / blockBinCapacity;
+  uint64_t estimatedEntries = 0;
+  for (const auto &group : groups) {
+    if (group.totalHash >
+        std::numeric_limits<uint64_t>::max() - estimatedEntries) {
+      throw std::runtime_error("QIMCF entry estimate overflow");
+    }
+    estimatedEntries += group.totalHash;
+  }
+  const uint64_t meanBucketEntries =
+      ceil_div_u64(estimatedEntries, std::max<size_t>(1, globalBinSize));
+  const uint64_t bucketHeadroom = meanBucketEntries / 4u;
+  const uint64_t estimatedMaxBucketEntries =
+      meanBucketEntries >
+              std::numeric_limits<uint64_t>::max() - bucketHeadroom - 64u
+          ? std::numeric_limits<uint64_t>::max()
+          : meanBucketEntries + bucketHeadroom + 64u;
+  const uint8_t estimatedPrefixBits =
+      bits_required_u64(estimatedMaxBucketEntries);
+  const uint8_t qidxGroupBits = chimera::imcf::choose_qidx_group_bits(
+      globalBinSize, globalBinNum, estimatedEntries, estimatedPrefixBits,
+      static_cast<uint64_t>(blockCount) + 1u,
+      kBlockQidxDenseCountBudgetBytes);
+  const uint32_t qidxGroupSize = 1u << qidxGroupBits;
+  const uint32_t qidxStride = qidxGroupSize + 1;
 
   std::vector<std::vector<std::string>> indexToTaxid =
       build_index_to_taxid(groups);
@@ -670,7 +695,20 @@ void run(BuildConfig config) {
   }
 
   const uint64_t groupCountSize =
-      static_cast<uint64_t>(globalBinSize) * kBlockQidxGroupSize;
+      static_cast<uint64_t>(globalBinSize) * qidxGroupSize;
+  if (groupCountSize > std::numeric_limits<size_t>::max()) {
+    throw std::runtime_error("QIMCF group count size exceeds address space");
+  }
+  if (config.verbose) {
+    const long double denseCountGiB =
+        static_cast<long double>(groupCountSize) * sizeof(uint32_t) *
+        (static_cast<uint64_t>(blockCount) + 1u) /
+        static_cast<long double>(1ull << 30);
+    std::cout << "QIMCF group bits: " << static_cast<unsigned>(qidxGroupBits)
+              << " (dense count working set " << std::fixed
+              << std::setprecision(2) << static_cast<double>(denseCountGiB)
+              << " GiB)" << std::defaultfloat << std::endl;
+  }
   std::vector<uint32_t> qidxGroupCounts(groupCountSize, 0u);
   std::vector<std::vector<uint32_t>> blockQidxCounts;
   blockQidxCounts.reserve(blockCount);
@@ -686,11 +724,11 @@ void run(BuildConfig config) {
                              effective_span, ref_read_len,
                              config.presence_unique_deg);
     std::vector<uint32_t> blockCounts(groupCountSize, 0u);
-    blockImcf.accumulate_qidx_group_counts(blockCounts,
+    blockImcf.accumulate_qidx_group_counts(blockCounts, qidxGroupBits,
                                            /*include_stash=*/true);
     uint64_t blockEntryCount = 0;
     std::vector<uint64_t> blockBucketBase = make_bucket_base_from_group_counts(
-        blockCounts, globalBinSize, blockEntryCount);
+        blockCounts, globalBinSize, qidxGroupSize, blockEntryCount);
     // Reuse the in-memory block for QIMCF entries; rebuilding it later is pure
     // duplicate work.
     blockEntryPaths[blockIdx] =
@@ -700,7 +738,7 @@ void run(BuildConfig config) {
     uint64_t writtenBlockEntries = 0;
     try {
       writtenBlockEntries = blockImcf.write_qidx_block_entries_by_bucket(
-          blockEntriesFd, blockBucketBase, blockBegin,
+          blockEntriesFd, blockBucketBase, blockBegin, qidxGroupBits,
           /*include_stash=*/true, &blockCounts);
       close_entries_spool(blockEntriesFd);
       blockEntriesFd = -1;
@@ -755,16 +793,16 @@ void run(BuildConfig config) {
   uint64_t entriesCount = 0;
   uint32_t maxBucketTotal = 0;
   write_prefix_spool_and_bucket_base(prefixSpoolPath, qidxGroupCounts,
-                                     globalBinSize, bucketBase, entriesCount,
-                                     maxBucketTotal);
+                                     globalBinSize, qidxGroupSize, bucketBase,
+                                     entriesCount, maxBucketTotal);
   const uint64_t prefixSpoolCount =
-      static_cast<uint64_t>(globalBinSize) * kBlockQidxStride;
+      static_cast<uint64_t>(globalBinSize) * qidxStride;
   std::vector<uint32_t>().swap(qidxGroupCounts);
   try {
     int entriesFd = open_sized_entries_spool(entriesSpoolPath, entriesCount);
     try {
       merge_block_entry_spools(blockEntryPaths, blockQidxCounts, globalBinSize,
-                               entriesFd, entriesCount);
+                               qidxGroupSize, entriesFd, entriesCount);
       close_entries_spool(entriesFd);
       entriesFd = -1;
     } catch (...) {
@@ -780,12 +818,13 @@ void run(BuildConfig config) {
   const uint8_t prefixBits = bits_required_u64(maxBucketTotal);
   const uint8_t entryBits = static_cast<uint8_t>(
       bits_required_u64(globalBinNum > 0 ? (globalBinNum - 1) : 0) +
-      (12 - kBlockQidxGroupBits) + 4);
+      (chimera::imcf::kQidxFingerprintBits - qidxGroupBits) + 4);
   chimera::imcf::InterleavedMergedCuckooFilter imcf;
   imcf.initialize_qidx_spool_only(globalBinNum, globalBinSize,
-                                  std::move(bucketBase), prefixBits, entryBits,
-                                  prefixSpoolPath, prefixSpoolCount,
-                                  entriesSpoolPath, entriesCount);
+                                  std::move(bucketBase), qidxGroupBits,
+                                  prefixBits, entryBits, prefixSpoolPath,
+                                  prefixSpoolCount, entriesSpoolPath,
+                                  entriesCount);
 #if defined(__GLIBC__)
   ::malloc_trim(0);
 #endif

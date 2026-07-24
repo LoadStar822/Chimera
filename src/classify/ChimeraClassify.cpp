@@ -5137,6 +5137,25 @@ void run(ClassifyConfig config) {
   chimera::presence::CoverageMeta coverageMeta;
   print_status_line(ConsoleStatusKind::Run, "loading database");
   loadFilter(config.dbFile, imcf, imcfConfig, indexToTaxid, &coverageMeta);
+  auto input_may_contain_reads = [](const std::vector<std::string> &paths) {
+    for (const std::string &path : paths) {
+      std::error_code ec;
+      const bool regular = std::filesystem::is_regular_file(path, ec);
+      if (ec || !regular) {
+        return true;
+      }
+      const uintmax_t bytes = std::filesystem::file_size(path, ec);
+      if (ec || bytes > 0) {
+        return true;
+      }
+    }
+    return false;
+  };
+  if (input_may_contain_reads(config.singleFiles) ||
+      input_may_contain_reads(config.pairedFiles)) {
+    imcf.prepare_mapped_archive(
+        chimera::local_resolution::core_archive_path_for(config.dbFile));
+  }
   {
     std::ostringstream msg;
     msg << "database loaded (taxonomy: "

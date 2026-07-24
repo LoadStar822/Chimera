@@ -52,6 +52,7 @@
 #include <simde/x86/avx2.h>
 #include <simde/x86/sse2.h>
 #include <stdexcept>
+#include <sys/mman.h>
 #include <type_traits>
 #include <utility>
 #include <unistd.h>
@@ -92,6 +93,51 @@ static inline uint8_t bits_required_u64(uint64_t v) {
 namespace chimera::imcf {
 static inline uint64_t mix64(uint64_t value) {
   return XXH3_64bits(&value, sizeof(value));
+}
+
+static constexpr uint8_t kQidxFingerprintBits = 12;
+static constexpr uint8_t kQidxMinGroupBits = 8;
+static constexpr uint8_t kQidxMaxGroupBits = kQidxFingerprintBits;
+
+static inline uint8_t choose_qidx_group_bits(
+    size_t hash_size, size_t bin_num, uint64_t entry_count,
+    uint8_t prefix_bits, uint64_t dense_count_copies = 0,
+    uint64_t dense_count_budget_bytes =
+        std::numeric_limits<uint64_t>::max()) {
+  if (hash_size == 0 || prefix_bits == 0) {
+    return kQidxMinGroupBits;
+  }
+  const uint8_t bin_bits =
+      bits_required_u64(bin_num > 0 ? (bin_num - 1) : 0);
+  uint8_t best_bits = kQidxMinGroupBits;
+  long double best_layout_bits = std::numeric_limits<long double>::max();
+  for (uint8_t group_bits = kQidxMinGroupBits;
+       group_bits <= kQidxMaxGroupBits; ++group_bits) {
+    const uint64_t group_size = uint64_t{1} << group_bits;
+    if (dense_count_copies != 0) {
+      const long double dense_bytes =
+          static_cast<long double>(hash_size) * group_size *
+          sizeof(uint32_t) * dense_count_copies;
+      if (dense_bytes >
+          static_cast<long double>(dense_count_budget_bytes)) {
+        continue;
+      }
+    }
+    const uint8_t entry_bits = static_cast<uint8_t>(
+        bin_bits + (kQidxFingerprintBits - group_bits) + 4);
+    const long double prefix_layout_bits =
+        static_cast<long double>(hash_size) * (group_size + 1u) *
+        prefix_bits;
+    const long double entry_layout_bits =
+        static_cast<long double>(entry_count) * entry_bits;
+    const long double layout_bits =
+        prefix_layout_bits + entry_layout_bits;
+    if (layout_bits < best_layout_bits) {
+      best_layout_bits = layout_bits;
+      best_bits = group_bits;
+    }
+  }
+  return best_bits;
 }
 
 struct Group {
@@ -332,7 +378,7 @@ class InterleavedMergedCuckooFilter {
     }
   };
   struct QueryIndex {
-    static constexpr uint32_t FP_BITS = 12;
+    static constexpr uint32_t FP_BITS = kQidxFingerprintBits;
     std::vector<uint64_t> bucketBase;  // size = hashSize + 1
     sdsl::int_vector<0> prefix;        // width = prefix_bits
     sdsl::int_vector<0> entries;       // width = entry_bits
@@ -347,6 +393,9 @@ class InterleavedMergedCuckooFilter {
     uint64_t prefixSpoolCount{0};
     uint64_t entriesSpoolCount{0};
     bool spoolBacked{false};
+    const uint8_t *mappedBucketBase{nullptr};
+    const uint8_t *mappedPrefixWords{nullptr};
+    const uint8_t *mappedEntryWords{nullptr};
 
     void refresh() {
       groupSize = 1u << g;
@@ -384,12 +433,16 @@ class InterleavedMergedCuckooFilter {
     }
 
     bool has_spool_backing() const { return spoolBacked; }
+    bool has_mapped_backing() const { return mappedBucketBase != nullptr; }
 
     template <class Archive> void serialize(Archive &ar) {
       ar(bucketBase, prefix, entries, g, prefix_bits, entry_bits);
       if constexpr (Archive::is_loading::value) {
         refresh();
         clear_spool_backing(false);
+        mappedBucketBase = nullptr;
+        mappedPrefixWords = nullptr;
+        mappedEntryWords = nullptr;
       }
     }
   };
@@ -404,8 +457,57 @@ class InterleavedMergedCuckooFilter {
   std::vector<std::vector<StashEntry>> stash;
   std::unique_ptr<QueryIndex> qidx;
   uint8_t storageMode{0}; // 0=classic, 1=qidx-only, 2=both
+  void *mappedArchiveBase{nullptr};
+  size_t mappedArchiveBytes{0};
   std::atomic<uint64_t> insertFailureTotal{0};
   std::atomic<uint64_t> insertFailureSaturated{0};
+
+  inline void release_mapped_archive() {
+    if (mappedArchiveBase != nullptr) {
+      ::munmap(mappedArchiveBase, mappedArchiveBytes);
+      mappedArchiveBase = nullptr;
+      mappedArchiveBytes = 0;
+    }
+  }
+
+  static inline uint64_t load_unaligned_u64(const uint8_t *data) {
+    uint64_t value = 0;
+    std::memcpy(&value, data, sizeof(value));
+    return value;
+  }
+
+  static inline uint64_t mapped_packed_value(const uint8_t *words,
+                                             uint64_t index,
+                                             uint8_t width) {
+    const uint64_t bit = index * static_cast<uint64_t>(width);
+    const uint64_t word = bit >> 6;
+    const uint8_t shift = static_cast<uint8_t>(bit & 63u);
+    uint64_t value = load_unaligned_u64(words + word * sizeof(uint64_t)) >> shift;
+    if (shift + width > 64) {
+      value |= load_unaligned_u64(words + (word + 1) * sizeof(uint64_t))
+               << (64 - shift);
+    }
+    if (width < 64) {
+      value &= (uint64_t{1} << width) - 1u;
+    }
+    return value;
+  }
+
+  inline uint64_t qidx_bucket_base(uint64_t index) const {
+    if (qidx->has_mapped_backing()) {
+      return load_unaligned_u64(qidx->mappedBucketBase +
+                                index * sizeof(uint64_t));
+    }
+    return qidx->bucketBase[index];
+  }
+
+  inline uint64_t qidx_entry(uint64_t index) const {
+    if (qidx->has_mapped_backing()) {
+      return mapped_packed_value(qidx->mappedEntryWords, index,
+                                 qidx->entry_bits);
+    }
+    return qidx->entries[index];
+  }
 
   struct BucketStats {
     size_t bucketCount{0};
@@ -546,7 +648,12 @@ class InterleavedMergedCuckooFilter {
   }
 
   inline uint64_t qidx_prefix(size_t bucket, uint32_t group) const {
-    return qidx->prefix[(uint64_t)bucket * qidx->stride + group];
+    const uint64_t index = static_cast<uint64_t>(bucket) * qidx->stride + group;
+    if (qidx->has_mapped_backing()) {
+      return mapped_packed_value(qidx->mappedPrefixWords, index,
+                                 qidx->prefix_bits);
+    }
+    return qidx->prefix[index];
   }
 
   template <class Archive>
@@ -768,7 +875,7 @@ class InterleavedMergedCuckooFilter {
 
 public:
   InterleavedMergedCuckooFilter() = default;
-  ~InterleavedMergedCuckooFilter() = default;
+  ~InterleavedMergedCuckooFilter() { release_mapped_archive(); }
   InterleavedMergedCuckooFilter(std::vector<Group> &groups,
                                 ChimeraBuild::IMCFConfig &config) {
     uint64_t maxTotalHash = 0;
@@ -826,6 +933,9 @@ public:
   }
 
   template <class Archive> void serialize(Archive &ar) {
+    if constexpr (Archive::is_loading::value) {
+      release_mapped_archive();
+    }
     ar(storageMode, binNum, binSize, tagNum, MaxCuckooCount, hashSize);
     if (storageMode == 0) {
       ar(data, stash);
@@ -871,13 +981,156 @@ public:
     return qidx && qidx->has_spool_backing();
   }
 
+  inline void initialize_mapped_qidx(
+      void *archiveBase, size_t archiveBytes, size_t globalBinNum,
+      size_t globalBinSize, size_t globalTagNum, int maxCuckooCount,
+      size_t globalHashSize, const uint8_t *bucketBaseBytes,
+      const uint8_t *prefixWords, uint8_t prefixBits,
+      const uint8_t *entryWords, uint8_t entryBits,
+      uint8_t groupBits) {
+    if (archiveBase == nullptr || archiveBytes == 0 ||
+        bucketBaseBytes == nullptr || prefixWords == nullptr ||
+        entryWords == nullptr || prefixBits == 0 || entryBits == 0) {
+      throw std::runtime_error("QIMCF mapped initialization received invalid data");
+    }
+
+    release_mapped_archive();
+    storageMode = 1;
+    binNum = globalBinNum;
+    binSize = globalBinSize;
+    tagNum = globalTagNum;
+    MaxCuckooCount = maxCuckooCount;
+    hashSize = globalHashSize;
+    data = sdsl::bit_vector();
+    stash.clear();
+    qidx = std::make_unique<QueryIndex>();
+    qidx->g = groupBits;
+    qidx->refresh();
+    qidx->prefix_bits = prefixBits;
+    qidx->entry_bits = entryBits;
+    qidx->mappedBucketBase = bucketBaseBytes;
+    qidx->mappedPrefixWords = prefixWords;
+    qidx->mappedEntryWords = entryWords;
+    mappedArchiveBase = archiveBase;
+    mappedArchiveBytes = archiveBytes;
+  }
+
+  inline void prepare_mapped_archive(
+      const std::filesystem::path &archivePath) const {
+    if (mappedArchiveBase == nullptr || mappedArchiveBytes == 0) {
+      return;
+    }
+
+    const long pageSizeLong = ::sysconf(_SC_PAGESIZE);
+    if (pageSizeLong <= 0) {
+      throw std::runtime_error("Cannot determine system page size");
+    }
+    const size_t pageSize = static_cast<size_t>(pageSizeLong);
+    const size_t pageCount =
+        (mappedArchiveBytes + pageSize - 1) / pageSize;
+    constexpr size_t kResidencySamples = 4096;
+    const size_t sampleCount = std::min(pageCount, kResidencySamples);
+    bool sampledResident = true;
+    for (size_t sample = 0; sample < sampleCount; ++sample) {
+      const size_t page =
+          sampleCount == 1
+              ? 0
+              : (sample * (pageCount - 1)) / (sampleCount - 1);
+      unsigned char resident = 0;
+      void *pageAddress =
+          static_cast<uint8_t *>(mappedArchiveBase) + page * pageSize;
+      if (::mincore(pageAddress, pageSize, &resident) != 0) {
+        throw std::runtime_error("Cannot inspect IMCF page residency");
+      }
+      if ((resident & 1u) == 0) {
+        sampledResident = false;
+        break;
+      }
+    }
+    if (sampledResident) {
+      return;
+    }
+
+    std::vector<unsigned char> residency(pageCount, 0);
+    if (::mincore(mappedArchiveBase, mappedArchiveBytes, residency.data()) != 0) {
+      throw std::runtime_error("Cannot inspect IMCF page residency");
+    }
+
+    const int fd = ::open(archivePath.c_str(), O_RDONLY);
+    if (fd < 0) {
+      throw std::runtime_error("Cannot reopen IMCF archive for prefetch: " +
+                               archivePath.string());
+    }
+    struct stat statBuf {};
+    if (::fstat(fd, &statBuf) != 0 || statBuf.st_size < 0 ||
+        static_cast<uint64_t>(statBuf.st_size) != mappedArchiveBytes) {
+      ::close(fd);
+      throw std::runtime_error("IMCF archive changed while mapped: " +
+                               archivePath.string());
+    }
+    ::posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+
+    constexpr size_t kResidencyChunkBytes = size_t{256} << 20;
+    constexpr size_t kReadBufferBytes = size_t{64} << 20;
+    std::vector<uint8_t> buffer(kReadBufferBytes);
+    try {
+      for (size_t chunkOffset = 0; chunkOffset < mappedArchiveBytes;) {
+        const size_t chunkBytes =
+            std::min(kResidencyChunkBytes, mappedArchiveBytes - chunkOffset);
+        const size_t firstPage = chunkOffset / pageSize;
+        const size_t lastPage = std::min(
+            pageCount,
+            (chunkOffset + chunkBytes + pageSize - 1) / pageSize);
+        const bool resident =
+            std::all_of(residency.begin() + firstPage,
+                        residency.begin() + lastPage,
+                        [](unsigned char value) { return (value & 1u) != 0; });
+        if (!resident) {
+          size_t readOffset = chunkOffset;
+          const size_t chunkEnd = chunkOffset + chunkBytes;
+          while (readOffset < chunkEnd) {
+            const size_t requested =
+                std::min(buffer.size(), chunkEnd - readOffset);
+            size_t completed = 0;
+            while (completed < requested) {
+              const ssize_t bytesRead =
+                  ::pread(fd, buffer.data() + completed,
+                          requested - completed,
+                          static_cast<off_t>(readOffset + completed));
+              if (bytesRead < 0 && errno == EINTR) {
+                continue;
+              }
+              if (bytesRead <= 0) {
+                throw std::runtime_error(
+                    "Failed to prefetch IMCF archive: " +
+                    archivePath.string());
+              }
+              completed += static_cast<size_t>(bytesRead);
+            }
+            readOffset += requested;
+          }
+        }
+        chunkOffset += chunkBytes;
+      }
+    } catch (...) {
+      ::close(fd);
+      throw;
+    }
+    ::close(fd);
+  }
+
   inline void initialize_qidx_spool_only(
       size_t globalBinNum, size_t globalBinSize,
-      std::vector<uint64_t> bucketBaseIn, uint8_t prefixBits,
+      std::vector<uint64_t> bucketBaseIn, uint8_t groupBits,
+      uint8_t prefixBits,
       uint8_t entryBits, const std::filesystem::path &prefixSpoolPath,
       uint64_t prefixSpoolCount,
       const std::filesystem::path &entriesSpoolPath,
       uint64_t entriesSpoolCount) {
+    if (groupBits < kQidxMinGroupBits ||
+        groupBits > kQidxMaxGroupBits) {
+      throw std::runtime_error("QIMCF spool initialization has invalid group bits");
+    }
     storageMode = 1;
     binNum = globalBinNum;
     binSize = globalBinSize;
@@ -885,7 +1138,7 @@ public:
     data = sdsl::bit_vector();
     stash.clear();
     qidx = std::make_unique<QueryIndex>();
-    qidx->g = 8;
+    qidx->g = groupBits;
     qidx->refresh();
     qidx->bucketBase = std::move(bucketBaseIn);
     qidx->prefix_bits = prefixBits;
@@ -905,20 +1158,23 @@ public:
   }
 
   inline void accumulate_qidx_group_counts(
-      std::vector<uint32_t> &groupCounts,
+      std::vector<uint32_t> &groupCounts, uint8_t groupBits,
       bool include_stash = true) const {
-    constexpr uint8_t kQidxGroupBits = 8;
-    constexpr uint32_t kGroupSize = 1u << kQidxGroupBits;
-    const uint32_t groupMask = kGroupSize - 1;
+    if (groupBits < kQidxMinGroupBits ||
+        groupBits > kQidxMaxGroupBits) {
+      throw std::runtime_error("QIMCF block count has invalid group bits");
+    }
+    const uint32_t groupSize = 1u << groupBits;
+    const uint32_t groupMask = groupSize - 1;
     const uint64_t expectedSize =
-        static_cast<uint64_t>(hashSize) * static_cast<uint64_t>(kGroupSize);
+        static_cast<uint64_t>(hashSize) * static_cast<uint64_t>(groupSize);
     if (groupCounts.size() != expectedSize) {
       throw std::runtime_error("QIMCF block count buffer has invalid size");
     }
 
 #pragma omp parallel
     {
-      std::vector<uint32_t> counts(kGroupSize, 0);
+      std::vector<uint32_t> counts(groupSize, 0);
 #pragma omp for schedule(dynamic, 4)
       for (int64_t bucket_i = 0; bucket_i < static_cast<int64_t>(hashSize);
            ++bucket_i) {
@@ -940,8 +1196,8 @@ public:
           }
         }
         const uint64_t offset =
-            static_cast<uint64_t>(bucket) * static_cast<uint64_t>(kGroupSize);
-        for (uint32_t lo = 0; lo < kGroupSize; ++lo) {
+            static_cast<uint64_t>(bucket) * static_cast<uint64_t>(groupSize);
+        for (uint32_t lo = 0; lo < groupSize; ++lo) {
           groupCounts[offset + lo] += counts[lo];
         }
       }
@@ -956,7 +1212,7 @@ public:
           continue;
         }
         uint32_t lo = static_cast<uint32_t>(entry.fingerprint & groupMask);
-        groupCounts[entry.bucket * static_cast<uint64_t>(kGroupSize) + lo] +=
+        groupCounts[entry.bucket * static_cast<uint64_t>(groupSize) + lo] +=
             popcount16(entry.speciesMask);
       }
     }
@@ -964,19 +1220,22 @@ public:
 
   inline uint64_t write_qidx_block_entries_by_bucket(
       int entriesFd, const std::vector<uint64_t> &bucketBase,
-      size_t globalBinOffset, bool include_stash = true,
+      size_t globalBinOffset, uint8_t groupBits, bool include_stash = true,
       const std::vector<uint32_t> *precomputedGroupCounts = nullptr) const {
-    constexpr uint8_t kQidxGroupBits = 8;
-    constexpr uint32_t kGroupSize = 1u << kQidxGroupBits;
-    constexpr uint8_t kFpHiBits = QueryIndex::FP_BITS - kQidxGroupBits;
-    constexpr uint32_t kStride = kGroupSize + 1;
-    const uint32_t groupMask = kGroupSize - 1;
+    if (groupBits < kQidxMinGroupBits ||
+        groupBits > kQidxMaxGroupBits) {
+      throw std::runtime_error("QIMCF block payload has invalid group bits");
+    }
+    const uint32_t groupSize = 1u << groupBits;
+    const uint8_t fpHiBits = QueryIndex::FP_BITS - groupBits;
+    const uint32_t stride = groupSize + 1;
+    const uint32_t groupMask = groupSize - 1;
     if (bucketBase.size() != hashSize + 1) {
       throw std::runtime_error("QIMCF block bucket base has invalid size");
     }
     if (precomputedGroupCounts != nullptr &&
         precomputedGroupCounts->size() !=
-            static_cast<uint64_t>(hashSize) * kGroupSize) {
+            static_cast<uint64_t>(hashSize) * groupSize) {
       throw std::runtime_error(
           "QIMCF block precomputed count buffer has invalid size");
     }
@@ -1030,9 +1289,9 @@ public:
 
 #pragma omp parallel
     {
-      std::vector<uint32_t> counts(kGroupSize, 0);
-      std::vector<uint32_t> pos(kGroupSize, 0);
-      std::vector<uint32_t> localPrefix(kStride, 0);
+      std::vector<uint32_t> counts(groupSize, 0);
+      std::vector<uint32_t> pos(groupSize, 0);
+      std::vector<uint32_t> localPrefix(stride, 0);
       std::vector<uint32_t> bucketCodes;
       bucketCodes.reserve(1u << 16);
 
@@ -1046,8 +1305,8 @@ public:
         const uint64_t expected = bucketBase[bucket + 1] - bucketBase[bucket];
         if (precomputedGroupCounts != nullptr) {
           const uint64_t offset =
-              static_cast<uint64_t>(bucket) * static_cast<uint64_t>(kGroupSize);
-          std::copy_n(precomputedGroupCounts->data() + offset, kGroupSize,
+              static_cast<uint64_t>(bucket) * static_cast<uint64_t>(groupSize);
+          std::copy_n(precomputedGroupCounts->data() + offset, groupSize,
                       counts.begin());
         } else {
           std::fill(counts.begin(), counts.end(), 0u);
@@ -1078,7 +1337,7 @@ public:
 
         uint32_t running = 0;
         localPrefix[0] = 0;
-        for (uint32_t lo = 0; lo < kGroupSize; ++lo) {
+        for (uint32_t lo = 0; lo < groupSize; ++lo) {
           running += counts[lo];
           localPrefix[lo + 1] = running;
           pos[lo] = localPrefix[lo];
@@ -1107,10 +1366,10 @@ public:
               }
               uint16_t fp = static_cast<uint16_t>(tag & 0x0FFFu);
               uint32_t lo = static_cast<uint32_t>(fp & groupMask);
-              uint16_t hi = static_cast<uint16_t>(fp >> kQidxGroupBits);
+              uint16_t hi = static_cast<uint16_t>(fp >> groupBits);
               uint16_t sp = static_cast<uint16_t>(tag >> 12);
               uint32_t code =
-                  (globalBin << (kFpHiBits + 4)) |
+                  (globalBin << (fpHiBits + 4)) |
                   (static_cast<uint32_t>(hi) << 4) | sp;
               bucketCodes[pos[lo]++] = code;
             }
@@ -1119,13 +1378,13 @@ public:
             while (stashIdx < stashEnd && stashFlat[stashIdx].bin == localBin) {
               uint16_t fp = stashFlat[stashIdx].fp;
               uint32_t lo = static_cast<uint32_t>(fp & groupMask);
-              uint16_t hi = static_cast<uint16_t>(fp >> kQidxGroupBits);
+              uint16_t hi = static_cast<uint16_t>(fp >> groupBits);
               uint16_t mask = stashFlat[stashIdx].mask;
               while (mask) {
                 uint16_t sp = static_cast<uint16_t>(std::countr_zero(mask));
                 mask &= static_cast<uint16_t>(mask - 1);
                 uint32_t code =
-                    (globalBin << (kFpHiBits + 4)) |
+                    (globalBin << (fpHiBits + 4)) |
                     (static_cast<uint32_t>(hi) << 4) | sp;
                 bucketCodes[pos[lo]++] = code;
               }
@@ -1133,7 +1392,7 @@ public:
             }
           }
         }
-        for (uint32_t lo = 0; lo < kGroupSize; ++lo) {
+        for (uint32_t lo = 0; lo < groupSize; ++lo) {
           if (pos[lo] != localPrefix[lo + 1]) {
             set_failure("QIMCF block bucket payload count mismatch");
             break;

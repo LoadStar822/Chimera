@@ -277,11 +277,17 @@ public:
   static constexpr uint32_t kNotFound =
       std::numeric_limits<uint32_t>::max();
 
+  explicit QueryHashIndex(uint32_t k) : narrow_keys_(k <= 16) {}
+
   uint32_t insert_or_get(uint64_t key) {
-    if (keys_.empty() || (dense_keys_.size() + 1) * 2 >= keys_.size()) {
-      rehash(keys_.empty() ? 4096 : keys_.size() * 2);
+    if (ids_.empty() || (size() + 1) * 2 >= ids_.size()) {
+      rehash(ids_.empty() ? 4096 : ids_.size() * 2);
     }
-    return insert_no_grow(key);
+    if (narrow_keys_) {
+      return insert_no_grow(static_cast<uint32_t>(key), keys32_,
+                            dense_keys32_);
+    }
+    return insert_no_grow(key, keys64_, dense_keys64_);
   }
 
   uint32_t find_id(uint64_t key) const {
@@ -303,41 +309,47 @@ public:
   }
 
   uint32_t find_id_in_table(uint64_t key) const {
-    if (keys_.empty()) {
+    if (ids_.empty()) {
       return kNotFound;
     }
-    const size_t mask = keys_.size() - 1;
-    size_t slot = static_cast<size_t>(mix(key)) & mask;
-    while (ids_[slot] != kNotFound) {
-      if (keys_[slot] == key) {
-        return ids_[slot];
+    if (narrow_keys_) {
+      if (key > std::numeric_limits<uint32_t>::max()) {
+        return kNotFound;
       }
-      slot = (slot + 1) & mask;
+      return find_id_in_table(static_cast<uint32_t>(key), keys32_);
     }
-    return kNotFound;
+    return find_id_in_table(key, keys64_);
   }
 
   bool contains(uint64_t key) const { return find_id(key) != kNotFound; }
 
-  size_t size() const { return dense_keys_.size(); }
-
-  uint64_t hash_at(uint32_t id) const { return dense_keys_.at(id); }
+  size_t size() const { return dense_size_; }
 
   void optimize_prefilter() {
     const size_t desired_bits = round_capacity(std::max<size_t>(
-        kDefaultPrefilterBitCount, std::max<size_t>(1, dense_keys_.size()) * 8));
+        kDefaultPrefilterBitCount, std::max<size_t>(1, size()) * 8));
     if (prefilter_.size() * 64 == desired_bits) {
+      std::vector<uint32_t>().swap(dense_keys32_);
+      std::vector<uint64_t>().swap(dense_keys64_);
       return;
     }
     prefilter_mask_ = desired_bits - 1;
     prefilter_.assign(desired_bits / 64, 0);
-    for (uint64_t key : dense_keys_) {
-      set_prefilter_bit(key);
+    if (narrow_keys_) {
+      for (const uint32_t key : dense_keys32_) {
+        set_prefilter_bit(key);
+      }
+    } else {
+      for (const uint64_t key : dense_keys64_) {
+        set_prefilter_bit(key);
+      }
     }
+    std::vector<uint32_t>().swap(dense_keys32_);
+    std::vector<uint64_t>().swap(dense_keys64_);
   }
 
   void reserve_slots(size_t requested_slots) {
-    if (requested_slots <= keys_.size()) {
+    if (requested_slots <= ids_.size()) {
       return;
     }
     rehash(requested_slots);
@@ -363,47 +375,72 @@ private:
 
   void rehash(size_t requested) {
     const size_t new_capacity = round_capacity(requested);
-    std::vector<uint64_t> new_keys(new_capacity, 0);
+    std::vector<uint32_t> new_keys32;
+    std::vector<uint64_t> new_keys64;
+    if (narrow_keys_) {
+      new_keys32.assign(new_capacity, 0);
+    } else {
+      new_keys64.assign(new_capacity, 0);
+    }
     std::vector<uint32_t> new_ids(new_capacity, kNotFound);
     const size_t mask = new_capacity - 1;
-    for (uint32_t id = 0; id < dense_keys_.size(); ++id) {
-      const uint64_t key = dense_keys_[id];
-      size_t slot = static_cast<size_t>(mix(key)) & mask;
-      while (new_ids[slot] != kNotFound) {
-        slot = (slot + 1) & mask;
+    if (narrow_keys_) {
+      for (uint32_t id = 0; id < dense_keys32_.size(); ++id) {
+        const uint32_t key = dense_keys32_[id];
+        size_t slot = static_cast<size_t>(mix(key)) & mask;
+        while (new_ids[slot] != kNotFound) {
+          slot = (slot + 1) & mask;
+        }
+        new_keys32[slot] = key;
+        new_ids[slot] = id;
       }
-      new_keys[slot] = key;
-      new_ids[slot] = id;
+    } else {
+      for (uint32_t id = 0; id < dense_keys64_.size(); ++id) {
+        const uint64_t key = dense_keys64_[id];
+        size_t slot = static_cast<size_t>(mix(key)) & mask;
+        while (new_ids[slot] != kNotFound) {
+          slot = (slot + 1) & mask;
+        }
+        new_keys64[slot] = key;
+        new_ids[slot] = id;
+      }
     }
-    keys_.swap(new_keys);
+    keys32_.swap(new_keys32);
+    keys64_.swap(new_keys64);
     ids_.swap(new_ids);
   }
 
-  uint32_t insert_no_grow(uint64_t key) {
-    const size_t mask = keys_.size() - 1;
+  template <typename Key>
+  uint32_t insert_no_grow(Key key, std::vector<Key> &keys,
+                          std::vector<Key> &dense_keys) {
+    const size_t mask = ids_.size() - 1;
     size_t slot = static_cast<size_t>(mix(key)) & mask;
     while (ids_[slot] != kNotFound) {
-      if (keys_[slot] == key) {
+      if (keys[slot] == key) {
         return ids_[slot];
       }
       slot = (slot + 1) & mask;
     }
-    const uint32_t id = static_cast<uint32_t>(dense_keys_.size());
-    keys_[slot] = key;
+    const uint32_t id = static_cast<uint32_t>(dense_size_);
+    keys[slot] = key;
+    dense_keys.push_back(key);
+    ++dense_size_;
     ids_[slot] = id;
-    dense_keys_.push_back(key);
     set_prefilter_bit(key);
     return id;
   }
 
-  void insert_existing_no_grow(uint64_t key, uint32_t id) {
-    const size_t mask = keys_.size() - 1;
+  template <typename Key>
+  uint32_t find_id_in_table(Key key, const std::vector<Key> &keys) const {
+    const size_t mask = ids_.size() - 1;
     size_t slot = static_cast<size_t>(mix(key)) & mask;
     while (ids_[slot] != kNotFound) {
+      if (keys[slot] == key) {
+        return ids_[slot];
+      }
       slot = (slot + 1) & mask;
     }
-    keys_[slot] = key;
-    ids_[slot] = id;
+    return kNotFound;
   }
 
   void set_prefilter_bit(uint64_t key) {
@@ -421,9 +458,13 @@ private:
   static constexpr size_t kDefaultPrefilterBitCount = size_t{1} << 24;
   static constexpr uint64_t kSecondPrefilterSalt = 0x9e3779b97f4a7c15ULL;
 
-  std::vector<uint64_t> keys_;
+  bool narrow_keys_{};
+  std::vector<uint32_t> keys32_;
+  std::vector<uint64_t> keys64_;
   std::vector<uint32_t> ids_;
-  std::vector<uint64_t> dense_keys_;
+  std::vector<uint32_t> dense_keys32_;
+  std::vector<uint64_t> dense_keys64_;
+  size_t dense_size_{};
   std::vector<uint64_t> prefilter_;
   size_t prefilter_mask_{kDefaultPrefilterBitCount - 1};
 };
@@ -2036,7 +2077,7 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
 
 	  const auto started = std::chrono::steady_clock::now();
 	  const auto root_meta = chimera::native_bounded::read_index_header(index_path);
-	  QueryHashIndex query_hashes;
+	  QueryHashIndex query_hashes(root_meta.k);
 	  const uint64_t read_count = collect_query_hashes_from_reads(
 	      read_files, root_meta.k, root_meta.w, query_hashes, threads);
 	  query_hashes.optimize_prefilter();
