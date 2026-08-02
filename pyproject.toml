@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "chimera"
-version = "1.7"
+version = "1.7.1"
 description = "A versatile tool for metagenomic classification"
 authors = ["Qinzhong Tian"]
 license = "MIT License"
