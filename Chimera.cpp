@@ -322,6 +322,9 @@ int main(int argc, char **argv) {
                      "Disable local read resolution (LPC) at classify time");
   classify->add_flag("--profile-cami", classifyConfig.write_cami_profile,
                      "Write CAMI/OPAL-compatible profile table");
+  classify->add_flag("--profile-read-trace",
+                     classifyConfig.write_profile_read_trace,
+                     "Write exact per-read contributions to the native profile");
   classify->add_option("--em-iter", classifyConfig.emIter, "EM iteration")
       ->default_val(100);
   classify

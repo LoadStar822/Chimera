@@ -259,6 +259,21 @@ chimera classify \
 
 With the Python wrapper, `-o` is an output directory. The directory must be empty or absent; Chimera will not write into a non-empty existing output directory.
 
+To trace each reported profile taxon back to its contributing reads, add
+`--profile-read-trace`. This optional flag is disabled by default and writes
+`ChimeraProfile.read_trace.tsv`, including the read identifier, profile taxid,
+assignment weight, and final abundance contribution. Contributions for each
+taxid sum to the corresponding abundance in `ChimeraProfile.tsv`. The trace can
+be substantially larger than the normal classification output.
+
+```bash
+chimera classify \
+  -i reads.fastq.gz \
+  -d ChimeraDB \
+  -o results \
+  --profile-read-trace
+```
+
 `classify` already writes `ChimeraProfile.tsv`. A separate `profile` command is only needed for auxiliary conversion from an existing aggregate table:
 
 ```bash
@@ -275,6 +290,7 @@ The `-k` option requests Krona output. Krona Tools are optional and are not inst
 | `ChimeraClassify.tsv` | yes | Per-read taxonomic assignments and read-level metadata. |
 | `ChimeraProfile.tsv` | yes | Default abundance profile for normal Chimera use. |
 | `ChimeraProfile.cami.tsv` | only with `--profile-cami` | CAMI/OPAL-compatible exchange format for benchmark tools. |
+| `ChimeraProfile.read_trace.tsv` | only with `--profile-read-trace` | Per-read contributions that reproduce each reported profile abundance. |
 
 ### `ChimeraClassify.tsv`
 

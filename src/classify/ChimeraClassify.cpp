@@ -445,6 +445,23 @@ struct SeqProfileFit {
   double assigned_features{0.0};
 };
 
+struct ProfileReadTracePlan {
+  bool use_localmix_response{false};
+  std::unordered_map<uint32_t, double> contribution_scale;
+};
+
+struct ProfileReadTraceEdge {
+  uint32_t species_taxid{0};
+  double assignment_weight{0.0};
+};
+
+struct ProfileReadTraceRecord {
+  uint64_t read_ordinal{0};
+  std::string read_id;
+  uint32_t decision_species_taxid{0};
+  std::vector<ProfileReadTraceEdge> edges;
+};
+
 enum class PrimaryProfileScale {
   LengthNormalized,
   SqrtLengthNormalized,
@@ -1922,6 +1939,16 @@ resolve_profile_cami_output_path(const std::string &outputFile) {
 }
 
 static std::string
+resolve_profile_read_trace_output_path(const std::string &outputFile) {
+  std::filesystem::path path(outputFile);
+  if (path.filename() == "ChimeraClassify.tsv") {
+    return (path.parent_path() / "ChimeraProfile.read_trace.tsv").string();
+  }
+  path.replace_extension(".profile.read_trace.tsv");
+  return path.string();
+}
+
+static std::string
 resolve_native_profile_trace_output_path(const std::string &outputFile) {
   std::filesystem::path path(outputFile);
   if (path.filename() == "ChimeraClassify.tsv") {
@@ -2120,6 +2147,11 @@ print_classify_configuration(const ChimeraClassify::ClassifyConfig &config) {
   if (config.write_cami_profile) {
     std::cout << "  profile.cami "
               << compact_path(resolve_profile_cami_output_path(outputFile))
+              << "\n";
+  }
+  if (config.write_profile_read_trace) {
+    std::cout << "  profile trace "
+              << compact_path(resolve_profile_read_trace_output_path(outputFile))
               << "\n";
   }
 
@@ -2546,10 +2578,41 @@ static void write_local_certificate_audit_row(
      << (decision.applied ? 1 : 0) << '\t' << decision.reason << '\n';
 }
 
+static void write_profile_read_trace_raw_record(
+    std::ostream *os, const ChimeraClassify::classifyResult &result,
+    uint32_t decisionSpecies,
+    const std::vector<ProfileReadTraceEdge> &edges = {}) {
+  if (os == nullptr || decisionSpecies == 0) {
+    return;
+  }
+  if (result.id.size() > std::numeric_limits<uint32_t>::max() ||
+      edges.size() > std::numeric_limits<uint32_t>::max()) {
+    throw std::runtime_error("Profile read trace record is too large");
+  }
+  const uint32_t idSize = static_cast<uint32_t>(result.id.size());
+  const uint32_t edgeCount = static_cast<uint32_t>(edges.size());
+  os->write(reinterpret_cast<const char *>(&result.read_ordinal),
+            sizeof(result.read_ordinal));
+  os->write(reinterpret_cast<const char *>(&idSize), sizeof(idSize));
+  os->write(reinterpret_cast<const char *>(&decisionSpecies),
+            sizeof(decisionSpecies));
+  os->write(reinterpret_cast<const char *>(&edgeCount), sizeof(edgeCount));
+  os->write(result.id.data(), static_cast<std::streamsize>(result.id.size()));
+  for (const auto &edge : edges) {
+    os->write(reinterpret_cast<const char *>(&edge.species_taxid),
+              sizeof(edge.species_taxid));
+    os->write(reinterpret_cast<const char *>(&edge.assignment_weight),
+              sizeof(edge.assignment_weight));
+  }
+  if (!*os) {
+    throw std::runtime_error("Failed to write profile read trace part");
+  }
+}
+
 static void accumulate_localmix_profile_candidates(
     const ChimeraClassify::classifyResult &result,
     const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
-    SpeciesProfileMasses &masses) {
+    SpeciesProfileMasses &masses, std::ostream *profileReadTraceOs) {
   ++masses.input_reads;
   if (result.taxidCount.empty() ||
       result.taxidCount.front().first == "unclassified") {
@@ -2610,11 +2673,18 @@ static void accumulate_localmix_profile_candidates(
 
   const double feature_weight =
       result.evaluated > 0.0 ? result.evaluated : 0.0;
+  std::vector<ProfileReadTraceEdge> traceEdges;
+  if (profileReadTraceOs != nullptr) {
+    traceEdges.reserve(speciesScore.size());
+  }
   for (const auto &[species, score] : speciesScore) {
     const double share = score / total;
     masses.assigned_reads[species] += share;
     if (feature_weight > 0.0) {
       masses.assigned_features[species] += feature_weight * share;
+    }
+    if (profileReadTraceOs != nullptr) {
+      traceEdges.push_back(ProfileReadTraceEdge{species, share});
     }
   }
   if (speciesScore.size() == 1) {
@@ -2623,6 +2693,15 @@ static void accumulate_localmix_profile_candidates(
     if (feature_weight > 0.0) {
       masses.unique_features[species] += feature_weight;
     }
+  }
+  if (profileReadTraceOs != nullptr) {
+    std::sort(traceEdges.begin(), traceEdges.end(),
+              [](const ProfileReadTraceEdge &lhs,
+                 const ProfileReadTraceEdge &rhs) {
+                return lhs.species_taxid < rhs.species_taxid;
+              });
+    write_profile_read_trace_raw_record(profileReadTraceOs, result,
+                                        decisionSpecies, traceEdges);
   }
 }
 
@@ -3551,7 +3630,7 @@ static void write_spool_parts_parallel(
 static void write_spool_output_part(
     const std::string &candidateSpoolPath,
     const std::string &sampleMixtureSpoolPath, const std::string &partPath,
-    const SpoolEMFit &fit,
+    const std::string &profileReadTracePartPath, const SpoolEMFit &fit,
     const SpoolSampleMixtureFit &sampleMixtureFit,
     const ChimeraClassify::EMOptions &options,
     const ChimeraClassify::DecisionConfig &decisionConfig,
@@ -3572,6 +3651,20 @@ static void write_spool_output_part(
   std::vector<char> partBuffer(1 << 20, '\0');
   partOs.rdbuf()->pubsetbuf(
       partBuffer.data(), static_cast<std::streamsize>(partBuffer.size()));
+  std::vector<char> profileReadTraceBuffer;
+  std::ofstream profileReadTraceOs;
+  if (!profileReadTracePartPath.empty()) {
+    profileReadTraceBuffer.assign(1 << 20, '\0');
+    profileReadTraceOs.rdbuf()->pubsetbuf(
+        profileReadTraceBuffer.data(),
+        static_cast<std::streamsize>(profileReadTraceBuffer.size()));
+    profileReadTraceOs.open(profileReadTracePartPath,
+                            std::ios::out | std::ios::binary);
+    if (!profileReadTraceOs.is_open()) {
+      throw std::runtime_error("Failed to open profile read trace part: " +
+                               profileReadTracePartPath);
+    }
+  }
   std::ostringstream postTopkOss;
   const bool useLocalCertificateApply =
       env_flag_enabled("CHIMERA_LOCAL_CERTIFICATE_APPLY");
@@ -3640,9 +3733,19 @@ static void write_spool_output_part(
             apply_local_resolution_result(result, localCalls, sampleDivergence,
                                           divergenceThreshold);
           }
+          const uint32_t decisionSpecies =
+              result.taxidCount.empty() ||
+                      result.taxidCount.front().first == "unclassified"
+                  ? 0
+                  : taxid_text_to_species(result.taxidCount.front().first,
+                                          ncbiTaxdump);
           if (collectLocalmixProfile) {
             accumulate_localmix_profile_candidates(
-                result, ncbiTaxdump, partStats.localmix_masses);
+                result, ncbiTaxdump, partStats.localmix_masses,
+                profileReadTraceOs.is_open() ? &profileReadTraceOs : nullptr);
+          } else if (profileReadTraceOs.is_open()) {
+            write_profile_read_trace_raw_record(&profileReadTraceOs, result,
+                                                decisionSpecies);
           }
           if (!result.taxidCount.empty() &&
               result.taxidCount.front().first == "unclassified") {
@@ -3655,9 +3758,6 @@ static void write_spool_output_part(
               if (decisionTaxid != 0) {
                 partStats.decision_taxid_counts[decisionTaxid] += 1.0;
               }
-              const uint32_t decisionSpecies =
-                  taxid_text_to_species(result.taxidCount.front().first,
-                                        ncbiTaxdump);
               if (decisionSpecies != 0) {
                 partStats.decision_species_counts[decisionSpecies] += 1.0;
               }
@@ -3670,6 +3770,13 @@ static void write_spool_output_part(
   if (!partOs.good()) {
     throw std::runtime_error("Failed to close classify output part: " +
                              partPath);
+  }
+  if (profileReadTraceOs.is_open()) {
+    profileReadTraceOs.close();
+    if (!profileReadTraceOs.good()) {
+      throw std::runtime_error("Failed to close profile read trace part: " +
+                               profileReadTracePartPath);
+    }
   }
   if (writeLocalCertificateAudit) {
     localCertificateAuditOs.close();
@@ -3713,6 +3820,98 @@ static void merge_classify_output_parts(
     fileInfo.unclassifiedNum += partStats[i].unclassified;
   }
   os.close();
+}
+
+static bool read_profile_read_trace_raw_record(
+    std::istream &is, ProfileReadTraceRecord &record) {
+  is.read(reinterpret_cast<char *>(&record.read_ordinal),
+          sizeof(record.read_ordinal));
+  if (!is) {
+    if (is.eof() && is.gcount() == 0) {
+      return false;
+    }
+    throw std::runtime_error("Failed to read profile read trace ordinal");
+  }
+  uint32_t idSize = 0;
+  uint32_t edgeCount = 0;
+  auto readValue = [&](auto &value, const char *what) {
+    is.read(reinterpret_cast<char *>(&value), sizeof(value));
+    if (!is) {
+      throw std::runtime_error(std::string("Failed to read profile read trace ") +
+                               what);
+    }
+  };
+  readValue(idSize, "id size");
+  readValue(record.decision_species_taxid, "decision species");
+  readValue(edgeCount, "edge count");
+  record.read_id.resize(idSize);
+  is.read(record.read_id.data(), static_cast<std::streamsize>(idSize));
+  if (!is) {
+    throw std::runtime_error("Failed to read profile read trace id");
+  }
+  record.edges.resize(edgeCount);
+  for (auto &edge : record.edges) {
+    readValue(edge.species_taxid, "edge species");
+    readValue(edge.assignment_weight, "edge weight");
+  }
+  return true;
+}
+
+static void write_profile_read_trace_output(
+    const std::string &path, const std::vector<std::string> &partPaths,
+    const ProfileReadTracePlan &plan) {
+  const auto parent = std::filesystem::path(path).parent_path();
+  if (!parent.empty()) {
+    std::filesystem::create_directories(parent);
+  }
+  std::ofstream os(path, std::ios::out | std::ios::binary);
+  if (!os.is_open()) {
+    throw std::runtime_error("Failed to open profile read trace: " + path);
+  }
+  std::vector<char> outputBuffer(1 << 20, '\0');
+  os.rdbuf()->pubsetbuf(outputBuffer.data(),
+                        static_cast<std::streamsize>(outputBuffer.size()));
+  os << "read_ordinal\tread_id\tdecision_species_taxid"
+     << "\tprofile_species_taxid\tcontribution_mode\tassignment_weight"
+     << "\trelative_contribution\tpercentage_contribution\n";
+  os << std::setprecision(17);
+
+  const char *mode =
+      plan.use_localmix_response ? "localmix_fractional" : "final_decision";
+  auto writeRow = [&](const ProfileReadTraceRecord &record, uint32_t species,
+                      double assignmentWeight) {
+    const auto scaleIt = plan.contribution_scale.find(species);
+    if (scaleIt == plan.contribution_scale.end()) {
+      return;
+    }
+    const double contribution = assignmentWeight * scaleIt->second;
+    os << record.read_ordinal << '\t' << record.read_id << '\t'
+       << record.decision_species_taxid << '\t' << species << '\t' << mode
+       << '\t' << assignmentWeight << '\t' << contribution << '\t'
+       << (100.0 * contribution) << '\n';
+  };
+
+  ProfileReadTraceRecord record;
+  for (const auto &partPath : partPaths) {
+    std::ifstream partIs(partPath, std::ios::in | std::ios::binary);
+    if (!partIs.is_open()) {
+      throw std::runtime_error("Failed to open profile read trace part: " +
+                               partPath);
+    }
+    while (read_profile_read_trace_raw_record(partIs, record)) {
+      if (plan.use_localmix_response) {
+        for (const auto &edge : record.edges) {
+          writeRow(record, edge.species_taxid, edge.assignment_weight);
+        }
+      } else {
+        writeRow(record, record.decision_species_taxid, 1.0);
+      }
+    }
+  }
+  os.close();
+  if (!os.good()) {
+    throw std::runtime_error("Failed to close profile read trace: " + path);
+  }
 }
 
 static const char *presence_state(double logPosterior, double threshold) {
@@ -4360,9 +4559,9 @@ static void write_classifier_response_reportable_profile_outputs(
     const std::string &debugPath, const std::string &tracePath,
     const SeqProfileFit &fit, const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
     const chimera::presence::CoverageMeta &coverageMeta,
-    const SeqProfileFit *localmixFit = nullptr,
-    const char *responseSourceOverride = nullptr,
-    PrimaryProfileScale primaryScale = PrimaryProfileScale::CallableNormalized) {
+    const SeqProfileFit *localmixFit, const char *responseSourceOverride,
+    PrimaryProfileScale primaryScale,
+    ProfileReadTracePlan *profileReadTracePlan) {
   struct CandidateRow {
     const SeqProfileRow *row{nullptr};
     double raw_abundance{0.0};
@@ -4505,6 +4704,37 @@ static void write_classifier_response_reportable_profile_outputs(
     const uint32_t rt = rhs.row == nullptr ? 0 : rhs.row->species_taxid;
     return lt < rt;
   });
+
+  if (profileReadTracePlan != nullptr) {
+    profileReadTracePlan->use_localmix_response = use_localmix_response;
+    profileReadTracePlan->contribution_scale.clear();
+    std::unordered_map<uint32_t, double> localmixAssignedReads;
+    if (use_localmix_response) {
+      localmixAssignedReads.reserve(localmixFit->rows.size());
+      for (const SeqProfileRow &row : localmixFit->rows) {
+        localmixAssignedReads[row.species_taxid] += row.assigned_reads;
+      }
+    }
+    if (kept_mass > 0.0) {
+      for (const CandidateRow &entry : rows) {
+        if (!entry.kept || entry.row == nullptr) {
+          continue;
+        }
+        const uint32_t species = entry.row->species_taxid;
+        double assignedReads = entry.row->assigned_reads;
+        if (use_localmix_response) {
+          const auto assignedIt = localmixAssignedReads.find(species);
+          assignedReads = assignedIt == localmixAssignedReads.end()
+                              ? 0.0
+                              : assignedIt->second;
+        }
+        if (assignedReads > 0.0) {
+          profileReadTracePlan->contribution_scale[species] =
+              (entry.response_abundance / kept_mass) / assignedReads;
+        }
+      }
+    }
+  }
 
   auto ensure_parent = [](const std::string &path) {
     const auto parent = std::filesystem::path(path).parent_path();
@@ -4805,6 +5035,14 @@ static void write_spool_em_results(
   const size_t part_count = candidateSpoolPaths.size();
   std::vector<std::string> partPaths =
       make_output_part_paths(outputFile, part_count);
+  const std::string profileReadTracePath =
+      config.write_profile_read_trace
+          ? resolve_profile_read_trace_output_path(outputFile)
+          : "";
+  const std::vector<std::string> profileReadTracePartPaths =
+      config.write_profile_read_trace
+          ? make_output_part_paths(profileReadTracePath, part_count)
+          : std::vector<std::string>{};
   ChimeraClassify::AbundanceAutoPolicy abundancePolicy{};
   SpoolAbundanceFit abundanceFit;
   if (classifyDebug) {
@@ -4828,28 +5066,37 @@ static void write_spool_em_results(
     postemDecisionEvidenceAggregates.resize(part_count);
   }
   std::vector<SpoolOutputPartStats> partStats(part_count);
-  write_spool_parts_parallel(
-      candidateSpoolPaths, partPaths, [&](size_t part_idx) {
-        EvidenceAggregateMap *primaryEvidence =
-            classifyDebug ? &postemPrimaryEvidenceAggregates[part_idx]
-                          : nullptr;
-        EvidenceAggregateMap *decisionEvidence =
-            classifyDebug ? &postemDecisionEvidenceAggregates[part_idx]
-                          : nullptr;
-        write_spool_output_part(
-            candidateSpoolPaths[part_idx], sampleMixtureSpoolPaths[part_idx],
-            partPaths[part_idx], fit, sampleMixtureFit, options,
-            decisionConfig, tax, presenceDecision, ncbiTaxdump, localCalls,
-            sampleDivergence,
-            config.local_resolution_divergence_threshold, partStats[part_idx],
-            primaryEvidence, decisionEvidence, collectLocalmixProfile);
-      });
+  try {
+    write_spool_parts_parallel(
+        candidateSpoolPaths, partPaths, [&](size_t part_idx) {
+          EvidenceAggregateMap *primaryEvidence =
+              classifyDebug ? &postemPrimaryEvidenceAggregates[part_idx]
+                            : nullptr;
+          EvidenceAggregateMap *decisionEvidence =
+              classifyDebug ? &postemDecisionEvidenceAggregates[part_idx]
+                            : nullptr;
+          write_spool_output_part(
+              candidateSpoolPaths[part_idx], sampleMixtureSpoolPaths[part_idx],
+              partPaths[part_idx],
+              profileReadTracePartPaths.empty()
+                  ? ""
+                  : profileReadTracePartPaths[part_idx],
+              fit, sampleMixtureFit, options, decisionConfig, tax,
+              presenceDecision, ncbiTaxdump, localCalls, sampleDivergence,
+              config.local_resolution_divergence_threshold, partStats[part_idx],
+              primaryEvidence, decisionEvidence, collectLocalmixProfile);
+        });
+  } catch (...) {
+    cleanup_part_paths(profileReadTracePartPaths);
+    throw;
+  }
 
   print_status_line(ConsoleStatusKind::Run, "writing output tables");
   try {
     merge_classify_output_parts(outputFile, partPaths, partStats, fileInfo);
   } catch (...) {
     cleanup_part_paths(partPaths);
+    cleanup_part_paths(profileReadTracePartPaths);
     throw;
   }
   std::unordered_map<uint32_t, double> decisionSpeciesCounts;
@@ -4901,6 +5148,7 @@ static void write_spool_em_results(
                                                        ncbiTaxdump);
     profileOutputLocalmixFit = &localmixProfile;
   }
+  ProfileReadTracePlan profileReadTracePlan;
   write_classifier_response_reportable_profile_outputs(
       resolve_profile_output_path(outputFile),
       config.write_cami_profile ? resolve_profile_cami_output_path(outputFile)
@@ -4908,7 +5156,19 @@ static void write_spool_em_results(
       classifyDebug ? resolve_native_profile_debug_output_path(outputFile) : "",
       classifyDebug ? resolve_native_profile_trace_output_path(outputFile) : "",
       *profileOutputFit, ncbiTaxdump, coverageMeta, profileOutputLocalmixFit,
-      profileResponseSourceOverride, profileOutputScale);
+      profileResponseSourceOverride, profileOutputScale,
+      config.write_profile_read_trace ? &profileReadTracePlan : nullptr);
+  if (config.write_profile_read_trace) {
+    try {
+      write_profile_read_trace_output(profileReadTracePath,
+                                      profileReadTracePartPaths,
+                                      profileReadTracePlan);
+    } catch (...) {
+      cleanup_part_paths(partPaths);
+      cleanup_part_paths(profileReadTracePartPaths);
+      throw;
+    }
+  }
   if (classifyDebug) {
     std::cout << "[classify][debug] classifier-response profile"
               << " path=" << resolve_profile_output_path(outputFile)
@@ -4934,6 +5194,7 @@ static void write_spool_em_results(
                                 abundancePolicy.abundance_weight);
   }
   cleanup_part_paths(partPaths);
+  cleanup_part_paths(profileReadTracePartPaths);
 }
 
 static std::filesystem::path make_spool_dir(const std::string &outputFile) {

@@ -588,6 +588,11 @@ def parse_arguments():
         action="store_true",
         help="Also write ChimeraProfile.cami.tsv for CAMI/OPAL benchmark tools",
     )
+    classify_parser.add_argument(
+        "--profile-read-trace",
+        action="store_true",
+        help="Write exact per-read contributions to ChimeraProfile.read_trace.tsv",
+    )
     # Auxiliary profile utilities. Native abundance profiles are written by
     # `classify`; this command is for legacy aggregate conversion and Krona.
     profile_parser = subparsers.add_parser(
@@ -756,6 +761,8 @@ def run_chimera(args, chimera_path=None):
             command.append("--no-local-resolution")
         if getattr(args, "profile_cami", False):
             command.append("--profile-cami")
+        if getattr(args, "profile_read_trace", False):
+            command.append("--profile-read-trace")
     if args.command == "classify":
         result = subprocess.run(command)
         if result.returncode != 0:
