@@ -795,6 +795,8 @@ struct ProcessScratch {
   std::vector<std::pair<uint32_t, uint64_t>> weighted;
   std::vector<uint32_t> topBins;
   std::vector<uint32_t> baseTopBins;
+  std::vector<uint32_t> candidateBinEpoch;
+  uint32_t candidateBinEpochValue{0};
   std::vector<std::pair<uint32_t, uint64_t>> repRanked;
   std::vector<std::pair<uint32_t, uint64_t>> genusRanked;
   std::vector<uint32_t> repPool;

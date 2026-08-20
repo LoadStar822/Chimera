@@ -647,10 +647,19 @@ static bool build_initial_candidate_surface(
 
   auto &topBins = scratch.topBins;
   topBins.clear();
+  ensure_epoch_vector(scratch.candidateBinEpoch, binNumAll);
+  const uint32_t candidateBinEpoch = next_epoch(
+      scratch.candidateBinEpoch, scratch.candidateBinEpochValue);
+  auto add_candidate = [&](uint32_t bin) {
+    if (bin >= binNumAll ||
+        scratch.candidateBinEpoch[bin] == candidateBinEpoch) {
+      return;
+    }
+    scratch.candidateBinEpoch[bin] = candidateBinEpoch;
+    topBins.push_back(bin);
+  };
   bool full_surface_mode = (coarseTotal == 0);
 
-  robin_hood::unordered_flat_set<uint32_t> candidateSet;
-  candidateSet.reserve(256);
   lowDegPreserve.clear();
   lowDegPreserve.reserve(64);
 
@@ -680,7 +689,7 @@ static bool build_initial_candidate_surface(
       if (low_fanout) {
         for (uint32_t b : routed) {
           if (b < binNumAll) {
-            candidateSet.insert(b);
+            add_candidate(b);
             lowDegPreserve.insert(b);
           }
         }
@@ -749,7 +758,7 @@ static bool build_initial_candidate_surface(
       if (bin >= binNumAll) {
         continue;
       }
-      candidateSet.insert(bin);
+      add_candidate(bin);
       covered += score;
       if (goal > 0 && covered >= goal) {
         break;
@@ -761,16 +770,16 @@ static bool build_initial_candidate_surface(
   if (!full_surface_mode) {
     for (const auto &[bin, _] : sampleBinScore) {
       if (bin < binNumAll) {
-        candidateSet.insert(bin);
+        add_candidate(bin);
       }
     }
   }
 
-  if (!candidateSet.empty()) {
+  if (!topBins.empty()) {
     auto &weighted = scratch.weighted;
     weighted.clear();
-    weighted.reserve(candidateSet.size());
-    for (uint32_t bin : candidateSet) {
+    weighted.reserve(topBins.size());
+    for (uint32_t bin : topBins) {
       uint64_t weight = 0;
       if (auto it = sampleBinScore.find(bin); it != sampleBinScore.end()) {
         weight += it->second * 4ull;
@@ -784,7 +793,13 @@ static bool build_initial_candidate_surface(
       weighted.emplace_back(bin, weight);
     }
     std::sort(weighted.begin(), weighted.end(),
-              [](const auto &a, const auto &b) { return a.second > b.second; });
+              [](const auto &a, const auto &b) {
+                if (a.second != b.second) {
+                  return a.second > b.second;
+                }
+                return a.first < b.first;
+              });
+    topBins.clear();
     topBins.reserve(std::min(candidateCap, weighted.size()));
     for (const auto &[bin, _] : weighted) {
       topBins.push_back(bin);
@@ -834,8 +849,8 @@ static void dump_preem_candidate_retention(
     return;
   }
   if (!preem_dump_header_written) {
-    dump_os
-        << "read_id\ttid\trank\tscore\tthr_base\tfloor_count\tbest_tid\tbest_genus\tcand_genus\tbaseline_kept\n";
+    dump_os << "read_id\ttid\trank\tscore\tthr_base\tfloor_count\tbest_tid"
+            << "\tbest_genus\tcand_genus\tbaseline_kept\n";
     preem_dump_header_written = true;
   }
   for (size_t i = 0; i < ranked.size(); ++i) {
@@ -1496,9 +1511,9 @@ static ResultCandidateSelection select_result_candidates_from_scores(
         std::max(dispersionFloor, calibrationSupportFloor);
 
     if (dump_preem_enabled) {
-      dump_preem_candidate_retention(dump_preem_path, id, tax, weightCtx,
-                                     ranked, effCap, thresholds.thr_base,
-                                     floorCount, bestTaxidStr, best_genus_id);
+      dump_preem_candidate_retention(
+          dump_preem_path, id, tax, weightCtx, ranked, effCap,
+          thresholds.thr_base, floorCount, bestTaxidStr, best_genus_id);
     }
 
     selection.candidates.reserve(ranked.size());
@@ -1683,6 +1698,9 @@ void processSequence(
   double presence_weight = 1.0;
 
   const auto &dump_preem = dump_preem_runtime_config();
+  const bool dumpPreemMain =
+      dump_preem.enabled && !config.sample_state_calibration;
+  const auto &evalHashes = hashs1;
   prepare_hash_sample_and_route(hashs1, config, weightCtx, scratch);
   uint32_t profileResponseTaxid = 0;
   auto &sampleVals = scratch.sampleVals;
@@ -1697,8 +1715,8 @@ void processSequence(
   uint64_t coarseTotal = 0;
   auto &deferredEval = scratch.deferredEval;
   deferredEval.clear();
-  if (hashs1.size() > 64) {
-    deferredEval.reserve(hashs1.size() - 64);
+  if (evalHashes.size() > 64) {
+    deferredEval.reserve(evalHashes.size() - 64);
   }
 
   coarseTotal =
@@ -1849,8 +1867,8 @@ void processSequence(
     if (!subset) {
       imcf.bulkContain_events(value, emit);
     } else if (topBinMarksActive && subset == &topBins) {
-      imcf.bulkContain_events_subset_marked(value, topBinMarks, topBinMarkEpoch,
-                                            emit);
+      imcf.bulkContain_events_subset_marked(
+          value, topBinMarks, topBinMarkEpoch, emit);
     } else {
       imcf.bulkContain_events_subset(value, *subset, emit);
     }
@@ -1978,9 +1996,9 @@ void processSequence(
     return scoring.collect_stats(eff_eval);
   };
 
-  size_t n0 = std::min<size_t>(64, hashs1.size());
+  size_t n0 = std::min<size_t>(64, evalHashes.size());
   for (size_t i = 0; i < n0; ++i) {
-    const double c = evaluate_minimizer(hashs1[i], activeSubset);
+    const double c = evaluate_minimizer(evalHashes[i], activeSubset);
     eff_eval += c;
   }
   n_eval = n0;
@@ -1988,14 +2006,14 @@ void processSequence(
   EvidenceStats stats = collect_stats();
   bool highConfPre = meets_quick_high_conf(config, stats, eff_eval);
 
-  if (!highConfPre && hashs1.size() > n0) {
+  if (!highConfPre && evalHashes.size() > n0) {
     size_t mask = (static_cast<size_t>(1) << 3) - 1;
-    for (size_t i = n0; i < hashs1.size(); ++i) {
-      if ((hashs1[i] & mask) != 0) {
+    for (size_t i = n0; i < evalHashes.size(); ++i) {
+      if ((evalHashes[i] & mask) != 0) {
         deferredEval.push_back(i);
         continue;
       }
-      const double c = evaluate_minimizer(hashs1[i], activeSubset);
+      const double c = evaluate_minimizer(evalHashes[i], activeSubset);
       eff_eval += c;
       ++n_eval;
     }
@@ -2004,10 +2022,10 @@ void processSequence(
 
     if (!highConfPre && !deferredEval.empty()) {
       for (size_t idx : deferredEval) {
-        if (idx >= hashs1.size()) {
+        if (idx >= evalHashes.size()) {
           continue;
         }
-        const double c = evaluate_minimizer(hashs1[idx], activeSubset);
+        const double c = evaluate_minimizer(evalHashes[idx], activeSubset);
         eff_eval += c;
         ++n_eval;
       }
@@ -2039,22 +2057,22 @@ void processSequence(
     uniqueRatio = s.uniqueRatio;
   };
   auto complete_original_subset_eval = [&]() {
-    if (n_eval >= hashs1.size()) {
+    if (n_eval >= evalHashes.size()) {
       return;
     }
     if (!deferredEval.empty()) {
       for (size_t idx : deferredEval) {
-        if (idx >= hashs1.size()) {
+        if (idx >= evalHashes.size()) {
           continue;
         }
-        const double c = evaluate_minimizer(hashs1[idx], activeSubset);
+        const double c = evaluate_minimizer(evalHashes[idx], activeSubset);
         eff_eval += c;
         ++n_eval;
       }
       deferredEval.clear();
     } else {
-      for (size_t i = n_eval; i < hashs1.size(); ++i) {
-        const double c = evaluate_minimizer(hashs1[i], activeSubset);
+      for (size_t i = n_eval; i < evalHashes.size(); ++i) {
+        const double c = evaluate_minimizer(evalHashes[i], activeSubset);
         eff_eval += c;
         ++n_eval;
       }
@@ -2075,7 +2093,7 @@ void processSequence(
 
   std::vector<SpoolCandidate> abundanceCandidates;
 
-  if (highConfPre && n_eval < hashs1.size()) {
+  if (highConfPre && n_eval < evalHashes.size()) {
     const ScoreStateSnapshot primarySnapshot = snapshot_score_state(
         scratch, eff_eval, n_eval, deferredEval, stats, highConfPre, thr_conf,
         gap_need, bestTid, secondTid, best, second, best_ratio, gap,
@@ -2116,8 +2134,8 @@ void processSequence(
     scoring.reset_dense_scores();
     eff_eval = 0.0;
     n_eval = 0;
-    for (size_t i = 0; i < hashs1.size(); ++i) {
-      const double c = evaluate_minimizer(hashs1[i], activeSubset);
+    for (size_t i = 0; i < evalHashes.size(); ++i) {
+      const double c = evaluate_minimizer(evalHashes[i], activeSubset);
       eff_eval += c;
       ++n_eval;
     }
@@ -2127,6 +2145,8 @@ void processSequence(
     gap_need = std::max(0.5, eff_eval / 24.0);
     apply_stats(stats);
   }
+
+
 
   // Optional: dump raw tidScore (pre-EM candidates before thresholds).
 
@@ -2152,7 +2172,7 @@ void processSequence(
   auto selection = select_result_candidates_from_scores(
       id, tax, weightCtx, config, scratch, scoring.tid_score, highConfPre,
       dispersion_hi, eff_eval, n_eval, bestTid, best, uniqueRatio,
-      bestTaxidStr, dump_preem.enabled, dump_preem.path);
+      bestTaxidStr, dumpPreemMain, dump_preem.path);
   std::vector<SpoolCandidate> resultCandidates =
       std::move(selection.candidates);
   profileResponseTaxid =
@@ -2495,8 +2515,8 @@ void classify_streaming_spool(
         candidateSpoolPaths.size() == spoolPaths.size();
     const bool write_sample_mixture_spool =
         sampleMixtureSpoolPaths.size() == spoolPaths.size();
-    std::ofstream spool;
     std::vector<char> spoolBuffer;
+    std::ofstream spool;
     if (writeFullSpool) {
       spoolBuffer.assign(1 << 20, '\0');
       spool.rdbuf()->pubsetbuf(
