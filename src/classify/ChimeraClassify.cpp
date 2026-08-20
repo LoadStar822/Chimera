@@ -5135,11 +5135,10 @@ static void write_spool_em_results(
   SeqProfileFit localmixProfile;
   const SeqProfileFit *profileOutputLocalmixFit = nullptr;
   const char *profileResponseSourceOverride = nullptr;
-  PrimaryProfileScale profileOutputScale =
-      PrimaryProfileScale::CallableNormalized;
+  const PrimaryProfileScale profileOutputScale =
+      PrimaryProfileScale::SequenceAbundance;
   if (useLpcReadcountProfile) {
     profileResponseSourceOverride = "lpc_final_readcount";
-    profileOutputScale = PrimaryProfileScale::SequenceAbundance;
   } else {
     SpeciesProfileMasses localmixMasses =
         merge_localmix_profile_masses(partStats);
