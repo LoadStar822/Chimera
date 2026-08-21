@@ -1855,6 +1855,8 @@ materialize_spool_result(const ChimeraClassify::SpoolReadRecord &record,
   result.evaluated = record.evaluated;
   result.query_length = record.query_length;
   result.reject_reason = record.reject_reason;
+  result.domain_evidence_per_hash = record.domain_evidence_per_hash;
+  result.domain_evidence_mask = record.domain_evidence_mask;
   if (record.best_taxid_hint != ChimeraClassify::kSpoolUnclassifiedTid) {
     result.best_taxid_hint = spool_taxid_to_string(record.best_taxid_hint, tax);
   }
@@ -5519,9 +5521,12 @@ void run(ClassifyConfig config) {
   TaxDict tax = build_tax_dict(indexToTaxid);
   std::vector<uint32_t> tid2speciesRep;
   std::vector<uint32_t> tid2genus;
+  std::vector<uint64_t> tid2totalSignatures;
+  std::vector<uint32_t> tid2totalBins;
   if (weightCtx.ncbiTaxdump && weightCtx.ncbiTaxdump->enabled()) {
     tid2speciesRep.resize(tax.id2str.size());
     tid2genus.resize(tax.id2str.size(), 0u);
+    tax.tid2domain.assign(tax.id2str.size(), kInvalidDomainIndex);
     for (uint32_t i = 0; i < tid2speciesRep.size(); ++i) {
       tid2speciesRep[i] = i;
     }
@@ -5534,6 +5539,8 @@ void run(ClassifyConfig config) {
       if (!chimera::utils::try_parse_u32(taxid, tid)) {
         continue;
       }
+      tax.tid2domain[tid_id] =
+          weightCtx.ncbiTaxdump->to_domain_index(tid);
       uint32_t sid = weightCtx.ncbiTaxdump->to_species(tid);
       uint32_t gid = weightCtx.ncbiTaxdump->to_genus(tid);
       tid2genus[tid_id] = gid;
@@ -5548,6 +5555,38 @@ void run(ClassifyConfig config) {
     weightCtx.tid2speciesRep = &tid2speciesRep;
     weightCtx.tid2genus = &tid2genus;
     rebuild_bin_slot_rep_lookup(tax, weightCtx.tid2speciesRep);
+    tid2totalSignatures.assign(tax.id2str.size(), 0u);
+    tid2totalBins.assign(tax.id2str.size(), 0u);
+    robin_hood::unordered_flat_map<uint32_t, uint64_t> signaturesByTaxid;
+    signaturesByTaxid.reserve(coverageMeta.entries.size());
+    for (const auto &entry : coverageMeta.entries) {
+      uint32_t taxid = 0;
+      if (chimera::utils::try_parse_u32(entry.taxid, taxid)) {
+        signaturesByTaxid.emplace(taxid, entry.total_signatures);
+      }
+    }
+    for (const auto &[species, rep] : species2rep) {
+      auto signatureIt = signaturesByTaxid.find(species);
+      if (signatureIt != signaturesByTaxid.end()) {
+        tid2totalSignatures[rep] = signatureIt->second;
+      }
+    }
+    for (size_t bin = 0; bin < tax.idx2id.size(); ++bin) {
+      uint32_t seen[kTaxSlotCount];
+      size_t seenCount = 0;
+      for (uint16_t slot = 0; slot < kTaxSlotCount; ++slot) {
+        const uint32_t rep =
+            tax.rep_tid_for_bin_slot(static_cast<uint32_t>(bin), slot);
+        if (rep == kInvalidTidId ||
+            std::find(seen, seen + seenCount, rep) != seen + seenCount) {
+          continue;
+        }
+        seen[seenCount++] = rep;
+        ++tid2totalBins[rep];
+      }
+    }
+    weightCtx.tid2totalSignatures = &tid2totalSignatures;
+    weightCtx.tid2totalBins = &tid2totalBins;
   }
   std::vector<std::vector<std::string>>().swap(indexToTaxid);
   PresenceSummary presenceSummary(config.presence_breadth_bits);

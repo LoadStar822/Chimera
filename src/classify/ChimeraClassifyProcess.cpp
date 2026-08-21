@@ -889,6 +889,119 @@ static const DumpPreemRuntimeConfig &dump_preem_runtime_config() {
   return cfg;
 }
 
+
+struct DomainEvidenceScore {
+  std::array<float, kDomainCount> per_hash{};
+  uint8_t mask{0};
+};
+
+static DomainEvidenceScore compute_domain_evidence_per_hash(
+    const std::vector<SpoolCandidate> &candidates, const TaxDict &tax,
+    const WeightingContext &weightCtx, ProcessScratch &scratch,
+    uint32_t scoreEpoch, const std::vector<uint32_t> &topBins,
+    bool fullSurface, size_t nEval, size_t binSize) {
+  DomainEvidenceScore result;
+  if (nEval == 0 || binSize == 0 || tax.tid2domain.empty() ||
+      !weightCtx.tid2totalSignatures || !weightCtx.tid2totalBins) {
+    return result;
+  }
+
+  uint8_t candidateMask = 0;
+  for (const auto &candidate : candidates) {
+    if (candidate.tid >= tax.tid2domain.size()) {
+      continue;
+    }
+    const uint8_t domain = tax.tid2domain[candidate.tid];
+    if (domain < kDomainCount) {
+      candidateMask |= static_cast<uint8_t>(1u << domain);
+    }
+  }
+  if (candidateMask == 0 || (candidateMask & (candidateMask - 1u)) == 0) {
+    return result;
+  }
+
+  const auto &totalSignatures = *weightCtx.tid2totalSignatures;
+  const auto &totalBins = *weightCtx.tid2totalBins;
+  if (scratch.tidActiveBinCountDense.size() < tax.id2str.size()) {
+    scratch.tidActiveBinCountDense.resize(tax.id2str.size(), 0u);
+  }
+  for (uint32_t tid : scratch.activeTidScores) {
+    scratch.tidActiveBinCountDense[tid] = 0u;
+  }
+  if (fullSurface) {
+    for (uint32_t tid : scratch.activeTidScores) {
+      if (tid < totalBins.size()) {
+        scratch.tidActiveBinCountDense[tid] = totalBins[tid];
+      }
+    }
+  } else {
+    for (uint32_t bin : topBins) {
+      uint32_t seen[kTaxSlotCount];
+      size_t seenCount = 0;
+      for (uint16_t slot = 0; slot < kTaxSlotCount; ++slot) {
+        const uint32_t tid = tax.rep_tid_for_bin_slot(bin, slot);
+        if (tid == kInvalidTidId || tid >= scratch.tidScoreEpoch.size() ||
+            scratch.tidScoreEpoch[tid] != scoreEpoch ||
+            std::find(seen, seen + seenCount, tid) != seen + seenCount) {
+          continue;
+        }
+        seen[seenCount++] = tid;
+        ++scratch.tidActiveBinCountDense[tid];
+      }
+    }
+  }
+
+  uint8_t validMask = 0;
+  bool anyPositive = false;
+  const double n = static_cast<double>(nEval);
+  const double collisionSpace =
+      static_cast<double>(binSize) * static_cast<double>(1u << 12);
+  for (uint32_t tid : scratch.activeTidScores) {
+    if (tid >= tax.tid2domain.size() || tid >= totalSignatures.size() ||
+        tid >= totalBins.size()) {
+      continue;
+    }
+    const uint8_t domain = tax.tid2domain[tid];
+    if (domain >= kDomainCount ||
+        (candidateMask & static_cast<uint8_t>(1u << domain)) == 0 ||
+        totalSignatures[tid] == 0 || totalBins[tid] == 0) {
+      continue;
+    }
+    const uint32_t activeBins = scratch.tidActiveBinCountDense[tid];
+    if (activeBins == 0) {
+      continue;
+    }
+    validMask |= static_cast<uint8_t>(1u << domain);
+    const double activeFraction =
+        std::min(1.0, static_cast<double>(activeBins) /
+                          static_cast<double>(totalBins[tid]));
+    const double mu =
+        2.0 * static_cast<double>(totalSignatures[tid]) * activeFraction /
+        collisionSpace;
+    const double p0 =
+        std::clamp(-std::expm1(-mu), 1e-12, 1.0 - 1e-12);
+    const double q = std::min(
+        1.0, static_cast<double>(scratch.tidHitCountDense[tid]) / n);
+    if (q <= p0) {
+      continue;
+    }
+    double evidence = q * std::log(q / p0);
+    if (q < 1.0) {
+      evidence +=
+          (1.0 - q) * std::log((1.0 - q) / (1.0 - p0));
+    }
+    if (evidence > result.per_hash[domain]) {
+      result.per_hash[domain] = static_cast<float>(evidence);
+      anyPositive = true;
+    }
+  }
+  if ((validMask & candidateMask) != candidateMask || !anyPositive) {
+    return DomainEvidenceScore{};
+  }
+  result.mask = candidateMask;
+  return result;
+}
+
 struct EvidenceStats {
   uint32_t bestTid = std::numeric_limits<uint32_t>::max();
   uint32_t secondTid = std::numeric_limits<uint32_t>::max();
@@ -981,6 +1094,9 @@ struct ReadScoringState {
     ensure_double_vector(scratch.tidScoreDense, tid_count);
     ensure_double_vector(scratch.tidBaseScoreDense, tid_count);
     ensure_double_vector(scratch.tidCompletionScoreDense, tid_count);
+    if (scratch.tidHitCountDense.size() < tid_count) {
+      scratch.tidHitCountDense.resize(tid_count, 0u);
+    }
     ensure_epoch_vector(scratch.uniqueHitsEpoch, tid_count);
     ensure_double_vector(scratch.uniqueHitsDense, tid_count);
     scratch.activeTidScores.clear();
@@ -1002,6 +1118,7 @@ struct ReadScoringState {
       scratch.tidScoreDense[tid] = 0.0;
       scratch.tidBaseScoreDense[tid] = 0.0;
       scratch.tidCompletionScoreDense[tid] = 0.0;
+      scratch.tidHitCountDense[tid] = 0u;
       scratch.activeTidScores.push_back(tid);
     }
     scratch.tidScoreDense[tid] += contrib;
@@ -1010,6 +1127,7 @@ struct ReadScoringState {
     } else {
       scratch.tidCompletionScoreDense[tid] += contrib;
     }
+    ++scratch.tidHitCountDense[tid];
   }
 
   void add_unique_hit(uint32_t tid, double value) {
@@ -1106,6 +1224,7 @@ struct ScoreStateSnapshot {
   std::vector<double> active_tid_values;
   std::vector<double> active_tid_base_values;
   std::vector<double> active_tid_completion_values;
+  std::vector<uint32_t> active_tid_hit_counts;
   std::vector<uint32_t> active_unique_hits;
   std::vector<double> active_unique_values;
 };
@@ -1136,11 +1255,13 @@ static ScoreStateSnapshot snapshot_score_state(
   snap.active_tid_values.reserve(snap.active_tid_scores.size());
   snap.active_tid_base_values.reserve(snap.active_tid_scores.size());
   snap.active_tid_completion_values.reserve(snap.active_tid_scores.size());
+  snap.active_tid_hit_counts.reserve(snap.active_tid_scores.size());
   for (uint32_t tid : snap.active_tid_scores) {
     snap.active_tid_values.push_back(scratch.tidScoreDense[tid]);
     snap.active_tid_base_values.push_back(scratch.tidBaseScoreDense[tid]);
     snap.active_tid_completion_values.push_back(
         scratch.tidCompletionScoreDense[tid]);
+    snap.active_tid_hit_counts.push_back(scratch.tidHitCountDense[tid]);
   }
   snap.active_unique_hits = scratch.activeUniqueHits;
   snap.active_unique_values.reserve(snap.active_unique_hits.size());
@@ -1170,6 +1291,7 @@ static void restore_score_state(
       scratch.tidScoreDense[tid] = 0.0;
       scratch.tidBaseScoreDense[tid] = 0.0;
       scratch.tidCompletionScoreDense[tid] = 0.0;
+      scratch.tidHitCountDense[tid] = 0u;
     }
   }
   scratch.activeTidScores = snap.active_tid_scores;
@@ -1180,6 +1302,7 @@ static void restore_score_state(
     scratch.tidBaseScoreDense[tid] = snap.active_tid_base_values[i];
     scratch.tidCompletionScoreDense[tid] =
         snap.active_tid_completion_values[i];
+    scratch.tidHitCountDense[tid] = snap.active_tid_hit_counts[i];
   }
 
   robin_hood::unordered_flat_set<uint32_t> oldUniqueHits;
@@ -1576,6 +1699,8 @@ static void finalize_read_record(
     uint32_t maxCountTid, double maxCountScore, double maxCountRawScore,
     bool tidScoreEmpty, std::string rejectReason,
     uint32_t profileResponseTaxid,
+    const std::array<float, kDomainCount> &domainEvidencePerHash,
+    uint8_t domainEvidenceMask,
     std::vector<SpoolCandidate> resultCandidates,
     std::vector<SpoolCandidate> abundanceCandidates,
     std::vector<SpoolCandidate> sampleMixtureCandidates,
@@ -1627,6 +1752,8 @@ static void finalize_read_record(
     result.id = id;
     result.best_taxid_hint = bestTaxidHintTid;
     result.profile_response_taxid = profileResponseTaxid;
+    result.domain_evidence_per_hash = domainEvidencePerHash;
+    result.domain_evidence_mask = domainEvidenceMask;
     result.reject_reason = std::move(rejectReason);
     result.candidates = std::move(resultCandidates);
     result.abundance_candidates = std::move(abundanceCandidates);
@@ -1641,6 +1768,8 @@ static void finalize_read_record(
     result.id = id;
     result.best_taxid_hint = bestTaxidStr;
     result.profile_response_taxid = profileResponseTaxid;
+    result.domain_evidence_per_hash = domainEvidencePerHash;
+    result.domain_evidence_mask = domainEvidenceMask;
     result.reject_reason = std::move(rejectReason);
     result.taxidCount.reserve(resultCandidates.size());
     for (const auto &candidate : resultCandidates) {
@@ -2189,13 +2318,16 @@ void processSequence(
   std::vector<SpoolCandidate> sampleMixtureCandidates =
       capture_sample_mixture_candidates_from_base_scores(scratch,
                                                          tax.id2str.size());
-
+  const DomainEvidenceScore domainEvidence = compute_domain_evidence_per_hash(
+      resultCandidates, tax, weightCtx, scratch, scoring.tid_score_epoch,
+      topBins, full_surface_mode || topBins.size() == binNumAll, n_eval,
+      imcfConfig.binSize);
   finalize_read_record(
-      id, readOrdinal, tax, fileInfo, presenceAcc, uniqueCount, uniqueRatio, eff_eval,
-      readLen,
-      bestTaxidHintTid, bestTaxidStr, maxCountValid, maxCountTid,
-      maxCountScore, maxCountRawScore, scoring.tid_score.empty(),
+      id, readOrdinal, tax, fileInfo, presenceAcc, uniqueCount, uniqueRatio,
+      eff_eval, readLen, bestTaxidHintTid, bestTaxidStr, maxCountValid,
+      maxCountTid, maxCountScore, maxCountRawScore, scoring.tid_score.empty(),
       std::move(rejectReason), profileResponseTaxid,
+      domainEvidence.per_hash, domainEvidence.mask,
       std::move(resultCandidates), std::move(abundanceCandidates),
       std::move(sampleMixtureCandidates), classifyResults, compactResults);
 }

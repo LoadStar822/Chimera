@@ -20,6 +20,7 @@
 #pragma once
 #ifndef CLASSIFYCONFIG_HPP
 #define CLASSIFYCONFIG_HPP
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -95,6 +96,8 @@ namespace ChimeraClassify {
 					uint64_t read_ordinal{ 0 };
 					std::vector<std::pair<std::string, double>> taxidCount;
 				std::vector<std::pair<std::string, double>> posteriors;
+				std::array<float, 4> domain_evidence_per_hash{};
+				uint8_t domain_evidence_mask{ 0 };
 				double evaluated{ 0.0 }; // 实际参与判别的 feature 数，用于归一化
 				uint32_t query_length{ 0 };
 				uint32_t profile_response_taxid{ 0 };

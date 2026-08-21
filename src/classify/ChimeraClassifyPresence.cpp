@@ -140,6 +140,71 @@ inline uint32_t popcount_vec(const std::vector<uint64_t> &sketch) {
   }
   return total;
 }
+bool apply_domain_evidence(
+    std::vector<std::pair<std::string, double>> &posterior,
+    const classifyResult &result, const TaxDict &tax) {
+  const uint8_t evidenceMask = result.domain_evidence_mask;
+  if (posterior.size() < 2 || evidenceMask == 0 ||
+      (evidenceMask & (evidenceMask - 1u)) == 0 ||
+      tax.tid2domain.empty()) {
+    return false;
+  }
+
+  std::array<double, kDomainCount> domainMass{};
+  std::vector<uint8_t> domains;
+  domains.reserve(posterior.size());
+  uint8_t posteriorMask = 0;
+  for (const auto &[taxid, probability] : posterior) {
+    auto tidIt = tax.str2id.find(taxid);
+    if (tidIt == tax.str2id.end() ||
+        tidIt->second >= tax.tid2domain.size()) {
+      return false;
+    }
+    const uint8_t domain = tax.tid2domain[tidIt->second];
+    if (domain >= kDomainCount || !(probability > 0.0)) {
+      return false;
+    }
+    domains.push_back(domain);
+    domainMass[domain] += probability;
+    posteriorMask |= static_cast<uint8_t>(1u << domain);
+  }
+  if ((posteriorMask & (posteriorMask - 1u)) == 0 ||
+      (evidenceMask & posteriorMask) != posteriorMask) {
+    return false;
+  }
+
+  std::vector<double> logScores;
+  logScores.reserve(posterior.size());
+  double maxLog = -std::numeric_limits<double>::infinity();
+  for (size_t i = 0; i < posterior.size(); ++i) {
+    const uint8_t domain = domains[i];
+    const double conditional = posterior[i].second / domainMass[domain];
+    const double score =
+        std::log(conditional) + result.domain_evidence_per_hash[domain];
+    logScores.push_back(score);
+    maxLog = std::max(maxLog, score);
+  }
+  double normalizer = 0.0;
+  for (double score : logScores) {
+    normalizer += std::exp(score - maxLog);
+  }
+  if (!(normalizer > 0.0)) {
+    return false;
+  }
+  for (size_t i = 0; i < posterior.size(); ++i) {
+    posterior[i].second =
+        std::exp(logScores[i] - maxLog) / normalizer;
+  }
+  std::sort(posterior.begin(), posterior.end(),
+            [](const auto &lhs, const auto &rhs) {
+              if (lhs.second != rhs.second) {
+                return lhs.second > rhs.second;
+              }
+              return lhs.first < rhs.first;
+            });
+  return true;
+}
+
 } // namespace
 
 PresenceAccumulator::PresenceAccumulator(uint32_t breadthBits)
@@ -704,13 +769,13 @@ void postEmDecision(
     // Keep POST_TOPK on the same pruned posterior that drives final decisions.
     result.posteriors = posterior;
 
-    const auto &top = posterior.front();
-    PresenceLevel top_presence = presence_level(top.first);
+    const auto &baselineTop = posterior.front();
+    PresenceLevel top_presence = presence_level(baselineTop.first);
 
     double class_weight = 0.0;
     bool weight_ok = true;
     if (!classWeights.empty()) {
-      auto weight_it = classWeights.find(top.first);
+      auto weight_it = classWeights.find(baselineTop.first);
       if (weight_it != classWeights.end()) {
         class_weight = weight_it->second;
         double pi_min = decisionConfig.min_class_weight;
@@ -723,6 +788,9 @@ void postEmDecision(
       }
     }
     if (weight_ok) {
+      (void)apply_domain_evidence(posterior, result, tax);
+      result.posteriors = posterior;
+      const auto &top = posterior.front();
       result.taxidCount.clear();
 
       double total_evidence = result.evaluated;

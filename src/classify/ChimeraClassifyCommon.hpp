@@ -3,6 +3,7 @@
 
 #include "ChimeraClassify.hpp"
 
+#include <array>
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -30,6 +31,9 @@ namespace ChimeraClassify {
 inline constexpr size_t kInvalidLength = std::numeric_limits<size_t>::max();
 inline constexpr size_t kClassifyQueueMaxPendingBytes =
     64ull * 1024ull * 1024ull;
+inline constexpr size_t kDomainCount = 4;
+inline constexpr uint8_t kInvalidDomainIndex =
+    std::numeric_limits<uint8_t>::max();
 
 struct QueueThrottle {
   std::mutex mutex;
@@ -191,6 +195,36 @@ struct NcbiTaxdump {
     return 0;
   }
 
+  uint8_t to_domain_index(uint32_t tid) const {
+    if (!enabled() || tid == 0 || tid >= parent.size()) {
+      return kInvalidDomainIndex;
+    }
+    uint32_t cur = tid;
+    for (int steps = 0; steps < 128; ++steps) {
+      switch (cur) {
+      case 2:
+        return 0;
+      case 2157:
+        return 1;
+      case 2759:
+        return 2;
+      case 10239:
+        return 3;
+      default:
+        break;
+      }
+      if (cur >= parent.size()) {
+        break;
+      }
+      const uint32_t next = parent[cur];
+      if (next == 0 || next == cur) {
+        break;
+      }
+      cur = next;
+    }
+    return kInvalidDomainIndex;
+  }
+
   const std::string &name(uint32_t tid) const {
     static const std::string empty;
     if (tid >= scientific_name.size()) {
@@ -250,6 +284,9 @@ struct WeightingContext {
   // Optional NCBI-only: map internal tid_id -> genus taxid for fast
   // same-genus grouping in coarse candidate routing.
   const std::vector<uint32_t> *tid2genus{nullptr};
+  // Optional NCBI-only exposure vectors indexed by representative tid_id.
+  const std::vector<uint64_t> *tid2totalSignatures{nullptr};
+  const std::vector<uint32_t> *tid2totalBins{nullptr};
   // Optional NCBI-only: map internal tid_id -> species group id (numeric NCBI
   // species taxid, or a stable synthetic id for non-numeric taxids). Used for
   // computing deg/exclusivity at the species level without changing output
@@ -580,6 +617,7 @@ struct TaxDict {
   std::vector<std::vector<uint32_t>> tid2bin; // tid_id -> 所在 bin 列表
   robin_hood::unordered_flat_map<std::string, uint32_t> str2id; // taxid -> tid_id
   std::vector<uint32_t> binSlotRepTid; // [bin * 16 + slot] -> rep tid_id
+  std::vector<uint8_t> tid2domain;
 
   inline uint32_t rep_tid_for_bin_slot(uint32_t bin, uint16_t slot) const {
     if (slot >= kTaxSlotCount) {
@@ -611,6 +649,8 @@ struct SpoolReadRecord {
   uint32_t query_length{0};
   uint32_t best_taxid_hint{0};
   uint32_t profile_response_taxid{0};
+  std::array<float, kDomainCount> domain_evidence_per_hash{};
+  uint8_t domain_evidence_mask{0};
   std::string reject_reason;
   std::vector<SpoolCandidate> candidates;
   std::vector<SpoolCandidate> abundance_candidates;
@@ -627,6 +667,8 @@ struct CompactClassifyResult {
   uint32_t query_length{0};
   uint32_t best_taxid_hint{kSpoolUnclassifiedTid};
   uint32_t profile_response_taxid{0};
+  std::array<float, kDomainCount> domain_evidence_per_hash{};
+  uint8_t domain_evidence_mask{0};
   std::string reject_reason;
   std::vector<SpoolCandidate> candidates;
   std::vector<SpoolCandidate> abundance_candidates;
@@ -814,6 +856,8 @@ struct ProcessScratch {
   std::vector<double> tidScoreDense;
   std::vector<double> tidBaseScoreDense;
   std::vector<double> tidCompletionScoreDense;
+  std::vector<uint32_t> tidHitCountDense;
+  std::vector<uint32_t> tidActiveBinCountDense;
   std::vector<uint32_t> tidScoreEpoch;
   std::vector<uint32_t> activeTidScores;
   uint32_t tidScoreEpochValue{0};

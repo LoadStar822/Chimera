@@ -16,7 +16,7 @@ namespace ChimeraClassify {
 
 namespace {
 
-constexpr char kSpoolMagic[] = {'C', 'H', 'S', 'P', '6', '\0', '\0', '\0'};
+constexpr char kSpoolMagic[] = {'C', 'H', 'S', 'P', '7', '\0', '\0', '\0'};
 
 struct SpoolCandidateLite {
   uint32_t tid{0};
@@ -128,6 +128,8 @@ void write_spool_record(std::ostream &os, const SpoolReadRecord &record) {
   write_pod(os, record.query_length);
   write_pod(os, record.best_taxid_hint);
   write_pod(os, record.profile_response_taxid);
+  write_pod(os, record.domain_evidence_per_hash);
+  write_pod(os, record.domain_evidence_mask);
   write_string(os, record.reject_reason);
   const uint32_t cand_len = static_cast<uint32_t>(record.candidates.size());
   write_pod(os, cand_len);
@@ -157,6 +159,8 @@ void write_spool_record(std::ostream &os,
   write_pod(os, record.query_length);
   write_pod(os, record.best_taxid_hint);
   write_pod(os, record.profile_response_taxid);
+  write_pod(os, record.domain_evidence_per_hash);
+  write_pod(os, record.domain_evidence_mask);
   write_string(os, record.reject_reason);
   const uint32_t cand_len = static_cast<uint32_t>(record.candidates.size());
   write_pod(os, cand_len);
@@ -186,6 +190,8 @@ void write_spool_candidate_record(std::ostream &os,
   write_pod(os, record.query_length);
   write_pod(os, record.best_taxid_hint);
   write_pod(os, record.profile_response_taxid);
+  write_pod(os, record.domain_evidence_per_hash);
+  write_pod(os, record.domain_evidence_mask);
   write_string(os, record.reject_reason);
   const uint32_t cand_len = static_cast<uint32_t>(record.candidates.size());
   write_pod(os, cand_len);
@@ -205,6 +211,8 @@ void write_spool_sample_mixture_record(
   write_pod(os, record.query_length);
   write_pod(os, record.best_taxid_hint);
   write_pod(os, record.profile_response_taxid);
+  write_pod(os, record.domain_evidence_per_hash);
+  write_pod(os, record.domain_evidence_mask);
   write_string(os, record.reject_reason);
   const uint32_t zero_len = 0;
   write_pod(os, zero_len);
@@ -241,7 +249,9 @@ bool read_spool_record(std::istream &is, SpoolReadRecord &record,
       !read_pod(is, record.evaluated) ||
       !read_pod(is, record.query_length) ||
       !read_pod(is, record.best_taxid_hint) ||
-      !read_pod(is, record.profile_response_taxid)) {
+      !read_pod(is, record.profile_response_taxid) ||
+      !read_pod(is, record.domain_evidence_per_hash) ||
+      !read_pod(is, record.domain_evidence_mask)) {
     throw std::runtime_error("Truncated classify spool record header");
   }
   uint32_t reject_len = 0;
