@@ -43,6 +43,7 @@ struct PendingRead {
   uint64_t ordinal{};
   uint32_t length{};
   std::vector<seqan3::dna4> sequence;
+  std::vector<seqan3::dna4> mate_sequence;
 };
 
 struct ReadRecord {
@@ -741,9 +742,19 @@ extract_read_records(const std::vector<PendingRead> &pending_reads, uint32_t k,
       read.length = pending.length;
       auto anchors =
           chimera::native_bounded::extract_minimizers(pending.sequence, k, w);
-      read.anchor_count = static_cast<uint32_t>(
-          std::min<size_t>(anchors.size(), std::numeric_limits<uint32_t>::max()));
+      size_t anchorCount = anchors.size();
       select_chain_anchors_inplace(anchors);
+      if (!pending.mate_sequence.empty()) {
+        auto mateAnchors = chimera::native_bounded::extract_minimizers(
+            pending.mate_sequence, k, w);
+        anchorCount += mateAnchors.size();
+        select_chain_anchors_inplace(mateAnchors);
+        anchors.insert(anchors.end(),
+                       std::make_move_iterator(mateAnchors.begin()),
+                       std::make_move_iterator(mateAnchors.end()));
+      }
+      read.anchor_count = static_cast<uint32_t>(
+          std::min<size_t>(anchorCount, std::numeric_limits<uint32_t>::max()));
       read.anchors = std::move(anchors);
       reads[idx] = std::move(read);
     }
@@ -760,13 +771,15 @@ extract_read_records(const std::vector<PendingRead> &pending_reads, uint32_t k,
   return reads;
 }
 
-ReadRecord make_read_record_from_pending(const PendingRead &pending, uint32_t k,
-                                         uint32_t w) {
+ReadRecord make_read_record(uint64_t ordinal,
+                            const std::vector<seqan3::dna4> &sequence,
+                            uint32_t k, uint32_t w) {
   ReadRecord read;
-  read.ordinal = pending.ordinal;
-  read.length = pending.length;
+  read.ordinal = ordinal;
+  read.length = static_cast<uint32_t>(
+      std::min<size_t>(sequence.size(), std::numeric_limits<uint32_t>::max()));
   auto anchors =
-      chimera::native_bounded::extract_minimizers(pending.sequence, k, w);
+      chimera::native_bounded::extract_minimizers(sequence, k, w);
   read.anchor_count = static_cast<uint32_t>(
       std::min<size_t>(anchors.size(), std::numeric_limits<uint32_t>::max()));
   select_chain_anchors_inplace(anchors);
@@ -776,7 +789,7 @@ ReadRecord make_read_record_from_pending(const PendingRead &pending, uint32_t k,
 
 template <typename BatchConsumer>
 uint64_t for_each_pending_read_batch(const std::vector<std::string> &paths,
-                                     size_t batch_size,
+                                     bool paired, size_t batch_size,
                                      BatchConsumer &&consume_batch) {
   std::vector<PendingRead> pending;
   pending.reserve(batch_size);
@@ -786,25 +799,61 @@ uint64_t for_each_pending_read_batch(const std::vector<std::string> &paths,
       return;
     }
     consume_batch(pending);
-    std::vector<PendingRead> fresh;
-    fresh.reserve(batch_size);
-    pending = std::move(fresh);
+    pending.clear();
+  };
+  auto append = [&](auto &&record1,
+                    std::vector<seqan3::dna4> *mateSequence) {
+    PendingRead read;
+    read.ordinal = ordinal++;
+    read.sequence = std::move(record1.sequence());
+    uint64_t length = read.sequence.size();
+    if (mateSequence != nullptr) {
+      read.mate_sequence = std::move(*mateSequence);
+      length += read.mate_sequence.size();
+    }
+    read.length = static_cast<uint32_t>(
+        std::min<uint64_t>(length, std::numeric_limits<uint32_t>::max()));
+    pending.push_back(std::move(read));
+    if (pending.size() >= batch_size) {
+      flush();
+    }
   };
 
-  for (const auto &path : paths) {
-    seqan3::sequence_file_input<raptor::dna4_traits,
-                                seqan3::fields<seqan3::field::seq>>
-        input{path};
-    for (auto &record : input) {
-      PendingRead pending_read;
-      pending_read.ordinal = ordinal++;
-      pending_read.length = static_cast<uint32_t>(
-          std::min<size_t>(record.sequence().size(),
-                           std::numeric_limits<uint32_t>::max()));
-      pending_read.sequence = std::move(record.sequence());
-      pending.push_back(std::move(pending_read));
-      if (pending.size() >= batch_size) {
-        flush();
+  if (!paired) {
+    for (const auto &path : paths) {
+      seqan3::sequence_file_input<raptor::dna4_traits,
+                                  seqan3::fields<seqan3::field::seq>>
+          input{path};
+      for (auto &record : input) {
+        append(std::move(record), nullptr);
+      }
+    }
+  } else {
+    if (paths.size() % 2 != 0) {
+      throw std::runtime_error(
+          "Local resolution paired input requires an even number of files");
+    }
+    for (size_t pathIndex = 0; pathIndex < paths.size(); pathIndex += 2) {
+      seqan3::sequence_file_input<raptor::dna4_traits,
+                                  seqan3::fields<seqan3::field::seq>>
+          input1{paths[pathIndex]};
+      seqan3::sequence_file_input<raptor::dna4_traits,
+                                  seqan3::fields<seqan3::field::seq>>
+          input2{paths[pathIndex + 1]};
+      auto it1 = input1.begin();
+      auto it2 = input2.begin();
+      const auto end1 = input1.end();
+      const auto end2 = input2.end();
+      while (it1 != end1 && it2 != end2) {
+        auto &record1 = *it1;
+        auto &record2 = *it2;
+        append(std::move(record1), &record2.sequence());
+        ++it1;
+        ++it2;
+      }
+      if (it1 != end1 || it2 != end2) {
+        throw std::runtime_error(
+            "Local resolution paired files have different read counts");
       }
     }
   }
@@ -813,10 +862,10 @@ uint64_t for_each_pending_read_batch(const std::vector<std::string> &paths,
 }
 
 uint64_t collect_query_hashes_from_reads(
-    const std::vector<std::string> &paths, uint32_t k, uint32_t w,
+    const std::vector<std::string> &paths, bool paired, uint32_t k, uint32_t w,
     QueryHashIndex &query_hashes, uint32_t threads) {
   return for_each_pending_read_batch(
-      paths, kLocalResolutionReadBatchSize,
+      paths, paired, kLocalResolutionReadBatchSize,
       [&](const std::vector<PendingRead> &pending) {
         auto reads = extract_read_records(pending, k, w, threads);
         for (auto &read : reads) {
@@ -2001,13 +2050,14 @@ chain_read_species_scores(const ReadRecord &read,
 }
 
 void chain_reads_to_call_store(
-    const std::vector<std::string> &read_files, uint32_t k, uint32_t w,
-    const QueryHashIndex &query_hashes, const CompactPostingIndex &index,
-    const std::vector<TargetRecord> &targets, int diag_bin, uint32_t min_chain,
-    uint32_t threads, ChimeraClassify::LocalResolutionCallStore &store,
+    const std::vector<std::string> &read_files, bool paired, uint32_t k,
+    uint32_t w, const QueryHashIndex &query_hashes,
+    const CompactPostingIndex &index, const std::vector<TargetRecord> &targets,
+    int diag_bin, uint32_t min_chain, uint32_t threads,
+    ChimeraClassify::LocalResolutionCallStore &store,
     std::atomic<uint64_t> &local_hits, std::atomic<uint64_t> &local_absent) {
   for_each_pending_read_batch(
-      read_files, kLocalResolutionReadBatchSize,
+      read_files, paired, kLocalResolutionReadBatchSize,
       [&](const std::vector<PendingRead> &pending) {
         std::vector<std::vector<TaxonScore>> batch_scores(pending.size());
         const uint32_t worker_count = std::max<uint32_t>(
@@ -2021,11 +2071,48 @@ void chain_reads_to_call_store(
             if (idx >= pending.size()) {
               break;
             }
-            auto read = make_read_record_from_pending(pending[idx], k, w);
+            auto read =
+                make_read_record(pending[idx].ordinal, pending[idx].sequence,
+                                 k, w);
             assign_query_hashes(read, query_hashes);
-            batch_scores[idx] =
-                chain_read_species_scores(read, index, targets, diag_bin,
-                                          min_chain);
+            auto scores = chain_read_species_scores(read, index, targets,
+                                                    diag_bin, min_chain);
+            if (!pending[idx].mate_sequence.empty()) {
+              auto mate = make_read_record(pending[idx].ordinal,
+                                           pending[idx].mate_sequence, k, w);
+              assign_query_hashes(mate, query_hashes);
+              auto mateScores = chain_read_species_scores(
+                  mate, index, targets, diag_bin, min_chain);
+              scores.insert(scores.end(),
+                            std::make_move_iterator(mateScores.begin()),
+                            std::make_move_iterator(mateScores.end()));
+              std::sort(scores.begin(), scores.end(),
+                        [](const TaxonScore &a, const TaxonScore &b) {
+                          return a.taxid < b.taxid;
+                        });
+              size_t mergedSize = 0;
+              for (const auto &score : scores) {
+                if (mergedSize != 0 &&
+                    scores[mergedSize - 1].taxid == score.taxid) {
+                  scores[mergedSize - 1].score =
+                      static_cast<uint32_t>(std::min<uint64_t>(
+                          static_cast<uint64_t>(scores[mergedSize - 1].score) +
+                              score.score,
+                          std::numeric_limits<uint32_t>::max()));
+                } else {
+                  scores[mergedSize++] = score;
+                }
+              }
+              scores.resize(mergedSize);
+              std::sort(scores.begin(), scores.end(),
+                        [](const TaxonScore &a, const TaxonScore &b) {
+                          if (a.score != b.score) {
+                            return a.score > b.score;
+                          }
+                          return taxid_decimal_lex_less(a.taxid, b.taxid);
+                        });
+            }
+            batch_scores[idx] = std::move(scores);
           }
         };
         std::vector<std::thread> workers;
@@ -2059,13 +2146,14 @@ namespace {
 
 LocalResolutionResult
 run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
+                                 bool paired,
                                  const std::filesystem::path &index_path,
                                  const std::filesystem::path &shard_manifest_path,
                                  const TargetFilter &target_filter,
                                  uint32_t diag_bin, uint32_t max_occ,
                                  uint32_t min_chain, uint32_t threads) {
   if (read_files.empty()) {
-    throw std::runtime_error("Local resolution route requires --single input");
+    throw std::runtime_error("Local resolution route requires read input");
   }
   if (index_path.empty()) {
     throw std::runtime_error("Local resolution route requires an index file");
@@ -2079,7 +2167,7 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
 	  const auto root_meta = chimera::native_bounded::read_index_header(index_path);
 	  QueryHashIndex query_hashes(root_meta.k);
 	  const uint64_t read_count = collect_query_hashes_from_reads(
-	      read_files, root_meta.k, root_meta.w, query_hashes, threads);
+	      read_files, paired, root_meta.k, root_meta.w, query_hashes, threads);
 	  query_hashes.optimize_prefilter();
 	  const auto reads_loaded = std::chrono::steady_clock::now();
 
@@ -2113,9 +2201,9 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
 	  result.calls.offsets.push_back(0);
 	  std::atomic<uint64_t> local_hits{0};
 	  std::atomic<uint64_t> local_absent{0};
-	  chain_reads_to_call_store(read_files, root_meta.k, root_meta.w, query_hashes,
-	                            index, targets, diag_bin, min_chain, threads,
-	                            result.calls, local_hits, local_absent);
+	  chain_reads_to_call_store(read_files, paired, root_meta.k, root_meta.w,
+	                            query_hashes, index, targets, diag_bin, min_chain,
+	                            threads, result.calls, local_hits, local_absent);
 	  if (result.calls.read_count() != read_count) {
 	    throw std::runtime_error(
 	        "local resolution call store read count mismatch");
@@ -2173,7 +2261,8 @@ LocalResolutionResult
 run_local_resolution_engine(const LocalResolutionRequest &request) {
   const auto target_filter = target_filter_from_targets(request.targets);
   return run_local_resolution_engine_impl(
-      request.read_files, std::filesystem::path(request.index_file),
+      request.read_files, request.paired,
+      std::filesystem::path(request.index_file),
       std::filesystem::path(request.shard_manifest_file), target_filter,
       request.diag_bin, request.max_occ, request.min_chain, request.threads);
 }

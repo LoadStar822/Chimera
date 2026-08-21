@@ -5752,7 +5752,7 @@ void run(ClassifyConfig config) {
     double localResolutionDivergence = config.community_dispersion_s;
     const std::string localProfileOutput =
         resolve_tsv_output_path(config.outputFile);
-    if (config.local_resolution_enabled && config.pairedFiles.empty()) {
+    if (config.local_resolution_enabled) {
       const auto postTopkScores = collect_local_resolution_post_topk_scores(
           candidateSpoolPaths, sampleMixtureSpoolPaths, speciesFit,
           sampleMixtureFit, options, decisionConfig, tax, &presenceDecision,
@@ -5844,7 +5844,10 @@ void run(ClassifyConfig config) {
                   .count();
           if (panel.selected_targets > 0) {
             ChimeraClassify::LocalResolutionRequest localRequest;
-            localRequest.read_files = config.singleFiles;
+            localRequest.paired = !config.pairedFiles.empty();
+            localRequest.read_files = localRequest.paired
+                                          ? config.pairedFiles
+                                          : config.singleFiles;
             localRequest.index_file = localIndexPath.string();
             localRequest.shard_manifest_file = shardManifestPath.string();
             localRequest.targets = panel.targets;
@@ -5950,15 +5953,6 @@ void run(ClassifyConfig config) {
               "local resolution (database has no local-resolution data)");
         }
       }
-    } else if (config.local_resolution_enabled && !config.pairedFiles.empty()) {
-      if (classifyDebug) {
-        write_local_resolution_profile_json(
-            localProfileOutput, "skipped_paired_input", localResolutionDivergence,
-            config.local_resolution_divergence_threshold, nullptr, nullptr, 0.0,
-            0.0, 0.0);
-      }
-      print_status_line(ConsoleStatusKind::Skip,
-                        "local resolution (paired input)");
     }
 
     write_spool_em_results(spoolPaths, candidateSpoolPaths,

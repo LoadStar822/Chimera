@@ -127,6 +127,7 @@ struct LocalResolutionTarget {
 
 struct LocalResolutionRequest {
   std::vector<std::string> read_files;
+  bool paired{false};
   std::string index_file;
   std::string shard_manifest_file;
   std::vector<LocalResolutionTarget> targets;
