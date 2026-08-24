@@ -1,4 +1,5 @@
 #include "ChimeraBuildNativeBounded.hpp"
+#include "BuildTaxonomy.hpp"
 
 #include <dna4_traits.hpp>
 #include <utils/LocalResolutionMetadata.hpp>
@@ -54,143 +55,6 @@ uint32_t parse_taxid_u32(const std::string &taxid) {
   }
 }
 
-struct Taxdump {
-  std::vector<uint32_t> parent;
-  std::vector<uint8_t> is_species;
-  std::vector<uint8_t> is_genus;
-
-  uint32_t to_species(uint32_t tid) const {
-    if (tid == 0 || tid >= is_species.size()) {
-      return tid;
-    }
-    if (is_species[tid]) {
-      return tid;
-    }
-    uint32_t cur = tid;
-    for (int steps = 0; steps < 128; ++steps) {
-      if (cur == 0 || cur >= parent.size()) {
-        break;
-      }
-      const uint32_t p = parent[cur];
-      if (p == 0 || p == cur) {
-        break;
-      }
-      cur = p;
-      if (cur < is_species.size() && is_species[cur]) {
-        return cur;
-      }
-    }
-    return tid;
-  }
-
-  uint32_t to_genus(uint32_t tid) const {
-    if (tid == 0 || tid >= parent.size()) {
-      return 0;
-    }
-    uint32_t cur = tid;
-    for (int steps = 0; steps < 128; ++steps) {
-      if (cur == 0 || cur >= parent.size()) {
-        break;
-      }
-      if (cur < is_genus.size() && is_genus[cur]) {
-        return cur;
-      }
-      const uint32_t p = parent[cur];
-      if (p == 0 || p == cur) {
-        break;
-      }
-      cur = p;
-    }
-    return 0;
-  }
-};
-
-std::optional<Taxdump> load_taxdump(const BuildConfig &config) {
-  std::vector<std::filesystem::path> roots;
-  if (!config.taxonomy_dir.empty()) {
-    roots.emplace_back(config.taxonomy_dir);
-  }
-  if (const char *env_dir = std::getenv("CHIMERA_NCBI_TAXDUMP_DIR")) {
-    if (*env_dir) {
-      roots.emplace_back(env_dir);
-    }
-  }
-
-  std::filesystem::path nodes;
-  for (const auto &root : roots) {
-    const auto candidate = root / "nodes.dmp";
-    if (std::filesystem::exists(candidate)) {
-      nodes = candidate;
-      break;
-    }
-  }
-  if (nodes.empty()) {
-    return std::nullopt;
-  }
-  std::ifstream in(nodes);
-  if (!in) {
-    throw std::runtime_error("failed to open taxonomy nodes.dmp: " +
-                             nodes.string());
-  }
-
-  Taxdump tax;
-  std::string line;
-  while (std::getline(in, line)) {
-    if (line.empty()) {
-      continue;
-    }
-    std::vector<std::string> fields;
-    std::stringstream ss(line);
-    std::string tok;
-    while (std::getline(ss, tok, '\t')) {
-      while (!tok.empty() &&
-             std::isspace(static_cast<unsigned char>(tok.front()))) {
-        tok.erase(tok.begin());
-      }
-      while (!tok.empty() &&
-             std::isspace(static_cast<unsigned char>(tok.back()))) {
-        tok.pop_back();
-      }
-      if (tok.empty() || tok == "|") {
-        continue;
-      }
-      fields.push_back(tok);
-      if (fields.size() >= 3) {
-        break;
-      }
-    }
-    if (fields.size() < 3) {
-      continue;
-    }
-    const uint32_t tid = parse_taxid_u32(fields[0]);
-    const uint32_t parent = parse_taxid_u32(fields[1]);
-    if (tid == 0) {
-      continue;
-    }
-    if (tid >= tax.parent.size()) {
-      tax.parent.resize(static_cast<size_t>(tid) + 1, 0);
-      tax.is_species.resize(static_cast<size_t>(tid) + 1, 0);
-      tax.is_genus.resize(static_cast<size_t>(tid) + 1, 0);
-    }
-    tax.parent[tid] = parent;
-    tax.is_species[tid] = (fields[2] == "species") ? 1 : 0;
-    tax.is_genus[tid] = (fields[2] == "genus") ? 1 : 0;
-  }
-  if (tax.parent.empty()) {
-    return std::nullopt;
-  }
-  return tax;
-}
-
-Taxdump load_required_taxdump_for_local_resolution(const BuildConfig &config) {
-  auto taxdump = load_taxdump(config);
-  if (!taxdump.has_value()) {
-    throw std::runtime_error(
-        "local read resolution build requires taxonomy nodes.dmp; provide "
-        "--taxonomy-dir or CHIMERA_NCBI_TAXDUMP_DIR");
-  }
-  return std::move(*taxdump);
-}
 
 std::vector<InputTask> make_tasks(
     const robin_hood::unordered_flat_map<std::string, std::vector<std::string>>
@@ -548,7 +412,8 @@ NativeBoundedBuildStats build_native_bounded_index_fused(
   std::filesystem::remove_all(paths.shard_dir);
   std::filesystem::create_directories(paths.shard_dir);
 
-  const auto taxdump = load_required_taxdump_for_local_resolution(config);
+  const auto taxdump =
+      BuildTaxonomy::load_required(config, "local read resolution build");
   NativeBoundedBuildStats stats;
   const size_t workerCount =
       std::max<size_t>(1, std::min<size_t>(config.threads, tasks.size()));
