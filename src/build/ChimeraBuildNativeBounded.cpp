@@ -30,7 +30,9 @@
 #include <thread>
 #include <vector>
 
+#include <dirent.h>
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 namespace ChimeraBuild {
@@ -228,6 +230,60 @@ void write_all_at(int fd, const char *data, size_t size, uint64_t offset,
     }
     written += static_cast<size_t>(rc);
   }
+}
+
+size_t shard_fd_cache_capacity(size_t workerCount, size_t shardCount) {
+  const size_t desired = std::min<size_t>(64, shardCount);
+  struct rlimit limit {};
+  if (::getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+    const int error = errno;
+    throw std::runtime_error("failed to read native bounded file descriptor "
+                             "limit: " + std::string(std::strerror(error)));
+  }
+  if (limit.rlim_cur == RLIM_INFINITY) {
+    return desired;
+  }
+
+#ifdef __linux__
+  const char *fdDirectory = "/proc/self/fd";
+#else
+  const char *fdDirectory = "/dev/fd";
+#endif
+  std::unique_ptr<DIR, int (*)(DIR *)> directory(::opendir(fdDirectory),
+                                               &::closedir);
+  if (!directory) {
+    const int error = errno;
+    throw std::runtime_error("failed to count native bounded open file "
+                             "descriptors: " + std::string(std::strerror(error)));
+  }
+  rlim_t openCount = 0;
+  errno = 0;
+  while (const auto *entry = ::readdir(directory.get())) {
+    if (entry->d_name[0] >= '0' && entry->d_name[0] <= '9') {
+      ++openCount;
+    }
+  }
+  if (errno != 0) {
+    const int error = errno;
+    throw std::runtime_error("failed to enumerate native bounded open file "
+                             "descriptors: " + std::string(std::strerror(error)));
+  }
+
+  // RLIMIT_NOFILE is process-wide, not per worker. Count inherited handles
+  // too; reserve one input stream per worker and headroom for other I/O.
+  // openCount conservatively includes the temporary directory handle.
+  constexpr rlim_t headroom = 32;
+  const rlim_t reserved = openCount + headroom;
+  const rlim_t perWorker =
+      limit.rlim_cur > reserved ? (limit.rlim_cur - reserved) / workerCount : 0;
+  if (perWorker <= 1) {
+    throw std::runtime_error(
+        "native bounded build has insufficient file descriptors: RLIMIT_NOFILE=" +
+        std::to_string(limit.rlim_cur) + ", open=" + std::to_string(openCount) +
+        ", workers=" + std::to_string(workerCount) +
+        "; reduce build threads or raise the process file descriptor limit");
+  }
+  return static_cast<size_t>(std::min<rlim_t>(desired, perWorker - 1));
 }
 
 class ShardFdCache {
@@ -463,7 +519,7 @@ NativeBoundedBuildStats build_native_bounded_index_fused(
   std::exception_ptr workerError;
   std::mutex errorMutex;
   const size_t shardFdCacheMaxOpen =
-      std::min<size_t>(64, std::max<size_t>(8, shardOutputs.size()));
+      shard_fd_cache_capacity(workerCount, shardOutputs.size());
   auto buildWorker = [&]() {
     ShardFdCache fdCache(shardOutputs, shardFdCacheMaxOpen);
     while (true) {
