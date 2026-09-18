@@ -310,6 +310,7 @@ int main(int argc, char **argv) {
             ? chimera::presence_sketch::default_sketch_path_for_db(
                   presenceSketchDatabase)
             : std::filesystem::path(presenceSketchOutput);
+    presenceSketchOptions.database = presenceSketchDatabase;
     if (presenceSketchOptions.taxonomy_dir.empty() &&
         !presenceSketchDatabase.empty()) {
       presenceSketchOptions.taxonomy_dir =
@@ -502,13 +503,13 @@ int main(int argc, char **argv) {
     if (*build) {
       ChimeraBuild::run(buildConfig);
       if (!buildNoPresenceSketch) {
-        // Sidecar consumed by `classify` (genome-evidence presence calling);
-        // built from the same input so every database carries it.
+        // presence sketch sidecar, built from the same input as the database
         ChimeraBuild::PresenceSketchBuildOptions sketchOptions;
         sketchOptions.input_file = buildConfig.input_file;
         sketchOptions.output_path =
             chimera::presence_sketch::default_sketch_path_for_db(
                 buildConfig.output_file);
+        sketchOptions.database = buildConfig.output_file;
         sketchOptions.taxonomy_dir =
             buildConfig.taxonomy_dir.empty()
                 ? ChimeraBuild::default_presence_taxonomy_dir(

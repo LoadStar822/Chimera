@@ -5756,16 +5756,38 @@ void run(ClassifyConfig config) {
   if (!profileTaxdump) {
     profileTaxdump = maybe_load_tax_tsv_for_profile(config.dbFile);
   }
-  // presence sketch sidecar (optional); without it classification is unchanged
+  // presence sketch sidecar (optional); without it classification is unchanged.
+  // A sketch registered in the database manifest must match it.
   std::optional<chimera::presence_sketch::SketchIndex> presenceSketch;
   if (config.presence_call_enabled) {
-    const std::filesystem::path sketchPath =
-        config.presence_call_sketch.empty()
-            ? chimera::presence_sketch::default_sketch_path_for_db(
-                  config.dbFile)
-            : std::filesystem::path(config.presence_call_sketch);
+    std::filesystem::path sketchPath(config.presence_call_sketch);
+    std::optional<chimera::local_resolution::ArtifactStamp> registered;
+    if (sketchPath.empty()) {
+      const auto manifest =
+          chimera::local_resolution::load_manifest_for_db(config.dbFile);
+      if (manifest.has_value() && manifest->presence_available) {
+        registered = manifest->presence_sketch;
+        sketchPath = chimera::local_resolution::materialize_manifest_path(
+            chimera::local_resolution::core_archive_path_for(config.dbFile),
+            *registered);
+      } else {
+        sketchPath = chimera::presence_sketch::default_sketch_path_for_db(
+            config.dbFile);
+      }
+    }
+    const bool sketchExists = std::filesystem::exists(sketchPath);
+    if (registered.has_value() &&
+        (!sketchExists ||
+         std::filesystem::file_size(sketchPath) != registered->size)) {
+      throw std::runtime_error(
+          "Presence sketch " + sketchPath.string() +
+          (sketchExists ? " does not match the database manifest"
+                        : " is registered in the database manifest but missing") +
+          "; rebuild it with `chimera presence-sketch` or pass "
+          "--no-presence-call");
+    }
     std::string sketchError;
-    if (std::filesystem::exists(sketchPath)) {
+    if (sketchExists) {
       presenceSketch =
           chimera::presence_sketch::SketchIndex::open(sketchPath, &sketchError);
       if (!presenceSketch.has_value()) {
@@ -5775,7 +5797,11 @@ void run(ClassifyConfig config) {
       std::ostringstream msg;
       msg << "presence sketch loaded (species="
           << presenceSketch->species_count()
-          << " scaled=" << presenceSketch->params().scaled << ")";
+          << " scaled=" << presenceSketch->params().scaled
+          << (registered.has_value() || !config.presence_call_sketch.empty()
+                  ? ""
+                  : ", not registered in the database manifest")
+          << ")";
       print_status_line(ConsoleStatusKind::Ok, msg.str());
     } else if (!config.presence_call_sketch.empty()) {
       throw std::runtime_error("Presence sketch not found: " +

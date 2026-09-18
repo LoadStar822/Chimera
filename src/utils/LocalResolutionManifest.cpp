@@ -207,14 +207,9 @@ void write_manifest(const std::filesystem::path &core_path,
   }
 }
 
-std::optional<BuildManifest>
-load_and_verify_manifest_for_db(const std::filesystem::path &db_path) {
-  const std::filesystem::path core_path = core_archive_path_for(db_path);
-  const std::filesystem::path manifest_path = manifest_path_for_core(core_path);
-  if (!std::filesystem::exists(manifest_path)) {
-    return std::nullopt;
-  }
+namespace {
 
+BuildManifest parse_manifest(const std::filesystem::path &manifest_path) {
   std::ifstream in(manifest_path);
   if (!in) {
     throw std::runtime_error("failed to open local resolution manifest: " +
@@ -246,6 +241,9 @@ load_and_verify_manifest_for_db(const std::filesystem::path &db_path) {
       manifest.shard_manifest = parse_stamp(fields, key);
     } else if (key == "shard") {
       manifest.shards.push_back(parse_stamp(fields, key));
+    } else if (key == "presence_sketch") {
+      manifest.presence_sketch = parse_stamp(fields, key);
+      manifest.presence_available = true;
     } else if (fields.size() == 2) {
       scalars.emplace(key, fields[1]);
     } else {
@@ -258,6 +256,29 @@ load_and_verify_manifest_for_db(const std::filesystem::path &db_path) {
   manifest.w = parse_u32_field(scalars, "w");
   manifest.targets_per_species =
       parse_u32_field(scalars, "targets_per_species");
+  return manifest;
+}
+
+} // namespace
+
+std::optional<BuildManifest>
+load_manifest_for_db(const std::filesystem::path &db_path) {
+  const std::filesystem::path manifest_path =
+      manifest_path_for_core(core_archive_path_for(db_path));
+  if (!std::filesystem::exists(manifest_path)) {
+    return std::nullopt;
+  }
+  return parse_manifest(manifest_path);
+}
+
+std::optional<BuildManifest>
+load_and_verify_manifest_for_db(const std::filesystem::path &db_path) {
+  const std::filesystem::path core_path = core_archive_path_for(db_path);
+  const std::filesystem::path manifest_path = manifest_path_for_core(core_path);
+  if (!std::filesystem::exists(manifest_path)) {
+    return std::nullopt;
+  }
+  BuildManifest manifest = parse_manifest(manifest_path);
 
   verify_stamp(core_path, manifest.core, "core archive");
   if (manifest.local_available) {
@@ -270,6 +291,45 @@ load_and_verify_manifest_for_db(const std::filesystem::path &db_path) {
     }
   }
   return manifest;
+}
+
+bool stamp_presence_sketch(const std::filesystem::path &core_path,
+                           const std::filesystem::path &sketch_path) {
+  const std::filesystem::path manifest_path = manifest_path_for_core(core_path);
+  if (!std::filesystem::exists(manifest_path)) {
+    return false;
+  }
+  const std::filesystem::path base_dir =
+      core_path.parent_path().empty() ? std::filesystem::path(".")
+                                      : core_path.parent_path();
+  std::vector<std::string> lines;
+  {
+    std::ifstream in(manifest_path);
+    if (!in) {
+      throw std::runtime_error("failed to open local resolution manifest: " +
+                               manifest_path.string());
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+      if (!line.empty() && split_tab(line)[0] != "presence_sketch") {
+        lines.push_back(line);
+      }
+    }
+  }
+  const std::filesystem::path tmp_path = manifest_path.string() + ".tmp";
+  {
+    std::ofstream out(tmp_path, std::ios::trunc);
+    if (!out) {
+      throw std::runtime_error("failed to write local resolution manifest: " +
+                               tmp_path.string());
+    }
+    for (const auto &line : lines) {
+      out << line << '\n';
+    }
+    write_stamp(out, "presence_sketch", stamp_artifact(base_dir, sketch_path));
+  }
+  std::filesystem::rename(tmp_path, manifest_path);
+  return true;
 }
 
 std::filesystem::path

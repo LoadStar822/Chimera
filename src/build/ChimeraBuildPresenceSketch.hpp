@@ -11,6 +11,7 @@ namespace ChimeraBuild {
 struct PresenceSketchBuildOptions {
   std::filesystem::path input_file;   // build input: <fasta path> <taxid> per line
   std::filesystem::path output_path;  // sketch.psk destination
+  std::filesystem::path database;     // database whose manifest registers the sketch (may be empty)
   std::string taxonomy_dir;           // directory with nodes.dmp (may be empty -> env)
   uint64_t scaled{1000};
   uint32_t max_refs{0};               // 0 = keep every genome (recommended)
@@ -27,6 +28,7 @@ struct PresenceSketchBuildStats {
   uint64_t keys{0};
   uint64_t bases{0};
   double seconds{0.0};
+  bool registered{false};       // stamped into the database manifest
 };
 
 PresenceSketchBuildStats

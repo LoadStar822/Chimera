@@ -23,6 +23,8 @@ struct BuildManifest {
   uint32_t k{};
   uint32_t w{};
   uint32_t targets_per_species{};
+  bool presence_available{};
+  ArtifactStamp presence_sketch;
 };
 
 std::filesystem::path core_archive_path_for(const std::filesystem::path &db_path);
@@ -37,8 +39,18 @@ void write_manifest(const std::filesystem::path &core_path,
                     uint32_t w,
                     uint32_t targets_per_species);
 
+// Parses the manifest without checking the artifacts.
+std::optional<BuildManifest>
+load_manifest_for_db(const std::filesystem::path &db_path);
+
+// Parses the manifest and checks the core and local resolution artifacts.
 std::optional<BuildManifest>
 load_and_verify_manifest_for_db(const std::filesystem::path &db_path);
+
+// Registers (or replaces) the presence sketch row; false when the database has
+// no manifest.
+bool stamp_presence_sketch(const std::filesystem::path &core_path,
+                           const std::filesystem::path &sketch_path);
 
 std::filesystem::path materialize_manifest_path(
     const std::filesystem::path &core_path,

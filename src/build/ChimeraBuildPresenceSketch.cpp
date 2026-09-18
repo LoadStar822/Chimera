@@ -2,6 +2,7 @@
 
 #include "BuildTaxonomy.hpp"
 
+#include <utils/LocalResolutionManifest.hpp>
 #include <utils/PresenceSketch.hpp>
 #include <dna4_traits.hpp>
 
@@ -389,6 +390,11 @@ build_presence_sketch(const PresenceSketchBuildOptions &options) {
   stats.keys = writer.keys_written();
   stats.references = writer.refs_written();
   stats.species = writer.species_written();
+  if (!options.database.empty()) {
+    stats.registered = chimera::local_resolution::stamp_presence_sketch(
+        chimera::local_resolution::core_archive_path_for(options.database),
+        options.output_path);
+  }
   stats.seconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
           .count();
@@ -408,6 +414,12 @@ build_presence_sketch(const PresenceSketchBuildOptions &options) {
               << "\n  references   " << stats.references
               << "\n  markers      " << stats.keys
               << "\n  scaled       " << options.scaled
+              << (options.database.empty()
+                      ? ""
+                      : stats.registered
+                            ? "\n  manifest     registered"
+                            : "\n  manifest     not registered (database has "
+                              "no manifest)")
               << "\n  time         " << static_cast<uint64_t>(stats.seconds)
               << "s" << std::endl;
   }
