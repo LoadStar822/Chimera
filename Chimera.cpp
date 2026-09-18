@@ -19,9 +19,12 @@
  */
 #include <CLI11.hpp>
 #include <ChimeraBuild.hpp>
+#include <ChimeraBuildPresenceSketch.hpp>
 #include <ChimeraClassify.hpp>
 #include <buildConfig.hpp>
 #include <classifyConfig.hpp>
+#include <utils/PresenceSketch.hpp>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -172,12 +175,20 @@ int main(int argc, char **argv) {
   // Create subcommands
   auto build = app.add_subcommand("build", "Build a sequence database");
   auto classify = app.add_subcommand("classify", "Classify sequences");
+  auto presenceSketch = app.add_subcommand(
+      "presence-sketch",
+      "Build the genome presence sketch sidecar of a database");
 
   const uint16_t default_threads = default_cli_threads();
 
   bool buildQuietRequested = false;
   bool buildNoLocalResolution = false;
+  bool buildNoPresenceSketch = false;
   bool classifyNoLocalResolution = false;
+  bool classifyNoPresenceCall = false;
+  ChimeraBuild::PresenceSketchBuildOptions presenceSketchOptions;
+  std::string presenceSketchDatabase;
+  std::string presenceSketchOutput;
 
   // Build
   build
@@ -241,6 +252,10 @@ int main(int argc, char **argv) {
       ->check(CLI::ExistingDirectory);
   build->add_flag("--no-local-resolution", buildNoLocalResolution,
                   "Do not build local read resolution (LPC) data");
+  build->add_flag("--no-presence-sketch", buildNoPresenceSketch,
+                  "Do not build the genome presence sketch sidecar "
+                  "(<output>/presence/sketch.psk) used by classify to call "
+                  "species presence");
   build->add_flag("-q,--quiet", buildQuietRequested, "Quiet output");
 
   build->callback([&buildConfig, &buildQuietRequested,
@@ -249,6 +264,57 @@ int main(int argc, char **argv) {
       buildConfig.native_bounded_index = false;
     }
     validate_build_config(buildConfig, buildQuietRequested);
+  });
+
+  // Presence sketch (sidecar of an existing database)
+  presenceSketch
+      ->add_option("-i,--input", presenceSketchOptions.input_file,
+                   "Build input file (<genome path> <taxid> per line)")
+      ->required()
+      ->check(CLI::ExistingFile);
+  presenceSketch
+      ->add_option("-d,--database", presenceSketchDatabase,
+                   "Database the sketch belongs to (sets the default output "
+                   "location and taxonomy)")
+      ->check(CLI::ExistingPath);
+  presenceSketch->add_option(
+      "-o,--output", presenceSketchOutput,
+      "Explicit sketch path (default: <database>/presence/sketch.psk)");
+  presenceSketch
+      ->add_option("--taxonomy-dir", presenceSketchOptions.taxonomy_dir,
+                   "Directory containing taxonomy nodes.dmp (default: the "
+                   "database taxonomy)")
+      ->check(CLI::ExistingDirectory);
+  presenceSketch
+      ->add_option("--scaled", presenceSketchOptions.scaled,
+                   "FracMinHash scaled factor (keep one k-mer in N)")
+      ->check(CLI::Range(uint64_t{1}, uint64_t{1000000}))
+      ->default_val(chimera::presence_sketch::kDefaultScaled);
+  presenceSketch
+      ->add_option("--max-refs", presenceSketchOptions.max_refs,
+                   "Genomes kept per species (0 = all, recommended; a cap "
+                   "selects a greedy diversity subset)")
+      ->default_val(chimera::presence_sketch::kDefaultMaxRefs);
+  presenceSketch
+      ->add_option("-t,--threads", presenceSketchOptions.threads,
+                   "Number of threads")
+      ->default_val(default_threads);
+  presenceSketch->callback([&presenceSketchOptions, &presenceSketchDatabase,
+                            &presenceSketchOutput]() {
+    if (presenceSketchDatabase.empty() && presenceSketchOutput.empty()) {
+      throw CLI::ValidationError(
+          "presence-sketch requires --database or --output");
+    }
+    presenceSketchOptions.output_path =
+        presenceSketchOutput.empty()
+            ? chimera::presence_sketch::default_sketch_path_for_db(
+                  presenceSketchDatabase)
+            : std::filesystem::path(presenceSketchOutput);
+    if (presenceSketchOptions.taxonomy_dir.empty() &&
+        !presenceSketchDatabase.empty()) {
+      presenceSketchOptions.taxonomy_dir =
+          ChimeraBuild::default_presence_taxonomy_dir(presenceSketchDatabase);
+    }
   });
 
   // Classify
@@ -267,9 +333,13 @@ int main(int argc, char **argv) {
 
   // Custom validation function to ensure that the --paired option must have an
   // even number of files
-  classify->callback([&classifyConfig, &classifyNoLocalResolution]() {
+  classify->callback([&classifyConfig, &classifyNoLocalResolution,
+                      &classifyNoPresenceCall]() {
     if (classifyNoLocalResolution) {
       classifyConfig.local_resolution_enabled = false;
+    }
+    if (classifyNoPresenceCall) {
+      classifyConfig.presence_call_enabled = false;
     }
     if (!classifyConfig.pairedFiles.empty() &&
         classifyConfig.pairedFiles.size() % 2 != 0) {
@@ -320,6 +390,37 @@ int main(int argc, char **argv) {
       ->default_val(400);
   classify->add_flag("--no-local-resolution", classifyNoLocalResolution,
                      "Disable local read resolution (LPC) at classify time");
+  classify->add_flag("--no-presence-call", classifyNoPresenceCall,
+                     "Disable genome-evidence species presence calling");
+  classify
+      ->add_option("--presence-sketch", classifyConfig.presence_call_sketch,
+                   "Presence sketch file (default: <database>/presence/sketch.psk)")
+      ->check(CLI::ExistingFile);
+  classify
+      ->add_option("--presence-fallback", classifyConfig.presence_call_fallback,
+                   "Reads of an absent species without a present candidate "
+                   "become unclassified or move to their genus")
+      ->check(CLI::IsMember({"unclassified", "genus"}))
+      ->default_val("unclassified");
+  classify
+      ->add_option("--presence-call-tau", classifyConfig.presence_call_tau,
+                   "Absent when observed private marker hits fall below tau x "
+                   "the hits expected from the assigned bases (survival-aware)")
+      ->check(CLI::Range(0.0, 1.0))
+      ->default_val(0.10);
+  classify
+      ->add_option("--presence-call-min-retention",
+                   classifyConfig.presence_call_min_retention,
+                   "Absent when the coverage-corrected marker retention is "
+                   "below this fraction")
+      ->check(CLI::Range(0.0, 1.0))
+      ->default_val(0.20);
+  classify
+      ->add_option("--presence-call-min-markers",
+                   classifyConfig.presence_call_min_markers,
+                   "Private markers a species reference needs to be judged")
+      ->check(CLI::Range(1u, 1000000u))
+      ->default_val(100);
   classify->add_flag("--profile-cami", classifyConfig.write_cami_profile,
                      "Write CAMI/OPAL-compatible profile table");
   classify->add_flag("--profile-read-trace",
@@ -400,8 +501,27 @@ int main(int argc, char **argv) {
   try {
     if (*build) {
       ChimeraBuild::run(buildConfig);
+      if (!buildNoPresenceSketch) {
+        // Sidecar consumed by `classify` (genome-evidence presence calling);
+        // built from the same input so every database carries it.
+        ChimeraBuild::PresenceSketchBuildOptions sketchOptions;
+        sketchOptions.input_file = buildConfig.input_file;
+        sketchOptions.output_path =
+            chimera::presence_sketch::default_sketch_path_for_db(
+                buildConfig.output_file);
+        sketchOptions.taxonomy_dir =
+            buildConfig.taxonomy_dir.empty()
+                ? ChimeraBuild::default_presence_taxonomy_dir(
+                      buildConfig.output_file)
+                : buildConfig.taxonomy_dir;
+        sketchOptions.threads = buildConfig.threads;
+        sketchOptions.verbose = !buildQuietRequested;
+        ChimeraBuild::build_presence_sketch(sketchOptions);
+      }
     } else if (*classify) {
       ChimeraClassify::run(classifyConfig);
+    } else if (*presenceSketch) {
+      ChimeraBuild::build_presence_sketch(presenceSketchOptions);
     }
   } catch (const std::exception &ex) {
     std::cerr << "Error: " << ex.what() << std::endl;

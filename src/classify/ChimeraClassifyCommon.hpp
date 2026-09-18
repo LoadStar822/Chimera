@@ -26,6 +26,10 @@
 #include <utils/FeatureHasher.hpp>
 #include <utils/PresenceModel.hpp>
 
+namespace ChimeraClassify::presence_call {
+class SampleSketchCollector;
+}
+
 namespace ChimeraClassify {
 
 inline constexpr size_t kInvalidLength = std::numeric_limits<size_t>::max();
@@ -928,7 +932,8 @@ void classify_streaming_spool(
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     const WeightingContext &weightCtx, PresenceSummary *presenceSummary,
     std::vector<QueueThrottle> *queueThrottles = nullptr,
-    ClassifyProgressCounters *progress = nullptr);
+    ClassifyProgressCounters *progress = nullptr,
+    presence_call::SampleSketchCollector *sampleSketch = nullptr);
 
 void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,

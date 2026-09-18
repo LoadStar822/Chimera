@@ -532,6 +532,12 @@ void writeResultRecord(std::ostream &os, const classifyResult &result,
     }
     os << postTopkOss.str() << '\t';
   }
+  if (!result.presence_note.empty()) {
+    if ((handled || result.taxidCount.empty()) && result.posteriors.empty()) {
+      os << '\t';
+    }
+    os << "PRESENCE=" << result.presence_note << '\t';
+  }
   os << '\n';
 }
 

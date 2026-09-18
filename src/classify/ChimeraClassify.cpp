@@ -14,7 +14,9 @@
 #include "ChimeraClassifyAutoPolicy.hpp"
 #include "ChimeraLpcClassify.hpp"
 #include "ChimeraClassifyReadout.hpp"
+#include "ChimeraPresenceCall.hpp"
 
+#include <utils/PresenceSketch.hpp>
 #include <utils/LocalResolutionMetadata.hpp>
 #include <utils/LocalResolutionManifest.hpp>
 #include <utils/NativeBoundedIndex.hpp>
@@ -2164,6 +2166,12 @@ print_classify_configuration(const ChimeraClassify::ClassifyConfig &config) {
   std::cout << "  local resolution "
             << (config.local_resolution_enabled ? "enabled" : "disabled")
             << "\n";
+  std::cout << "  presence call "
+            << (config.presence_call_enabled ? "enabled" : "disabled");
+  if (config.presence_call_enabled) {
+    std::cout << " (fallback=" << config.presence_call_fallback << ")";
+  }
+  std::cout << "\n";
   std::cout << "  debug       "
             << (env_flag_enabled("CHIMERA_CLASSIFY_DEBUG") ? "enabled"
                                                            : "disabled")
@@ -2224,8 +2232,96 @@ struct SpoolOutputPartStats {
   std::unordered_map<uint32_t, double> decision_taxid_counts;
   std::unordered_map<uint32_t, double> profile_response_taxid_counts;
   std::unordered_map<uint32_t, double> decision_species_counts;
+  std::unordered_map<uint32_t, double> decision_species_bases;
+  uint64_t presence_reassigned{0};
+  uint64_t presence_to_genus{0};
+  uint64_t presence_withdrawn{0};
   SpeciesProfileMasses localmix_masses;
 };
+
+// Species presence calls fed back into the per-read decisions.
+struct PresenceFeedback {
+  const std::unordered_set<uint32_t> *present{nullptr};
+  const std::unordered_set<uint32_t> *absent{nullptr};
+  bool genus_fallback{false};
+};
+
+struct PresenceFeedbackSummary {
+  bool active{false};
+  size_t assessed{0};
+  size_t present{0};
+  size_t absent{0};
+  double s_hat{0.0};
+  uint64_t reassigned{0};
+  uint64_t to_genus{0};
+  uint64_t withdrawn{0};
+  std::string table_path;
+};
+
+static std::string
+resolve_presence_call_output_path(const std::string &outputFile) {
+  std::filesystem::path path(outputFile);
+  if (path.filename() == "ChimeraClassify.tsv") {
+    return (path.parent_path() / "ChimeraPresenceCall.tsv").string();
+  }
+  path.replace_extension(".presence_call.tsv");
+  return path.string();
+}
+
+static uint32_t taxid_text_to_species(
+    const std::string &taxidText,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump);
+
+// Moves a read of an absent species to its best present candidate, else withdraws it.
+static bool apply_presence_feedback(
+    ChimeraClassify::classifyResult &result, const PresenceFeedback &feedback,
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
+    SpoolOutputPartStats &stats) {
+  if (feedback.absent == nullptr || feedback.absent->empty() ||
+      result.taxidCount.empty() ||
+      result.taxidCount.front().first == "unclassified") {
+    return false;
+  }
+  const std::string original = result.taxidCount.front().first;
+  const double originalCount = result.taxidCount.front().second;
+  const uint32_t species = taxid_text_to_species(original, ncbiTaxdump);
+  if (species == 0 || feedback.absent->count(species) == 0) {
+    return false;
+  }
+  if (feedback.present != nullptr) {
+    for (const auto &[candidate, weight] : result.posteriors) {
+      if (!(weight > 0.0) || candidate.empty() || candidate == "unclassified") {
+        continue;
+      }
+      const uint32_t candidateSpecies =
+          taxid_text_to_species(candidate, ncbiTaxdump);
+      if (candidateSpecies == 0 || candidateSpecies == species ||
+          feedback.present->count(candidateSpecies) == 0) {
+        continue;
+      }
+      result.taxidCount.assign(1, {candidate, originalCount});
+      result.presence_note = "reassigned_from:" + original;
+      ++stats.presence_reassigned;
+      return true;
+    }
+  }
+  if (feedback.genus_fallback && ncbiTaxdump != nullptr &&
+      ncbiTaxdump->enabled()) {
+    const uint32_t genus = ncbiTaxdump->to_genus(species);
+    if (genus != 0) {
+      result.taxidCount.assign(1, {std::to_string(genus), originalCount});
+      result.presence_note = "genus_fallback_from:" + original;
+      ++stats.presence_to_genus;
+      return true;
+    }
+  }
+  result.taxidCount.assign(1, {std::string("unclassified"), 0.0});
+  result.reject_reason = "absent_species";
+  result.best_taxid_hint = original;
+  result.presence_note = "withdrawn_from:" + original;
+  ++stats.presence_withdrawn;
+  return true;
+}
 
 static double decision_support_fraction(
     const ChimeraClassify::classifyResult &result) {
@@ -2614,7 +2710,8 @@ static void write_profile_read_trace_raw_record(
 static void accumulate_localmix_profile_candidates(
     const ChimeraClassify::classifyResult &result,
     const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
-    SpeciesProfileMasses &masses, std::ostream *profileReadTraceOs) {
+    SpeciesProfileMasses &masses, std::ostream *profileReadTraceOs,
+    const std::unordered_set<uint32_t> *absentSpecies = nullptr) {
   ++masses.input_reads;
   if (result.taxidCount.empty() ||
       result.taxidCount.front().first == "unclassified") {
@@ -2641,6 +2738,10 @@ static void accumulate_localmix_profile_candidates(
     }
     const uint32_t species = taxid_text_to_species(taxidText, ncbiTaxdump);
     if (species == 0) {
+      continue;
+    }
+    if (absentSpecies != nullptr && species != decisionSpecies &&
+        absentSpecies->count(species) != 0) {
       continue;
     }
     if (decisionGenus != 0 && ncbiTaxdump && ncbiTaxdump->enabled() &&
@@ -3644,18 +3745,25 @@ static void write_spool_output_part(
     SpoolOutputPartStats &partStats,
     EvidenceAggregateMap *postemPrimaryEvidenceAggregate,
     EvidenceAggregateMap *postemDecisionEvidenceAggregate,
-    bool collectLocalmixProfile) {
-  std::ofstream partOs(partPath, std::ios::out | std::ios::binary);
-  if (!partOs.is_open()) {
-    throw std::runtime_error("Failed to open classify output part: " +
-                             partPath);
+    bool collectLocalmixProfile,
+    const PresenceFeedback *presenceFeedback = nullptr,
+    bool writeOutput = true) {
+  // writeOutput=false: decision-only pass, collects part statistics only
+  std::ofstream partOs;
+  std::vector<char> partBuffer;
+  if (writeOutput) {
+    partBuffer.assign(1 << 20, '\0');
+    partOs.rdbuf()->pubsetbuf(
+        partBuffer.data(), static_cast<std::streamsize>(partBuffer.size()));
+    partOs.open(partPath, std::ios::out | std::ios::binary);
+    if (!partOs.is_open()) {
+      throw std::runtime_error("Failed to open classify output part: " +
+                               partPath);
+    }
   }
-  std::vector<char> partBuffer(1 << 20, '\0');
-  partOs.rdbuf()->pubsetbuf(
-      partBuffer.data(), static_cast<std::streamsize>(partBuffer.size()));
   std::vector<char> profileReadTraceBuffer;
   std::ofstream profileReadTraceOs;
-  if (!profileReadTracePartPath.empty()) {
+  if (writeOutput && !profileReadTracePartPath.empty()) {
     profileReadTraceBuffer.assign(1 << 20, '\0');
     profileReadTraceOs.rdbuf()->pubsetbuf(
         profileReadTraceBuffer.data(),
@@ -3671,7 +3779,7 @@ static void write_spool_output_part(
   const bool useLocalCertificateApply =
       env_flag_enabled("CHIMERA_LOCAL_CERTIFICATE_APPLY");
   const bool writeLocalCertificateAudit =
-      useLocalCertificateApply &&
+      writeOutput && useLocalCertificateApply &&
       env_flag_enabled("CHIMERA_LOCAL_CERTIFICATE_AUDIT");
   std::ofstream localCertificateAuditOs;
   if (writeLocalCertificateAudit) {
@@ -3735,6 +3843,10 @@ static void write_spool_output_part(
             apply_local_resolution_result(result, localCalls, sampleDivergence,
                                           divergenceThreshold);
           }
+          if (presenceFeedback != nullptr) {
+            apply_presence_feedback(result, *presenceFeedback, ncbiTaxdump,
+                                    partStats);
+          }
           const uint32_t decisionSpecies =
               result.taxidCount.empty() ||
                       result.taxidCount.front().first == "unclassified"
@@ -3744,7 +3856,9 @@ static void write_spool_output_part(
           if (collectLocalmixProfile) {
             accumulate_localmix_profile_candidates(
                 result, ncbiTaxdump, partStats.localmix_masses,
-                profileReadTraceOs.is_open() ? &profileReadTraceOs : nullptr);
+                profileReadTraceOs.is_open() ? &profileReadTraceOs : nullptr,
+                presenceFeedback != nullptr ? presenceFeedback->absent
+                                            : nullptr);
           } else if (profileReadTraceOs.is_open()) {
             write_profile_read_trace_raw_record(&profileReadTraceOs, result,
                                                 decisionSpecies);
@@ -3762,16 +3876,22 @@ static void write_spool_output_part(
               }
               if (decisionSpecies != 0) {
                 partStats.decision_species_counts[decisionSpecies] += 1.0;
+                partStats.decision_species_bases[decisionSpecies] +=
+                    static_cast<double>(result.query_length);
               }
             }
           }
-          ChimeraClassify::writeResultRecord(partOs, result, postTopkOss);
+          if (writeOutput) {
+            ChimeraClassify::writeResultRecord(partOs, result, postTopkOss);
+          }
         }
       });
-  partOs.close();
-  if (!partOs.good()) {
-    throw std::runtime_error("Failed to close classify output part: " +
-                             partPath);
+  if (writeOutput) {
+    partOs.close();
+    if (!partOs.good()) {
+      throw std::runtime_error("Failed to close classify output part: " +
+                               partPath);
+    }
   }
   if (profileReadTraceOs.is_open()) {
     profileReadTraceOs.close();
@@ -5020,7 +5140,10 @@ static void write_spool_em_results(
     const ChimeraClassify::ClassifyConfig &config,
     const LocalResolutionCallStore *localCalls, double sampleDivergence,
     ChimeraClassify::FileInfo &fileInfo,
-    std::unordered_map<uint32_t, double> *profileClassTaxonPriors = nullptr) {
+    std::unordered_map<uint32_t, double> *profileClassTaxonPriors = nullptr,
+    const chimera::presence_sketch::SketchIndex *presenceSketch = nullptr,
+    const ChimeraClassify::presence_call::SampleSketch *sampleSketch = nullptr,
+    PresenceFeedbackSummary *presenceSummaryOut = nullptr) {
   const std::string outputFile = resolve_tsv_output_path(config.outputFile);
   const bool classifyDebug = env_flag_enabled("CHIMERA_CLASSIFY_DEBUG");
   const bool useLocalCertificateApply =
@@ -5068,6 +5191,96 @@ static void write_spool_em_results(
     postemDecisionEvidenceAggregates.resize(part_count);
   }
   std::vector<SpoolOutputPartStats> partStats(part_count);
+
+  // presence calling: measure per-species exposure, judge, feed the calls back
+  ChimeraClassify::presence_call::CallResult presenceCalls;
+  PresenceFeedback presenceFeedback;
+  const PresenceFeedback *presenceFeedbackPtr = nullptr;
+  const bool presenceActive = presenceSketch != nullptr &&
+                              sampleSketch != nullptr &&
+                              config.presence_call_enabled;
+  if (presenceActive) {
+    print_status_line(ConsoleStatusKind::Run, "calling species presence");
+    const auto presenceStarted = std::chrono::steady_clock::now();
+    write_spool_parts_parallel(
+        candidateSpoolPaths, partPaths, [&](size_t part_idx) {
+          write_spool_output_part(
+              candidateSpoolPaths[part_idx], sampleMixtureSpoolPaths[part_idx],
+              partPaths[part_idx], "", fit, sampleMixtureFit, options,
+              decisionConfig, tax, presenceDecision, ncbiTaxdump, localCalls,
+              sampleDivergence,
+              config.local_resolution_divergence_threshold,
+              partStats[part_idx], nullptr, nullptr, false, nullptr, false);
+        });
+    std::unordered_map<uint32_t, ChimeraClassify::presence_call::SpeciesExposure>
+        exposureMap;
+    for (const auto &stats : partStats) {
+      for (const auto &[species, reads] : stats.decision_species_counts) {
+        auto &entry = exposureMap[species];
+        entry.species = species;
+        entry.reads += reads;
+      }
+      for (const auto &[species, bases] : stats.decision_species_bases) {
+        auto &entry = exposureMap[species];
+        entry.species = species;
+        entry.bases += bases;
+      }
+    }
+    // too little exposure to reach the test's thresholds: leave untouched
+    const double minExposureBases =
+        10.0 * static_cast<double>(presenceSketch->params().scaled);
+    std::vector<ChimeraClassify::presence_call::SpeciesExposure> exposure;
+    exposure.reserve(exposureMap.size());
+    for (const auto &[species, entry] : exposureMap) {
+      if (entry.bases >= minExposureBases) {
+        exposure.push_back(entry);
+      }
+    }
+    std::sort(exposure.begin(), exposure.end(),
+              [](const auto &a, const auto &b) { return a.bases > b.bases; });
+    ChimeraClassify::presence_call::CallOptions callOptions;
+    callOptions.tau = config.presence_call_tau;
+    callOptions.min_retention = config.presence_call_min_retention;
+    callOptions.min_markers = config.presence_call_min_markers;
+    presenceCalls = ChimeraClassify::presence_call::call_presence(
+        *presenceSketch, *sampleSketch, exposure, callOptions);
+    ChimeraClassify::presence_call::write_call_table(
+        resolve_presence_call_output_path(outputFile), presenceCalls,
+        ncbiTaxdump);
+    const double presenceSeconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      presenceStarted)
+            .count();
+    {
+      std::ostringstream msg;
+      msg << "species presence: assessed=" << presenceCalls.assessed
+          << " present=" << presenceCalls.present.size()
+          << " absent=" << presenceCalls.absent.size()
+          << " calibrators=" << presenceCalls.calibrators;
+      msg << std::fixed << std::setprecision(3)
+          << " kmer_survival=" << presenceCalls.s_hat
+          << " time=" << format_seconds(presenceSeconds);
+      print_status_line(ConsoleStatusKind::Ok, msg.str());
+    }
+    if (presenceSummaryOut != nullptr) {
+      presenceSummaryOut->active = true;
+      presenceSummaryOut->assessed = presenceCalls.assessed;
+      presenceSummaryOut->present = presenceCalls.present.size();
+      presenceSummaryOut->absent = presenceCalls.absent.size();
+      presenceSummaryOut->s_hat = presenceCalls.s_hat;
+      presenceSummaryOut->table_path =
+          resolve_presence_call_output_path(outputFile);
+    }
+    if (!presenceCalls.absent.empty()) {
+      presenceFeedback.present = &presenceCalls.present;
+      presenceFeedback.absent = &presenceCalls.absent;
+      presenceFeedback.genus_fallback =
+          config.presence_call_fallback == "genus";
+      presenceFeedbackPtr = &presenceFeedback;
+    }
+    partStats.assign(part_count, SpoolOutputPartStats{});
+  }
+
   try {
     write_spool_parts_parallel(
         candidateSpoolPaths, partPaths, [&](size_t part_idx) {
@@ -5086,11 +5299,27 @@ static void write_spool_em_results(
               fit, sampleMixtureFit, options, decisionConfig, tax,
               presenceDecision, ncbiTaxdump, localCalls, sampleDivergence,
               config.local_resolution_divergence_threshold, partStats[part_idx],
-              primaryEvidence, decisionEvidence, collectLocalmixProfile);
+              primaryEvidence, decisionEvidence, collectLocalmixProfile,
+              presenceFeedbackPtr, true);
         });
   } catch (...) {
     cleanup_part_paths(profileReadTracePartPaths);
     throw;
+  }
+  if (presenceSummaryOut != nullptr && presenceFeedbackPtr != nullptr) {
+    for (const auto &stats : partStats) {
+      presenceSummaryOut->reassigned += stats.presence_reassigned;
+      presenceSummaryOut->to_genus += stats.presence_to_genus;
+      presenceSummaryOut->withdrawn += stats.presence_withdrawn;
+    }
+    std::ostringstream msg;
+    msg << "presence feedback: reassigned="
+        << format_integer(presenceSummaryOut->reassigned)
+        << " withdrawn=" << format_integer(presenceSummaryOut->withdrawn);
+    if (presenceSummaryOut->to_genus > 0) {
+      msg << " to_genus=" << format_integer(presenceSummaryOut->to_genus);
+    }
+    print_status_line(ConsoleStatusKind::Ok, msg.str());
   }
 
   print_status_line(ConsoleStatusKind::Run, "writing output tables");
@@ -5502,6 +5731,36 @@ void run(ClassifyConfig config) {
   if (!profileTaxdump) {
     profileTaxdump = maybe_load_tax_tsv_for_profile(config.dbFile);
   }
+  // presence sketch sidecar (optional); without it classification is unchanged
+  std::optional<chimera::presence_sketch::SketchIndex> presenceSketch;
+  if (config.presence_call_enabled) {
+    const std::filesystem::path sketchPath =
+        config.presence_call_sketch.empty()
+            ? chimera::presence_sketch::default_sketch_path_for_db(
+                  config.dbFile)
+            : std::filesystem::path(config.presence_call_sketch);
+    std::string sketchError;
+    if (std::filesystem::exists(sketchPath)) {
+      presenceSketch =
+          chimera::presence_sketch::SketchIndex::open(sketchPath, &sketchError);
+      if (!presenceSketch.has_value()) {
+        throw std::runtime_error("Failed to open presence sketch " +
+                                 sketchPath.string() + ": " + sketchError);
+      }
+      std::ostringstream msg;
+      msg << "presence sketch loaded (species="
+          << presenceSketch->species_count()
+          << " scaled=" << presenceSketch->params().scaled << ")";
+      print_status_line(ConsoleStatusKind::Ok, msg.str());
+    } else if (!config.presence_call_sketch.empty()) {
+      throw std::runtime_error("Presence sketch not found: " +
+                               sketchPath.string());
+    } else {
+      print_status_line(ConsoleStatusKind::Skip,
+                        "species presence (database has no presence sketch; "
+                        "run `chimera presence-sketch`)");
+    }
+  }
   if (imcfConfig.featureMethod != 1) {
     throw std::runtime_error(
         "This Chimera version no longer supports syncmer databases. Rebuild the database with strobemer.");
@@ -5667,17 +5926,34 @@ void run(ClassifyConfig config) {
     producer_done.store(true, std::memory_order_release);
   });
 
+  std::unique_ptr<presence_call::SampleSketchCollector> sampleSketchCollector;
+  if (presenceSketch.has_value()) {
+    sampleSketchCollector = std::make_unique<presence_call::SampleSketchCollector>(
+        presenceSketch->params());
+  }
   classify_streaming_spool(imcfConfig, readQueues, config, imcf, tax,
                            spoolPaths, candidateSpoolPaths,
                            sampleMixtureSpoolPaths, writeFullSpool, fileInfo,
                            producer_done, feature_params, feature_min_len,
                            weightCtx, presencePtr, &queueThrottles,
-                           &progressCounters);
+                           &progressCounters, sampleSketchCollector.get());
   producer.join();
   streaming_done.store(true, std::memory_order_release);
   progressThread.join();
   print_streaming_progress(progressCounters, true, streamingStarted, true);
   std::vector<moodycamel::ConcurrentQueue<batchReads>>().swap(readQueues);
+  std::optional<presence_call::SampleSketch> sampleSketch;
+  if (sampleSketchCollector) {
+    sampleSketch = sampleSketchCollector->finalize();
+    sampleSketchCollector.reset();
+    if (classifyDebug) {
+      std::cout << "[classify][debug] sample-sketch"
+                << " sampled=" << sampleSketch->sampled_kmers
+                << " distinct=" << sampleSketch->keys.size()
+                << " sequences=" << sampleSketch->sequences
+                << " bases=" << sampleSketch->bases << "\n";
+    }
+  }
   if (fileInfo.sequenceNum > 0) {
     fileInfo.avgLen = fileInfo.bpLength / fileInfo.sequenceNum;
   }
@@ -5713,6 +5989,7 @@ void run(ClassifyConfig config) {
   print_status_line(ConsoleStatusKind::Ok, "read assignments estimated");
   classWeights = speciesFit.class_weights;
   posteriorModelUsed = true;
+  PresenceFeedbackSummary presenceFeedbackSummary;
   if (posteriorModelUsed) {
     DecisionConfig decisionConfig;
     const PostPiAutoPolicy postPiPolicy = derive_post_pi_auto_policy(
@@ -5964,7 +6241,11 @@ void run(ClassifyConfig config) {
                                : weightCtx.ncbiTaxdump,
                            coverageMeta, config,
                            localResolutionCallPtr, localResolutionDivergence,
-                           fileInfo, nullptr);
+                           fileInfo, nullptr,
+                           presenceSketch.has_value() ? &*presenceSketch
+                                                      : nullptr,
+                           sampleSketch.has_value() ? &*sampleSketch : nullptr,
+                           &presenceFeedbackSummary);
   }
   {
     const std::string outputFile = resolve_tsv_output_path(config.outputFile);
@@ -5992,6 +6273,10 @@ void run(ClassifyConfig config) {
     if (config.write_cami_profile) {
       std::cout << "  profile.cami "
                 << resolve_profile_cami_output_path(outputFile) << "\n";
+    }
+    if (presenceFeedbackSummary.active) {
+      std::cout << "  presence    " << presenceFeedbackSummary.table_path
+                << "\n";
     }
   }
   std::vector<chimera::presence::CoverageEntry>().swap(coverageMeta.entries);

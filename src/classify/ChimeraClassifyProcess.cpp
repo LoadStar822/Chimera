@@ -1,4 +1,5 @@
 #include "ChimeraClassifyCommon.hpp"
+#include "ChimeraPresenceCall.hpp"
 
 #include <utils/Parse.hpp>
 #include <utils/NativeBoundedIndex.hpp>
@@ -2623,7 +2624,8 @@ void classify_streaming_spool(
     const chimera::feature::Params &feature_params, size_t feature_min_len,
     const WeightingContext &weightCtx, PresenceSummary *presenceSummary,
     std::vector<QueueThrottle> *queueThrottles,
-    ClassifyProgressCounters *progress) {
+    ClassifyProgressCounters *progress,
+    presence_call::SampleSketchCollector *sampleSketch) {
 
 #pragma omp parallel
   {
@@ -2632,6 +2634,13 @@ void classify_streaming_spool(
 #else
     const int thread_id = 0;
 #endif
+    // Thread-local FracMinHash sample of every read (presence calling).
+    std::vector<uint64_t> sketchHashes;
+    uint64_t sketchSequences = 0;
+    uint64_t sketchBases = 0;
+    if (sampleSketch != nullptr) {
+      sketchHashes.reserve(1 << 16);
+    }
     const size_t queue_index = static_cast<size_t>(
         std::clamp<int>(thread_id, 0, static_cast<int>(readQueues.size() - 1)));
     moodycamel::ConcurrentQueue<batchReads> &readQueue =
@@ -2707,6 +2716,23 @@ void classify_streaming_spool(
       if (readQueue.try_dequeue(batch)) {
         const size_t batch_size = batch.ids.size();
         release_queue_slot(queueThrottle, estimate_batch_bytes(batch));
+        if (sampleSketch != nullptr) {
+          const auto &params = sampleSketch->params();
+          for (const auto &seq : batch.seqs) {
+            chimera::presence_sketch::sample_hashes(seq, params, sketchHashes);
+            sketchBases += seq.size();
+          }
+          for (const auto &seq : batch.seqs2) {
+            chimera::presence_sketch::sample_hashes(seq, params, sketchHashes);
+            sketchBases += seq.size();
+          }
+          sketchSequences += batch_size;
+          if (sketchHashes.size() >= (1u << 22)) {
+            sampleSketch->absorb(std::move(sketchHashes), 0, 0);
+            sketchHashes = std::vector<uint64_t>();
+            sketchHashes.reserve(1 << 16);
+          }
+        }
         processBatchCompactToSpool(
             batch, imcfConfig, tax, config, imcf,
             writeFullSpool ? &spool : nullptr,
@@ -2748,6 +2774,9 @@ void classify_streaming_spool(
       if (presenceSummary) {
         presenceSummary->merge(presenceLocal);
       }
+    }
+    if (sampleSketch != nullptr) {
+      sampleSketch->absorb(std::move(sketchHashes), sketchSequences, sketchBases);
     }
   }
 }

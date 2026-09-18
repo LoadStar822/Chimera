@@ -487,6 +487,11 @@ def add_build_arguments(parser, require_input: bool) -> None:
         action="store_true",
         help="Do not build local read resolution (LPC) data",
     )
+    parser.add_argument(
+        "--no-presence-sketch",
+        action="store_true",
+        help="Do not build the genome presence sketch sidecar used by classify to call species presence",
+    )
 
 
 def append_build_command_args(command, args) -> None:
@@ -507,6 +512,8 @@ def append_build_command_args(command, args) -> None:
         command.extend(["--taxonomy-dir", str(args.taxonomy_dir)])
     if getattr(args, "no_local_resolution", False):
         command.append("--no-local-resolution")
+    if getattr(args, "no_presence_sketch", False):
+        command.append("--no-presence-sketch")
 
 
 def parse_arguments():
@@ -592,6 +599,24 @@ def parse_arguments():
         "--profile-read-trace",
         action="store_true",
         help="Write exact per-read contributions to ChimeraProfile.read_trace.tsv",
+    )
+    classify_parser.add_argument(
+        "--no-presence-call",
+        action="store_true",
+        help="Disable genome-evidence species presence calling (and its feedback into read assignments)",
+    )
+    classify_parser.add_argument(
+        "--presence-sketch",
+        dest="presence_sketch",
+        default=None,
+        help="Presence sketch file (default: <database>/presence/sketch.psk when it exists)",
+    )
+    classify_parser.add_argument(
+        "--presence-fallback",
+        dest="presence_fallback",
+        default=None,
+        choices=["unclassified", "genus"],
+        help="Where reads of an absent species go when no present candidate explains them",
     )
     # Auxiliary profile utilities. Native abundance profiles are written by
     # `classify`; this command is for legacy aggregate conversion and Krona.
@@ -763,6 +788,13 @@ def run_chimera(args, chimera_path=None):
             command.append("--profile-cami")
         if getattr(args, "profile_read_trace", False):
             command.append("--profile-read-trace")
+        if getattr(args, "no_presence_call", False):
+            command.append("--no-presence-call")
+        if getattr(args, "presence_sketch", None):
+            _ensure_file_exists(Path(args.presence_sketch), "Presence sketch")
+            command.extend(["--presence-sketch", str(args.presence_sketch)])
+        if getattr(args, "presence_fallback", None):
+            command.extend(["--presence-fallback", str(args.presence_fallback)])
     if args.command == "classify":
         result = subprocess.run(command)
         if result.returncode != 0:

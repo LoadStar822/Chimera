@@ -210,6 +210,18 @@ chimera classify \
   --no-local-resolution
 ```
 
+### Species Presence Calling
+
+`build` also writes a presence sketch (`<db>/presence/sketch.psk`), a FracMinHash sample of every reference genome grouped by species. `classify` uses it to check each species that received reads: a species whose k-mers are found far less often than its reads predict, once k-mers shared with present relatives are set aside, is called absent. Its reads move to their best present candidate or become unclassified, and the profile is estimated without it.
+
+Calls are written to `ChimeraPresenceCall.tsv`, and affected reads carry a `PRESENCE=` tag in `ChimeraClassify.tsv`. The step is skipped when the database has no sketch.
+
+```bash
+chimera build -i target.tsv -o ChimeraDB --no-presence-sketch
+chimera presence-sketch -i target.tsv -d ChimeraDB -t 32
+chimera classify -i reads.fastq.gz -d ChimeraDB -o results --no-presence-call
+```
+
 ## Custom `target.tsv`
 
 You can build Chimera databases from your own references. Write a two-column `target.tsv` with no header:
@@ -291,6 +303,7 @@ The `-k` option requests Krona output. Krona Tools are optional and are not inst
 | `ChimeraProfile.tsv` | yes | Default abundance profile for normal Chimera use. |
 | `ChimeraProfile.cami.tsv` | only with `--profile-cami` | CAMI/OPAL-compatible exchange format for benchmark tools. |
 | `ChimeraProfile.read_trace.tsv` | only with `--profile-read-trace` | Per-read contributions that reproduce each reported profile abundance. |
+| `ChimeraPresenceCall.tsv` | when the database has a presence sketch | Per-species genome-evidence presence calls (status, reason, marker statistics) behind the profile. |
 
 ### `ChimeraClassify.tsv`
 
@@ -301,7 +314,10 @@ Example shape:
 ```text
 read_id    taxid:score    POST_TOPK=...
 read_id    unclassified   REJECT=...   HINT=...
+read_id    taxid:score    POST_TOPK=...   PRESENCE=reassigned_from:<absent taxid>
 ```
+
+`PRESENCE=` marks reads whose assignment was changed by species presence calling (`reassigned_from`, `withdrawn_from`, `genus_fallback_from`, each followed by the absent taxid).
 
 This file is for read-level inspection and downstream filtering. It is not the abundance profile, and `ChimeraProfile.tsv` should not be reconstructed by simply counting final labels.
 
@@ -331,12 +347,13 @@ CAMI/OPAL-compatible profile output. It is written only when `--profile-cami` is
 
 ## Database Layout
 
-A Chimera database is a directory containing the core index, taxonomy metadata, and optional LPC data:
+A Chimera database is a directory containing the core index, taxonomy metadata, optional LPC data, and the genome presence sketch:
 
 ```text
 ChimeraDB/
   core.imcf
   manifest.tsv
+  presence/sketch.psk
   ...
 ```
 

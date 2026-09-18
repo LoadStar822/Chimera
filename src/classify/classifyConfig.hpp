@@ -70,6 +70,14 @@ namespace ChimeraClassify {
 	int lpc_diag_bin = 256;
 	uint32_t lpc_max_occ = 500;
 	uint32_t lpc_min_chain = 4;
+	// Genome-evidence presence calling (reference sketch sidecar) and the
+	// feedback of its calls into per-read assignments.
+	bool presence_call_enabled = true;
+	std::string presence_call_sketch;               // explicit sketch path (optional)
+	std::string presence_call_fallback = "unclassified"; // unclassified|genus
+	double presence_call_tau = 0.10;
+	double presence_call_min_retention = 0.20;
+	uint32_t presence_call_min_markers = 100;
 	};
 
 	struct FileInfo {
@@ -103,6 +111,7 @@ namespace ChimeraClassify {
 				uint32_t profile_response_taxid{ 0 };
 				std::string reject_reason; // 为空表示未拒绝或接受
 				std::string best_taxid_hint; // 最佳候选 taxid（即使未被接受）
+				std::string presence_note; // presence feedback applied to this read (empty: none)
 				std::vector<std::pair<std::string, double>> abundanceCount;
 				std::vector<std::pair<std::string, double>> sampleMixturePosteriors;
 				std::vector<std::pair<std::string, double>> sampleMixtureLocalScores;
