@@ -4683,7 +4683,8 @@ static void write_classifier_response_reportable_profile_outputs(
     const chimera::presence::CoverageMeta &coverageMeta,
     const SeqProfileFit *localmixFit, const char *responseSourceOverride,
     PrimaryProfileScale primaryScale,
-    ProfileReadTracePlan *profileReadTracePlan) {
+    ProfileReadTracePlan *profileReadTracePlan,
+    const std::unordered_set<uint32_t> *presenceEvidence) {
   struct CandidateRow {
     const SeqProfileRow *row{nullptr};
     double raw_abundance{0.0};
@@ -4750,6 +4751,7 @@ static void write_classifier_response_reportable_profile_outputs(
   uint64_t low_support_rows = 0;
   uint64_t below_floor_rows = 0;
   uint64_t single_source_rows = 0;
+  uint64_t presence_evidence_rows = 0;
   uint64_t reportable_without_response_rows = 0;
   double kept_mass = 0.0;
   double kept_observation_mass = 0.0;
@@ -4763,17 +4765,30 @@ static void write_classifier_response_reportable_profile_outputs(
     if (genus_it != meta.genus_species_count.end()) {
       entry.genus_species_count = genus_it->second;
     }
+    // Species whose genome the presence test found in the sample are
+    // reportable below the read-count floors: those floors guard against
+    // spurious low-count assignments, which the k-mer evidence rules out.
+    const bool genome_evidence =
+        presenceEvidence != nullptr &&
+        presenceEvidence->count(row.species_taxid) != 0;
 
     if (!(row.effective_callable_signatures > 0.0)) {
       entry.reportability = "nuisance_no_callable_exposure";
       ++no_exposure_rows;
     } else if (row.assigned_reads <
-               static_cast<double>(min_read_support)) {
+                   static_cast<double>(min_read_support) &&
+               !genome_evidence) {
       entry.reportability = "nuisance_low_runtime_support";
       ++low_support_rows;
-    } else if (entry.raw_percent < report_floor_percent) {
+    } else if (entry.raw_percent < report_floor_percent && !genome_evidence) {
       entry.reportability = "nuisance_below_dynamic_detection_floor";
       ++below_floor_rows;
+    } else if (genome_evidence &&
+               (row.assigned_reads < static_cast<double>(min_read_support) ||
+                entry.raw_percent < report_floor_percent)) {
+      entry.kept = true;
+      entry.reportability = "presence_evidence_reportable";
+      ++presence_evidence_rows;
     } else if (row.source_count <= 1) {
       entry.kept = true;
       entry.reportability = "single_source_limited_reportable";
@@ -4789,6 +4804,12 @@ static void write_classifier_response_reportable_profile_outputs(
         auto response_it = localmix_mass.find(row.species_taxid);
         entry.response_abundance =
             response_it == localmix_mass.end() ? 0.0 : response_it->second;
+        if (!(entry.response_abundance > 0.0) &&
+            entry.reportability == "presence_evidence_reportable") {
+          // below the floors the restricted response has no row; report the
+          // observed mass
+          entry.response_abundance = entry.raw_abundance;
+        }
       }
       if (!(entry.response_abundance > 0.0) ||
           !std::isfinite(entry.response_abundance)) {
@@ -4979,6 +5000,8 @@ static void write_classifier_response_reportable_profile_outputs(
     out << "no_callable_exposure_rows\t" << no_exposure_rows << "\n";
     out << "low_runtime_support_rows\t" << low_support_rows << "\n";
     out << "below_dynamic_floor_rows\t" << below_floor_rows << "\n";
+    out << "presence_evidence_reportable_rows\t" << presence_evidence_rows
+        << "\n";
     out << "reportable_without_response_rows\t"
         << reportable_without_response_rows << "\n";
     out << "\n";
@@ -5256,6 +5279,7 @@ static void write_spool_em_results(
       msg << "species presence: assessed=" << presenceCalls.assessed
           << " present=" << presenceCalls.present.size()
           << " absent=" << presenceCalls.absent.size()
+          << " evidence=" << presenceCalls.evidence.size()
           << " calibrators=" << presenceCalls.calibrators;
       msg << std::fixed << std::setprecision(3)
           << " kmer_survival=" << presenceCalls.s_hat
@@ -5387,7 +5411,8 @@ static void write_spool_em_results(
       classifyDebug ? resolve_native_profile_trace_output_path(outputFile) : "",
       *profileOutputFit, ncbiTaxdump, coverageMeta, profileOutputLocalmixFit,
       profileResponseSourceOverride, profileOutputScale,
-      config.write_profile_read_trace ? &profileReadTracePlan : nullptr);
+      config.write_profile_read_trace ? &profileReadTracePlan : nullptr,
+      presenceActive ? &presenceCalls.evidence : nullptr);
   if (config.write_profile_read_trace) {
     try {
       write_profile_read_trace_output(profileReadTracePath,

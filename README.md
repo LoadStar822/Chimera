@@ -212,7 +212,7 @@ chimera classify \
 
 ### Species Presence Calling
 
-`build` also writes a presence sketch (`<db>/presence/sketch.psk`), a FracMinHash sample of every reference genome grouped by species. `classify` uses it to check each species that received reads: a species whose k-mers are found far less often than its reads predict, once k-mers shared with present relatives are set aside, is called absent. Its reads move to their best present candidate or become unclassified, and the profile is estimated without it.
+`build` also writes a presence sketch (`<db>/presence/sketch.psk`), a FracMinHash sample of every reference genome grouped by species. `classify` uses it to check each species that received reads: a species whose k-mers are found far less often than its reads predict, once k-mers shared with present relatives are set aside, is called absent. Its reads move to their best present candidate or become unclassified, and the profile is estimated without it. Species with strong evidence of their own k-mers are reported even below the profile's read-count floors.
 
 Calls are written to `ChimeraPresenceCall.tsv`, and affected reads carry a `PRESENCE=` tag in `ChimeraClassify.tsv`. The step is skipped when the database has no sketch.
 

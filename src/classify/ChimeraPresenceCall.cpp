@@ -13,6 +13,7 @@
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace ChimeraClassify::presence_call {
 
@@ -436,6 +437,42 @@ CallResult call_presence(const psk::SketchIndex &index, const SampleSketch &samp
       call.status = "not_assessable";
     }
   }
+  // positive genome evidence, judged on private markers
+  std::unordered_map<uint32_t, size_t> call_index;
+  for (size_t i = 0; i < result.calls.size(); ++i) {
+    call_index[result.calls[i].species] = i;
+  }
+  for (SpeciesCall &call : result.calls) {
+    if (call.status != "present" || !call.reason.empty()) {
+      continue;
+    }
+    const MarkerStats &s = call.priv;
+    if (s.positive < options.min_positive || s.rho < options.evidence_min_rho) {
+      continue;
+    }
+    bool fits = false;
+    if (s.retention >= 0.0) {
+      fits = s.retention >= options.evidence_min_retention;
+    } else if (call.full.containment > 0.0) {
+      fits = s.containment / call.full.containment >= options.evidence_min_ratio;
+    }
+    call.evidence = fits;
+  }
+  // a tie claimant with fewer reads is the same genome under another name
+  for (const SpeciesCall &call : result.calls) {
+    if (call.reason != "tie" || call.claimant == 0) {
+      continue;
+    }
+    const auto it = call_index.find(call.claimant);
+    if (it != call_index.end() && result.calls[it->second].reads < call.reads) {
+      result.calls[it->second].evidence = false;
+    }
+  }
+  for (const SpeciesCall &call : result.calls) {
+    if (call.evidence) {
+      result.evidence.insert(call.species);
+    }
+  }
   return result;
 }
 
@@ -449,7 +486,7 @@ void write_call_table(const std::string &path, const CallResult &result,
   if (!out) {
     throw std::runtime_error("failed to open presence call table: " + path);
   }
-  out << "species_taxid\tname\tstatus\treason\trank\treads\tassigned_bases"
+  out << "species_taxid\tname\tstatus\treason\tevidence\trank\treads\tassigned_bases"
       << "\ttotal_markers\treferences\tstrains\tclaimed_fraction\tclaimant\tclaimant_containment\tclaimant_retention\tbest_ref\tbest_ref_bases"
       << "\tfull_markers\tfull_hits\tfull_containment\tfull_expected_hits\tfull_rho\tfull_retention"
       << "\tprivate_markers\tprivate_hits\tprivate_containment\tprivate_expected_hits\tprivate_rho\tprivate_retention"
@@ -479,7 +516,8 @@ void write_call_table(const std::string &path, const CallResult &result,
   });
   for (const SpeciesCall *call : rows) {
     out << call->species << '\t' << name_of(call->species) << '\t' << call->status << '\t'
-        << call->reason << '\t' << call->rank << '\t' << fmt(call->reads) << '\t'
+        << call->reason << '\t' << (call->evidence ? 1 : 0) << '\t' << call->rank << '\t'
+        << fmt(call->reads) << '\t'
         << fmt(call->bases) << '\t' << call->total_markers << '\t'
         << call->references << '\t' << call->strains << '\t'
         << fmt(call->claimed_fraction) << '\t' << call->claimant << '\t'

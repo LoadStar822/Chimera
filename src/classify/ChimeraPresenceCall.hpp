@@ -65,6 +65,10 @@ struct CallOptions {
   double strain_min_containment{0.10};
   // tie: stay present when the claimant's retention is not better by delta
   double tie_retention_delta{0.05};
+  // evidence: private markers hit consistently with the reads on a fitting genome
+  double evidence_min_rho{0.5};
+  double evidence_min_retention{0.5};
+  double evidence_min_ratio{0.6};
   // survival calibration over confident species
   uint32_t calibration_min_positive{200};
   uint32_t calibration_min_repeated{20};
@@ -91,6 +95,7 @@ struct SpeciesCall {
   double bases{0.0};
   std::string status;       // no_sketch | not_assessable | present | absent
   std::string reason;       // redundant | inconsistent | low_retention | tie | (empty)
+  bool evidence{false};     // present with positive genome evidence (see CallOptions)
   int rank{-1};
   double claimed_fraction{0.0};
   uint32_t claimant{0};              // species that claimed most of the markers (0: none)
@@ -109,6 +114,7 @@ struct CallResult {
   std::vector<SpeciesCall> calls;
   std::unordered_set<uint32_t> present;
   std::unordered_set<uint32_t> absent;
+  std::unordered_set<uint32_t> evidence; // present species with positive genome evidence
   double s_hat{-1.0};       // per-k-mer survival estimate (<0: not calibrated)
   size_t calibrators{0};
   size_t assessed{0};
