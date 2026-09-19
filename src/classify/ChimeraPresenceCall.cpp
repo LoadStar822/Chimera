@@ -153,7 +153,20 @@ MarkerStats compute_stats(const Loaded &data, size_t ref,
     if (lambda > 0.0) {
       s.lambda_ztp = lambda;
       if (s.mean_positive >= options.min_mean_positive) {
-        s.retention = s.containment / (-std::expm1(-lambda));
+        // The multiplicity estimate of the coverage is inflated at low
+        // coverage by markers shared with abundant relatives, which would
+        // make a divergent low-abundance strain look like retained markers
+        // are missing. The reads assigned to the species bound the coverage
+        // from below; an absence call is judged on the smaller estimate,
+        // positive evidence for an otherwise unreportable species on the
+        // multiplicity estimate alone.
+        s.retention_strict = s.containment / (-std::expm1(-lambda));
+        double effective_lambda = lambda;
+        if (s.lambda_bases > 0.0) {
+          effective_lambda =
+              std::min(lambda, s.lambda_bases * effective_survival);
+        }
+        s.retention = s.containment / (-std::expm1(-effective_lambda));
       }
     }
   }
@@ -451,8 +464,8 @@ CallResult call_presence(const psk::SketchIndex &index, const SampleSketch &samp
       continue;
     }
     bool fits = false;
-    if (s.retention >= 0.0) {
-      fits = s.retention >= options.evidence_min_retention;
+    if (s.retention_strict >= 0.0) {
+      fits = s.retention_strict >= options.evidence_min_retention;
     } else if (call.full.containment > 0.0) {
       fits = s.containment / call.full.containment >= options.evidence_min_ratio;
     }

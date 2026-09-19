@@ -86,7 +86,11 @@ struct MarkerStats {
   double tail_p{1.0};        // P(Poisson(H_exp) <= H)
   double mean_positive{0.0}; // mean multiplicity of positive markers
   double lambda_ztp{-1.0};   // effective coverage from multiplicities (<0: n/a)
-  double retention{-1.0};    // containment / (1 - exp(-lambda_ztp)) (<0: n/a)
+  // containment / (1 - exp(-lambda)) with lambda the smaller of lambda_ztp
+  // and lambda_bases * survival (<0: n/a); the absence test uses it
+  double retention{-1.0};
+  // the same under lambda_ztp alone (<0: n/a); positive evidence needs it
+  double retention_strict{-1.0};
 };
 
 struct SpeciesCall {

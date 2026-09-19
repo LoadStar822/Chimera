@@ -2066,7 +2066,9 @@ std::vector<TaxonScore>
 chain_read_species_scores(const ReadRecord &read,
                           const CompactPostingIndex &index,
                           const std::vector<TargetRecord> &targets,
-                          int diag_bin, uint32_t min_chain) {
+                          int diag_bin, uint32_t min_chain,
+                          double min_coverage, uint32_t min_coverage_span,
+                          uint32_t k) {
   if (read.anchor_qids.size() != read.anchors.size()) {
     throw std::runtime_error("local query token id invariant violated");
   }
@@ -2105,7 +2107,12 @@ chain_read_species_scores(const ReadRecord &read,
   // species with more representatives do not accumulate an advantage. The
   // number of representatives that chain nearly as well is kept as support;
   // the decision layer uses it only to separate near-tied species.
-  thread_local std::unordered_map<uint32_t, uint32_t> best_by_target;
+  struct TargetChains {
+    uint32_t best{};
+    uint32_t q_lo{std::numeric_limits<uint32_t>::max()};
+    uint32_t q_hi{};
+  };
+  thread_local std::unordered_map<uint32_t, TargetChains> best_by_target;
   best_by_target.clear();
   for (const auto &[key, stats] : chains) {
     if (stats.count < min_chain) {
@@ -2124,18 +2131,37 @@ chain_read_species_scores(const ReadRecord &read,
       continue;
     }
     auto &best = best_by_target[key.tid];
-    best = std::max(best, score);
+    best.best = std::max(best.best, score);
+    best.q_lo = std::min(best.q_lo, stats.q_min);
+    best.q_hi = std::max(best.q_hi, stats.q_max);
   }
+  // A target explains the read only when its chains span most of it, or a
+  // stretch long enough to be genomic on its own (a long read may run past
+  // what its reference carries). A match confined to a short stretch of a
+  // short read (adapter, vector, chimeric junction) is not from that genome,
+  // however exact the stretch is.
+  const double min_covered =
+      std::min(min_coverage * static_cast<double>(read.length),
+               static_cast<double>(min_coverage_span));
   thread_local std::unordered_map<uint32_t, TaxonScore> by_species;
   by_species.clear();
-  for (const auto &[tid, score] : best_by_target) {
+  for (auto &[tid, chainsOfTarget] : best_by_target) {
+    const double covered =
+        static_cast<double>(chainsOfTarget.q_hi - chainsOfTarget.q_lo + k);
+    if (covered < min_covered) {
+      chainsOfTarget.best = 0;
+      continue;
+    }
     auto &entry = by_species[targets[tid].species];
     entry.taxid = targets[tid].species;
-    entry.score = std::max(entry.score, score);
+    entry.score = std::max(entry.score, chainsOfTarget.best);
   }
-  for (const auto &[tid, score] : best_by_target) {
+  for (const auto &[tid, chainsOfTarget] : best_by_target) {
+    if (chainsOfTarget.best == 0) {
+      continue;
+    }
     auto &entry = by_species[targets[tid].species];
-    if (static_cast<uint64_t>(score) * 5ULL >=
+    if (static_cast<uint64_t>(chainsOfTarget.best) * 5ULL >=
         static_cast<uint64_t>(entry.score) * 4ULL) {
       ++entry.support;
     }
@@ -2190,7 +2216,8 @@ void chain_reads_to_call_store(
     const std::vector<std::string> &read_files, bool paired, uint32_t k,
     uint32_t w, const QueryHashIndex &query_hashes,
     const CompactPostingIndex &index, const std::vector<TargetRecord> &targets,
-    int diag_bin, uint32_t min_chain, uint32_t threads,
+    int diag_bin, uint32_t min_chain, double min_coverage,
+    uint32_t min_coverage_span, uint32_t threads,
     const ChimeraClassify::ReadBitset *skip_reads, TrustProbeState &trust,
     ChimeraClassify::LocalResolutionCallStore &store,
     std::atomic<uint64_t> &local_hits, std::atomic<uint64_t> &local_absent,
@@ -2224,14 +2251,16 @@ void chain_reads_to_call_store(
                 make_read_record(pending[idx].ordinal, pending[idx].sequence,
                                  k, w);
             assign_query_hashes(read, query_hashes);
-            auto scores = chain_read_species_scores(read, index, targets,
-                                                    diag_bin, min_chain);
+            auto scores = chain_read_species_scores(
+                read, index, targets, diag_bin, min_chain, min_coverage,
+                min_coverage_span, k);
             if (!pending[idx].mate_sequence.empty()) {
               auto mate = make_read_record(pending[idx].ordinal,
                                            pending[idx].mate_sequence, k, w);
               assign_query_hashes(mate, query_hashes);
               auto mateScores = chain_read_species_scores(
-                  mate, index, targets, diag_bin, min_chain);
+                  mate, index, targets, diag_bin, min_chain, min_coverage,
+                  min_coverage_span, k);
               scores.insert(scores.end(),
                             std::make_move_iterator(mateScores.begin()),
                             std::make_move_iterator(mateScores.end()));
@@ -2319,7 +2348,8 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
                                  const std::filesystem::path &shard_manifest_path,
                                  const TargetFilter &target_filter,
                                  uint32_t diag_bin, uint32_t max_occ,
-                                 uint32_t min_chain, uint32_t threads,
+                                 uint32_t min_chain, double min_coverage,
+                                 uint32_t min_coverage_span, uint32_t threads,
                                  const SampleKeyBitset *sample_keys,
                                  const ReadBitset *skip_reads,
                                  const TrustProbe *trust_probe) {
@@ -2378,8 +2408,9 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
   trust.probe = skip_reads == nullptr ? nullptr : trust_probe;
   chain_reads_to_call_store(read_files, paired, root_meta.k, root_meta.w,
                             query_hashes, index, targets, diag_bin, min_chain,
-                            threads, skip_reads, trust, result.calls,
-                            local_hits, local_absent, skipped);
+                            min_coverage, min_coverage_span, threads,
+                            skip_reads, trust, result.calls, local_hits,
+                            local_absent, skipped);
   const auto chained = std::chrono::steady_clock::now();
 
   result.stats.reads = result.calls.read_count();
@@ -2470,7 +2501,8 @@ run_local_resolution_engine(const LocalResolutionRequest &request) {
       request.read_files, request.paired,
       std::filesystem::path(request.index_file),
       std::filesystem::path(request.shard_manifest_file), target_filter,
-      request.diag_bin, request.max_occ, request.min_chain, request.threads,
+      request.diag_bin, request.max_occ, request.min_chain,
+      request.min_coverage, request.min_coverage_span, request.threads,
       request.sample_keys, request.skip_reads, request.trust_probe);
 }
 

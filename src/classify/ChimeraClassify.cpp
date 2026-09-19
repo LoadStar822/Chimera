@@ -6545,6 +6545,8 @@ void run(ClassifyConfig config) {
           localRequest.diag_bin = config.lpc_diag_bin;
           localRequest.max_occ = config.lpc_max_occ;
           localRequest.min_chain = config.lpc_min_chain;
+          localRequest.min_coverage = config.lpc_min_coverage;
+          localRequest.min_coverage_span = config.lpc_min_coverage_span;
           localRequest.threads = config.threads;
           localRequest.sample_keys = sampleKeys.enabled() ? &sampleKeys : nullptr;
           localRequest.skip_reads = &postTopkScores.trusted;

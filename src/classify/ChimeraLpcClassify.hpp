@@ -188,6 +188,10 @@ struct LocalResolutionRequest {
   uint32_t diag_bin{};
   uint32_t max_occ{};
   uint32_t min_chain{};
+  // A target's chains must span min_coverage of the read or min_coverage_span
+  // bases, whichever is less.
+  double min_coverage{0.5};
+  uint32_t min_coverage_span{300};
   uint32_t threads{};
   const SampleKeyBitset *sample_keys{nullptr}; // replaces the read hash pass
   const ReadBitset *skip_reads{nullptr};       // trusted reads
