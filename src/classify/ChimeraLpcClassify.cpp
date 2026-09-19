@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cerrno>
 #include <cctype>
 #include <chrono>
@@ -132,7 +133,10 @@ struct ChainStats {
 struct TaxonScore {
   uint32_t taxid{};
   uint32_t score{};
+  uint32_t support{}; // representatives whose best chain is close to the top
 };
+
+constexpr size_t kMaxCandidatesPerRead = 8;
 
 struct TargetFilter {
   struct Route {
@@ -252,22 +256,36 @@ public:
   }
 
 private:
+  // Bounded per-reader cache: a panel may span thousands of shards and every
+  // worker owns a reader, so unbounded caching runs into the fd limit.
+  static constexpr size_t kMaxCachedFds = 16;
+
   int fd_for(const std::filesystem::path &path) {
     const std::string key = path.string();
     const auto found = fds_.find(key);
     if (found != fds_.end()) {
       return found->second;
     }
+    if (fds_.size() >= kMaxCachedFds) {
+      const auto oldest = fds_.find(open_order_.front());
+      if (oldest != fds_.end()) {
+        ::close(oldest->second);
+        fds_.erase(oldest);
+      }
+      open_order_.erase(open_order_.begin());
+    }
     const int fd = ::open(key.c_str(), O_RDONLY);
     if (fd < 0) {
       throw std::runtime_error("failed to open local resolution shard: " +
-                               key);
+                               key + " (" + std::strerror(errno) + ")");
     }
     fds_.emplace(key, fd);
+    open_order_.push_back(key);
     return fd;
   }
 
   std::unordered_map<std::string, int> fds_;
+  std::vector<std::string> open_order_;
 };
 
 constexpr uint64_t kDirectTargetLoadBatchAnchorCap = 64'000'000ULL;
@@ -280,7 +298,31 @@ public:
 
   explicit QueryHashIndex(uint32_t k) : narrow_keys_(k <= 16) {}
 
+  // Dense-rank mode: the key set is a bitset over the 2k-bit key space and a
+  // key's id is its rank among set bits, so no hashing or probing is needed.
+  void adopt_bitset(std::vector<uint64_t> words) {
+    bitset_ = std::move(words);
+    rank_dir_.assign(bitset_.size() / kRankBlockWords + 1, 0);
+    uint64_t total = 0;
+    for (size_t word = 0; word < bitset_.size(); ++word) {
+      if (word % kRankBlockWords == 0) {
+        rank_dir_[word / kRankBlockWords] = total;
+      }
+      total += static_cast<uint64_t>(std::popcount(bitset_[word]));
+    }
+    if (total > std::numeric_limits<uint32_t>::max()) {
+      throw std::runtime_error("too many sample minimizer keys");
+    }
+    dense_size_ = static_cast<size_t>(total);
+    rank_mode_ = true;
+  }
+
+  bool rank_mode() const { return rank_mode_; }
+
   uint32_t insert_or_get(uint64_t key) {
+    if (rank_mode_) {
+      throw std::runtime_error("query hash index is read-only in rank mode");
+    }
     if (ids_.empty() || (size() + 1) * 2 >= ids_.size()) {
       rehash(ids_.empty() ? 4096 : ids_.size() * 2);
     }
@@ -292,6 +334,9 @@ public:
   }
 
   uint32_t find_id(uint64_t key) const {
+    if (rank_mode_) {
+      return rank_of(key);
+    }
     if (!maybe_contains(key)) {
       return kNotFound;
     }
@@ -299,6 +344,11 @@ public:
   }
 
   bool maybe_contains(uint64_t key) const {
+    if (rank_mode_) {
+      const uint64_t word = key >> 6;
+      return word < bitset_.size() &&
+             ((bitset_[word] >> (key & 63)) & 1ULL) != 0;
+    }
     if (prefilter_.empty()) {
       return false;
     }
@@ -310,6 +360,9 @@ public:
   }
 
   uint32_t find_id_in_table(uint64_t key) const {
+    if (rank_mode_) {
+      return rank_of(key);
+    }
     if (ids_.empty()) {
       return kNotFound;
     }
@@ -327,6 +380,9 @@ public:
   size_t size() const { return dense_size_; }
 
   void optimize_prefilter() {
+    if (rank_mode_) {
+      return;
+    }
     const size_t desired_bits = round_capacity(std::max<size_t>(
         kDefaultPrefilterBitCount, std::max<size_t>(1, size()) * 8));
     if (prefilter_.size() * 64 == desired_bits) {
@@ -350,13 +406,34 @@ public:
   }
 
   void reserve_slots(size_t requested_slots) {
-    if (requested_slots <= ids_.size()) {
+    if (rank_mode_ || requested_slots <= ids_.size()) {
       return;
     }
     rehash(requested_slots);
   }
 
 private:
+  static constexpr size_t kRankBlockWords = 8; // one cache line of bits
+
+  uint32_t rank_of(uint64_t key) const {
+    const uint64_t word = key >> 6;
+    if (word >= bitset_.size()) {
+      return kNotFound;
+    }
+    const uint64_t bits = bitset_[word];
+    const uint64_t bit = key & 63;
+    if (((bits >> bit) & 1ULL) == 0) {
+      return kNotFound;
+    }
+    uint64_t rank = rank_dir_[word / kRankBlockWords];
+    for (uint64_t w = word - (word % kRankBlockWords); w < word; ++w) {
+      rank += static_cast<uint64_t>(std::popcount(bitset_[w]));
+    }
+    rank += static_cast<uint64_t>(
+        std::popcount(bits & ((1ULL << bit) - 1ULL)));
+    return static_cast<uint32_t>(rank);
+  }
+
   static uint64_t mix(uint64_t x) {
     x ^= x >> 33;
     x *= 0xff51afd7ed558ccdULL;
@@ -468,6 +545,9 @@ private:
   size_t dense_size_{};
   std::vector<uint64_t> prefilter_;
   size_t prefilter_mask_{kDefaultPrefilterBitCount - 1};
+  bool rank_mode_{false};
+  std::vector<uint64_t> bitset_;
+  std::vector<uint64_t> rank_dir_;
 };
 
 std::string trim_copy(std::string s) {
@@ -533,8 +613,8 @@ make_local_resolution_call(const ReadRecord &read,
   call.read_ordinal = read.ordinal;
   call.candidates.reserve(scores.size());
   for (const auto &score : scores) {
-    call.candidates.push_back(
-        ChimeraClassify::LocalResolutionCandidate{score.taxid, score.score});
+    call.candidates.push_back(ChimeraClassify::LocalResolutionCandidate{
+        score.taxid, score.score, score.support});
   }
   return call;
 }
@@ -710,7 +790,7 @@ void assign_query_hashes(ReadRecord &read, const QueryHashIndex &query_hashes) {
   read.anchor_qids.reserve(read.anchors.size());
   for (const auto &anchor : read.anchors) {
     const uint32_t qid = query_hashes.find_id(anchor.hash);
-    if (qid == QueryHashIndex::kNotFound) {
+    if (qid == QueryHashIndex::kNotFound && !query_hashes.rank_mode()) {
       throw std::runtime_error(
           "local resolution query hash missing from first pass");
     }
@@ -878,8 +958,8 @@ void append_local_resolution_scores(
     ChimeraClassify::LocalResolutionCallStore &store,
     const std::vector<TaxonScore> &scores) {
   for (const auto &score : scores) {
-    store.candidates.push_back(
-        ChimeraClassify::LocalResolutionCandidate{score.taxid, score.score});
+    store.candidates.push_back(ChimeraClassify::LocalResolutionCandidate{
+        score.taxid, score.score, score.support});
   }
   store.offsets.push_back(static_cast<uint64_t>(store.candidates.size()));
 }
@@ -1969,6 +2049,19 @@ bool taxid_decimal_lex_less(uint32_t lhs, uint32_t rhs) {
   return lhs_digits < rhs_digits;
 }
 
+void sort_taxon_scores(std::vector<TaxonScore> &scores) {
+  std::sort(scores.begin(), scores.end(),
+            [](const TaxonScore &a, const TaxonScore &b) {
+              if (a.score != b.score) {
+                return a.score > b.score;
+              }
+              if (a.support != b.support) {
+                return a.support > b.support;
+              }
+              return taxid_decimal_lex_less(a.taxid, b.taxid);
+            });
+}
+
 std::vector<TaxonScore>
 chain_read_species_scores(const ReadRecord &read,
                           const CompactPostingIndex &index,
@@ -1986,7 +2079,7 @@ chain_read_species_scores(const ReadRecord &read,
   for (size_t token_idx = 0; token_idx < read.anchors.size(); ++token_idx) {
     const auto &query = read.anchors[token_idx];
     const uint32_t qid = read.anchor_qids[token_idx];
-    if (index.overflow[qid] != 0) {
+    if (qid == QueryHashIndex::kNotFound || index.overflow[qid] != 0) {
       continue;
     }
     const auto span = index.spans[qid];
@@ -2008,11 +2101,12 @@ chain_read_species_scores(const ReadRecord &read,
     }
   }
 
-  thread_local std::unordered_map<uint32_t, uint64_t> mass_by_species;
-  mass_by_species.clear();
-  if (mass_by_species.bucket_count() < chains.size()) {
-    mass_by_species.reserve(chains.size());
-  }
+  // A species scores its single best chain over all of its targets, so that
+  // species with more representatives do not accumulate an advantage. The
+  // number of representatives that chain nearly as well is kept as support;
+  // the decision layer uses it only to separate near-tied species.
+  thread_local std::unordered_map<uint32_t, uint32_t> best_by_target;
+  best_by_target.clear();
   for (const auto &[key, stats] : chains) {
     if (stats.count < min_chain) {
       continue;
@@ -2026,50 +2120,105 @@ chain_read_species_scores(const ReadRecord &read,
         static_cast<uint64_t>(std::min(q_span, t_span)) / 20ULL;
     const uint32_t score = static_cast<uint32_t>(
         std::min<uint64_t>(score64, std::numeric_limits<uint32_t>::max()));
-    const auto &target = targets[key.tid];
-    if (target.species == 0) {
+    if (targets[key.tid].species == 0) {
       continue;
     }
-    mass_by_species[target.species] += score;
+    auto &best = best_by_target[key.tid];
+    best = std::max(best, score);
+  }
+  thread_local std::unordered_map<uint32_t, TaxonScore> by_species;
+  by_species.clear();
+  for (const auto &[tid, score] : best_by_target) {
+    auto &entry = by_species[targets[tid].species];
+    entry.taxid = targets[tid].species;
+    entry.score = std::max(entry.score, score);
+  }
+  for (const auto &[tid, score] : best_by_target) {
+    auto &entry = by_species[targets[tid].species];
+    if (static_cast<uint64_t>(score) * 5ULL >=
+        static_cast<uint64_t>(entry.score) * 4ULL) {
+      ++entry.support;
+    }
   }
   std::vector<TaxonScore> scores;
-  scores.reserve(mass_by_species.size());
-  for (const auto &[taxid, score] : mass_by_species) {
-    scores.push_back({taxid,
-                      static_cast<uint32_t>(std::min<uint64_t>(
-                          score, std::numeric_limits<uint32_t>::max()))});
+  scores.reserve(by_species.size());
+  for (const auto &[taxid, entry] : by_species) {
+    scores.push_back(entry);
   }
-  std::sort(scores.begin(), scores.end(),
-            [](const TaxonScore &a, const TaxonScore &b) {
-              if (a.score != b.score) {
-                return a.score > b.score;
-              }
-              return taxid_decimal_lex_less(a.taxid, b.taxid);
-            });
+  sort_taxon_scores(scores);
+  if (scores.size() > kMaxCandidatesPerRead) {
+    scores.resize(kMaxCandidatesPerRead);
+  }
   return scores;
 }
+
+struct TrustProbeState {
+  const ChimeraClassify::TrustProbe *probe{nullptr};
+  bool decided{false};
+  bool revoked{false};
+  uint64_t seen{};
+  uint64_t chained{};
+  uint64_t agree{};
+
+  bool decidable() const { return probe != nullptr && !decided; }
+
+  // Trust is decided once enough probes have chained, or once the read stream
+  // has passed the last probe.
+  void decide_if_ready(uint64_t last_ordinal_in_batch) {
+    if (!decidable()) {
+      return;
+    }
+    if (chained < probe->target_chained &&
+        last_ordinal_in_batch < probe->last_ordinal) {
+      return;
+    }
+    decide();
+  }
+
+  void decide() {
+    if (!decidable()) {
+      return;
+    }
+    decided = true;
+    revoked = chained >= probe->min_decidable &&
+              static_cast<double>(agree) <
+                  probe->min_agreement * static_cast<double>(chained);
+  }
+};
 
 void chain_reads_to_call_store(
     const std::vector<std::string> &read_files, bool paired, uint32_t k,
     uint32_t w, const QueryHashIndex &query_hashes,
     const CompactPostingIndex &index, const std::vector<TargetRecord> &targets,
     int diag_bin, uint32_t min_chain, uint32_t threads,
+    const ChimeraClassify::ReadBitset *skip_reads, TrustProbeState &trust,
     ChimeraClassify::LocalResolutionCallStore &store,
-    std::atomic<uint64_t> &local_hits, std::atomic<uint64_t> &local_absent) {
+    std::atomic<uint64_t> &local_hits, std::atomic<uint64_t> &local_absent,
+    std::atomic<uint64_t> &skipped) {
+  // Without a probe the skip set is final; with one, trusted reads are chained
+  // until the probe has decided that they can be skipped.
+  std::atomic<bool> skip_active{trust.probe == nullptr};
   for_each_pending_read_batch(
       read_files, paired, kLocalResolutionReadBatchSize,
       [&](const std::vector<PendingRead> &pending) {
         std::vector<std::vector<TaxonScore>> batch_scores(pending.size());
+        std::vector<uint8_t> batch_skipped(pending.size(), 0);
         const uint32_t worker_count = std::max<uint32_t>(
             1, std::min<uint32_t>(
                    threads == 0 ? 1 : threads,
                    static_cast<uint32_t>(std::max<size_t>(1, pending.size()))));
         std::atomic<size_t> next{0};
+        const bool skip_now = skip_active.load(std::memory_order_relaxed);
         auto worker = [&]() {
           while (true) {
             const size_t idx = next.fetch_add(1, std::memory_order_relaxed);
             if (idx >= pending.size()) {
               break;
+            }
+            if (skip_now && skip_reads != nullptr &&
+                skip_reads->test(pending[idx].ordinal)) {
+              batch_skipped[idx] = 1;
+              continue;
             }
             auto read =
                 make_read_record(pending[idx].ordinal, pending[idx].sequence,
@@ -2094,23 +2243,20 @@ void chain_reads_to_call_store(
               for (const auto &score : scores) {
                 if (mergedSize != 0 &&
                     scores[mergedSize - 1].taxid == score.taxid) {
-                  scores[mergedSize - 1].score =
-                      static_cast<uint32_t>(std::min<uint64_t>(
-                          static_cast<uint64_t>(scores[mergedSize - 1].score) +
-                              score.score,
-                          std::numeric_limits<uint32_t>::max()));
+                  auto &merged = scores[mergedSize - 1];
+                  merged.score = static_cast<uint32_t>(std::min<uint64_t>(
+                      static_cast<uint64_t>(merged.score) + score.score,
+                      std::numeric_limits<uint32_t>::max()));
+                  merged.support = std::max(merged.support, score.support);
                 } else {
                   scores[mergedSize++] = score;
                 }
               }
               scores.resize(mergedSize);
-              std::sort(scores.begin(), scores.end(),
-                        [](const TaxonScore &a, const TaxonScore &b) {
-                          if (a.score != b.score) {
-                            return a.score > b.score;
-                          }
-                          return taxid_decimal_lex_less(a.taxid, b.taxid);
-                        });
+              sort_taxon_scores(scores);
+              if (scores.size() > kMaxCandidatesPerRead) {
+                scores.resize(kMaxCandidatesPerRead);
+              }
             }
             batch_scores[idx] = std::move(scores);
           }
@@ -2128,14 +2274,36 @@ void chain_reads_to_call_store(
             throw std::runtime_error(
                 "local resolution read ordinal stream is not contiguous");
           }
-          if (batch_scores[i].empty()) {
+          if (batch_skipped[i] != 0) {
+            skipped.fetch_add(1, std::memory_order_relaxed);
+          } else if (batch_scores[i].empty()) {
             local_absent.fetch_add(1, std::memory_order_relaxed);
           } else {
             local_hits.fetch_add(1, std::memory_order_relaxed);
           }
+          if (trust.decidable() && batch_skipped[i] == 0) {
+            const auto found =
+                trust.probe->core_species.find(pending[i].ordinal);
+            if (found != trust.probe->core_species.end()) {
+              ++trust.seen;
+              if (!batch_scores[i].empty()) {
+                ++trust.chained;
+                if (batch_scores[i].front().taxid == found->second) {
+                  ++trust.agree;
+                }
+              }
+            }
+          }
           append_local_resolution_scores(store, batch_scores[i]);
         }
+        if (trust.decidable() && !pending.empty()) {
+          trust.decide_if_ready(pending.back().ordinal);
+          if (trust.decided && !trust.revoked) {
+            skip_active.store(true, std::memory_order_relaxed);
+          }
+        }
       });
+  trust.decide();
 }
 
 } // namespace
@@ -2151,7 +2319,10 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
                                  const std::filesystem::path &shard_manifest_path,
                                  const TargetFilter &target_filter,
                                  uint32_t diag_bin, uint32_t max_occ,
-                                 uint32_t min_chain, uint32_t threads) {
+                                 uint32_t min_chain, uint32_t threads,
+                                 const SampleKeyBitset *sample_keys,
+                                 const ReadBitset *skip_reads,
+                                 const TrustProbe *trust_probe) {
   if (read_files.empty()) {
     throw std::runtime_error("Local resolution route requires read input");
   }
@@ -2163,13 +2334,18 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
         "Local resolution route requires a shard manifest file");
   }
 
-	  const auto started = std::chrono::steady_clock::now();
-	  const auto root_meta = chimera::native_bounded::read_index_header(index_path);
-	  QueryHashIndex query_hashes(root_meta.k);
-	  const uint64_t read_count = collect_query_hashes_from_reads(
-	      read_files, paired, root_meta.k, root_meta.w, query_hashes, threads);
-	  query_hashes.optimize_prefilter();
-	  const auto reads_loaded = std::chrono::steady_clock::now();
+  const auto started = std::chrono::steady_clock::now();
+  const auto root_meta = chimera::native_bounded::read_index_header(index_path);
+  QueryHashIndex query_hashes(root_meta.k);
+  if (sample_keys != nullptr && sample_keys->enabled() &&
+      sample_keys->k() == root_meta.k && sample_keys->w() == root_meta.w) {
+    query_hashes.adopt_bitset(sample_keys->words());
+  } else {
+    collect_query_hashes_from_reads(read_files, paired, root_meta.k,
+                                    root_meta.w, query_hashes, threads);
+    query_hashes.optimize_prefilter();
+  }
+  const auto reads_loaded = std::chrono::steady_clock::now();
 
   LoadStats stats;
   std::vector<TargetRecord> targets;
@@ -2192,25 +2368,26 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
   }
   const auto refs_loaded = std::chrono::steady_clock::now();
 
-	  LocalResolutionResult result;
-	  result.calls.offsets.reserve(static_cast<size_t>(
-	      std::min<uint64_t>(read_count + 1,
-	                         static_cast<uint64_t>(
-	                             std::numeric_limits<size_t>::max()))));
-	  result.calls.offsets.clear();
-	  result.calls.offsets.push_back(0);
-	  std::atomic<uint64_t> local_hits{0};
-	  std::atomic<uint64_t> local_absent{0};
-	  chain_reads_to_call_store(read_files, paired, root_meta.k, root_meta.w,
-	                            query_hashes, index, targets, diag_bin, min_chain,
-	                            threads, result.calls, local_hits, local_absent);
-	  if (result.calls.read_count() != read_count) {
-	    throw std::runtime_error(
-	        "local resolution call store read count mismatch");
-	  }
-	  const auto chained = std::chrono::steady_clock::now();
+  LocalResolutionResult result;
+  result.calls.offsets.clear();
+  result.calls.offsets.push_back(0);
+  std::atomic<uint64_t> local_hits{0};
+  std::atomic<uint64_t> local_absent{0};
+  std::atomic<uint64_t> skipped{0};
+  TrustProbeState trust;
+  trust.probe = skip_reads == nullptr ? nullptr : trust_probe;
+  chain_reads_to_call_store(read_files, paired, root_meta.k, root_meta.w,
+                            query_hashes, index, targets, diag_bin, min_chain,
+                            threads, skip_reads, trust, result.calls,
+                            local_hits, local_absent, skipped);
+  const auto chained = std::chrono::steady_clock::now();
 
-	  result.stats.reads = read_count;
+  result.stats.reads = result.calls.read_count();
+  result.stats.skipped_reads = skipped.load(std::memory_order_relaxed);
+  result.stats.probe_reads = trust.seen;
+  result.stats.probe_chained = trust.chained;
+  result.stats.probe_agree = trust.agree;
+  result.stats.trust_revoked = trust.revoked;
   result.stats.query_hashes = query_hashes.size();
   result.stats.target_filter = target_filter.names.size();
   result.stats.target_routes = target_filter.route_by_name.size();
@@ -2237,7 +2414,7 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
   result.stats.dropped_broad_records = stats.dropped_broad_records;
   result.stats.local_hits = local_hits.load(std::memory_order_relaxed);
   result.stats.local_absent = local_absent.load(std::memory_order_relaxed);
-	  result.stats.threads = std::max<uint32_t>(1, threads == 0 ? 1 : threads);
+  result.stats.threads = std::max<uint32_t>(1, threads == 0 ? 1 : threads);
   result.stats.k = root_meta.k;
   result.stats.w = root_meta.w;
   result.stats.read_seconds =
@@ -2257,6 +2434,35 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
 
 } // namespace
 
+SampleKeyBitset::SampleKeyBitset(uint32_t k, uint32_t w) : k_(k), w_(w) {
+  if (k == 0 || k > 16) {
+    throw std::runtime_error("sample key bitset needs 1 <= k <= 16");
+  }
+  words_.assign((uint64_t{1} << (2 * k)) / 64, 0);
+}
+
+void SampleKeyBitset::add(const std::vector<seqan3::dna4> &sequence) {
+  const auto anchors = chimera::native_bounded::extract_minimizers(
+      sequence, static_cast<int>(k_), static_cast<int>(w_));
+  for (const auto &anchor : anchors) {
+    std::atomic_ref<uint64_t>(words_[anchor.hash >> 6])
+        .fetch_or(uint64_t{1} << (anchor.hash & 63), std::memory_order_relaxed);
+  }
+}
+
+bool SampleKeyBitset::test(uint64_t key) const {
+  const uint64_t word = key >> 6;
+  return word < words_.size() && ((words_[word] >> (key & 63)) & 1ULL) != 0;
+}
+
+void ReadBitset::set(uint64_t ordinal) {
+  if (ordinal / 64 >= words.size()) {
+    throw std::runtime_error("read ordinal exceeds the read bitset");
+  }
+  std::atomic_ref<uint64_t>(words[ordinal / 64])
+      .fetch_or(uint64_t{1} << (ordinal % 64), std::memory_order_relaxed);
+}
+
 LocalResolutionResult
 run_local_resolution_engine(const LocalResolutionRequest &request) {
   const auto target_filter = target_filter_from_targets(request.targets);
@@ -2264,7 +2470,8 @@ run_local_resolution_engine(const LocalResolutionRequest &request) {
       request.read_files, request.paired,
       std::filesystem::path(request.index_file),
       std::filesystem::path(request.shard_manifest_file), target_filter,
-      request.diag_bin, request.max_occ, request.min_chain, request.threads);
+      request.diag_bin, request.max_occ, request.min_chain, request.threads,
+      request.sample_keys, request.skip_reads, request.trust_probe);
 }
 
 } // namespace ChimeraClassify

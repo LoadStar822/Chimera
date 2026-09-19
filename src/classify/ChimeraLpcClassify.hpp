@@ -6,13 +6,51 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
+#include <seqan3/alphabet/nucleotide/dna4.hpp>
+
 namespace ChimeraClassify {
+
+// Minimizer keys (2k-bit canonical k-mers, k <= 16) seen in the sample.
+// Filled during the main classify pass so local resolution needs no read
+// pass of its own and can filter shard anchors with one exact bit test.
+class SampleKeyBitset {
+public:
+  SampleKeyBitset() = default;
+  SampleKeyBitset(uint32_t k, uint32_t w);
+
+  bool enabled() const { return !words_.empty(); }
+  uint32_t k() const { return k_; }
+  uint32_t w() const { return w_; }
+  void add(const std::vector<seqan3::dna4> &sequence); // thread-safe
+  bool test(uint64_t key) const;
+  const std::vector<uint64_t> &words() const { return words_; }
+  std::vector<uint64_t> take() { return std::move(words_); }
+
+private:
+  uint32_t k_{0};
+  uint32_t w_{0};
+  std::vector<uint64_t> words_;
+};
+
+// Bit per read ordinal; set bits are reads that skip chaining.
+struct ReadBitset {
+  std::vector<uint64_t> words;
+
+  explicit ReadBitset(uint64_t reads = 0) : words((reads + 63) / 64, 0) {}
+  void set(uint64_t ordinal); // thread-safe
+  bool test(uint64_t ordinal) const {
+    return ordinal / 64 < words.size() &&
+           ((words[ordinal / 64] >> (ordinal % 64)) & 1ULL) != 0;
+  }
+};
 
 struct LocalResolutionCandidate {
   uint32_t taxid{};
   uint32_t score{};
+  uint32_t support{}; // representatives chaining nearly as well as the best
 };
 
 struct LocalResolutionReadCall {
@@ -96,6 +134,11 @@ struct LocalResolutionStats {
   uint64_t dropped_broad_records{};
   uint64_t local_hits{};
   uint64_t local_absent{};
+  uint64_t skipped_reads{};
+  uint64_t probe_reads{};
+  uint64_t probe_chained{};
+  uint64_t probe_agree{};
+  bool trust_revoked{false};
   uint32_t threads{};
   uint8_t k{};
   uint16_t w{};
@@ -125,6 +168,17 @@ struct LocalResolutionTarget {
   std::string target_name;
 };
 
+// Trusted reads are chained until enough of them have been compared with the
+// core call; trust is then revoked for the sample when the two disagree too
+// often, otherwise the remaining trusted reads are skipped.
+struct TrustProbe {
+  std::unordered_map<uint64_t, uint32_t> core_species; // probe ordinal -> species
+  uint64_t last_ordinal{};
+  uint32_t target_chained{2000};
+  uint32_t min_decidable{50};
+  double min_agreement{0.7};
+};
+
 struct LocalResolutionRequest {
   std::vector<std::string> read_files;
   bool paired{false};
@@ -135,6 +189,9 @@ struct LocalResolutionRequest {
   uint32_t max_occ{};
   uint32_t min_chain{};
   uint32_t threads{};
+  const SampleKeyBitset *sample_keys{nullptr}; // replaces the read hash pass
+  const ReadBitset *skip_reads{nullptr};       // trusted reads
+  const TrustProbe *trust_probe{nullptr};      // when null, skip_reads is final
 };
 
 LocalResolutionResult run_local_resolution_engine(

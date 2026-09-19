@@ -61,12 +61,15 @@ namespace ChimeraClassify {
 	bool local_resolution_enabled = true;
 	bool write_cami_profile = false;
 	bool write_profile_read_trace = false;
-	uint32_t local_resolution_top_groups = 32;
-	uint32_t local_resolution_species_per_group = 8;
-		uint32_t local_resolution_targets_per_species = 8;
-		uint32_t local_resolution_max_targets_per_group = 32;
-		uint64_t local_resolution_max_anchor_bytes = 0;
-		double local_resolution_divergence_threshold = 0.5;
+	// Local read resolution. Reads whose core call is trusted (posterior and
+	// raw-hit evidence both high) keep it; every other read is decided by
+	// chaining against a sample panel of representative genomes.
+	double local_resolution_trust_posterior = 0.95;
+	double local_resolution_trust_evidence = 0.20;
+	uint64_t local_resolution_min_species_reads = 2;
+	double local_resolution_min_species_mass = 1.0;
+	uint32_t local_resolution_targets_per_species = 16;
+	uint64_t local_resolution_max_anchor_bytes = 2ULL << 30;
 	int lpc_diag_bin = 256;
 	uint32_t lpc_max_occ = 500;
 	uint32_t lpc_min_chain = 4;
@@ -107,8 +110,10 @@ namespace ChimeraClassify {
 				std::array<float, 4> domain_evidence_per_hash{};
 				uint8_t domain_evidence_mask{ 0 };
 				double evaluated{ 0.0 }; // 实际参与判别的 feature 数，用于归一化
+				double top_raw_score{ 0.0 }; // best raw candidate hit count
 				uint32_t query_length{ 0 };
 				uint32_t profile_response_taxid{ 0 };
+				bool local_resolution_applied{ false }; // decided by local read resolution
 				std::string reject_reason; // 为空表示未拒绝或接受
 				std::string best_taxid_hint; // 最佳候选 taxid（即使未被接受）
 				std::string presence_note; // presence feedback applied to this read (empty: none)

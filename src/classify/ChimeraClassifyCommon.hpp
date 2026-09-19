@@ -29,6 +29,9 @@
 namespace ChimeraClassify::presence_call {
 class SampleSketchCollector;
 }
+namespace ChimeraClassify {
+class SampleKeyBitset;
+}
 
 namespace ChimeraClassify {
 
@@ -933,7 +936,8 @@ void classify_streaming_spool(
     const WeightingContext &weightCtx, PresenceSummary *presenceSummary,
     std::vector<QueueThrottle> *queueThrottles = nullptr,
     ClassifyProgressCounters *progress = nullptr,
-    presence_call::SampleSketchCollector *sampleSketch = nullptr);
+    presence_call::SampleSketchCollector *sampleSketch = nullptr,
+    SampleKeyBitset *sampleKeys = nullptr);
 
 void classify(ChimeraBuild::IMCFConfig &imcfConfig,
               std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,

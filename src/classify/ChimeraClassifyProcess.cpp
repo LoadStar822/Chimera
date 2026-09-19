@@ -1,4 +1,5 @@
 #include "ChimeraClassifyCommon.hpp"
+#include "ChimeraLpcClassify.hpp"
 #include "ChimeraPresenceCall.hpp"
 
 #include <utils/Parse.hpp>
@@ -2625,7 +2626,8 @@ void classify_streaming_spool(
     const WeightingContext &weightCtx, PresenceSummary *presenceSummary,
     std::vector<QueueThrottle> *queueThrottles,
     ClassifyProgressCounters *progress,
-    presence_call::SampleSketchCollector *sampleSketch) {
+    presence_call::SampleSketchCollector *sampleSketch,
+    SampleKeyBitset *sampleKeys) {
 
 #pragma omp parallel
   {
@@ -2731,6 +2733,14 @@ void classify_streaming_spool(
             sampleSketch->absorb(std::move(sketchHashes), 0, 0);
             sketchHashes = std::vector<uint64_t>();
             sketchHashes.reserve(1 << 16);
+          }
+        }
+        if (sampleKeys != nullptr) {
+          for (const auto &seq : batch.seqs) {
+            sampleKeys->add(seq);
+          }
+          for (const auto &seq : batch.seqs2) {
+            sampleKeys->add(seq);
           }
         }
         processBatchCompactToSpool(
