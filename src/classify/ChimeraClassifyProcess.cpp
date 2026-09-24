@@ -51,6 +51,27 @@ static uint32_t profile_response_taxid_from_candidates(
   return taxid;
 }
 
+// Wait used by a worker whose read queue is empty. Reads are parsed by one
+// thread, so workers often wait on it; spinning on yield() alone turns that
+// wait into kernel time. Yield a few times, then sleep in short steps.
+class IdleWait {
+public:
+  void reset() { rounds_ = 0; }
+
+  void wait() {
+    if (rounds_ < kYieldRounds) {
+      ++rounds_;
+      std::this_thread::yield();
+      return;
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+  }
+
+private:
+  static constexpr unsigned kYieldRounds = 64;
+  unsigned rounds_ = 0;
+};
+
 } // namespace
 
 static inline uint64_t splitmix64(uint64_t x) {
@@ -2518,8 +2539,10 @@ void classify_streaming(
     PresenceAccumulator *presencePtr =
         presenceSummary ? &presenceLocal : nullptr;
 
+    IdleWait idle;
     for (;;) {
       if (readQueue.try_dequeue(batch)) {
+        idle.reset();
         release_queue_slot(queueThrottle, estimate_batch_bytes(batch));
         processBatch(batch, imcfConfig, tax, config, imcf,
                      localClassifyResults, feature_params, feature_min_len,
@@ -2529,7 +2552,7 @@ void classify_streaming(
       if (producer_done.load(std::memory_order_acquire)) {
         break;
       }
-      std::this_thread::yield();
+      idle.wait();
     }
 
 #pragma omp critical
@@ -2666,8 +2689,10 @@ void classify_streaming_spool(
     PresenceAccumulator *presencePtr =
         presenceSummary ? &presenceLocal : nullptr;
 
+    IdleWait idle;
     for (;;) {
       if (readQueue.try_dequeue(batch)) {
+        idle.reset();
         const size_t batch_size = batch.ids.size();
         release_queue_slot(queueThrottle, estimate_batch_bytes(batch));
         if (sampleSketch != nullptr) {
@@ -2711,7 +2736,7 @@ void classify_streaming_spool(
       if (producer_done.load(std::memory_order_acquire)) {
         break;
       }
-      std::this_thread::yield();
+      idle.wait();
     }
 
 #pragma omp critical
