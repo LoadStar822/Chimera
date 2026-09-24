@@ -192,6 +192,17 @@ def _directory_has_taxdump(path: Path) -> bool:
     return path.is_dir() and (path / "nodes.dmp").is_file()
 
 
+def _database_taxdump_dirs(database_path: Path):
+    # where the native build keeps a database's taxonomy
+    if database_path.is_dir():
+        return [database_path / "taxonomy" / "taxdump", database_path / "taxonomy"]
+    core = database_path if database_path.suffix == ".imcf" else database_path.with_suffix(".imcf")
+    return [
+        core.parent / f"{core.stem}.profiledb" / "taxonomy" / "taxdump",
+        core.parent / "taxonomy" / "taxdump",
+    ]
+
+
 def _find_local_taxdump_archive(search_root: Path):
     candidates = [
         search_root / "taxdump.tar.gz",
@@ -311,7 +322,9 @@ def _prepare_build_taxonomy_dir(args) -> None:
             )
         args.taxonomy_dir = str(taxonomy_dir)
         return
-    if getattr(args, "no_local_resolution", False):
+    if getattr(args, "no_local_resolution", False) and getattr(
+        args, "no_presence_sketch", False
+    ):
         return
 
     kind = str(getattr(args, "taxonomy_kind", "auto") or "auto").strip().lower()
@@ -554,6 +567,54 @@ def parse_arguments():
     )
     add_build_arguments(build_parser, require_input=True)
 
+    # Presence sketch subcommand
+    sketch_parser = subparsers.add_parser(
+        "presence-sketch",
+        help="Build the genome presence sketch of an existing database",
+    )
+    sketch_parser.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help="Build input file (target.tsv) the database was built from",
+    )
+    sketch_parser.add_argument(
+        "-d",
+        "--database",
+        default=None,
+        help="Database the sketch belongs to (sets the default output location and taxonomy)",
+    )
+    sketch_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Explicit sketch path (default: the database's presence sketch)",
+    )
+    sketch_parser.add_argument(
+        "--taxonomy-dir",
+        dest="taxonomy_dir",
+        default=None,
+        help="Directory containing NCBI taxdump nodes.dmp (default: the database taxonomy, "
+        "or a taxdump/ directory beside the input file)",
+    )
+    sketch_parser.add_argument(
+        "--scaled", type=int, default=None, help="FracMinHash scaled factor (keep one k-mer in N)"
+    )
+    sketch_parser.add_argument(
+        "--max-refs",
+        dest="max_refs",
+        type=int,
+        default=None,
+        help="Genomes kept per species (0 = all, recommended)",
+    )
+    sketch_parser.add_argument(
+        "-t",
+        "--threads",
+        type=int,
+        default=default_threads(),
+        help="Number of threads for building the sketch",
+    )
+
     # Classify subcommand
     classify_parser = subparsers.add_parser("classify", help="Classify sequences")
     classify_inputs = classify_parser.add_mutually_exclusive_group(required=True)
@@ -760,6 +821,46 @@ def run_chimera(args, chimera_path=None):
         _ensure_output_directory_available(Path(args.output), "Build")
         _prepare_build_taxonomy_dir(args)
         append_build_command_args(command, args)
+
+    elif args.command == "presence-sketch":
+        if not args.database and not args.output:
+            raise RuntimeError("presence-sketch requires --database or --output")
+        input_path = Path(args.input)
+        _ensure_file_exists(input_path, "Presence sketch input file")
+        database_path = None
+        if args.database:
+            database_path = _ensure_path_exists(Path(args.database), "Presence sketch database")
+        # Without --taxonomy-dir the native command uses the database taxonomy;
+        # without one, a taxdump beside the input is used.
+        taxonomy_dir = Path(args.taxonomy_dir).resolve() if args.taxonomy_dir else None
+        if taxonomy_dir is None and not (
+            database_path is not None
+            and any(_directory_has_taxdump(d) for d in _database_taxdump_dirs(database_path))
+        ):
+            input_dir = input_path.resolve().parent
+            taxonomy_dir = next(
+                (d for d in (input_dir / "taxdump", input_dir) if _directory_has_taxdump(d)),
+                None,
+            )
+            if taxonomy_dir is None:
+                raise FileNotFoundError(
+                    "No taxonomy found for the presence sketch; pass --taxonomy-dir with the "
+                    "NCBI taxdump the database was built with"
+                )
+        if taxonomy_dir is not None and not _directory_has_taxdump(taxonomy_dir):
+            raise FileNotFoundError(f"--taxonomy-dir must contain nodes.dmp: {taxonomy_dir}")
+        command.extend(["-i", args.input])
+        if args.database:
+            command.extend(["-d", args.database])
+        if args.output:
+            command.extend(["-o", args.output])
+        command.extend(["-t", str(args.threads)])
+        if taxonomy_dir is not None:
+            command.extend(["--taxonomy-dir", str(taxonomy_dir)])
+        if args.scaled is not None:
+            command.extend(["--scaled", str(args.scaled)])
+        if args.max_refs is not None:
+            command.extend(["--max-refs", str(args.max_refs)])
 
     elif args.command == "classify":
         database_path = Path(args.database).expanduser()

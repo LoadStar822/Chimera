@@ -91,6 +91,7 @@ private:
   };
   void write_header();
   std::filesystem::path path_;
+  std::filesystem::path partial_path_;
   Params params_;
   uint32_t max_refs_{0};
   uint64_t input_genomes_{0};

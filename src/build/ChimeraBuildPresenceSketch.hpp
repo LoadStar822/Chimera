@@ -21,7 +21,7 @@ struct PresenceSketchBuildOptions {
 
 struct PresenceSketchBuildStats {
   uint64_t genomes{0};
-  uint64_t unreadable_genomes{0};
+  uint64_t genomes_without_markers{0};
   uint64_t species{0};
   uint64_t species_capped{0};   // species with more genomes than max_refs
   uint64_t references{0};       // genomes kept in the sketch

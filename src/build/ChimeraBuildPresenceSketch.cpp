@@ -274,10 +274,10 @@ build_presence_sketch(const PresenceSketchBuildOptions &options) {
   std::mutex error_mutex;
   std::exception_ptr first_error;
   std::atomic<bool> stop{false};
-  auto record_error = [&]() {
+  auto record_error = [&](std::exception_ptr error) {
     std::lock_guard<std::mutex> lock(error_mutex);
     if (!first_error) {
-      first_error = std::current_exception();
+      first_error = error;
     }
     stop.store(true);
   };
@@ -307,7 +307,7 @@ build_presence_sketch(const PresenceSketchBuildOptions &options) {
   std::vector<char> readable(tasks.size(), 0);
   std::atomic<size_t> next_genome{0};
   std::atomic<size_t> done_genomes{0};
-  std::atomic<uint64_t> unreadable{0};
+  std::atomic<uint64_t> without_markers{0};
   std::atomic<uint64_t> total_bases{0};
   const size_t genome_workers =
       std::max<size_t>(1, std::min<size_t>(options.threads, tasks.size()));
@@ -321,16 +321,18 @@ build_presence_sketch(const PresenceSketchBuildOptions &options) {
       try {
         GenomeSketch sketch = sketch_genome(tasks[idx], idx, params);
         if (sketch.bases == 0 || sketch.keys.empty()) {
-          unreadable.fetch_add(1);
+          without_markers.fetch_add(1);
         } else {
           total_bases.fetch_add(sketch.bases);
           genome_sketches[idx] = std::move(sketch);
           readable[idx] = 1;
         }
-      } catch (const std::exception &) {
-        unreadable.fetch_add(1);
+      } catch (const std::exception &ex) {
+        record_error(std::make_exception_ptr(std::runtime_error(
+            "presence sketch build: cannot read reference " + tasks[idx].path +
+            ": " + ex.what())));
       } catch (...) {
-        record_error();
+        record_error(std::current_exception());
       }
       const size_t finished = done_genomes.fetch_add(1) + 1;
       if (options.verbose && (finished % 10000 == 0)) {
@@ -379,12 +381,12 @@ build_presence_sketch(const PresenceSketchBuildOptions &options) {
         writer.add_species(
             build_species_markers(species, tasks, sketches, selected));
       } catch (...) {
-        record_error();
+        record_error(std::current_exception());
       }
     }
   });
   writer.finish();
-  stats.unreadable_genomes = unreadable.load();
+  stats.genomes_without_markers = without_markers.load();
   stats.bases = total_bases.load();
   stats.species_capped = capped.load();
   stats.keys = writer.keys_written();
@@ -401,9 +403,9 @@ build_presence_sketch(const PresenceSketchBuildOptions &options) {
   if (options.verbose) {
     std::cout << "presence sketch written: " << options.output_path.string()
               << "\n  genomes      " << stats.genomes
-              << (stats.unreadable_genomes > 0
-                      ? " (" + std::to_string(stats.unreadable_genomes) +
-                            " unreadable)"
+              << (stats.genomes_without_markers > 0
+                      ? " (" + std::to_string(stats.genomes_without_markers) +
+                            " without markers)"
                       : "")
               << "\n  species      " << stats.species
               << (stats.species_capped > 0

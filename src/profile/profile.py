@@ -200,7 +200,7 @@ def _load_ncbi_taxonomy() -> Any:
             "The auxiliary `chimera profile` command requires ete3 for NCBI "
             "taxonomy lookup. Install it separately, for example "
             "`conda install -c conda-forge ete3` or "
-            "`pip install chimera[legacy-profile]`, or use the native "
+            "`pip install ete3`, or use the native "
             "`chimera classify` profile output instead."
         ) from exc
     return NCBITaxa()

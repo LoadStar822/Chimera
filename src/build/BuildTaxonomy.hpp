@@ -9,6 +9,9 @@
 namespace ChimeraBuild
 {
 
+	// Taxids are used as given in the build input, without merged.dmp
+	// remapping, so that LPC and presence data carry the same labels as the
+	// core index and the classify-side taxonomy.
 	class BuildTaxonomy
 	{
 	  public:
@@ -19,7 +22,6 @@ namespace ChimeraBuild
 
 	  private:
 		std::vector<uint32_t> parent_;
-		std::vector<uint32_t> merged_;
 		std::vector<uint8_t> is_species_;
 		std::vector<uint8_t> is_genus_;
 	};

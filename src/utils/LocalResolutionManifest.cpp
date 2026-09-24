@@ -327,6 +327,14 @@ bool stamp_presence_sketch(const std::filesystem::path &core_path,
       out << line << '\n';
     }
     write_stamp(out, "presence_sketch", stamp_artifact(base_dir, sketch_path));
+    // replace the manifest only with a completely written one
+    out.close();
+    if (!out) {
+      std::error_code ec;
+      std::filesystem::remove(tmp_path, ec);
+      throw std::runtime_error("failed to write local resolution manifest: " +
+                               tmp_path.string());
+    }
   }
   std::filesystem::rename(tmp_path, manifest_path);
   return true;

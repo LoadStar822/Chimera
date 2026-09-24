@@ -72,26 +72,27 @@ void sort_unique(std::vector<uint64_t> &hashes) {
 SketchWriter::SketchWriter(const std::filesystem::path &path,
                            const Params &params, uint32_t max_refs,
                            uint64_t input_genomes)
-    : path_(path), params_(params), max_refs_(max_refs),
-      input_genomes_(input_genomes) {
+    : path_(path), partial_path_(path.string() + ".partial"),
+      params_(params), max_refs_(max_refs), input_genomes_(input_genomes) {
   const auto parent = path_.parent_path();
   if (!parent.empty()) {
     std::filesystem::create_directories(parent);
   }
-  out_.open(path_, std::ios::binary | std::ios::trunc);
+  out_.open(partial_path_, std::ios::binary | std::ios::trunc);
   if (!out_) {
     throw std::runtime_error("failed to open presence sketch for writing: " +
-                             path_.string());
+                             partial_path_.string());
   }
   write_header();
 }
 
+// An unfinished sketch is discarded: only finish() puts a sketch at path_, so
+// a failed build never leaves a truncated file where classify would load it.
 SketchWriter::~SketchWriter() {
   if (!finished_) {
-    try {
-      finish();
-    } catch (...) {
-    }
+    out_.close();
+    std::error_code ec;
+    std::filesystem::remove(partial_path_, ec);
   }
 }
 
@@ -187,8 +188,10 @@ void SketchWriter::finish() {
   out_.flush();
   out_.close();
   if (!out_) {
-    throw std::runtime_error("failed to finalize presence sketch: " + path_.string());
+    throw std::runtime_error("failed to finalize presence sketch: " +
+                             partial_path_.string());
   }
+  std::filesystem::rename(partial_path_, path_);
 }
 
 // ----------------------------------------------------------------------------
@@ -285,6 +288,12 @@ bool SketchIndex::load_species(uint32_t species, SpeciesMarkers &markers) const 
           static_cast<std::streamsize>(entry.index_count * sizeof(uint32_t)));
   if (!in) {
     throw std::runtime_error("corrupt presence sketch species block");
+  }
+  for (const uint32_t i : markers.index) {
+    if (i >= markers.keys.size()) {
+      throw std::runtime_error("corrupt presence sketch marker index for species " +
+                               std::to_string(species));
+    }
   }
   return true;
 }

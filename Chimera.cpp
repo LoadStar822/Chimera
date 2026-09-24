@@ -24,6 +24,7 @@
 #include <buildConfig.hpp>
 #include <classifyConfig.hpp>
 #include <utils/PresenceSketch.hpp>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -160,6 +161,22 @@ void validate_build_config(ChimeraBuild::BuildConfig &buildConfig,
     throw CLI::ValidationError("Local resolution window must be greater than 0");
   }
   buildConfig.verbose = !buildQuietRequested;
+}
+
+// The presence sketch is built after the core index, from the taxonomy the
+// build copies into the database; check it exists before the long build.
+void require_presence_taxonomy(const ChimeraBuild::BuildConfig &buildConfig) {
+  std::filesystem::path source = buildConfig.taxonomy_dir;
+  if (source.empty()) {
+    if (const char *env_dir = std::getenv("CHIMERA_NCBI_TAXDUMP_DIR")) {
+      source = env_dir;
+    }
+  }
+  if (source.empty() || !std::filesystem::exists(source / "nodes.dmp")) {
+    throw std::runtime_error(
+        "the presence sketch needs taxonomy nodes.dmp: pass --taxonomy-dir "
+        "(or set CHIMERA_NCBI_TAXDUMP_DIR), or build with --no-presence-sketch");
+  }
 }
 
 } // namespace
@@ -501,6 +518,9 @@ int main(int argc, char **argv) {
 
   try {
     if (*build) {
+      if (!buildNoPresenceSketch) {
+        require_presence_taxonomy(buildConfig);
+      }
       ChimeraBuild::run(buildConfig);
       if (!buildNoPresenceSketch) {
         // presence sketch sidecar, built from the same input as the database
