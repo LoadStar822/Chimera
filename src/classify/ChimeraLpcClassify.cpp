@@ -32,12 +32,18 @@
 
 #include <dna4_traits.hpp>
 
+#include <dirent.h>
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 namespace {
 
 constexpr size_t kMaxChainTokensPerRead = 256;
+// A read that does not chain on its sampled anchors is chained again on all of
+// them (evenly sampled down to this many): once a noisy long read is sampled
+// to kMaxChainTokensPerRead, too few exact anchors share a diagonal.
+constexpr size_t kMaxRescueTokensPerRead = 16384;
 constexpr size_t kLocalResolutionReadBatchSize = 4096;
 
 struct PendingRead {
@@ -215,9 +221,58 @@ struct DirectTargetPlan {
   uint64_t skipped_shards{};
 };
 
+// Every worker owns a reader and RLIMIT_NOFILE is process-wide: each reader
+// caches as many shard fds as the limit leaves per worker (at most 16), and
+// when the limit cannot give every worker one, fewer workers run.
+struct DirectReaderBudget {
+  uint32_t workers{};
+  size_t fds_per_reader{};
+};
+
+DirectReaderBudget direct_reader_budget(uint32_t workers) {
+  constexpr size_t kDesired = 16;
+  workers = std::max<uint32_t>(1, workers);
+  struct rlimit limit {};
+  if (::getrlimit(RLIMIT_NOFILE, &limit) != 0 ||
+      limit.rlim_cur == RLIM_INFINITY) {
+    return {workers, kDesired};
+  }
+#ifdef __linux__
+  const char *fdDirectory = "/proc/self/fd";
+#else
+  const char *fdDirectory = "/dev/fd";
+#endif
+  rlim_t openCount = 0;
+  if (DIR *directory = ::opendir(fdDirectory)) {
+    while (const auto *entry = ::readdir(directory)) {
+      if (entry->d_name[0] >= '0' && entry->d_name[0] <= '9') {
+        ++openCount;
+      }
+    }
+    ::closedir(directory);
+  }
+  // Headroom for the handles other stages open while the readers are live.
+  constexpr rlim_t headroom = 32;
+  const rlim_t reserved = openCount + headroom;
+  const rlim_t available =
+      limit.rlim_cur > reserved ? limit.rlim_cur - reserved : 0;
+  if (available == 0) {
+    throw std::runtime_error(
+        "local resolution has no file descriptors left: RLIMIT_NOFILE=" +
+        std::to_string(limit.rlim_cur) + ", open=" + std::to_string(openCount) +
+        "; raise the process file descriptor limit");
+  }
+  if (available < workers) {
+    return {static_cast<uint32_t>(available), 1};
+  }
+  return {workers,
+          static_cast<size_t>(std::min<rlim_t>(kDesired, available / workers))};
+}
+
 class DirectShardReader {
 public:
-  DirectShardReader() = default;
+  explicit DirectShardReader(size_t max_cached_fds)
+      : max_cached_fds_(std::max<size_t>(1, max_cached_fds)) {}
   DirectShardReader(const DirectShardReader &) = delete;
   DirectShardReader &operator=(const DirectShardReader &) = delete;
 
@@ -258,7 +313,7 @@ public:
 private:
   // Bounded per-reader cache: a panel may span thousands of shards and every
   // worker owns a reader, so unbounded caching runs into the fd limit.
-  static constexpr size_t kMaxCachedFds = 16;
+  size_t max_cached_fds_;
 
   int fd_for(const std::filesystem::path &path) {
     const std::string key = path.string();
@@ -266,7 +321,7 @@ private:
     if (found != fds_.end()) {
       return found->second;
     }
-    if (fds_.size() >= kMaxCachedFds) {
+    if (fds_.size() >= max_cached_fds_) {
       const auto oldest = fds_.find(open_order_.front());
       if (oldest != fds_.end()) {
         ::close(oldest->second);
@@ -754,9 +809,9 @@ load_shard_manifest(const std::filesystem::path &manifest_path) {
   return out;
 }
 
-void select_chain_anchors_inplace(
-    std::vector<chimera::native_bounded::Anchor> &anchors) {
-  const size_t token_budget = std::min(anchors.size(), kMaxChainTokensPerRead);
+void select_anchors_inplace(
+    std::vector<chimera::native_bounded::Anchor> &anchors, size_t budget) {
+  const size_t token_budget = std::min(anchors.size(), budget);
   if (token_budget == anchors.size()) {
     return;
   }
@@ -823,12 +878,12 @@ extract_read_records(const std::vector<PendingRead> &pending_reads, uint32_t k,
       auto anchors =
           chimera::native_bounded::extract_minimizers(pending.sequence, k, w);
       size_t anchorCount = anchors.size();
-      select_chain_anchors_inplace(anchors);
+      select_anchors_inplace(anchors, kMaxRescueTokensPerRead);
       if (!pending.mate_sequence.empty()) {
         auto mateAnchors = chimera::native_bounded::extract_minimizers(
             pending.mate_sequence, k, w);
         anchorCount += mateAnchors.size();
-        select_chain_anchors_inplace(mateAnchors);
+        select_anchors_inplace(mateAnchors, kMaxRescueTokensPerRead);
         anchors.insert(anchors.end(),
                        std::make_move_iterator(mateAnchors.begin()),
                        std::make_move_iterator(mateAnchors.end()));
@@ -862,7 +917,7 @@ ReadRecord make_read_record(uint64_t ordinal,
       chimera::native_bounded::extract_minimizers(sequence, k, w);
   read.anchor_count = static_cast<uint32_t>(
       std::min<size_t>(anchors.size(), std::numeric_limits<uint32_t>::max()));
-  select_chain_anchors_inplace(anchors);
+  select_anchors_inplace(anchors, kMaxRescueTokensPerRead);
   read.anchors = std::move(anchors);
   return read;
 }
@@ -1007,7 +1062,7 @@ std::vector<ReadRecord> load_reads(
           pending.sequence, k, w);
       read.anchor_count = static_cast<uint32_t>(
           std::min<size_t>(anchors.size(), std::numeric_limits<uint32_t>::max()));
-      select_chain_anchors_inplace(anchors);
+      select_anchors_inplace(anchors, kMaxChainTokensPerRead);
       read.anchors = std::move(anchors);
       reads[idx] = std::move(read);
     }
@@ -1423,12 +1478,13 @@ std::vector<DirectTargetLoad> load_direct_targets_parallel(
   const uint32_t worker_count = std::max<uint32_t>(
       1, std::min<uint32_t>(threads == 0 ? 1 : threads,
                             static_cast<uint32_t>(batch_size)));
+  const DirectReaderBudget budget = direct_reader_budget(worker_count);
   std::atomic<size_t> next{0};
   std::atomic<bool> stop{false};
   std::exception_ptr error;
   std::mutex error_mutex;
   auto worker = [&]() {
-    DirectShardReader reader;
+    DirectShardReader reader(budget.fds_per_reader);
     while (!stop.load(std::memory_order_relaxed)) {
       const size_t local_idx = next.fetch_add(1, std::memory_order_relaxed);
       if (local_idx >= batch_size) {
@@ -1449,8 +1505,8 @@ std::vector<DirectTargetLoad> load_direct_targets_parallel(
     }
   };
   std::vector<std::thread> workers;
-  workers.reserve(worker_count);
-  for (uint32_t i = 0; i < worker_count; ++i) {
+  workers.reserve(budget.workers);
+  for (uint32_t i = 0; i < budget.workers; ++i) {
     workers.emplace_back(worker);
   }
   for (auto &thread : workers) {
@@ -1473,12 +1529,13 @@ std::vector<DirectTargetLoad> count_direct_targets_parallel(
   const uint32_t worker_count = std::max<uint32_t>(
       1, std::min<uint32_t>(threads == 0 ? 1 : threads,
                             static_cast<uint32_t>(work_items.size())));
+  const DirectReaderBudget budget = direct_reader_budget(worker_count);
   std::atomic<size_t> next{0};
   std::atomic<bool> stop{false};
   std::exception_ptr error;
   std::mutex error_mutex;
   auto worker = [&]() {
-    DirectShardReader reader;
+    DirectShardReader reader(budget.fds_per_reader);
     while (!stop.load(std::memory_order_relaxed)) {
       const size_t idx = next.fetch_add(1, std::memory_order_relaxed);
       if (idx >= work_items.size()) {
@@ -1501,8 +1558,8 @@ std::vector<DirectTargetLoad> count_direct_targets_parallel(
     }
   };
   std::vector<std::thread> workers;
-  workers.reserve(worker_count);
-  for (uint32_t i = 0; i < worker_count; ++i) {
+  workers.reserve(budget.workers);
+  for (uint32_t i = 0; i < budget.workers; ++i) {
     workers.emplace_back(worker);
   }
   for (auto &thread : workers) {
@@ -2178,6 +2235,47 @@ chain_read_species_scores(const ReadRecord &read,
   return scores;
 }
 
+// Chains a read on kMaxChainTokensPerRead evenly sampled anchors, and only when
+// that finds nothing, on all of its anchors. first_pass_chained reports whether
+// the sampled anchors chained.
+std::vector<TaxonScore>
+chain_read_species_scores_with_rescue(const ReadRecord &read,
+                                      const CompactPostingIndex &index,
+                                      const std::vector<TargetRecord> &targets,
+                                      int diag_bin, uint32_t min_chain,
+                                      double min_coverage,
+                                      uint32_t min_coverage_span, uint32_t k,
+                                      bool &first_pass_chained) {
+  if (read.anchors.size() <= kMaxChainTokensPerRead) {
+    auto scores = chain_read_species_scores(read, index, targets, diag_bin,
+                                            min_chain, min_coverage,
+                                            min_coverage_span, k);
+    first_pass_chained = !scores.empty();
+    return scores;
+  }
+  thread_local ReadRecord sampled;
+  sampled.ordinal = read.ordinal;
+  sampled.anchor_count = read.anchor_count;
+  sampled.length = read.length;
+  sampled.anchors.clear();
+  sampled.anchor_qids.clear();
+  const size_t total = read.anchors.size();
+  for (size_t i = 0; i < kMaxChainTokensPerRead; ++i) {
+    const size_t token_index = (i * total) / kMaxChainTokensPerRead;
+    sampled.anchors.push_back(read.anchors[token_index]);
+    sampled.anchor_qids.push_back(read.anchor_qids[token_index]);
+  }
+  auto scores = chain_read_species_scores(sampled, index, targets, diag_bin,
+                                          min_chain, min_coverage,
+                                          min_coverage_span, k);
+  first_pass_chained = !scores.empty();
+  if (first_pass_chained) {
+    return scores;
+  }
+  return chain_read_species_scores(read, index, targets, diag_bin, min_chain,
+                                   min_coverage, min_coverage_span, k);
+}
+
 struct TrustProbeState {
   const ChimeraClassify::TrustProbe *probe{nullptr};
   bool decided{false};
@@ -2230,6 +2328,7 @@ void chain_reads_to_call_store(
       [&](const std::vector<PendingRead> &pending) {
         std::vector<std::vector<TaxonScore>> batch_scores(pending.size());
         std::vector<uint8_t> batch_skipped(pending.size(), 0);
+        std::vector<uint8_t> batch_first_pass(pending.size(), 0);
         const uint32_t worker_count = std::max<uint32_t>(
             1, std::min<uint32_t>(
                    threads == 0 ? 1 : threads,
@@ -2251,16 +2350,19 @@ void chain_reads_to_call_store(
                 make_read_record(pending[idx].ordinal, pending[idx].sequence,
                                  k, w);
             assign_query_hashes(read, query_hashes);
-            auto scores = chain_read_species_scores(
+            bool firstPass = false;
+            auto scores = chain_read_species_scores_with_rescue(
                 read, index, targets, diag_bin, min_chain, min_coverage,
-                min_coverage_span, k);
+                min_coverage_span, k, firstPass);
             if (!pending[idx].mate_sequence.empty()) {
               auto mate = make_read_record(pending[idx].ordinal,
                                            pending[idx].mate_sequence, k, w);
               assign_query_hashes(mate, query_hashes);
-              auto mateScores = chain_read_species_scores(
+              bool mateFirstPass = false;
+              auto mateScores = chain_read_species_scores_with_rescue(
                   mate, index, targets, diag_bin, min_chain, min_coverage,
-                  min_coverage_span, k);
+                  min_coverage_span, k, mateFirstPass);
+              firstPass = firstPass || mateFirstPass;
               scores.insert(scores.end(),
                             std::make_move_iterator(mateScores.begin()),
                             std::make_move_iterator(mateScores.end()));
@@ -2288,6 +2390,7 @@ void chain_reads_to_call_store(
               }
             }
             batch_scores[idx] = std::move(scores);
+            batch_first_pass[idx] = firstPass ? 1 : 0;
           }
         };
         std::vector<std::thread> workers;
@@ -2315,7 +2418,7 @@ void chain_reads_to_call_store(
                 trust.probe->core_species.find(pending[i].ordinal);
             if (found != trust.probe->core_species.end()) {
               ++trust.seen;
-              if (!batch_scores[i].empty()) {
+              if (batch_first_pass[i] != 0) {
                 ++trust.chained;
                 if (batch_scores[i].front().taxid == found->second) {
                   ++trust.agree;
