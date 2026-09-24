@@ -20,12 +20,14 @@ std::filesystem::path g_tmp_work_dir = "tmp";
 
 struct SpoolChunkRecord {
   uint32_t taxidIndex{0};
+  uint64_t taskIndex{0};
   uint64_t spoolOffset{0};
   uint64_t count{0};
 };
 
 struct PendingBufferChunk {
   uint32_t taxidIndex{0};
+  uint64_t taskIndex{0};
   uint64_t bufferOffset{0};
   uint64_t count{0};
 };
@@ -148,15 +150,18 @@ private:
   std::string failureMessage;
 };
 
-inline void append_kept_hash(uint32_t taxidIndex, uint64_t hash,
-                             bool isUnique,
+// A chunk never spans two input files, so the chunks of a taxid can be put
+// back in input order afterwards (see the end of feature_count).
+inline void append_kept_hash(uint32_t taxidIndex, uint64_t taskIndex,
+                             uint64_t hash, bool isUnique,
                              std::vector<uint64_t> &threadBuffer,
                              std::vector<PendingBufferChunk> &pendingChunks,
                              uint64_t &totalSignatures,
                              uint64_t &uniqueSignatures) {
-  if (pendingChunks.empty() || pendingChunks.back().taxidIndex != taxidIndex) {
-    pendingChunks.push_back(
-        {taxidIndex, static_cast<uint64_t>(threadBuffer.size()), 0});
+  if (pendingChunks.empty() || pendingChunks.back().taxidIndex != taxidIndex ||
+      pendingChunks.back().taskIndex != taskIndex) {
+    pendingChunks.push_back({taxidIndex, taskIndex,
+                             static_cast<uint64_t>(threadBuffer.size()), 0});
   }
   threadBuffer.push_back(hash);
   ++pendingChunks.back().count;
@@ -202,8 +207,8 @@ inline void flush_feature_thread_buffer(
     return;
   }
   for (const auto &chunk : flush_chunks) {
-    localChunks.push_back(
-        {chunk.taxidIndex, chunk_offset + chunk.bufferOffset, chunk.count});
+    localChunks.push_back({chunk.taxidIndex, chunk.taskIndex,
+                           chunk_offset + chunk.bufferOffset, chunk.count});
     localCounters[chunk.taxidIndex].hash_count += chunk.count;
   }
   localSpoolOffset += static_cast<uint64_t>(buffer_size);
@@ -374,8 +379,9 @@ void feature_count(
             }
             unique_signature = decision.unique;
           }
-          append_kept_hash(task.taxidIndex, hash, unique_signature,
-                           thread_buffer, pending_buffer_chunks,
+          append_kept_hash(task.taxidIndex, static_cast<uint64_t>(idx), hash,
+                           unique_signature, thread_buffer,
+                           pending_buffer_chunks,
                            taxon_counters.total_signatures,
                            taxon_counters.unique_signatures);
           ++appended;
@@ -467,10 +473,36 @@ void feature_count(
   }
 
   if (featureLayout) {
+    // Order each taxid's chunks by input file, not by thread: which thread
+    // took which file depends on scheduling, and the IMCF build places and
+    // inserts hashes in chunkRefs order, so a thread-ordered layout made
+    // core.imcf differ between two builds of the same input.
+    struct OrderedChunk {
+      uint64_t taskIndex;
+      uint64_t spoolOffset;
+      uint16_t threadId;
+      uint64_t count;
+    };
+    std::vector<std::vector<OrderedChunk>> orderedChunks(taxidCount);
     for (size_t tid = 0; tid < static_cast<size_t>(used_threads); ++tid) {
       for (const auto &chunk : threadChunkManifests[tid]) {
-        featureLayout->perTaxid[chunk.taxidIndex].chunkRefs.push_back(
-            {static_cast<uint16_t>(tid), chunk.spoolOffset, chunk.count});
+        orderedChunks[chunk.taxidIndex].push_back(
+            {chunk.taskIndex, chunk.spoolOffset, static_cast<uint16_t>(tid),
+             chunk.count});
+      }
+    }
+    for (size_t idx = 0; idx < taxidCount; ++idx) {
+      auto &chunks = orderedChunks[idx];
+      std::sort(chunks.begin(), chunks.end(),
+                [](const OrderedChunk &a, const OrderedChunk &b) {
+                  if (a.taskIndex != b.taskIndex) {
+                    return a.taskIndex < b.taskIndex;
+                  }
+                  return a.spoolOffset < b.spoolOffset;
+                });
+      for (const auto &chunk : chunks) {
+        featureLayout->perTaxid[idx].chunkRefs.push_back(
+            {chunk.threadId, chunk.spoolOffset, chunk.count});
       }
     }
   }
