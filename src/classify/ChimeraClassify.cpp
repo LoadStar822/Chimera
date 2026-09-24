@@ -2268,6 +2268,8 @@ struct PresenceFeedback {
   const std::unordered_set<uint32_t> *present{nullptr};
   const std::unordered_set<uint32_t> *absent{nullptr};
   bool genus_fallback{false};
+  // absent species -> genus of the species that claimed most of its markers
+  const std::unordered_map<uint32_t, uint32_t> *claimant_genus{nullptr};
 };
 
 struct PresenceFeedbackSummary {
@@ -2296,7 +2298,12 @@ static uint32_t taxid_text_to_species(
     const std::string &taxidText,
     const ChimeraClassify::NcbiTaxdump *ncbiTaxdump);
 
-// Moves a read of an absent species to its best present candidate, else withdraws it.
+// Moves a read of an absent species to its best present candidate when that
+// candidate shares the absent species' genus. Otherwise the species that
+// claimed the absent species' markers can still vouch for a genus: the
+// candidate's genus when the claimant belongs to it, else the absent
+// species' own genus when the claimant belongs to that. Any other read is
+// withdrawn.
 static bool apply_presence_feedback(
     ChimeraClassify::classifyResult &result, const PresenceFeedback &feedback,
     const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
@@ -2312,6 +2319,15 @@ static bool apply_presence_feedback(
   if (species == 0 || feedback.absent->count(species) == 0) {
     return false;
   }
+  const bool checkGenus = ncbiTaxdump != nullptr && ncbiTaxdump->enabled();
+  const uint32_t genus = checkGenus ? ncbiTaxdump->to_genus(species) : 0;
+  uint32_t claimantGenus = 0;
+  if (checkGenus && feedback.claimant_genus != nullptr) {
+    const auto it = feedback.claimant_genus->find(species);
+    if (it != feedback.claimant_genus->end()) {
+      claimantGenus = it->second;
+    }
+  }
   if (feedback.present != nullptr) {
     for (const auto &[candidate, weight] : result.posteriors) {
       if (!(weight > 0.0) || candidate.empty() || candidate == "unclassified") {
@@ -2323,21 +2339,32 @@ static bool apply_presence_feedback(
           feedback.present->count(candidateSpecies) == 0) {
         continue;
       }
+      // A present candidate from another genus is almost never the source of
+      // the read, but its genus often is when the claimant shares it.
+      if (checkGenus) {
+        const uint32_t candidateGenus = ncbiTaxdump->to_genus(candidateSpecies);
+        if (genus == 0 || candidateGenus != genus) {
+          if (claimantGenus != 0 && candidateGenus == claimantGenus) {
+            result.taxidCount.assign(
+                1, {std::to_string(candidateGenus), originalCount});
+            result.presence_note = "claimant_genus_from:" + original;
+            ++stats.presence_to_genus;
+            return true;
+          }
+          break;
+        }
+      }
       result.taxidCount.assign(1, {candidate, originalCount});
       result.presence_note = "reassigned_from:" + original;
       ++stats.presence_reassigned;
       return true;
     }
   }
-  if (feedback.genus_fallback && ncbiTaxdump != nullptr &&
-      ncbiTaxdump->enabled()) {
-    const uint32_t genus = ncbiTaxdump->to_genus(species);
-    if (genus != 0) {
-      result.taxidCount.assign(1, {std::to_string(genus), originalCount});
-      result.presence_note = "genus_fallback_from:" + original;
-      ++stats.presence_to_genus;
-      return true;
-    }
+  if (genus != 0 && (feedback.genus_fallback || claimantGenus == genus)) {
+    result.taxidCount.assign(1, {std::to_string(genus), originalCount});
+    result.presence_note = "genus_fallback_from:" + original;
+    ++stats.presence_to_genus;
+    return true;
   }
   result.taxidCount.assign(1, {std::string("unclassified"), 0.0});
   result.reject_reason = "absent_species";
@@ -2736,9 +2763,12 @@ static void accumulate_localmix_profile_candidates(
     const ChimeraClassify::classifyResult &result,
     const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
     SpeciesProfileMasses &masses, std::ostream *profileReadTraceOs,
+    bool presenceGenus,
     const std::unordered_set<uint32_t> *absentSpecies = nullptr) {
   ++masses.input_reads;
-  if (result.taxidCount.empty() ||
+  // a read that presence moved to a genus carries no species mass, here as in
+  // the final-decision profile; its posterior must not spread it back
+  if (presenceGenus || result.taxidCount.empty() ||
       result.taxidCount.front().first == "unclassified") {
     return;
   }
@@ -4233,12 +4263,17 @@ static void write_spool_output_part(
           } else {
             apply_local_resolution_result(result, localDecision);
           }
-          if (presenceFeedback != nullptr) {
-            apply_presence_feedback(result, *presenceFeedback, ncbiTaxdump,
-                                    partStats);
+          // a read that presence moved to a genus carries no species mass
+          bool presenceGenus = false;
+          if (presenceFeedback != nullptr &&
+              apply_presence_feedback(result, *presenceFeedback, ncbiTaxdump,
+                                      partStats)) {
+            presenceGenus =
+                result.presence_note.rfind("genus_fallback_from:", 0) == 0 ||
+                result.presence_note.rfind("claimant_genus_from:", 0) == 0;
           }
           const uint32_t decisionSpecies =
-              result.taxidCount.empty() ||
+              presenceGenus || result.taxidCount.empty() ||
                       result.taxidCount.front().first == "unclassified"
                   ? 0
                   : taxid_text_to_species(result.taxidCount.front().first,
@@ -4247,6 +4282,7 @@ static void write_spool_output_part(
             accumulate_localmix_profile_candidates(
                 result, ncbiTaxdump, partStats.localmix_masses,
                 profileReadTraceOs.is_open() ? &profileReadTraceOs : nullptr,
+                presenceGenus,
                 presenceFeedback != nullptr ? presenceFeedback->absent
                                             : nullptr);
           } else if (profileReadTraceOs.is_open()) {
@@ -5602,6 +5638,7 @@ static void write_spool_em_results(
   // presence calling: measure per-species exposure, judge, feed the calls back
   ChimeraClassify::presence_call::CallResult presenceCalls;
   PresenceFeedback presenceFeedback;
+  std::unordered_map<uint32_t, uint32_t> presenceClaimantGenus;
   const PresenceFeedback *presenceFeedbackPtr = nullptr;
   const bool presenceActive = presenceSketch != nullptr &&
                               sampleSketch != nullptr &&
@@ -5688,6 +5725,20 @@ static void write_spool_em_results(
       presenceFeedback.absent = &presenceCalls.absent;
       presenceFeedback.genus_fallback =
           config.presence_call_fallback == "genus";
+      if (config.presence_call_fallback == "claimant" &&
+          ncbiTaxdump != nullptr && ncbiTaxdump->enabled()) {
+        for (const auto &call : presenceCalls.calls) {
+          if (call.claimant == 0 ||
+              presenceCalls.absent.count(call.species) == 0) {
+            continue;
+          }
+          const uint32_t genus = ncbiTaxdump->to_genus(call.claimant);
+          if (genus != 0) {
+            presenceClaimantGenus[call.species] = genus;
+          }
+        }
+        presenceFeedback.claimant_genus = &presenceClaimantGenus;
+      }
       presenceFeedbackPtr = &presenceFeedback;
     }
     partStats.assign(part_count, SpoolOutputPartStats{});

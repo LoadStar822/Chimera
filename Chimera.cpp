@@ -417,9 +417,11 @@ int main(int argc, char **argv) {
   classify
       ->add_option("--presence-fallback", classifyConfig.presence_call_fallback,
                    "Reads of an absent species without a present candidate "
-                   "become unclassified or move to their genus")
-      ->check(CLI::IsMember({"unclassified", "genus"}))
-      ->default_val("unclassified");
+                   "in its genus move to the genus its markers' claimant "
+                   "shares with the read (claimant), become unclassified, or "
+                   "move to their genus")
+      ->check(CLI::IsMember({"claimant", "unclassified", "genus"}))
+      ->default_val("claimant");
   classify
       ->add_option("--presence-call-tau", classifyConfig.presence_call_tau,
                    "Absent when observed private marker hits fall below tau x "

@@ -676,8 +676,9 @@ def parse_arguments():
         "--presence-fallback",
         dest="presence_fallback",
         default=None,
-        choices=["unclassified", "genus"],
-        help="Where reads of an absent species go when no present candidate explains them",
+        choices=["claimant", "unclassified", "genus"],
+        help="Where reads of an absent species go when no present candidate of its genus explains them "
+        "(default claimant: the genus the species that claimed its markers shares with the read)",
     )
     # Auxiliary profile utilities. Native abundance profiles are written by
     # `classify`; this command is for legacy aggregate conversion and Krona.

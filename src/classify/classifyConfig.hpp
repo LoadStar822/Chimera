@@ -82,7 +82,7 @@ namespace ChimeraClassify {
 	// feedback of its calls into per-read assignments.
 	bool presence_call_enabled = true;
 	std::string presence_call_sketch;               // explicit sketch path (optional)
-	std::string presence_call_fallback = "unclassified"; // unclassified|genus
+	std::string presence_call_fallback = "claimant"; // claimant|unclassified|genus
 	double presence_call_tau = 0.10;
 	double presence_call_min_retention = 0.20;
 	uint32_t presence_call_min_markers = 100;

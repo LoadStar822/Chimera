@@ -157,9 +157,9 @@ MarkerStats compute_stats(const Loaded &data, size_t ref,
         // coverage by markers shared with abundant relatives, which would
         // make a divergent low-abundance strain look like retained markers
         // are missing. The reads assigned to the species bound the coverage
-        // from below; an absence call is judged on the smaller estimate,
-        // positive evidence for an otherwise unreportable species on the
-        // multiplicity estimate alone.
+        // from below; the low-retention test of an absence call is judged on
+        // the smaller estimate, positive evidence for an otherwise
+        // unreportable species on the multiplicity estimate alone.
         s.retention_strict = s.containment / (-std::expm1(-lambda));
         double effective_lambda = lambda;
         if (s.lambda_bases > 0.0) {
@@ -407,8 +407,11 @@ CallResult call_presence(const psk::SketchIndex &index, const SampleSketch &samp
       call.best_ref_bases = data.markers.refs[best.ref].bases;
       absent = judge(best.stats, call.reason);
     }
-    if (absent && dominant < exposure.size()) {
-      // tie: the claimant does not fit the sample better; the classifier's call stands
+    if (absent && !best.found && dominant < exposure.size()) {
+      // tie: other species claimed every marker, so the private test has
+      // nothing to judge; when the claimant does not fit the sample better,
+      // the classifier's call stands. A species whose own private markers
+      // failed the test stays absent however well its full genome fits.
       std::string ignored;
       const bool own_consistent = !judge(full[i].stats, ignored);
       const double own = full[i].stats.retention;
