@@ -425,6 +425,7 @@ struct SeqProfileRow {
   double assigned_features{0.0};
   double unique_features{0.0};
   double sequence_abundance{0.0};
+  double base_abundance{0.0};
   double feature_abundance{0.0};
   double effective_length{0.0};
   double effective_callable_signatures{0.0};
@@ -436,6 +437,7 @@ struct SeqProfileRow {
   double feature_length_normalized_abundance{0.0};
   double feature_sqrt_length_normalized_abundance{0.0};
   uint32_t source_count{0};
+  double assigned_bases{0.0};
 };
 
 struct SeqProfileFit {
@@ -450,6 +452,8 @@ struct SeqProfileFit {
 
 struct ProfileReadTracePlan {
   bool use_localmix_response{false};
+  // abundance in bases: a read contributes its assigned bases, not one read
+  bool base_units{false};
   std::unordered_map<uint32_t, double> contribution_scale;
 };
 
@@ -462,6 +466,7 @@ struct ProfileReadTraceRecord {
   uint64_t read_ordinal{0};
   std::string read_id;
   uint32_t decision_species_taxid{0};
+  uint32_t query_length{0};
   std::vector<ProfileReadTraceEdge> edges;
 };
 
@@ -471,10 +476,12 @@ enum class PrimaryProfileScale {
   CallableNormalized,
   UniqueCallableNormalized,
   SequenceAbundance,
+  BaseAbundance,
 };
 
 struct SpeciesProfileMasses {
   std::unordered_map<uint32_t, double> assigned_reads;
+  std::unordered_map<uint32_t, double> assigned_bases;
   std::unordered_map<uint32_t, double> unique_reads;
   std::unordered_map<uint32_t, double> assigned_features;
   std::unordered_map<uint32_t, double> unique_features;
@@ -2746,6 +2753,8 @@ static void write_profile_read_trace_raw_record(
   os->write(reinterpret_cast<const char *>(&idSize), sizeof(idSize));
   os->write(reinterpret_cast<const char *>(&decisionSpecies),
             sizeof(decisionSpecies));
+  os->write(reinterpret_cast<const char *>(&result.query_length),
+            sizeof(result.query_length));
   os->write(reinterpret_cast<const char *>(&edgeCount), sizeof(edgeCount));
   os->write(result.id.data(), static_cast<std::streamsize>(result.id.size()));
   for (const auto &edge : edges) {
@@ -2842,6 +2851,8 @@ static void accumulate_localmix_profile_candidates(
   for (const auto &[species, score] : speciesScore) {
     const double share = score / total;
     masses.assigned_reads[species] += share;
+    masses.assigned_bases[species] +=
+        share * static_cast<double>(result.query_length);
     if (feature_weight > 0.0) {
       masses.assigned_features[species] += feature_weight * share;
     }
@@ -4499,6 +4510,7 @@ static bool read_profile_read_trace_raw_record(
   };
   readValue(idSize, "id size");
   readValue(record.decision_species_taxid, "decision species");
+  readValue(record.query_length, "query length");
   readValue(edgeCount, "edge count");
   record.read_id.resize(idSize);
   is.read(record.read_id.data(), static_cast<std::streamsize>(idSize));
@@ -4540,7 +4552,9 @@ static void write_profile_read_trace_output(
     if (scaleIt == plan.contribution_scale.end()) {
       return;
     }
-    const double contribution = assignmentWeight * scaleIt->second;
+    const double readMass =
+        plan.base_units ? static_cast<double>(record.query_length) : 1.0;
+    const double contribution = assignmentWeight * readMass * scaleIt->second;
     os << record.read_ordinal << '\t' << record.read_id << '\t'
        << record.decision_species_taxid << '\t' << species << '\t' << mode
        << '\t' << assignmentWeight << '\t' << contribution << '\t'
@@ -4675,7 +4689,8 @@ static SeqProfileFit make_profile_from_species_counts(
     const std::unordered_map<uint32_t, double> &speciesCounts,
     uint64_t inputReads, uint64_t classifiedReads,
     const chimera::presence::CoverageMeta &coverageMeta,
-    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump);
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
+    const std::unordered_map<uint32_t, double> *speciesBases = nullptr);
 
 static uint32_t strict_species_for_taxid(
     uint32_t taxid, const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
@@ -4739,6 +4754,12 @@ static SeqProfileFit make_profile_from_species_masses(
       fit.assigned_features += value;
     }
   }
+  double assigned_bases = 0.0;
+  for (const auto &[species, value] : masses.assigned_bases) {
+    if (species != 0 && value > 0.0) {
+      assigned_bases += value;
+    }
+  }
 
   const auto scale_samples =
       build_species_callable_scale_samples(coverageMeta, ncbiTaxdump);
@@ -4759,6 +4780,13 @@ static SeqProfileFit make_profile_from_species_masses(
     row.assigned_reads = value;
     if (fit.assigned_reads > 0.0) {
       row.sequence_abundance = value / fit.assigned_reads;
+    }
+    auto bases_it = masses.assigned_bases.find(species);
+    if (bases_it != masses.assigned_bases.end()) {
+      row.assigned_bases = bases_it->second;
+      if (assigned_bases > 0.0) {
+        row.base_abundance = bases_it->second / assigned_bases;
+      }
     }
     auto unique_it = masses.unique_reads.find(species);
     if (unique_it != masses.unique_reads.end()) {
@@ -4881,7 +4909,8 @@ static SeqProfileFit make_profile_from_species_counts(
     const std::unordered_map<uint32_t, double> &speciesCounts,
     uint64_t inputReads, uint64_t classifiedReads,
     const chimera::presence::CoverageMeta &coverageMeta,
-    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
+    const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
+    const std::unordered_map<uint32_t, double> *speciesBases) {
   SeqProfileFit fit;
   fit.input_reads = inputReads;
   fit.reads_with_candidates = classifiedReads;
@@ -4894,6 +4923,14 @@ static SeqProfileFit make_profile_from_species_counts(
     }
   }
   fit.assigned_reads = assigned_sum;
+  double bases_sum = 0.0;
+  if (speciesBases != nullptr) {
+    for (const auto &[species, value] : *speciesBases) {
+      if (species != 0 && value > 0.0 && speciesCounts.count(species) != 0) {
+        bases_sum += value;
+      }
+    }
+  }
 
   const auto scale_samples =
       build_species_callable_scale_samples(coverageMeta, ncbiTaxdump);
@@ -4911,6 +4948,13 @@ static SeqProfileFit make_profile_from_species_counts(
     row.unique_reads = value;
     if (assigned_sum > 0.0) {
       row.sequence_abundance = value / assigned_sum;
+    }
+    if (bases_sum > 0.0) {
+      auto bases_it = speciesBases->find(species);
+      if (bases_it != speciesBases->end()) {
+        row.assigned_bases = bases_it->second;
+        row.base_abundance = bases_it->second / bases_sum;
+      }
     }
     auto scale_it = scale_samples.find(species);
     if (scale_it != scale_samples.end()) {
@@ -4997,6 +5041,9 @@ static double primary_profile_abundance(const SeqProfileRow &row,
                ? row.unique_callable_normalized_abundance
                : row.sequence_abundance;
   }
+  if (primaryScale == PrimaryProfileScale::BaseAbundance) {
+    return row.base_abundance;
+  }
   return row.sequence_abundance;
 }
 
@@ -5013,6 +5060,8 @@ static const char *primary_profile_scale_label(
     return "unique_signature_normalized_abundance";
   case PrimaryProfileScale::SequenceAbundance:
     return "sequence_abundance";
+  case PrimaryProfileScale::BaseAbundance:
+    return "base_abundance";
   }
   return "sequence_abundance";
 }
@@ -5223,6 +5272,7 @@ static void write_classifier_response_reportable_profile_outputs(
     const SeqProfileRow *row{nullptr};
     double raw_abundance{0.0};
     double raw_percent{0.0};
+    double unit_abundance{0.0};
     double response_abundance{0.0};
     double response_percent{0.0};
     bool kept{false};
@@ -5233,7 +5283,11 @@ static void write_classifier_response_reportable_profile_outputs(
 
   constexpr const char *kProfileInput =
       "classifier_response_sparse_reportability_v1";
-  const PrimaryProfileScale kScale = primaryScale;
+  // Base units change only the reported abundance; the detection floor and
+  // read support are still judged on read counts.
+  const bool base_units = primaryScale == PrimaryProfileScale::BaseAbundance;
+  const PrimaryProfileScale kScale =
+      base_units ? PrimaryProfileScale::SequenceAbundance : primaryScale;
 
   std::vector<CandidateRow> rows;
   rows.reserve(fit.rows.size());
@@ -5248,7 +5302,7 @@ static void write_classifier_response_reportable_profile_outputs(
     }
     raw_total += abundance;
     rows.push_back(
-        CandidateRow{&row, abundance, 0.0, 0.0, 0.0, false, {}, {}, 0});
+        CandidateRow{&row, abundance, 0.0, 0.0, 0.0, 0.0, false, {}, {}, 0});
   }
 
   std::vector<double> normalized;
@@ -5259,6 +5313,18 @@ static void write_classifier_response_reportable_profile_outputs(
       entry.raw_percent = 100.0 * entry.raw_abundance;
       normalized.push_back(entry.raw_abundance);
     }
+  }
+  double base_total = 0.0;
+  if (base_units) {
+    for (const CandidateRow &entry : rows) {
+      base_total += entry.row->base_abundance;
+    }
+  }
+  for (CandidateRow &entry : rows) {
+    entry.unit_abundance =
+        !base_units ? entry.raw_abundance
+        : base_total > 0.0 ? entry.row->base_abundance / base_total
+                           : 0.0;
   }
   const double effective_taxa =
       classifier_response_effective_taxa(normalized);
@@ -5272,8 +5338,10 @@ static void write_classifier_response_reportable_profile_outputs(
                                      effective_taxa >= 32.0;
   const auto localmix_mass =
       use_localmix_response
-          ? profile_abundance_by_species(*localmixFit,
-                                         PrimaryProfileScale::SequenceAbundance)
+          ? profile_abundance_by_species(
+                *localmixFit, base_units
+                                  ? PrimaryProfileScale::BaseAbundance
+                                  : PrimaryProfileScale::SequenceAbundance)
           : std::unordered_map<uint32_t, double>{};
   const char *abundance_response_source =
       responseSourceOverride != nullptr
@@ -5333,7 +5401,7 @@ static void write_classifier_response_reportable_profile_outputs(
     }
 
     if (entry.kept) {
-      entry.response_abundance = entry.raw_abundance;
+      entry.response_abundance = entry.unit_abundance;
       if (use_localmix_response) {
         auto response_it = localmix_mass.find(row.species_taxid);
         entry.response_abundance =
@@ -5342,7 +5410,7 @@ static void write_classifier_response_reportable_profile_outputs(
             entry.reportability == "presence_evidence_reportable") {
           // below the floors the restricted response has no row; report the
           // observed mass
-          entry.response_abundance = entry.raw_abundance;
+          entry.response_abundance = entry.unit_abundance;
         }
       }
       if (!(entry.response_abundance > 0.0) ||
@@ -5384,12 +5452,18 @@ static void write_classifier_response_reportable_profile_outputs(
 
   if (profileReadTracePlan != nullptr) {
     profileReadTracePlan->use_localmix_response = use_localmix_response;
+    profileReadTracePlan->base_units = base_units;
     profileReadTracePlan->contribution_scale.clear();
-    std::unordered_map<uint32_t, double> localmixAssignedReads;
+    // a species' reported share is divided over the mass its reads carry in
+    // the fit that produced it: bases in base units, reads otherwise
+    auto source_mass = [&](const SeqProfileRow &row) {
+      return base_units ? row.assigned_bases : row.assigned_reads;
+    };
+    std::unordered_map<uint32_t, double> localmixSourceMass;
     if (use_localmix_response) {
-      localmixAssignedReads.reserve(localmixFit->rows.size());
+      localmixSourceMass.reserve(localmixFit->rows.size());
       for (const SeqProfileRow &row : localmixFit->rows) {
-        localmixAssignedReads[row.species_taxid] += row.assigned_reads;
+        localmixSourceMass[row.species_taxid] += source_mass(row);
       }
     }
     if (kept_mass > 0.0) {
@@ -5398,16 +5472,15 @@ static void write_classifier_response_reportable_profile_outputs(
           continue;
         }
         const uint32_t species = entry.row->species_taxid;
-        double assignedReads = entry.row->assigned_reads;
+        double sourceMass = source_mass(*entry.row);
         if (use_localmix_response) {
-          const auto assignedIt = localmixAssignedReads.find(species);
-          assignedReads = assignedIt == localmixAssignedReads.end()
-                              ? 0.0
-                              : assignedIt->second;
+          const auto sourceIt = localmixSourceMass.find(species);
+          sourceMass =
+              sourceIt == localmixSourceMass.end() ? 0.0 : sourceIt->second;
         }
-        if (assignedReads > 0.0) {
+        if (sourceMass > 0.0) {
           profileReadTracePlan->contribution_scale[species] =
-              (entry.response_abundance / kept_mass) / assignedReads;
+              (entry.response_abundance / kept_mass) / sourceMass;
         }
       }
     }
@@ -5634,6 +5707,7 @@ merge_localmix_profile_masses(const std::vector<SpoolOutputPartStats> &parts) {
     merged.multi_candidate_reads += src.multi_candidate_reads;
     merged.candidate_edges += src.candidate_edges;
     merge_map(merged.assigned_reads, src.assigned_reads);
+    merge_map(merged.assigned_bases, src.assigned_bases);
     merge_map(merged.unique_reads, src.unique_reads);
     merge_map(merged.assigned_features, src.assigned_features);
     merge_map(merged.unique_features, src.unique_features);
@@ -5901,16 +5975,21 @@ static void write_spool_em_results(
     throw;
   }
   std::unordered_map<uint32_t, double> decisionSpeciesCounts;
+  std::unordered_map<uint32_t, double> decisionSpeciesBases;
   uint64_t decisionClassifiedReads = 0;
   for (const auto &stats : partStats) {
     decisionClassifiedReads += stats.classified;
     for (const auto &[species, value] : stats.decision_species_counts) {
       decisionSpeciesCounts[species] += value;
     }
+    for (const auto &[species, value] : stats.decision_species_bases) {
+      decisionSpeciesBases[species] += value;
+    }
   }
   SeqProfileFit classifyDecisionProfile = make_profile_from_species_counts(
       decisionSpeciesCounts, fileInfo.classifiedNum + fileInfo.unclassifiedNum,
-      decisionClassifiedReads, coverageMeta, ncbiTaxdump);
+      decisionClassifiedReads, coverageMeta, ncbiTaxdump,
+      &decisionSpeciesBases);
   if (profileClassTaxonPriors != nullptr) {
     profileClassTaxonPriors->clear();
     if (ncbiTaxdump != nullptr && ncbiTaxdump->enabled()) {
@@ -5934,7 +6013,7 @@ static void write_spool_em_results(
   }
   const SeqProfileFit *profileOutputFit = &classifyDecisionProfile;
   const PrimaryProfileScale profileOutputScale =
-      PrimaryProfileScale::SequenceAbundance;
+      PrimaryProfileScale::BaseAbundance;
   SpeciesProfileMasses localmixMasses =
       merge_localmix_profile_masses(partStats);
   SeqProfileFit localmixProfile = make_profile_from_species_masses(
