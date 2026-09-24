@@ -24,7 +24,7 @@ Chimera is a reference-database metagenomic classifier designed for fast custom 
 - **Profile output during classification**: `chimera classify` writes both per-read assignments and `ChimeraProfile.tsv`.
 - **Interactive NCBI download wizard** for users who do not want to hand-write genome download commands.
 - **Automatic NCBI taxdump handling** during build when the Python wrapper can infer or download the taxonomy data.
-- **Optional local read resolution (LPC)** for near-neighbor or strain-like ambiguity when the database contains LPC data.
+- **Local read resolution (LPC)** re-decides the reads the core classifier cannot settle by chaining them against a panel of reference genomes chosen for the sample.
 - **Simple user workflow**: interactive genome download, automatic taxonomy handling, minimal required parameters, and classify/profile output in one command.
 
 ## Quick Links
@@ -189,7 +189,7 @@ When `target.tsv` comes from `chimera download`, the wrapper finds the adjacent 
 
 ### Local Read Resolution
 
-For NCBI databases, Chimera builds local read resolution data by default when usable taxonomy data are available. LPC is used by `classify` only when the database contains the required data and the sample contains eligible local ambiguity.
+For NCBI databases, Chimera builds local read resolution data by default when usable taxonomy data are available. When the database contains this data, `classify` runs LPC on every sample: reads whose core call is confident and well supported keep it, every other read is re-decided by chaining against a panel of reference genomes chosen for the sample, and a read that chains to nothing in the panel is left unclassified. Panel species that the sample's reads cannot tell apart (the same organism filed under several names) are reported under one name.
 
 Disable LPC during build if you want a smaller database or do not want this extra build step:
 
@@ -372,7 +372,7 @@ Internal filenames may change between releases. For reproducibility, keep the wh
   ```
 
   On managed clusters, the hard limit may be controlled by the scheduler or system administrator.
-- LPC can improve difficult local assignments but adds runtime and memory cost.
+- LPC adds a second pass over the reads and holds up to about 2 GiB of panel anchors in memory.
 - Prebuilt binaries target AVX2-capable x86-64 machines. Use a portable source build on older CPUs.
 
 ## Benchmarking
