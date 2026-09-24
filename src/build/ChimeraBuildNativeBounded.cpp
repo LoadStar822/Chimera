@@ -50,11 +50,18 @@ std::string make_target_name(size_t source_id, uint32_t contig,
 }
 
 uint32_t parse_taxid_u32(const std::string &taxid) {
+  unsigned long long value = 0;
   try {
-    return static_cast<uint32_t>(std::stoul(taxid));
+    value = std::stoull(taxid);
   } catch (...) {
     return 0;
   }
+  if (value > std::numeric_limits<uint32_t>::max()) {
+    throw std::runtime_error("taxid " + taxid +
+                             " is larger than 4294967295; taxids must fit in "
+                             "32 bits, renumber custom taxa below this limit");
+  }
+  return static_cast<uint32_t>(value);
 }
 
 

@@ -14,7 +14,7 @@ namespace ChimeraBuild
 	namespace
 	{
 
-		uint32_t parse_taxid(std::string_view text) noexcept
+		uint32_t parse_taxid(std::string_view text)
 		{
 			while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front())))
 			{
@@ -26,6 +26,12 @@ namespace ChimeraBuild
 			}
 			uint32_t value = 0;
 			const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+			if (error == std::errc::result_out_of_range)
+			{
+				throw std::runtime_error("taxonomy nodes.dmp taxid " + std::string(text) +
+				                         " is larger than 4294967295; taxids must fit in 32 bits, "
+				                         "renumber custom taxa below this limit");
+			}
 			return error == std::errc{} && end == text.data() + text.size() ? value : 0;
 		}
 

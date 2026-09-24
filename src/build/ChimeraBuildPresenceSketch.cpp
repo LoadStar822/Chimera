@@ -17,6 +17,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
@@ -72,11 +73,19 @@ std::vector<GenomeTask> parse_input(const std::filesystem::path &input) {
     if (!(iss >> task.path >> taxid_text)) {
       continue;
     }
+    unsigned long long taxid = 0;
     try {
-      task.taxid = static_cast<uint32_t>(std::stoul(taxid_text));
+      taxid = std::stoull(taxid_text);
     } catch (const std::exception &) {
       continue;
     }
+    if (taxid > std::numeric_limits<uint32_t>::max()) {
+      throw std::runtime_error("taxid " + taxid_text +
+                               " is larger than 4294967295; taxids must fit "
+                               "in 32 bits, renumber custom taxa below this "
+                               "limit");
+    }
+    task.taxid = static_cast<uint32_t>(taxid);
     std::error_code ec;
     task.bytes = std::filesystem::file_size(task.path, ec);
     if (ec) {
