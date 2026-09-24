@@ -733,17 +733,6 @@ void saveResult(const std::vector<classifyResult> &classifyResults,
 void writeResultRecord(std::ostream &os, const classifyResult &result,
                        std::ostringstream &postTopkOss);
 
-struct GroupHeat {
-  std::vector<uint32_t> score;
-  uint32_t decay_shift = 5;   // divide by 32
-  uint32_t decay_period = 64; // decay every 64 sequences
-  uint32_t counter = 0;
-
-  void ensure(size_t bins);
-  void decay_if_needed();
-  void boost(uint32_t bin, uint32_t delta);
-};
-
 struct PresenceStats {
   uint64_t score{0};
   uint64_t uniqueScore{0};
@@ -885,7 +874,7 @@ PresenceDecision evaluate_presence_coverage(
 void processSequence(
     const std::vector<uint64_t> &hashs1, size_t readLen,
     ChimeraBuild::IMCFConfig &imcfConfig, const TaxDict &tax,
-    ClassifyConfig &config, const WeightingContext &weightCtx, GroupHeat &heat,
+    ClassifyConfig &config, const WeightingContext &weightCtx,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
     uint64_t readOrdinal,
     std::vector<classifyResult> *classifyResults,
@@ -898,7 +887,7 @@ void processBatch(
     chimera::imcf::InterleavedMergedCuckooFilter &imcf,
     std::vector<classifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
-    FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
+    FileInfo &fileInfo, const WeightingContext &weightCtx,
     PresenceAccumulator *presenceAcc, ProcessScratch &scratch);
 
 void processBatchCompact(
@@ -907,7 +896,7 @@ void processBatchCompact(
     chimera::imcf::InterleavedMergedCuckooFilter &imcf,
     std::vector<CompactClassifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
-    FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
+    FileInfo &fileInfo, const WeightingContext &weightCtx,
     PresenceAccumulator *presenceAcc, ProcessScratch &scratch);
 
 void classify_streaming(

@@ -53,35 +53,6 @@ static uint32_t profile_response_taxid_from_candidates(
 
 } // namespace
 
-void GroupHeat::ensure(size_t bins) {
-  if (score.size() < bins) {
-    score.resize(bins, 0);
-  }
-}
-
-void GroupHeat::decay_if_needed() {
-  if (decay_period == 0) {
-    return;
-  }
-  ++counter;
-  if (counter >= decay_period) {
-    counter = 0;
-    for (auto &v : score) {
-      v -= (v >> decay_shift);
-    }
-  }
-}
-
-void GroupHeat::boost(uint32_t bin, uint32_t delta) {
-  if (bin >= score.size()) {
-    score.resize(static_cast<size_t>(bin) + 1, 0);
-  }
-  uint64_t next =
-      static_cast<uint64_t>(score[bin]) + static_cast<uint64_t>(delta);
-  score[bin] = static_cast<uint32_t>(
-      std::min<uint64_t>(next, std::numeric_limits<uint32_t>::max()));
-}
-
 static inline uint64_t splitmix64(uint64_t x) {
   x += 0x9e3779b97f4a7c15ULL;
   x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
@@ -634,8 +605,7 @@ static bool build_initial_candidate_surface(
     const robin_hood::unordered_flat_map<uint32_t, uint32_t> &sampleBinScore,
     uint64_t coarseTotal, double dispersion_hi, size_t binNumAll,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const TaxDict &tax,
-    const WeightingContext &weightCtx, const GroupHeat &heat,
-    ProcessScratch &scratch,
+    const WeightingContext &weightCtx, ProcessScratch &scratch,
     robin_hood::unordered_flat_map<uint32_t, uint32_t> &repRareSupport,
     robin_hood::unordered_flat_map<uint32_t, uint32_t> &genusRareSupport,
     robin_hood::unordered_flat_set<uint32_t> &lowDegPreserve) {
@@ -785,9 +755,6 @@ static bool build_initial_candidate_surface(
       uint64_t weight = 0;
       if (auto it = sampleBinScore.find(bin); it != sampleBinScore.end()) {
         weight += it->second * 4ull;
-      }
-      if (bin < heat.score.size()) {
-        weight += heat.score[bin];
       }
       if (lowDegPreserve.find(bin) != lowDegPreserve.end()) {
         weight += (1ull << 32);
@@ -1796,14 +1763,13 @@ static void finalize_read_record(
 void processSequence(
     const std::vector<uint64_t> &hashs1, size_t readLen,
     ChimeraBuild::IMCFConfig &imcfConfig, const TaxDict &tax,
-    ClassifyConfig &config, const WeightingContext &weightCtx, GroupHeat &heat,
+    ClassifyConfig &config, const WeightingContext &weightCtx,
     chimera::imcf::InterleavedMergedCuckooFilter &imcf, const std::string &id,
     uint64_t readOrdinal,
     std::vector<classifyResult> *classifyResults,
     std::vector<CompactClassifyResult> *compactResults, FileInfo &fileInfo,
     PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
   const size_t binNumAll = tax.idx2id.size();
-  heat.ensure(binNumAll);
   const double community_dispersion_s =
       clamp01(config.community_dispersion_s);
   const double dispersion_hi = community_dispersion_s;
@@ -1857,23 +1823,13 @@ void processSequence(
   robin_hood::unordered_flat_set<uint32_t> lowDegPreserve;
   bool full_surface_mode = build_initial_candidate_surface(
       routeVals, sampleBinScore, coarseTotal, dispersion_hi, binNumAll, imcf,
-      tax, weightCtx, heat, scratch, repRareSupport, genusRareSupport,
+      tax, weightCtx, scratch, repRareSupport, genusRareSupport,
       lowDegPreserve);
 
   const bool adaptive_surface_mode = expand_adaptive_candidate_surface(
       readLen, dispersion_hi, coarseTotal, repCoarseScore, genusCoarseScore,
       repRareSupport, genusRareSupport, lowDegPreserve, rankedBins, tax,
       weightCtx, binNumAll, full_surface_mode, topBins, scratch);
-  if (!full_surface_mode) {
-    for (auto bin : topBins) {
-      uint32_t delta = 1;
-      if (auto it = sampleBinScore.find(bin); it != sampleBinScore.end()) {
-        delta = std::max<uint32_t>(delta, it->second);
-      }
-      heat.boost(bin, delta);
-    }
-  }
-  heat.decay_if_needed();
 
   auto &minimizerTids = scratch.minimizerTids;
   minimizerTids.clear();
@@ -2340,7 +2296,7 @@ void processBatch(
     chimera::imcf::InterleavedMergedCuckooFilter &imcf,
     std::vector<classifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
-    FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
+    FileInfo &fileInfo, const WeightingContext &weightCtx,
     PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
 	  auto &hashs1 = scratch.hashs1;
 	  hashs1.clear();
@@ -2376,7 +2332,7 @@ void processBatch(
 	      const uint64_t ordinal =
 	          i < batch.ordinals.size() ? batch.ordinals[i] : 0;
 	      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
-	                      heat, imcf, batch.ids[i], ordinal,
+	                      imcf, batch.ids[i], ordinal,
 	                      &classifyResults,
 	                      nullptr, fileInfo, presenceAcc, scratch);
 	    }
@@ -2404,7 +2360,7 @@ void processBatch(
 	      const uint64_t ordinal =
 	          i < batch.ordinals.size() ? batch.ordinals[i] : 0;
 	      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
-	                      heat, imcf, batch.ids[i], ordinal,
+	                      imcf, batch.ids[i], ordinal,
 	                      &classifyResults,
 	                      nullptr, fileInfo, presenceAcc, scratch);
 	    }
@@ -2417,7 +2373,7 @@ static void process_compact_batch_read(
     ClassifyConfig &config, chimera::imcf::InterleavedMergedCuckooFilter &imcf,
     std::vector<CompactClassifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
-    FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
+    FileInfo &fileInfo, const WeightingContext &weightCtx,
     PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
   auto &hashs1 = scratch.hashs1;
   hashs1.clear();
@@ -2457,7 +2413,7 @@ static void process_compact_batch_read(
     hashs1.erase(std::unique(hashs1.begin(), hashs1.end()), hashs1.end());
   }
   const uint64_t ordinal = i < batch.ordinals.size() ? batch.ordinals[i] : 0;
-  processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx, heat,
+  processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
                   imcf, batch.ids[i], ordinal, nullptr, &classifyResults,
                   fileInfo, presenceAcc, scratch);
 }
@@ -2468,14 +2424,14 @@ void processBatchCompact(
     chimera::imcf::InterleavedMergedCuckooFilter &imcf,
     std::vector<CompactClassifyResult> &classifyResults,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
-    FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
+    FileInfo &fileInfo, const WeightingContext &weightCtx,
     PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
   scratch.hashs1.reserve(2048);
   const size_t count = !batch.seqs2.empty() ? batch.ids.size() : batch.seqs.size();
   for (size_t i = 0; i < count; ++i) {
     process_compact_batch_read(batch, i, imcfConfig, tax, config, imcf,
                                classifyResults, feature_params,
-                               feature_min_len, fileInfo, heat, weightCtx,
+                               feature_min_len, fileInfo, weightCtx,
                                presenceAcc, scratch);
   }
 }
@@ -2502,7 +2458,7 @@ static void processBatchCompactToSpool(
     std::ostream *spool, std::ostream *candidateSpool,
     std::ostream *sampleMixtureSpool,
     const chimera::feature::Params &feature_params, size_t feature_min_len,
-    FileInfo &fileInfo, GroupHeat &heat, const WeightingContext &weightCtx,
+    FileInfo &fileInfo, const WeightingContext &weightCtx,
     PresenceAccumulator *presenceAcc, ProcessScratch &scratch) {
   scratch.hashs1.reserve(2048);
   std::vector<CompactClassifyResult> oneResult;
@@ -2512,7 +2468,7 @@ static void processBatchCompactToSpool(
     oneResult.clear();
     process_compact_batch_read(batch, i, imcfConfig, tax, config, imcf,
                                oneResult, feature_params, feature_min_len,
-                               fileInfo, heat, weightCtx, presenceAcc,
+                               fileInfo, weightCtx, presenceAcc,
                                scratch);
     if (!oneResult.empty()) {
       write_spool_result(oneResult.front(), spool, candidateSpool,
@@ -2556,8 +2512,6 @@ void classify_streaming(
     localFileInfo.minLen = kInvalidLength;
     localFileInfo.maxLen = 0;
     localFileInfo.bpLength = 0;
-    GroupHeat heat;
-    heat.ensure(tax.idx2id.size());
     ProcessScratch scratch;
     PresenceAccumulator presenceLocal(
         presenceSummary ? presenceSummary->sketchBits : 0);
@@ -2569,7 +2523,7 @@ void classify_streaming(
         release_queue_slot(queueThrottle, estimate_batch_bytes(batch));
         processBatch(batch, imcfConfig, tax, config, imcf,
                      localClassifyResults, feature_params, feature_min_len,
-                     localFileInfo, heat, weightCtx, presencePtr, scratch);
+                     localFileInfo, weightCtx, presencePtr, scratch);
         continue;
       }
       if (producer_done.load(std::memory_order_acquire)) {
@@ -2706,8 +2660,6 @@ void classify_streaming_spool(
     localFileInfo.minLen = kInvalidLength;
     localFileInfo.maxLen = 0;
     localFileInfo.bpLength = 0;
-    GroupHeat heat;
-    heat.ensure(tax.idx2id.size());
     ProcessScratch scratch;
     PresenceAccumulator presenceLocal(
         presenceSummary ? presenceSummary->sketchBits : 0);
@@ -2748,7 +2700,7 @@ void classify_streaming_spool(
             writeFullSpool ? &spool : nullptr,
             write_candidate_spool ? &candidateSpool : nullptr,
             write_sample_mixture_spool ? &sampleMixtureSpool : nullptr,
-            feature_params, feature_min_len, localFileInfo, heat, weightCtx,
+            feature_params, feature_min_len, localFileInfo, weightCtx,
             presencePtr, scratch);
         if (progress != nullptr) {
           progress->processed_reads.fetch_add(batch_size,
@@ -2820,12 +2772,10 @@ void classify(
     localFileInfo.minLen = kInvalidLength;
     localFileInfo.maxLen = 0;
     localFileInfo.bpLength = 0;
-    GroupHeat heat;
-    heat.ensure(tax.idx2id.size());
     ProcessScratch scratch;
     while (readQueue.try_dequeue(batch)) {
       processBatch(batch, imcfConfig, tax, config, imcf, localClassifyResults,
-                   feature_params, feature_min_len, localFileInfo, heat,
+                   feature_params, feature_min_len, localFileInfo,
                    weightCtx, nullptr, scratch);
     }
 #pragma omp critical

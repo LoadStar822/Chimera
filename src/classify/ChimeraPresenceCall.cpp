@@ -339,7 +339,10 @@ CallResult call_presence(const psk::SketchIndex &index, const SampleSketch &samp
     if (full[a].stats.containment != full[b].stats.containment) {
       return full[a].stats.containment > full[b].stats.containment;
     }
-    return exposure[a].bases > exposure[b].bases;
+    if (exposure[a].bases != exposure[b].bases) {
+      return exposure[a].bases > exposure[b].bases;
+    }
+    return exposure[a].species < exposure[b].species;
   });
   ClaimMap claimed;
   result.assessed = order.size();
@@ -380,7 +383,9 @@ CallResult call_presence(const psk::SketchIndex &index, const SampleSketch &samp
     size_t dominant = exposure.size();
     size_t dominant_count = 0;
     for (const auto &[owner, count] : claimants) {
-      if (count > dominant_count) {
+      // ties go to the earlier (larger) exposure, not the hash order
+      if (count > dominant_count ||
+          (count == dominant_count && owner < dominant)) {
         dominant_count = count;
         dominant = owner;
       }

@@ -5642,8 +5642,13 @@ static void write_spool_em_results(
         exposure.push_back(entry);
       }
     }
+    // ties by taxid: the map's order depends on how reads were split across
+    // workers, and the call order decides which species claims shared markers
     std::sort(exposure.begin(), exposure.end(),
-              [](const auto &a, const auto &b) { return a.bases > b.bases; });
+              [](const auto &a, const auto &b) {
+                return a.bases != b.bases ? a.bases > b.bases
+                                          : a.species < b.species;
+              });
     ChimeraClassify::presence_call::CallOptions callOptions;
     callOptions.tau = config.presence_call_tau;
     callOptions.min_retention = config.presence_call_min_retention;
