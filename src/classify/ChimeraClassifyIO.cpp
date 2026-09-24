@@ -45,8 +45,10 @@ void skip_bytes(std::istream &is, std::streamoff bytes,
   if (bytes <= 0) {
     return;
   }
-  is.seekg(bytes, std::ios::cur);
-  if (!is) {
+  // Skip inside the stream buffer: seekg() drops the buffer, so each skipped
+  // field cost an lseek plus a fresh buffer read.
+  is.ignore(static_cast<std::streamsize>(bytes));
+  if (is.gcount() != static_cast<std::streamsize>(bytes)) {
     throw std::runtime_error("Truncated classify spool " + what);
   }
 }
