@@ -745,6 +745,25 @@ void postEmDecision(
     return PresenceLevel::kUnknown;
   };
 
+  // Sample-weight gate on a call's top taxon; its presence level moves the floor.
+  auto passes_weight_gate = [&](const std::string &taxid) {
+    if (classWeights.empty()) {
+      return true;
+    }
+    const auto weight_it = classWeights.find(taxid);
+    if (weight_it == classWeights.end()) {
+      return true;
+    }
+    double pi_min = decisionConfig.min_class_weight;
+    const PresenceLevel level = presence_level(taxid);
+    if (level == PresenceLevel::kAccepted) {
+      pi_min = std::min(pi_min, kPresencePiFloor);
+    } else if (level == PresenceLevel::kRejected) {
+      pi_min = std::min(1.0, pi_min * kRejectFactor);
+    }
+    return weight_it->second >= pi_min;
+  };
+
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
@@ -769,27 +788,18 @@ void postEmDecision(
     // Keep POST_TOPK on the same pruned posterior that drives final decisions.
     result.posteriors = posterior;
 
-    const auto &baselineTop = posterior.front();
-    PresenceLevel top_presence = presence_level(baselineTop.first);
-
-    double class_weight = 0.0;
-    bool weight_ok = true;
-    if (!classWeights.empty()) {
-      auto weight_it = classWeights.find(baselineTop.first);
-      if (weight_it != classWeights.end()) {
-        class_weight = weight_it->second;
-        double pi_min = decisionConfig.min_class_weight;
-        if (top_presence == PresenceLevel::kAccepted) {
-          pi_min = std::min(pi_min, kPresencePiFloor);
-        } else if (top_presence == PresenceLevel::kRejected) {
-          pi_min = std::min(1.0, pi_min * kRejectFactor);
-        }
-        weight_ok = (class_weight >= pi_min);
+    bool weight_ok = passes_weight_gate(posterior.front().first);
+    if (weight_ok) {
+      const std::string baselineTop = posterior.front().first;
+      // A domain correction that changes the top puts the new top through the
+      // same gate.
+      if (apply_domain_evidence(posterior, result, tax) &&
+          posterior.front().first != baselineTop) {
+        weight_ok = passes_weight_gate(posterior.front().first);
       }
+      result.posteriors = posterior;
     }
     if (weight_ok) {
-      (void)apply_domain_evidence(posterior, result, tax);
-      result.posteriors = posterior;
       const auto &top = posterior.front();
       result.taxidCount.clear();
 
