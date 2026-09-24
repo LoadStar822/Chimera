@@ -61,9 +61,10 @@ namespace ChimeraClassify {
 	bool local_resolution_enabled = true;
 	bool write_cami_profile = false;
 	bool write_profile_read_trace = false;
-	// Local read resolution. Reads whose core call is trusted (posterior and
-	// raw-hit evidence both high) keep it; every other read is decided by
-	// chaining against a sample panel of representative genomes.
+	// Local read resolution. Reads whose core call is trusted (high posterior,
+	// and the best core candidate holding a large share of the weighted hit
+	// mass) keep it; every other read is decided by chaining against a sample
+	// panel of representative genomes.
 	double local_resolution_trust_posterior = 0.95;
 	double local_resolution_trust_evidence = 0.20;
 	uint64_t local_resolution_min_species_reads = 2;

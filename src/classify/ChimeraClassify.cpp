@@ -3130,9 +3130,10 @@ struct LocalResolutionPostTopkScores {
 constexpr uint64_t kTrustProbeWindowReads = 2000000;
 constexpr size_t kTrustProbeReads = 20000;
 
-// A read is trusted when its core decision is confident (posterior) and rests
-// on a large share of its features (raw hits / evaluated); such reads keep
-// the core call and are not chained.
+// A read is trusted when its core decision is confident (posterior) and its
+// best core candidate holds a large share of the read's weighted hit mass
+// (best candidate raw score over the summed weights of the minimizers that
+// hit); such reads keep the core call and are not chained.
 static bool local_resolution_trusts_read(
     const ChimeraClassify::classifyResult &result,
     const ChimeraClassify::ClassifyConfig &config) {
@@ -3433,6 +3434,7 @@ struct LocalResolutionSpeciesModel {
     bool accepted{};
   };
   std::vector<Link> links; // candidate fold links, for the debug table
+  std::unordered_map<uint32_t, double> containment; // folded members, debug table
 
   uint32_t representative(uint32_t species) const {
     const auto it = fold.find(species);
@@ -3521,12 +3523,27 @@ local_resolution_family_of(const ChimeraClassify::NcbiTaxdump &taxdump,
 // Species s is folded into species p when at least half of the reads that put
 // s at the top are near-ties with p: among the reads left to local resolution,
 // whatever separates the two references is not visible, so the group is one
-// organism here. Trusted reads (kept with their core call) do not enter the
-// fold test; they count as unambiguous evidence when the group's name and the
-// sample prior are chosen.
+// organism here. Trusted reads (kept with their core call) count as
+// unambiguous evidence for the sample prior. The engine skips them once the
+// trust probe has decided; those it chained before that enter the fold test
+// with their chains like any other read. The group
+// reports under its best-named member. Among equally named members the one the
+// others fold into comes first: its own reads are mostly not near-ties, so the
+// chains did tell it apart. Where the links run both ways the chains could not
+// tell the members apart, and the member whose genome is most contained in the
+// sample decides (when the presence sketch gives containments), then the
+// core's posterior mass. Containments within twice the binomial standard
+// error of the best one count as equal. Without core masses (the trust probe
+// revoked the core calls) the unique local and trusted reads decide last.
+// Remaining ties go to the lower taxid.
+using GenomeContainmentFn = std::function<
+    std::unordered_map<uint32_t, ChimeraClassify::presence_call::GenomeContainment>(
+        const std::vector<uint32_t> &)>;
 static LocalResolutionSpeciesModel build_local_resolution_species_model(
     const LocalResolutionCallStore &calls,
     const std::unordered_map<uint32_t, uint64_t> *trustedSpeciesReads,
+    const std::unordered_map<uint32_t, double> *coreSpeciesMass,
+    const GenomeContainmentFn &genomeContainment,
     const ChimeraClassify::NcbiTaxdump *ncbiTaxdump) {
   constexpr double kFoldTieShare = 0.5;
   constexpr uint64_t kFoldMinTiedReads = 25;
@@ -3576,12 +3593,13 @@ static LocalResolutionSpeciesModel build_local_resolution_species_model(
     const uint32_t b = static_cast<uint32_t>(key & 0xffffffffULL);
     for (const auto &[from, to] : {std::pair{a, b}, std::pair{b, a}}) {
       auto &best = partner[from];
-      if (count > best.second) {
+      if (count > best.second || (count == best.second && to < best.first)) {
         best = {to, count};
       }
     }
   }
   std::vector<LocalResolutionSpeciesModel::Link> links;
+  std::unordered_set<uint32_t> absorbed; // species whose own link was accepted
   std::unordered_map<uint32_t, uint32_t> parent;
   auto find = [&](uint32_t x) {
     while (true) {
@@ -3622,6 +3640,7 @@ static LocalResolutionSpeciesModel build_local_resolution_species_model(
             kFoldTieShare * static_cast<double>(totalIt->second) &&
         compatible(species, best.first)) {
       link.accepted = true;
+      absorbed.insert(species);
       const uint32_t ra = find(species);
       const uint32_t rb = find(best.first);
       if (ra != rb) {
@@ -3642,23 +3661,104 @@ static LocalResolutionSpeciesModel build_local_resolution_species_model(
   for (const auto &[species, count] : total) {
     groups[find(species)].push_back(species);
   }
+  for (auto &[root, members] : groups) {
+    std::sort(members.begin(), members.end());
+  }
   auto uniqueOf = [&](uint32_t species) -> uint64_t {
     const auto it = unique.find(species);
     return it == unique.end() ? 0 : it->second;
+  };
+  auto massOf = [&](uint32_t species) -> double {
+    const auto it = coreSpeciesMass->find(species);
+    return it == coreSpeciesMass->end() ? 0.0 : it->second;
+  };
+  std::unordered_map<uint32_t, ChimeraClassify::presence_call::GenomeContainment>
+      containment;
+  if (genomeContainment) {
+    std::vector<uint32_t> folded;
+    for (const auto &[root, members] : groups) {
+      if (members.size() >= 2) {
+        folded.insert(folded.end(), members.begin(), members.end());
+      }
+    }
+    if (!folded.empty()) {
+      containment = genomeContainment(folded);
+    }
+  }
+  for (const auto &[species, genome] : containment) {
+    model.containment[species] = genome.containment;
+  }
+  auto standard_error = [](const auto &genome) {
+    const double c = genome.containment;
+    return genome.markers > 0
+               ? std::sqrt(c * (1.0 - c) / static_cast<double>(genome.markers))
+               : 0.0;
+  };
+  auto outranks = [&](uint32_t a, uint32_t b) {
+    if (coreSpeciesMass != nullptr && massOf(a) != massOf(b)) {
+      return massOf(a) > massOf(b);
+    }
+    if (uniqueOf(a) != uniqueOf(b)) {
+      return uniqueOf(a) > uniqueOf(b);
+    }
+    return a < b;
+  };
+  std::vector<uint32_t> pool;
+  std::vector<uint32_t> kept;
+  auto keep = [&](auto &&pred) {
+    kept.clear();
+    for (uint32_t species : pool) {
+      if (pred(species)) {
+        kept.push_back(species);
+      }
+    }
+    if (!kept.empty()) {
+      pool.swap(kept);
+    }
   };
   for (const auto &[root, members] : groups) {
     if (members.size() < 2) {
       continue;
     }
-    uint32_t representative = members.front();
     int bestQuality = -1;
     for (uint32_t species : members) {
-      const int quality = quality_of(species);
-      if (quality > bestQuality ||
-          (quality == bestQuality &&
-           uniqueOf(species) > uniqueOf(representative))) {
+      bestQuality = std::max(bestQuality, quality_of(species));
+    }
+    pool.clear();
+    for (uint32_t species : members) {
+      if (quality_of(species) == bestQuality) {
+        pool.push_back(species);
+      }
+    }
+    keep([&](uint32_t species) { return absorbed.count(species) == 0; });
+    const ChimeraClassify::presence_call::GenomeContainment *top = nullptr;
+    uint32_t topSpecies = 0;
+    for (uint32_t species : pool) {
+      const auto it = containment.find(species);
+      if (it != containment.end() &&
+          (top == nullptr || it->second.containment > top->containment ||
+           (it->second.containment == top->containment &&
+            species < topSpecies))) {
+        top = &it->second;
+        topSpecies = species;
+      }
+    }
+    if (top != nullptr) {
+      const auto best = *top;
+      keep([&](uint32_t species) {
+        const auto it = containment.find(species);
+        if (it == containment.end()) {
+          return false;
+        }
+        const double spread = std::hypot(standard_error(best),
+                                         standard_error(it->second));
+        return best.containment - it->second.containment <= 2.0 * spread;
+      });
+    }
+    uint32_t representative = pool.front();
+    for (uint32_t species : pool) {
+      if (outranks(species, representative)) {
         representative = species;
-        bestQuality = quality;
       }
     }
     for (uint32_t species : members) {
@@ -3694,14 +3794,22 @@ static void write_local_resolution_fold_table(
     return a.total != b.total ? a.total > b.total : a.species < b.species;
   });
   out << "species\tname\ttotal\tunique\tties\tpartner\tpartner_name\t"
-         "accepted\trepresentative\trepresentative_name\tprior\n";
+         "accepted\trepresentative\trepresentative_name\tprior\t"
+         "containment\n";
   for (const auto &link : rows) {
     const uint32_t representative = model.representative(link.species);
     out << link.species << '\t' << name_of(link.species) << '\t' << link.total
         << '\t' << link.unique << '\t' << link.ties << '\t' << link.partner
         << '\t' << name_of(link.partner) << '\t' << (link.accepted ? 1 : 0)
         << '\t' << representative << '\t' << name_of(representative) << '\t'
-        << model.prior_of(representative) << '\n';
+        << model.prior_of(representative) << '\t';
+    const auto it = model.containment.find(link.species);
+    if (it == model.containment.end()) {
+      out << "NA";
+    } else {
+      out << it->second;
+    }
+    out << '\n';
   }
 }
 
@@ -6620,12 +6728,22 @@ void run(ClassifyConfig config) {
           localDecision.trusted = localResult.stats.trust_revoked
                                       ? nullptr
                                       : &postTopkScores.trusted;
+          GenomeContainmentFn genomeContainment;
+          if (presenceSketch.has_value() && sampleSketch.has_value()) {
+            genomeContainment = [&](const std::vector<uint32_t> &species) {
+              return presence_call::genome_containment(
+                  *presenceSketch, *sampleSketch, species,
+                  config.presence_call_min_markers);
+            };
+          }
           localDecision.model = build_local_resolution_species_model(
               localResolutionCalls,
               localResult.stats.trust_revoked
                   ? nullptr
                   : &postTopkScores.trusted_species_reads,
-              ncbiTaxdump.get());
+              localResult.stats.trust_revoked ? nullptr
+                                              : &postTopkScores.species_scores,
+              genomeContainment, ncbiTaxdump.get());
           localDecisionPtr = &localDecision;
           {
             std::ostringstream msg;

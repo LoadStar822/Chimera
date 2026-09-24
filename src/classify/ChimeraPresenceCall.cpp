@@ -497,6 +497,26 @@ CallResult call_presence(const psk::SketchIndex &index, const SampleSketch &samp
   return result;
 }
 
+std::unordered_map<uint32_t, GenomeContainment>
+genome_containment(const psk::SketchIndex &index, const SampleSketch &sample,
+                   const std::vector<uint32_t> &species, uint32_t min_markers) {
+  CallOptions options;
+  options.min_markers = min_markers;
+  std::unordered_map<uint32_t, GenomeContainment> out;
+  for (const uint32_t taxid : species) {
+    Loaded data;
+    if (out.count(taxid) != 0 || !index.load_species(taxid, data.markers)) {
+      continue;
+    }
+    lookup_counts(sample, data);
+    const BestRef best = best_reference(data, {}, 0.0, options, 1.0);
+    if (best.found) {
+      out[taxid] = {best.stats.containment, best.stats.markers};
+    }
+  }
+  return out;
+}
+
 void write_call_table(const std::string &path, const CallResult &result,
                       const NcbiTaxdump *taxdump) {
   const auto parent = std::filesystem::path(path).parent_path();

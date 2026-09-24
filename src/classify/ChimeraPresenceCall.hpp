@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -128,6 +129,20 @@ CallResult call_presence(const chimera::presence_sketch::SketchIndex &index,
                          const SampleSketch &sample,
                          const std::vector<SpeciesExposure> &exposure,
                          const CallOptions &options);
+
+struct GenomeContainment {
+  double containment{0.0}; // share of the markers seen in the sample
+  uint64_t markers{0};
+};
+
+// Containment of each species' best genome in the sample: the share of its
+// markers seen, for the reference with the largest share among those with at
+// least min_markers markers. Species without a sketch or such a reference are
+// left out.
+std::unordered_map<uint32_t, GenomeContainment>
+genome_containment(const chimera::presence_sketch::SketchIndex &index,
+                   const SampleSketch &sample,
+                   const std::vector<uint32_t> &species, uint32_t min_markers);
 
 void write_call_table(const std::string &path, const CallResult &result,
                       const NcbiTaxdump *taxdump);
