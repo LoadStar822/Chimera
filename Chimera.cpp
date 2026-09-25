@@ -441,6 +441,19 @@ int main(int argc, char **argv) {
                    "Private markers a species reference needs to be judged")
       ->check(CLI::Range(1u, 1000000u))
       ->default_val(100);
+  classify
+      ->add_option("--species-boundary-ani",
+                   classifyConfig.species_boundary_ani,
+                   "Count a read toward the read-support floors of its "
+                   "species unless its hit share falls clearly below "
+                   "(approximate one-sided test, nominal 5%) that of a read "
+                   "at this identity to the reference, and judge the "
+                   "detection floor on the bases of those reads. Reads "
+                   "without quality values count as accurate; the boundary "
+                   "is not applied to a sample in which most "
+                   "species-assigned bases fall outside it (0 = off)")
+      ->check(CLI::Range(0.0, 1.0))
+      ->default_val(0.95);
   classify->add_flag("--profile-cami", classifyConfig.write_cami_profile,
                      "Write CAMI/OPAL-compatible profile table");
   classify->add_flag("--profile-read-trace",

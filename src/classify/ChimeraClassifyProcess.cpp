@@ -1690,7 +1690,7 @@ static void finalize_read_record(
     bool tidScoreEmpty, std::string rejectReason,
     uint32_t profileResponseTaxid,
     const std::array<float, kDomainCount> &domainEvidencePerHash,
-    uint8_t domainEvidenceMask,
+    uint8_t domainEvidenceMask, double topHitShare,
     std::vector<SpoolCandidate> resultCandidates,
     std::vector<SpoolCandidate> abundanceCandidates,
     std::vector<SpoolCandidate> sampleMixtureCandidates,
@@ -1744,6 +1744,7 @@ static void finalize_read_record(
     result.profile_response_taxid = profileResponseTaxid;
     result.domain_evidence_per_hash = domainEvidencePerHash;
     result.domain_evidence_mask = domainEvidenceMask;
+    result.top_hit_share = static_cast<float>(topHitShare);
     result.reject_reason = std::move(rejectReason);
     result.candidates = std::move(resultCandidates);
     result.abundance_candidates = std::move(abundanceCandidates);
@@ -1760,6 +1761,7 @@ static void finalize_read_record(
     result.profile_response_taxid = profileResponseTaxid;
     result.domain_evidence_per_hash = domainEvidencePerHash;
     result.domain_evidence_mask = domainEvidenceMask;
+    result.top_hit_share = static_cast<float>(topHitShare);
     result.reject_reason = std::move(rejectReason);
     result.taxidCount.reserve(resultCandidates.size());
     for (const auto &candidate : resultCandidates) {
@@ -2301,12 +2303,27 @@ void processSequence(
       resultCandidates, tax, weightCtx, scratch, scoring.tid_score_epoch,
       topBins, full_surface_mode || topBins.size() == binNumAll, n_eval,
       imcfConfig.binSize);
+  // Share of the evaluated features found in the best-matching candidate,
+  // close to the read's containment in its nearest reference.
+  double topHitShare = 0.0;
+  if (n_eval > 0) {
+    for (const auto &cand : resultCandidates) {
+      if (cand.tid < scratch.tidHitCountDense.size() &&
+          cand.tid < scratch.tidScoreEpoch.size() &&
+          scratch.tidScoreEpoch[cand.tid] == scoring.tid_score_epoch) {
+        topHitShare = std::max(
+            topHitShare,
+            static_cast<double>(scratch.tidHitCountDense[cand.tid]));
+      }
+    }
+    topHitShare = std::min(1.0, topHitShare / static_cast<double>(n_eval));
+  }
   finalize_read_record(
       id, readOrdinal, tax, fileInfo, presenceAcc, uniqueCount, uniqueRatio,
       eff_eval, readLen, bestTaxidHintTid, bestTaxidStr, maxCountValid,
       maxCountTid, maxCountScore, maxCountRawScore, scoring.tid_score.empty(),
       std::move(rejectReason), profileResponseTaxid,
-      domainEvidence.per_hash, domainEvidence.mask,
+      domainEvidence.per_hash, domainEvidence.mask, topHitShare,
       std::move(resultCandidates), std::move(abundanceCandidates),
       std::move(sampleMixtureCandidates), classifyResults, compactResults);
 }
@@ -2352,10 +2369,18 @@ void processBatch(
 	      }
 	      const uint64_t ordinal =
 	          i < batch.ordinals.size() ? batch.ordinals[i] : 0;
+	      const size_t resultsBefore = classifyResults.size();
 	      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
 	                      imcf, batch.ids[i], ordinal,
 	                      &classifyResults,
 	                      nullptr, fileInfo, presenceAcc, scratch);
+	      if (classifyResults.size() > resultsBefore) {
+	        classifyResults.back().mate2_length = static_cast<uint32_t>(
+	            std::min<size_t>(len2, std::numeric_limits<uint32_t>::max()));
+	        if (i < batch.accuracies.size()) {
+	          classifyResults.back().read_accuracy = batch.accuracies[i];
+	        }
+	      }
 	    }
 	  } else {
 	    for (size_t i = 0; i < batch.seqs.size(); i++) {
@@ -2380,10 +2405,15 @@ void processBatch(
 	      }
 	      const uint64_t ordinal =
 	          i < batch.ordinals.size() ? batch.ordinals[i] : 0;
+	      const size_t resultsBefore = classifyResults.size();
 	      processSequence(hashs1, readLen, imcfConfig, tax, config, weightCtx,
 	                      imcf, batch.ids[i], ordinal,
 	                      &classifyResults,
 	                      nullptr, fileInfo, presenceAcc, scratch);
+	      if (classifyResults.size() > resultsBefore &&
+	          i < batch.accuracies.size()) {
+	        classifyResults.back().read_accuracy = batch.accuracies[i];
+	      }
 	    }
   }
 }
@@ -2450,10 +2480,21 @@ void processBatchCompact(
   scratch.hashs1.reserve(2048);
   const size_t count = !batch.seqs2.empty() ? batch.ids.size() : batch.seqs.size();
   for (size_t i = 0; i < count; ++i) {
+    const size_t resultsBefore = classifyResults.size();
     process_compact_batch_read(batch, i, imcfConfig, tax, config, imcf,
                                classifyResults, feature_params,
                                feature_min_len, fileInfo, weightCtx,
                                presenceAcc, scratch);
+    if (classifyResults.size() > resultsBefore) {
+      if (i < batch.seqs2.size()) {
+        classifyResults.back().mate2_length = static_cast<uint32_t>(
+            std::min<size_t>(batch.seqs2[i].size(),
+                             std::numeric_limits<uint32_t>::max()));
+      }
+      if (i < batch.accuracies.size()) {
+        classifyResults.back().read_accuracy = batch.accuracies[i];
+      }
+    }
   }
 }
 
@@ -2492,6 +2533,14 @@ static void processBatchCompactToSpool(
                                fileInfo, weightCtx, presenceAcc,
                                scratch);
     if (!oneResult.empty()) {
+      if (i < batch.seqs2.size()) {
+        oneResult.front().mate2_length = static_cast<uint32_t>(
+            std::min<size_t>(batch.seqs2[i].size(),
+                             std::numeric_limits<uint32_t>::max()));
+      }
+      if (i < batch.accuracies.size()) {
+        oneResult.front().read_accuracy = batch.accuracies[i];
+      }
       write_spool_result(oneResult.front(), spool, candidateSpool,
                          sampleMixtureSpool);
     }

@@ -1864,6 +1864,9 @@ materialize_spool_result(const ChimeraClassify::SpoolReadRecord &record,
   result.read_ordinal = record.read_ordinal;
   result.evaluated = record.evaluated;
   result.query_length = record.query_length;
+  result.read_accuracy = record.read_accuracy;
+  result.top_hit_share = record.top_hit_share;
+  result.mate2_length = record.mate2_length;
   result.reject_reason = record.reject_reason;
   result.domain_evidence_per_hash = record.domain_evidence_per_hash;
   result.domain_evidence_mask = record.domain_evidence_mask;
@@ -2203,6 +2206,10 @@ print_classify_configuration(const ChimeraClassify::ClassifyConfig &config) {
     std::cout << " (fallback=" << config.presence_call_fallback << ")";
   }
   std::cout << "\n";
+  if (config.species_boundary_enabled()) {
+    std::cout << "  species boundary ani>=" << config.species_boundary_ani
+              << " (approximate one-sided test, nominal alpha=0.05)\n";
+  }
   std::cout << "  debug       "
             << (env_flag_enabled("CHIMERA_CLASSIFY_DEBUG") ? "enabled"
                                                            : "disabled")
@@ -2264,6 +2271,9 @@ struct SpoolOutputPartStats {
   std::unordered_map<uint32_t, double> profile_response_taxid_counts;
   std::unordered_map<uint32_t, double> decision_species_counts;
   std::unordered_map<uint32_t, double> decision_species_bases;
+  // reads within the species boundary and their bases, per decision species
+  std::unordered_map<uint32_t, double> boundary_species_counts;
+  std::unordered_map<uint32_t, double> boundary_species_bases;
   uint64_t presence_reassigned{0};
   uint64_t presence_to_genus{0};
   uint64_t presence_withdrawn{0};
@@ -2277,6 +2287,67 @@ struct PresenceFeedback {
   bool genus_fallback{false};
   // absent species -> genus of the species that claimed most of its markers
   const std::unordered_map<uint32_t, uint32_t> *claimant_genus{nullptr};
+};
+
+// Species boundary of the read-support floors. A read supports its species
+// unless its hit share, the share of its evaluated features found in its best
+// retained candidate, falls clearly below the share of a read from a genome at
+// the boundary identity. The test is an approximation at a nominal one-sided
+// 5% level, not an exact test: it models the features as overlapping k-mers.
+// At identity ani and a base accuracy a implied by the quality values, one of
+// the read's k-mers (k the strobe length) is error-free with probability
+// q = r^k, r = ani * a; the share over its n overlapping k-mers (n = L - k + 1,
+// summed over the two mates of a pair) has mean q and variance
+// [q(1 - q) + 2 sum_{j=1}^{k-1} (r^(k+j) - q^2)] / n, as k-mers j apart share
+// k - j bases. Short reads vary too much to fall outside, so the test acts on
+// long reads and contigs. The unweighted share is used because the
+// IDF-weighted score drops for species split over many bins.
+struct SpeciesBoundary {
+  double ani{0.0};
+  double exponent{0.0}; // k
+};
+
+// one-sided 5% quantile of the standard normal
+constexpr double kSpeciesBoundaryZ = 1.6448536269514722;
+
+// Reads without quality values count as accurate (contigs, reads given as
+// FASTA). When less than this share of a sample's species-assigned bases falls
+// within the boundary, the model does not fit the sample (typically noisy long
+// reads given as FASTA, whose errors the test cannot see) and the boundary is
+// not applied to it.
+constexpr double kSpeciesBoundaryMinInsideShare = 0.5;
+
+static bool within_species_boundary(
+    const ChimeraClassify::classifyResult &result,
+    const SpeciesBoundary &boundary) {
+  const double accuracy =
+      std::clamp(static_cast<double>(result.read_accuracy), 0.5, 1.0);
+  const double r = boundary.ani * accuracy;
+  const double q = std::pow(r, boundary.exponent);
+  const int k = static_cast<int>(std::lround(boundary.exponent));
+  double lagged = 0.0;
+  double overlap = q;
+  for (int j = 1; j < k; ++j) {
+    overlap *= r;
+    lagged += overlap - q * q;
+  }
+  const auto positions = [&boundary](double length) {
+    return std::max(0.0, length - boundary.exponent + 1.0);
+  };
+  const double mate2 = static_cast<double>(result.mate2_length);
+  const double kmers = std::max(
+      1.0, positions(static_cast<double>(result.query_length) - mate2) +
+               positions(mate2));
+  const double variance =
+      std::max(q * (1.0 - q) + 2.0 * lagged, q * (1.0 - q)) / kmers;
+  return static_cast<double>(result.top_hit_share) >=
+         q - kSpeciesBoundaryZ * std::sqrt(variance);
+}
+
+// Reads within the species boundary and their bases, per decision species.
+struct SpeciesBoundarySupport {
+  std::unordered_map<uint32_t, double> reads;
+  std::unordered_map<uint32_t, double> bases;
 };
 
 struct PresenceFeedbackSummary {
@@ -4288,7 +4359,7 @@ static void write_spool_output_part(
     EvidenceAggregateMap *postemDecisionEvidenceAggregate,
     bool collectLocalmixProfile,
     const PresenceFeedback *presenceFeedback = nullptr,
-    bool writeOutput = true) {
+    bool writeOutput = true, const SpeciesBoundary *boundary = nullptr) {
   // writeOutput=false: decision-only pass, collects part statistics only
   std::ofstream partOs;
   std::vector<char> partBuffer;
@@ -4423,6 +4494,12 @@ static void write_spool_output_part(
                 partStats.decision_species_counts[decisionSpecies] += 1.0;
                 partStats.decision_species_bases[decisionSpecies] +=
                     static_cast<double>(result.query_length);
+                if (boundary != nullptr &&
+                    within_species_boundary(result, *boundary)) {
+                  partStats.boundary_species_counts[decisionSpecies] += 1.0;
+                  partStats.boundary_species_bases[decisionSpecies] +=
+                      static_cast<double>(result.query_length);
+                }
               }
             }
           }
@@ -5267,7 +5344,8 @@ static void write_classifier_response_reportable_profile_outputs(
     const SeqProfileFit *localmixFit, const char *responseSourceOverride,
     PrimaryProfileScale primaryScale,
     ProfileReadTracePlan *profileReadTracePlan,
-    const std::unordered_set<uint32_t> *presenceEvidence) {
+    const std::unordered_set<uint32_t> *presenceEvidence,
+    const SpeciesBoundarySupport *boundarySupport = nullptr) {
   struct CandidateRow {
     const SeqProfileRow *row{nullptr};
     double raw_abundance{0.0};
@@ -5279,12 +5357,14 @@ static void write_classifier_response_reportable_profile_outputs(
     std::string column_type;
     std::string reportability;
     uint32_t genus_species_count{0};
+    double boundary_reads{0.0};
+    double boundary_percent{0.0};
   };
 
   constexpr const char *kProfileInput =
       "classifier_response_sparse_reportability_v1";
-  // Base units change only the reported abundance; the detection floor and
-  // read support are still judged on read counts.
+  // Base units change the reported abundance; the detection floor and read
+  // support are judged on read counts unless the species boundary is on.
   const bool base_units = primaryScale == PrimaryProfileScale::BaseAbundance;
   const PrimaryProfileScale kScale =
       base_units ? PrimaryProfileScale::SequenceAbundance : primaryScale;
@@ -5325,6 +5405,12 @@ static void write_classifier_response_reportable_profile_outputs(
         !base_units ? entry.raw_abundance
         : base_total > 0.0 ? entry.row->base_abundance / base_total
                            : 0.0;
+  }
+  double assigned_base_total = 0.0;
+  if (boundarySupport != nullptr) {
+    for (const CandidateRow &entry : rows) {
+      assigned_base_total += entry.row->assigned_bases;
+    }
   }
   const double effective_taxa =
       classifier_response_effective_taxa(normalized);
@@ -5373,21 +5459,41 @@ static void write_classifier_response_reportable_profile_outputs(
     const bool genome_evidence =
         presenceEvidence != nullptr &&
         presenceEvidence->count(row.species_taxid) != 0;
+    // Only reads within the species boundary of their reference count toward
+    // the floors: reads of a relative outside the species, novel or in the
+    // database, do not show that the species itself is in the sample. The
+    // detection floor is then judged on their share of the assigned bases,
+    // the unit of the reported abundance.
+    double support_reads = row.assigned_reads;
+    double support_percent = entry.raw_percent;
+    if (boundarySupport != nullptr && row.assigned_reads > 0.0) {
+      const auto readsIt = boundarySupport->reads.find(row.species_taxid);
+      const auto basesIt = boundarySupport->bases.find(row.species_taxid);
+      const double insideReads =
+          readsIt == boundarySupport->reads.end() ? 0.0 : readsIt->second;
+      const double insideBases =
+          basesIt == boundarySupport->bases.end() ? 0.0 : basesIt->second;
+      support_reads = std::min(insideReads, row.assigned_reads);
+      support_percent = assigned_base_total > 0.0
+                            ? 100.0 * insideBases / assigned_base_total
+                            : 0.0;
+    }
+    entry.boundary_reads = support_reads;
+    entry.boundary_percent = support_percent;
 
     if (!(row.effective_callable_signatures > 0.0)) {
       entry.reportability = "nuisance_no_callable_exposure";
       ++no_exposure_rows;
-    } else if (row.assigned_reads <
-                   static_cast<double>(min_read_support) &&
+    } else if (support_reads < static_cast<double>(min_read_support) &&
                !genome_evidence) {
       entry.reportability = "nuisance_low_runtime_support";
       ++low_support_rows;
-    } else if (entry.raw_percent < report_floor_percent && !genome_evidence) {
+    } else if (support_percent < report_floor_percent && !genome_evidence) {
       entry.reportability = "nuisance_below_dynamic_detection_floor";
       ++below_floor_rows;
     } else if (genome_evidence &&
-               (row.assigned_reads < static_cast<double>(min_read_support) ||
-                entry.raw_percent < report_floor_percent)) {
+               (support_reads < static_cast<double>(min_read_support) ||
+                support_percent < report_floor_percent)) {
       entry.kept = true;
       entry.reportability = "presence_evidence_reportable";
       ++presence_evidence_rows;
@@ -5616,7 +5722,8 @@ static void write_classifier_response_reportable_profile_outputs(
         << "\tassigned_reads\teffective_callable_exposure\tsource_count"
         << "\tgenus_species_count\tcolumn_type\tkept\treportability"
         << "\tparent_taxid\tparent_name\tgenus_taxid\tgenus_name"
-        << "\tlineage_taxids\tlineage_names\n";
+        << "\tlineage_taxids\tlineage_names\tboundary_reads"
+        << "\tboundary_percent\n";
     out << std::setprecision(12);
     for (const CandidateRow &entry : rows) {
       if (entry.row == nullptr) {
@@ -5650,7 +5757,8 @@ static void write_classifier_response_reportable_profile_outputs(
                  genusTaxid == 0 ? "" : profile_taxon_name(genusTaxid,
                                                            ncbiTaxdump))
           << '\t' << join_profile_lineage_taxids(lineage) << '\t'
-          << join_profile_lineage_names(lineage, ncbiTaxdump) << '\n';
+          << join_profile_lineage_names(lineage, ncbiTaxdump) << '\t'
+          << entry.boundary_reads << '\t' << entry.boundary_percent << '\n';
     }
     out.close();
     if (!out.good()) {
@@ -5926,6 +6034,14 @@ static void write_spool_em_results(
     partStats.assign(part_count, SpoolOutputPartStats{});
   }
 
+  SpeciesBoundary speciesBoundary;
+  const SpeciesBoundary *speciesBoundaryPtr = nullptr;
+  if (config.species_boundary_enabled()) {
+    speciesBoundary.ani = config.species_boundary_ani;
+    speciesBoundary.exponent = config.species_boundary_exponent;
+    speciesBoundaryPtr = &speciesBoundary;
+  }
+
   try {
     write_spool_parts_parallel(
         candidateSpoolPaths, partPaths, [&](size_t part_idx) {
@@ -5944,7 +6060,7 @@ static void write_spool_em_results(
               fit, sampleMixtureFit, options, decisionConfig, tax,
               presenceDecision, ncbiTaxdump, localDecision, partStats[part_idx],
               primaryEvidence, decisionEvidence, true, presenceFeedbackPtr,
-              true);
+              true, speciesBoundaryPtr);
         });
   } catch (...) {
     cleanup_part_paths(profileReadTracePartPaths);
@@ -5966,6 +6082,33 @@ static void write_spool_em_results(
     print_status_line(ConsoleStatusKind::Ok, msg.str());
   }
 
+  bool applySpeciesBoundary = false;
+  if (speciesBoundaryPtr != nullptr) {
+    double assignedBases = 0.0;
+    double insideBases = 0.0;
+    for (const auto &stats : partStats) {
+      for (const auto &[species, value] : stats.decision_species_bases) {
+        assignedBases += value;
+      }
+      for (const auto &[species, value] : stats.boundary_species_bases) {
+        insideBases += value;
+      }
+    }
+    const double insideShare =
+        assignedBases > 0.0 ? insideBases / assignedBases : 1.0;
+    applySpeciesBoundary = insideShare >= kSpeciesBoundaryMinInsideShare;
+    std::ostringstream msg;
+    msg << "species boundary: " << std::fixed << std::setprecision(1)
+        << 100.0 * insideShare << "% of species-assigned bases within";
+    if (applySpeciesBoundary) {
+      print_status_line(ConsoleStatusKind::Ok, msg.str());
+    } else {
+      msg << ", not applied (below 50%, e.g. noisy reads without quality "
+             "values)";
+      print_status_line(ConsoleStatusKind::Skip, msg.str());
+    }
+  }
+
   print_status_line(ConsoleStatusKind::Run, "writing output tables");
   try {
     merge_classify_output_parts(outputFile, partPaths, partStats, fileInfo);
@@ -5976,6 +6119,7 @@ static void write_spool_em_results(
   }
   std::unordered_map<uint32_t, double> decisionSpeciesCounts;
   std::unordered_map<uint32_t, double> decisionSpeciesBases;
+  SpeciesBoundarySupport boundarySupport;
   uint64_t decisionClassifiedReads = 0;
   for (const auto &stats : partStats) {
     decisionClassifiedReads += stats.classified;
@@ -5984,6 +6128,12 @@ static void write_spool_em_results(
     }
     for (const auto &[species, value] : stats.decision_species_bases) {
       decisionSpeciesBases[species] += value;
+    }
+    for (const auto &[species, value] : stats.boundary_species_counts) {
+      boundarySupport.reads[species] += value;
+    }
+    for (const auto &[species, value] : stats.boundary_species_bases) {
+      boundarySupport.bases[species] += value;
     }
   }
   SeqProfileFit classifyDecisionProfile = make_profile_from_species_counts(
@@ -6028,7 +6178,8 @@ static void write_spool_em_results(
       *profileOutputFit, ncbiTaxdump, coverageMeta, &localmixProfile, nullptr,
       profileOutputScale,
       config.write_profile_read_trace ? &profileReadTracePlan : nullptr,
-      presenceActive ? &presenceCalls.evidence : nullptr);
+      presenceActive ? &presenceCalls.evidence : nullptr,
+      applySpeciesBoundary ? &boundarySupport : nullptr);
   if (config.write_profile_read_trace) {
     try {
       write_profile_read_trace_output(profileReadTracePath,
@@ -6443,6 +6594,7 @@ void run(ClassifyConfig config) {
   size_t feature_min_len = 0;
   chimera::feature::Params feature_params =
       prepare_feature_params_for_classify(imcfConfig, feature_min_len);
+  config.species_boundary_exponent = static_cast<double>(feature_params.strobe.k);
 
   TaxDict tax = build_tax_dict(indexToTaxid);
   std::vector<uint32_t> tid2speciesRep;

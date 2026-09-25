@@ -214,6 +214,8 @@ chimera classify \
 
 `build` also writes a presence sketch (`<db>/presence/sketch.psk`), a FracMinHash sample of every reference genome grouped by species. `classify` uses it to check each species that received reads: a species whose k-mers are found far less often than its reads predict, once k-mers shared with present relatives are set aside, is called absent. Its reads move to their best present candidate or become unclassified, and the profile is estimated without it. Species with strong evidence of their own k-mers are reported even below the profile's read-count floors.
 
+A read counts toward the read-support floors of its species only if it lies within the species boundary (`--species-boundary-ani`, default 0.95): it is left out when the share of its features found in the best candidate falls clearly below that of a read at 95% identity to the reference (an approximate one-sided test at the nominal 5% level, using the read accuracy its quality values imply). The detection floor is then judged on the bases of the reads that pass. Reads without quality values count as accurate, the boundary is not applied to a sample in which most species-assigned bases fall outside it, and `--species-boundary-ani 0` turns it off.
+
 Calls are written to `ChimeraPresenceCall.tsv`, and affected reads carry a `PRESENCE=` tag in `ChimeraClassify.tsv`. The step is skipped when the database has no sketch. The sketch is registered in the database manifest, and `classify` stops if the registered sketch is missing or does not match it.
 
 ```bash

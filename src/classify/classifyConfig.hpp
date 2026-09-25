@@ -87,6 +87,19 @@ namespace ChimeraClassify {
 	double presence_call_tau = 0.10;
 	double presence_call_min_retention = 0.20;
 	uint32_t presence_call_min_markers = 100;
+	// Species boundary of the read-support floors: a read counts toward the
+	// floors of its species unless the share of its evaluated features found
+	// in the best candidate falls clearly below (approximate one-sided test,
+	// nominal 5%) that of a read at identity ani to its reference, given the
+	// read accuracy its quality values imply and the strobe length k (an
+	// error-free strobe needs k correct bases). The detection floor is then
+	// judged on the bases of those reads. Not applied to a sample in which
+	// most species-assigned bases fall outside the boundary. 0 disables.
+	double species_boundary_ani = 0.95;
+	double species_boundary_exponent = 28.0; // set from the database's strobe length
+	bool species_boundary_enabled() const {
+		return species_boundary_ani > 0.0;
+	}
 	};
 
 	struct FileInfo {
@@ -106,6 +119,7 @@ namespace ChimeraClassify {
 			std::vector< uint64_t >                    ordinals;
 			std::vector< std::vector< seqan3::dna4 > > seqs;
 			std::vector< std::vector< seqan3::dna4 > > seqs2{};
+			std::vector< float >                       accuracies{}; // empty without quality values
 		};
 
 				struct classifyResult {
@@ -118,6 +132,9 @@ namespace ChimeraClassify {
 				double evaluated{ 0.0 }; // 实际参与判别的 feature 数，用于归一化
 				double top_raw_score{ 0.0 }; // best raw candidate hit count
 				uint32_t query_length{ 0 };
+				float read_accuracy{ 1.0f }; // mean per-base accuracy from quality values (1 without them)
+				float top_hit_share{ 0.0f }; // largest share of evaluated features found in one candidate
+				uint32_t mate2_length{ 0 }; // length of the second mate of a pair (0 for single reads)
 				uint32_t profile_response_taxid{ 0 };
 				bool local_resolution_applied{ false }; // decided by local read resolution
 				std::string reject_reason; // 为空表示未拒绝或接受

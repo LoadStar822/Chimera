@@ -654,6 +654,9 @@ struct SpoolReadRecord {
   uint64_t read_ordinal{0};
   double evaluated{0.0};
   uint32_t query_length{0};
+  float read_accuracy{1.0f};
+  float top_hit_share{0.0f};
+  uint32_t mate2_length{0}; // second mate of a pair (0 for single reads)
   uint32_t best_taxid_hint{0};
   uint32_t profile_response_taxid{0};
   std::array<float, kDomainCount> domain_evidence_per_hash{};
@@ -672,6 +675,9 @@ struct CompactClassifyResult {
   uint64_t read_ordinal{0};
   double evaluated{0.0};
   uint32_t query_length{0};
+  float read_accuracy{1.0f};
+  float top_hit_share{0.0f};
+  uint32_t mate2_length{0}; // second mate of a pair (0 for single reads)
   uint32_t best_taxid_hint{kSpoolUnclassifiedTid};
   uint32_t profile_response_taxid{0};
   std::array<float, kDomainCount> domain_evidence_per_hash{};

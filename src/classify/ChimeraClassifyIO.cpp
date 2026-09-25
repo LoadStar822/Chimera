@@ -1,5 +1,8 @@
 #include "ChimeraClassifyCommon.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -7,16 +10,24 @@
 #include <sstream>
 #include <thread>
 #include <stdexcept>
+#include <type_traits>
 
 #include <dna4_traits.hpp>
 #include <seqan3/alphabet/nucleotide/dna4.hpp>
+#include <seqan3/alphabet/quality/phred94.hpp>
 #include <seqan3/utility/views/chunk.hpp>
 
 namespace ChimeraClassify {
 
 namespace {
 
-constexpr char kSpoolMagic[] = {'C', 'H', 'S', 'P', '7', '\0', '\0', '\0'};
+constexpr char kSpoolMagic[] = {'C', 'H', 'S', 'P', '1', '0', '\0', '\0'};
+
+// Accepts every Phred+33 quality value, including the Q42-Q93 of PacBio HiFi
+// reads that the default phred42 alphabet rejects.
+struct dna4_phred94_traits : raptor::dna4_traits {
+  using quality_alphabet = seqan3::phred94;
+};
 
 struct SpoolCandidateLite {
   uint32_t tid{0};
@@ -128,6 +139,9 @@ void write_spool_record(std::ostream &os, const SpoolReadRecord &record) {
   write_pod(os, record.read_ordinal);
   write_pod(os, record.evaluated);
   write_pod(os, record.query_length);
+  write_pod(os, record.read_accuracy);
+  write_pod(os, record.top_hit_share);
+  write_pod(os, record.mate2_length);
   write_pod(os, record.best_taxid_hint);
   write_pod(os, record.profile_response_taxid);
   write_pod(os, record.domain_evidence_per_hash);
@@ -159,6 +173,9 @@ void write_spool_record(std::ostream &os,
   write_pod(os, record.read_ordinal);
   write_pod(os, record.evaluated);
   write_pod(os, record.query_length);
+  write_pod(os, record.read_accuracy);
+  write_pod(os, record.top_hit_share);
+  write_pod(os, record.mate2_length);
   write_pod(os, record.best_taxid_hint);
   write_pod(os, record.profile_response_taxid);
   write_pod(os, record.domain_evidence_per_hash);
@@ -190,6 +207,9 @@ void write_spool_candidate_record(std::ostream &os,
   write_pod(os, record.read_ordinal);
   write_pod(os, record.evaluated);
   write_pod(os, record.query_length);
+  write_pod(os, record.read_accuracy);
+  write_pod(os, record.top_hit_share);
+  write_pod(os, record.mate2_length);
   write_pod(os, record.best_taxid_hint);
   write_pod(os, record.profile_response_taxid);
   write_pod(os, record.domain_evidence_per_hash);
@@ -211,6 +231,9 @@ void write_spool_sample_mixture_record(
   write_pod(os, record.read_ordinal);
   write_pod(os, record.evaluated);
   write_pod(os, record.query_length);
+  write_pod(os, record.read_accuracy);
+  write_pod(os, record.top_hit_share);
+  write_pod(os, record.mate2_length);
   write_pod(os, record.best_taxid_hint);
   write_pod(os, record.profile_response_taxid);
   write_pod(os, record.domain_evidence_per_hash);
@@ -250,6 +273,9 @@ bool read_spool_record(std::istream &is, SpoolReadRecord &record,
   if (!read_pod(is, record.read_ordinal) ||
       !read_pod(is, record.evaluated) ||
       !read_pod(is, record.query_length) ||
+      !read_pod(is, record.read_accuracy) ||
+      !read_pod(is, record.top_hit_share) ||
+      !read_pod(is, record.mate2_length) ||
       !read_pod(is, record.best_taxid_hint) ||
       !read_pod(is, record.profile_response_taxid) ||
       !read_pod(is, record.domain_evidence_per_hash) ||
@@ -321,6 +347,34 @@ bool read_spool_record(std::istream &is, SpoolReadRecord &record) {
   return read_spool_record(is, record, kSpoolReadAll);
 }
 
+// Sums the per-base error probabilities 10^(-Q/10) of a quality string.
+template <typename Qualities>
+static void add_base_errors(const Qualities &qualities, double &errors,
+                            size_t &bases) {
+  static const std::array<double, 94> kErrorByPhred = [] {
+    std::array<double, 94> table{};
+    for (size_t q = 0; q < table.size(); ++q) {
+      table[q] = std::pow(10.0, -static_cast<double>(q) / 10.0);
+    }
+    return table;
+  }();
+  for (const auto &quality : qualities) {
+    const int phred = static_cast<int>(seqan3::to_phred(quality));
+    errors += kErrorByPhred[static_cast<size_t>(
+        std::clamp(phred, 0, static_cast<int>(kErrorByPhred.size()) - 1))];
+    ++bases;
+  }
+}
+
+// Mean per-base accuracy implied by the quality values; 1 without them (FASTA).
+static float mean_base_accuracy(double errors, size_t bases) {
+  if (bases == 0) {
+    return 1.0f;
+  }
+  return static_cast<float>(
+      std::clamp(1.0 - errors / static_cast<double>(bases), 0.0, 1.0));
+}
+
 void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues,
                 ClassifyConfig config, FileInfo &fileInfo,
                 size_t max_reads,
@@ -332,6 +386,9 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
 
   const size_t shardCount = readQueues.size();
   std::hash<std::string> hasher;
+  // Quality values are parsed only when the species boundary needs the read
+  // accuracy.
+  const bool withQualities = config.species_boundary_enabled();
 
   auto init_batch = [&](batchReads &batch, bool paired) {
     batch.ids.reserve(config.batchSize);
@@ -339,6 +396,9 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
     batch.seqs.reserve(config.batchSize);
     if (paired) {
       batch.seqs2.reserve(config.batchSize);
+    }
+    if (withQualities) {
+      batch.accuracies.reserve(config.batchSize);
     }
   };
 
@@ -371,19 +431,18 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
       init_batch(b, false);
     }
 
-    for (const auto &file : config.singleFiles) {
-      ++totalFiles;
-
-      seqan3::sequence_file_input<
-          raptor::dna4_traits,
-          seqan3::fields<seqan3::field::id, seqan3::field::seq>>
-          fin{file};
-
+    auto consume_single = [&](auto &fin, auto withQual) {
       for (auto &&r : fin) {
 	        std::string id = std::move(r.id());
 	        const uint64_t ordinal = static_cast<uint64_t>(totalSequences);
 	        size_t shard = hasher(id) % shardCount;
 	        auto &batch = pending[shard];
+        if constexpr (decltype(withQual)::value) {
+          double errors = 0.0;
+          size_t bases = 0;
+          add_base_errors(r.base_qualities(), errors, bases);
+          batch.accuracies.emplace_back(mean_base_accuracy(errors, bases));
+        }
 	        batch.ids.emplace_back(std::move(id));
 	        batch.ordinals.emplace_back(ordinal);
 	        batch.seqs.emplace_back(std::move(r.sequence()));
@@ -395,6 +454,25 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
         if (batch.ids.size() >= config.batchSize) {
           flush_batch(shard, batch, false);
         }
+      }
+    };
+
+    for (const auto &file : config.singleFiles) {
+      ++totalFiles;
+
+      if (withQualities) {
+        seqan3::sequence_file_input<
+            dna4_phred94_traits,
+            seqan3::fields<seqan3::field::id, seqan3::field::seq,
+                           seqan3::field::qual>>
+            fin{file};
+        consume_single(fin, std::true_type{});
+      } else {
+        seqan3::sequence_file_input<
+            raptor::dna4_traits,
+            seqan3::fields<seqan3::field::id, seqan3::field::seq>>
+            fin{file};
+        consume_single(fin, std::false_type{});
       }
       if (reached_limit) {
         break;
@@ -410,18 +488,7 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
       init_batch(b, true);
     }
 
-    for (size_t i = 0; i < config.pairedFiles.size(); i += 2) {
-      totalFiles += 2;
-
-      seqan3::sequence_file_input<
-          raptor::dna4_traits,
-          seqan3::fields<seqan3::field::id, seqan3::field::seq>>
-          fin1{config.pairedFiles[i]};
-      seqan3::sequence_file_input<
-          raptor::dna4_traits,
-          seqan3::fields<seqan3::field::id, seqan3::field::seq>>
-          fin2{config.pairedFiles[i + 1]};
-
+    auto consume_paired = [&](auto &fin1, auto &fin2, auto withQual) {
       auto it1 = fin1.begin();
       auto end1 = fin1.end();
       auto it2 = fin2.begin();
@@ -434,6 +501,13 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
 	        const uint64_t ordinal = static_cast<uint64_t>(totalSequences);
 	        size_t shard = hasher(id) % shardCount;
 	        auto &batch = pending[shard];
+        if constexpr (decltype(withQual)::value) {
+          double errors = 0.0;
+          size_t bases = 0;
+          add_base_errors(rec1.base_qualities(), errors, bases);
+          add_base_errors(rec2.base_qualities(), errors, bases);
+          batch.accuracies.emplace_back(mean_base_accuracy(errors, bases));
+        }
 	        batch.ids.emplace_back(std::move(id));
 	        batch.ordinals.emplace_back(ordinal);
 	        batch.seqs.emplace_back(std::move(rec1.sequence()));
@@ -446,6 +520,28 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
         if (batch.ids.size() >= config.batchSize) {
           flush_batch(shard, batch, true);
         }
+      }
+    };
+
+    for (size_t i = 0; i < config.pairedFiles.size(); i += 2) {
+      totalFiles += 2;
+
+      if (withQualities) {
+        using QualFields = seqan3::fields<seqan3::field::id, seqan3::field::seq,
+                                          seqan3::field::qual>;
+        seqan3::sequence_file_input<dna4_phred94_traits, QualFields> fin1{
+            config.pairedFiles[i]};
+        seqan3::sequence_file_input<dna4_phred94_traits, QualFields> fin2{
+            config.pairedFiles[i + 1]};
+        consume_paired(fin1, fin2, std::true_type{});
+      } else {
+        using PlainFields =
+            seqan3::fields<seqan3::field::id, seqan3::field::seq>;
+        seqan3::sequence_file_input<raptor::dna4_traits, PlainFields> fin1{
+            config.pairedFiles[i]};
+        seqan3::sequence_file_input<raptor::dna4_traits, PlainFields> fin2{
+            config.pairedFiles[i + 1]};
+        consume_paired(fin1, fin2, std::false_type{});
       }
       if (reached_limit) {
         break;

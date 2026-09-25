@@ -667,6 +667,11 @@ def parse_arguments():
         help="Disable genome-evidence species presence calling (and its feedback into read assignments)",
     )
     classify_parser.add_argument(
+        "--no-species-boundary",
+        action="store_true",
+        help="Judge the read-support floors on all reads of a species by read count, not on the reads within the species boundary and their bases",
+    )
+    classify_parser.add_argument(
         "--presence-sketch",
         dest="presence_sketch",
         default=None,
@@ -892,6 +897,8 @@ def run_chimera(args, chimera_path=None):
             command.append("--profile-read-trace")
         if getattr(args, "no_presence_call", False):
             command.append("--no-presence-call")
+        if getattr(args, "no_species_boundary", False):
+            command.extend(["--species-boundary-ani", "0"])
         if getattr(args, "presence_sketch", None):
             _ensure_file_exists(Path(args.presence_sketch), "Presence sketch")
             command.extend(["--presence-sketch", str(args.presence_sketch)])
