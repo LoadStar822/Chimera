@@ -2590,6 +2590,12 @@ void classify_streaming(
 
     IdleWait idle;
     for (;;) {
+      // Read the done flag before dequeueing: once it is set, every batch the
+      // producer enqueued is visible, so a failed dequeue means the queue is
+      // really empty. Checking it after a failed dequeue can drop the final
+      // batch enqueued in between.
+      const bool producerDone =
+          producer_done.load(std::memory_order_acquire);
       if (readQueue.try_dequeue(batch)) {
         idle.reset();
         release_queue_slot(queueThrottle, estimate_batch_bytes(batch));
@@ -2598,7 +2604,7 @@ void classify_streaming(
                      localFileInfo, weightCtx, presencePtr, scratch);
         continue;
       }
-      if (producer_done.load(std::memory_order_acquire)) {
+      if (producerDone) {
         break;
       }
       idle.wait();
@@ -2740,6 +2746,12 @@ void classify_streaming_spool(
 
     IdleWait idle;
     for (;;) {
+      // Read the done flag before dequeueing: once it is set, every batch the
+      // producer enqueued is visible, so a failed dequeue means the queue is
+      // really empty. Checking it after a failed dequeue can drop the final
+      // batch enqueued in between.
+      const bool producerDone =
+          producer_done.load(std::memory_order_acquire);
       if (readQueue.try_dequeue(batch)) {
         idle.reset();
         const size_t batch_size = batch.ids.size();
@@ -2782,7 +2794,7 @@ void classify_streaming_spool(
         }
         continue;
       }
-      if (producer_done.load(std::memory_order_acquire)) {
+      if (producerDone) {
         break;
       }
       idle.wait();
