@@ -2562,6 +2562,11 @@ void classify_streaming(
   {
 #ifdef _OPENMP
     const int thread_id = omp_get_thread_num();
+    // Queue i is drained only by thread i, so a smaller team would leave
+    // queues unconsumed.
+    if (static_cast<size_t>(omp_get_num_threads()) < readQueues.size()) {
+      throw std::runtime_error("Fewer classify threads than read queues");
+    }
 #else
     const int thread_id = 0;
 #endif
@@ -2665,6 +2670,11 @@ void classify_streaming_spool(
   {
 #ifdef _OPENMP
     const int thread_id = omp_get_thread_num();
+    // Queue i is drained only by thread i, so a smaller team would leave
+    // queues unconsumed.
+    if (static_cast<size_t>(omp_get_num_threads()) < readQueues.size()) {
+      throw std::runtime_error("Fewer classify threads than read queues");
+    }
 #else
     const int thread_id = 0;
 #endif
@@ -2842,6 +2852,11 @@ void classify(
   {
 #ifdef _OPENMP
     const int thread_id = omp_get_thread_num();
+    // Queue i is drained only by thread i, so a smaller team would leave
+    // queues unconsumed.
+    if (static_cast<size_t>(omp_get_num_threads()) < readQueues.size()) {
+      throw std::runtime_error("Fewer classify threads than read queues");
+    }
 #else
     const int thread_id = 0;
 #endif

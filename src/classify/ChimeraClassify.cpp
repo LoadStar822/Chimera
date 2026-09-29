@@ -4564,6 +4564,9 @@ static void merge_classify_output_parts(
     fileInfo.unclassifiedNum += partStats[i].unclassified;
   }
   os.close();
+  if (!os.good()) {
+    throw std::runtime_error("Failed to close classify output: " + outputFile);
+  }
 }
 
 static bool read_profile_read_trace_raw_record(

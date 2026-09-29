@@ -256,6 +256,11 @@ bool read_spool_record(std::istream &is, SpoolReadRecord &record,
   uint32_t id_len = 0;
   is.read(reinterpret_cast<char *>(&id_len), sizeof(id_len));
   if (!is) {
+    // Only a clean end of file, with no bytes of the next record read, ends
+    // the spool; anything else means the file was cut short or unreadable.
+    if (is.gcount() != 0 || !is.eof()) {
+      throw std::runtime_error("Truncated classify spool record length");
+    }
     return false;
   }
   record.id.clear();
@@ -411,8 +416,12 @@ void parseReads(std::vector<moodycamel::ConcurrentQueue<batchReads>> &readQueues
         (queueThrottles != nullptr && shard < queueThrottles->size())
             ? &(*queueThrottles)[shard]
             : nullptr;
-    acquire_queue_slot(throttle, estimate_batch_bytes(batch));
-    readQueues[shard].enqueue(std::move(batch));
+    const size_t batch_bytes = estimate_batch_bytes(batch);
+    acquire_queue_slot(throttle, batch_bytes);
+    if (!readQueues[shard].enqueue(std::move(batch))) {
+      release_queue_slot(throttle, batch_bytes);
+      throw std::runtime_error("Failed to enqueue a read batch");
+    }
     if (progress != nullptr) {
       progress->parsed_reads.fetch_add(batch_size, std::memory_order_relaxed);
     }
