@@ -87,6 +87,29 @@ std::vector<InputTask> make_tasks(
   return tasks;
 }
 
+// Sequence bytes of the inputs, a compressed file counted as four times its
+// size on disk; counting stops once past the limit.
+uint64_t input_sequence_bytes(const std::vector<InputTask> &tasks,
+                              uint64_t limit) {
+  uint64_t total = 0;
+  for (const auto &task : tasks) {
+    std::error_code ec;
+    uint64_t bytes = std::filesystem::file_size(task.filename, ec);
+    if (ec) {
+      return std::numeric_limits<uint64_t>::max();
+    }
+    const auto extension = std::filesystem::path(task.filename).extension();
+    if (extension == ".gz" || extension == ".bgz" || extension == ".bz2") {
+      bytes *= 4;
+    }
+    total += bytes;
+    if (total > limit) {
+      break;
+    }
+  }
+  return total;
+}
+
 std::string shard_filename(uint32_t genus) {
   return "g" + std::to_string(genus) + ".nbcidx";
 }
@@ -444,10 +467,31 @@ uint64_t write_representative_pool_for_genus(
   return written;
 }
 
+// Species all of whose input sequences are local targets, one taxid per line.
+void write_complete_species(const std::filesystem::path &path,
+                            const std::vector<uint32_t> &species) {
+  std::ofstream out(path, std::ios::trunc);
+  if (!out) {
+    throw std::runtime_error("failed to open complete species list: " +
+                             path.string());
+  }
+  out << "species\n";
+  for (const uint32_t taxid : species) {
+    out << taxid << '\n';
+  }
+  out.close();
+  if (!out) {
+    throw std::runtime_error("failed to write complete species list: " +
+                             path.string());
+  }
+}
+
 struct SpeciesBuildState {
   uint32_t species{};
   uint32_t genus{};
   size_t remaining_tasks{};
+  uint64_t sequences{}; // input sequences of the species
+  bool complete{false}; // every one of them is a target
   std::mutex mutex;
   std::vector<EncodedTarget> candidates;
   std::vector<TargetPlan> selected;
@@ -582,12 +626,14 @@ NativeBoundedBuildStats build_native_bounded_index_fused(
         auto &speciesState = *speciesStates[resolved.species_state];
         std::vector<EncodedTarget> speciesTargets;
         bool finalizeSpecies = false;
+        uint64_t speciesSequences = 0;
         {
           std::lock_guard<std::mutex> lock(speciesState.mutex);
           for (auto &candidate : taskCandidates) {
             retain_target(speciesState.candidates, std::move(candidate),
                           config.native_bounded_targets_per_species);
           }
+          speciesState.sequences += contig;
           if (speciesState.remaining_tasks == 0) {
             throw std::runtime_error(
                 "native bounded species task accounting underflow");
@@ -595,6 +641,7 @@ NativeBoundedBuildStats build_native_bounded_index_fused(
           --speciesState.remaining_tasks;
           if (speciesState.remaining_tasks == 0) {
             speciesTargets = std::move(speciesState.candidates);
+            speciesSequences = speciesState.sequences;
             finalizeSpecies = true;
           }
         }
@@ -604,6 +651,7 @@ NativeBoundedBuildStats build_native_bounded_index_fused(
               std::move(speciesTargets),
               config.native_bounded_sources_per_species,
               config.native_bounded_targets_per_source);
+          speciesState.complete = speciesTargets.size() == speciesSequences;
           uint64_t speciesBytes = 0;
           for (const auto &target : speciesTargets) {
             if (target.anchors.size() >
@@ -677,6 +725,7 @@ NativeBoundedBuildStats build_native_bounded_index_fused(
   std::unordered_map<uint32_t, std::vector<TargetPlan *>> plansByGenus;
   std::vector<chimera::native_bounded::TargetMeta> rootTargets;
   std::vector<TargetPlan *> selectedPlans;
+  std::vector<uint32_t> completeSpecies;
   for (auto &state : speciesStates) {
     if (state->remaining_tasks != 0) {
       throw std::runtime_error(
@@ -685,7 +734,13 @@ NativeBoundedBuildStats build_native_bounded_index_fused(
     for (auto &plan : state->selected) {
       selectedPlans.push_back(&plan);
     }
+    if (state->complete) {
+      completeSpecies.push_back(state->species);
+    }
   }
+  std::sort(completeSpecies.begin(), completeSpecies.end());
+  stats.species = speciesStates.size();
+  stats.complete_species = completeSpecies.size();
   std::sort(selectedPlans.begin(), selectedPlans.end(),
             [](const TargetPlan *lhs, const TargetPlan *rhs) {
               if (lhs->source_index != rhs->source_index) {
@@ -761,6 +816,9 @@ NativeBoundedBuildStats build_native_bounded_index_fused(
   }
   chimera::local_resolution::write_rep_metadata(paths.rep_metadata,
                                                 std::move(repMetadataRows));
+  if (!paths.complete_species.empty()) {
+    write_complete_species(paths.complete_species, completeSpecies);
+  }
   const auto layoutFinished = std::chrono::steady_clock::now();
   stats.layout_seconds =
       std::chrono::duration<double>(layoutFinished - layoutStarted).count();
@@ -784,6 +842,18 @@ NativeBoundedBuildStats build_native_bounded_index(
   const auto tasks = make_tasks(inputFiles);
   if (tasks.empty()) {
     throw std::runtime_error("native bounded index build has no valid inputs");
+  }
+  // A small input keeps every sequence, so that every species is complete.
+  const uint64_t keepAllBytes = config.native_bounded_keep_all_bytes;
+  if (keepAllBytes > 0 &&
+      input_sequence_bytes(tasks, keepAllBytes) <= keepAllBytes) {
+    BuildConfig keepAll = config;
+    keepAll.native_bounded_targets_per_species = 0;
+    keepAll.native_bounded_sources_per_species = 0;
+    keepAll.native_bounded_targets_per_source = 0;
+    auto stats = build_native_bounded_index_fused(keepAll, tasks, paths);
+    stats.kept_all = true;
+    return stats;
   }
   return build_native_bounded_index_fused(config, tasks, paths);
 }

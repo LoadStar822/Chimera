@@ -58,6 +58,10 @@ namespace ChimeraBuild {
 				uint32_t native_bounded_targets_per_species{ 32 };
 				uint32_t native_bounded_sources_per_species{ 8 };
 				uint32_t native_bounded_targets_per_source{ 0 };
+				// Input of at most this many sequence bytes (compressed files counted
+				// four times their size on disk) keeps every sequence as a local
+				// target.
+				uint64_t native_bounded_keep_all_bytes{ 4ULL << 30 };
 			};
 
 	inline std::ostream& operator<<(std::ostream& os, const BuildConfig& config) {
@@ -85,6 +89,7 @@ namespace ChimeraBuild {
 					<< std::setw(25) << "Local targets/species:" << config.native_bounded_targets_per_species << std::endl
 					<< std::setw(25) << "Local sources/species:" << config.native_bounded_sources_per_species << std::endl
 					<< std::setw(25) << "Local targets/source:" << config.native_bounded_targets_per_source << std::endl
+					<< std::setw(25) << "Local keep-all bytes:" << config.native_bounded_keep_all_bytes << std::endl
 					<< std::setw(25) << "Verbose:" << config.verbose << std::endl;
 
 		os << std::string(50, '=') << std::endl;

@@ -25,6 +25,9 @@ struct BuildManifest {
   uint32_t targets_per_species{};
   bool presence_available{};
   ArtifactStamp presence_sketch;
+  // Species all of whose input sequences are local targets.
+  bool complete_species_available{};
+  ArtifactStamp complete_species;
 };
 
 std::filesystem::path core_archive_path_for(const std::filesystem::path &db_path);
@@ -35,6 +38,7 @@ void write_manifest(const std::filesystem::path &core_path,
                     const std::filesystem::path &local_index_path,
                     const std::filesystem::path &rep_metadata_path,
                     const std::filesystem::path &shard_manifest_path,
+                    const std::filesystem::path &complete_species_path,
                     uint32_t k,
                     uint32_t w,
                     uint32_t targets_per_species);

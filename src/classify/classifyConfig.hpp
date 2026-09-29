@@ -69,7 +69,9 @@ namespace ChimeraClassify {
 	double local_resolution_trust_evidence = 0.20;
 	uint64_t local_resolution_min_species_reads = 2;
 	double local_resolution_min_species_mass = 1.0;
-	uint32_t local_resolution_targets_per_species = 16;
+	// Source genomes per species in the panel; 0 admits all of them, the
+	// anchor byte budget being the only cap.
+	uint32_t local_resolution_targets_per_species = 0;
 	uint64_t local_resolution_max_anchor_bytes = 2ULL << 30;
 	int lpc_diag_bin = 256;
 	uint32_t lpc_max_occ = 500;

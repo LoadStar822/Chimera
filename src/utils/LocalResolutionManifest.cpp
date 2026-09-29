@@ -172,6 +172,7 @@ void write_manifest(const std::filesystem::path &core_path,
                     const std::filesystem::path &local_index_path,
                     const std::filesystem::path &rep_metadata_path,
                     const std::filesystem::path &shard_manifest_path,
+                    const std::filesystem::path &complete_species_path,
                     uint32_t k,
                     uint32_t w,
                     uint32_t targets_per_species) {
@@ -203,6 +204,11 @@ void write_manifest(const std::filesystem::path &core_path,
     const auto shards = stamp_shards(base_dir, shard_manifest_path);
     for (const auto &shard : shards) {
       write_stamp(out, "shard", shard);
+    }
+    if (!complete_species_path.empty() &&
+        std::filesystem::exists(complete_species_path)) {
+      write_stamp(out, "complete_species",
+                  stamp_artifact(base_dir, complete_species_path));
     }
   }
 }
@@ -244,6 +250,9 @@ BuildManifest parse_manifest(const std::filesystem::path &manifest_path) {
     } else if (key == "presence_sketch") {
       manifest.presence_sketch = parse_stamp(fields, key);
       manifest.presence_available = true;
+    } else if (key == "complete_species") {
+      manifest.complete_species = parse_stamp(fields, key);
+      manifest.complete_species_available = true;
     } else if (fields.size() == 2) {
       scalars.emplace(key, fields[1]);
     } else {
@@ -288,6 +297,9 @@ load_and_verify_manifest_for_db(const std::filesystem::path &db_path) {
     for (size_t i = 0; i < manifest.shards.size(); ++i) {
       verify_stamp(core_path, manifest.shards[i],
                    "shard " + std::to_string(i));
+    }
+    if (manifest.complete_species_available) {
+      verify_stamp(core_path, manifest.complete_species, "complete species");
     }
   }
   return manifest;

@@ -139,6 +139,8 @@ struct LocalResolutionStats {
   uint64_t probe_chained{};
   uint64_t probe_agree{};
   bool trust_revoked{false};
+  uint64_t veto_checked{};  // trusted reads of a vetoable core species
+  uint64_t vetoed_reads{};  // of those, the ones without a chain to it
   uint32_t threads{};
   uint8_t k{};
   uint16_t w{};
@@ -156,6 +158,7 @@ struct LocalResolutionStats {
 struct LocalResolutionResult {
   LocalResolutionCallStore calls;
   LocalResolutionStats stats;
+  ReadBitset vetoed; // trusted reads whose trust the chains withdrew
 };
 
 struct LocalResolutionTarget {
@@ -196,6 +199,11 @@ struct LocalResolutionRequest {
   const SampleKeyBitset *sample_keys{nullptr}; // replaces the read hash pass
   const ReadBitset *skip_reads{nullptr};       // trusted reads
   const TrustProbe *trust_probe{nullptr};      // when null, skip_reads is final
+  // A trusted read whose core species is in veto_species (sorted: species the
+  // database and the panel hold in full) is chained, and loses its trust when
+  // no chain reaches that species. Other trusted reads are skipped as usual.
+  const std::vector<uint32_t> *trusted_core_species{nullptr}; // by ordinal
+  const std::vector<uint32_t> *veto_species{nullptr};
 };
 
 LocalResolutionResult run_local_resolution_engine(

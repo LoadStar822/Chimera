@@ -2119,15 +2119,21 @@ void sort_taxon_scores(std::vector<TaxonScore> &scores) {
             });
 }
 
+// partial_species, when given, receives the species that chained on some
+// target only over too little of the read, and over enough of it on none.
 std::vector<TaxonScore>
 chain_read_species_scores(const ReadRecord &read,
                           const CompactPostingIndex &index,
                           const std::vector<TargetRecord> &targets,
                           int diag_bin, uint32_t min_chain,
                           double min_coverage, uint32_t min_coverage_span,
-                          uint32_t k) {
+                          uint32_t k,
+                          std::vector<uint32_t> *partial_species = nullptr) {
   if (read.anchor_qids.size() != read.anchors.size()) {
     throw std::runtime_error("local query token id invariant violated");
+  }
+  if (partial_species != nullptr) {
+    partial_species->clear();
   }
   thread_local std::unordered_map<ChainKey, ChainStats, ChainKeyHash> chains;
   chains.clear();
@@ -2207,6 +2213,9 @@ chain_read_species_scores(const ReadRecord &read,
         static_cast<double>(chainsOfTarget.q_hi - chainsOfTarget.q_lo + k);
     if (covered < min_covered) {
       chainsOfTarget.best = 0;
+      if (partial_species != nullptr) {
+        partial_species->push_back(targets[tid].species);
+      }
       continue;
     }
     auto &entry = by_species[targets[tid].species];
@@ -2223,6 +2232,15 @@ chain_read_species_scores(const ReadRecord &read,
       ++entry.support;
     }
   }
+  if (partial_species != nullptr && !partial_species->empty()) {
+    std::sort(partial_species->begin(), partial_species->end());
+    partial_species->erase(
+        std::unique(partial_species->begin(), partial_species->end()),
+        partial_species->end());
+    std::erase_if(*partial_species, [&](uint32_t species) {
+      return by_species.count(species) != 0;
+    });
+  }
   std::vector<TaxonScore> scores;
   scores.reserve(by_species.size());
   for (const auto &[taxid, entry] : by_species) {
@@ -2237,7 +2255,7 @@ chain_read_species_scores(const ReadRecord &read,
 
 // Chains a read on kMaxChainTokensPerRead evenly sampled anchors, and only when
 // that finds nothing, on all of its anchors. first_pass_chained reports whether
-// the sampled anchors chained.
+// the sampled anchors chained; partial_species is that of the last pass.
 std::vector<TaxonScore>
 chain_read_species_scores_with_rescue(const ReadRecord &read,
                                       const CompactPostingIndex &index,
@@ -2245,11 +2263,14 @@ chain_read_species_scores_with_rescue(const ReadRecord &read,
                                       int diag_bin, uint32_t min_chain,
                                       double min_coverage,
                                       uint32_t min_coverage_span, uint32_t k,
-                                      bool &first_pass_chained) {
+                                      bool &first_pass_chained,
+                                      std::vector<uint32_t> *partial_species =
+                                          nullptr) {
   if (read.anchors.size() <= kMaxChainTokensPerRead) {
     auto scores = chain_read_species_scores(read, index, targets, diag_bin,
                                             min_chain, min_coverage,
-                                            min_coverage_span, k);
+                                            min_coverage_span, k,
+                                            partial_species);
     first_pass_chained = !scores.empty();
     return scores;
   }
@@ -2267,13 +2288,15 @@ chain_read_species_scores_with_rescue(const ReadRecord &read,
   }
   auto scores = chain_read_species_scores(sampled, index, targets, diag_bin,
                                           min_chain, min_coverage,
-                                          min_coverage_span, k);
+                                          min_coverage_span, k,
+                                          partial_species);
   first_pass_chained = !scores.empty();
   if (first_pass_chained) {
     return scores;
   }
   return chain_read_species_scores(read, index, targets, diag_bin, min_chain,
-                                   min_coverage, min_coverage_span, k);
+                                   min_coverage, min_coverage_span, k,
+                                   partial_species);
 }
 
 struct TrustProbeState {
@@ -2317,18 +2340,38 @@ void chain_reads_to_call_store(
     int diag_bin, uint32_t min_chain, double min_coverage,
     uint32_t min_coverage_span, uint32_t threads,
     const ChimeraClassify::ReadBitset *skip_reads, TrustProbeState &trust,
+    const std::vector<uint32_t> *trusted_core,
+    const std::vector<uint32_t> *veto_species,
     ChimeraClassify::LocalResolutionCallStore &store,
-    std::atomic<uint64_t> &local_hits, std::atomic<uint64_t> &local_absent,
-    std::atomic<uint64_t> &skipped) {
+    ChimeraClassify::ReadBitset &vetoed, uint64_t &veto_checked,
+    uint64_t &vetoed_reads, std::atomic<uint64_t> &local_hits,
+    std::atomic<uint64_t> &local_absent, std::atomic<uint64_t> &skipped) {
   // Without a probe the skip set is final; with one, trusted reads are chained
   // until the probe has decided that they can be skipped.
   std::atomic<bool> skip_active{trust.probe == nullptr};
+  // A trusted read of a species the database and the panel hold in full is
+  // always chained: when no chain reaches its core species, the core call has
+  // no support in any of that species' sequences and the read loses its trust.
+  // Otherwise it counts as skipped once skipping is active.
+  const bool veto = skip_reads != nullptr && trusted_core != nullptr &&
+                    veto_species != nullptr && !veto_species->empty();
+  const auto vetoable_core = [&](uint64_t ordinal) -> uint32_t {
+    if (!veto || ordinal >= trusted_core->size()) {
+      return 0;
+    }
+    const uint32_t core = (*trusted_core)[ordinal];
+    return core != 0 && std::binary_search(veto_species->begin(),
+                                           veto_species->end(), core)
+               ? core
+               : 0;
+  };
   for_each_pending_read_batch(
       read_files, paired, kLocalResolutionReadBatchSize,
       [&](const std::vector<PendingRead> &pending) {
         std::vector<std::vector<TaxonScore>> batch_scores(pending.size());
         std::vector<uint8_t> batch_skipped(pending.size(), 0);
         std::vector<uint8_t> batch_first_pass(pending.size(), 0);
+        std::vector<uint8_t> batch_veto(veto ? pending.size() : 0, 0);
         const uint32_t worker_count = std::max<uint32_t>(
             1, std::min<uint32_t>(
                    threads == 0 ? 1 : threads,
@@ -2336,13 +2379,18 @@ void chain_reads_to_call_store(
         std::atomic<size_t> next{0};
         const bool skip_now = skip_active.load(std::memory_order_relaxed);
         auto worker = [&]() {
+          std::vector<uint32_t> partial;
+          std::vector<uint32_t> matePartial;
           while (true) {
             const size_t idx = next.fetch_add(1, std::memory_order_relaxed);
             if (idx >= pending.size()) {
               break;
             }
-            if (skip_now && skip_reads != nullptr &&
-                skip_reads->test(pending[idx].ordinal)) {
+            const bool trustedRead = skip_reads != nullptr &&
+                                     skip_reads->test(pending[idx].ordinal);
+            const uint32_t vetoCore =
+                trustedRead ? vetoable_core(pending[idx].ordinal) : 0;
+            if (skip_now && trustedRead && vetoCore == 0) {
               batch_skipped[idx] = 1;
               continue;
             }
@@ -2353,7 +2401,8 @@ void chain_reads_to_call_store(
             bool firstPass = false;
             auto scores = chain_read_species_scores_with_rescue(
                 read, index, targets, diag_bin, min_chain, min_coverage,
-                min_coverage_span, k, firstPass);
+                min_coverage_span, k, firstPass,
+                vetoCore != 0 ? &partial : nullptr);
             if (!pending[idx].mate_sequence.empty()) {
               auto mate = make_read_record(pending[idx].ordinal,
                                            pending[idx].mate_sequence, k, w);
@@ -2361,7 +2410,12 @@ void chain_reads_to_call_store(
               bool mateFirstPass = false;
               auto mateScores = chain_read_species_scores_with_rescue(
                   mate, index, targets, diag_bin, min_chain, min_coverage,
-                  min_coverage_span, k, mateFirstPass);
+                  min_coverage_span, k, mateFirstPass,
+                  vetoCore != 0 ? &matePartial : nullptr);
+              if (vetoCore != 0) {
+                partial.insert(partial.end(), matePartial.begin(),
+                               matePartial.end());
+              }
               firstPass = firstPass || mateFirstPass;
               scores.insert(scores.end(),
                             std::make_move_iterator(mateScores.begin()),
@@ -2389,6 +2443,25 @@ void chain_reads_to_call_store(
                 scores.resize(kMaxCandidatesPerRead);
               }
             }
+            if (vetoCore != 0) {
+              // A chain over part of the read still counts for the species.
+              const bool coreChained =
+                  std::any_of(scores.begin(), scores.end(),
+                              [&](const TaxonScore &score) {
+                                return score.taxid == vetoCore;
+                              }) ||
+                  std::find(partial.begin(), partial.end(), vetoCore) !=
+                      partial.end();
+              if (!coreChained) {
+                batch_veto[idx] = 2; // checked and vetoed
+              } else {
+                batch_veto[idx] = 1; // checked, keeps its trust
+                if (skip_now) {
+                  batch_skipped[idx] = 1;
+                  scores.clear();
+                }
+              }
+            }
             batch_scores[idx] = std::move(scores);
             batch_first_pass[idx] = firstPass ? 1 : 0;
           }
@@ -2405,6 +2478,13 @@ void chain_reads_to_call_store(
           if (pending[i].ordinal != store.read_count()) {
             throw std::runtime_error(
                 "local resolution read ordinal stream is not contiguous");
+          }
+          if (veto && batch_veto[i] != 0) {
+            ++veto_checked;
+            if (batch_veto[i] == 2) {
+              ++vetoed_reads;
+              vetoed.set(pending[i].ordinal);
+            }
           }
           if (batch_skipped[i] != 0) {
             skipped.fetch_add(1, std::memory_order_relaxed);
@@ -2455,7 +2535,9 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
                                  uint32_t min_coverage_span, uint32_t threads,
                                  const SampleKeyBitset *sample_keys,
                                  const ReadBitset *skip_reads,
-                                 const TrustProbe *trust_probe) {
+                                 const TrustProbe *trust_probe,
+                                 const std::vector<uint32_t> *trusted_core,
+                                 const std::vector<uint32_t> *veto_species) {
   if (read_files.empty()) {
     throw std::runtime_error("Local resolution route requires read input");
   }
@@ -2509,12 +2591,21 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
   std::atomic<uint64_t> skipped{0};
   TrustProbeState trust;
   trust.probe = skip_reads == nullptr ? nullptr : trust_probe;
+  if (skip_reads != nullptr && trusted_core != nullptr &&
+      veto_species != nullptr && !veto_species->empty()) {
+    result.vetoed = ReadBitset(skip_reads->words.size() * 64);
+  }
+  uint64_t vetoChecked = 0;
+  uint64_t vetoedReads = 0;
   chain_reads_to_call_store(read_files, paired, root_meta.k, root_meta.w,
                             query_hashes, index, targets, diag_bin, min_chain,
                             min_coverage, min_coverage_span, threads,
-                            skip_reads, trust, result.calls, local_hits,
-                            local_absent, skipped);
+                            skip_reads, trust, trusted_core, veto_species,
+                            result.calls, result.vetoed, vetoChecked,
+                            vetoedReads, local_hits, local_absent, skipped);
   const auto chained = std::chrono::steady_clock::now();
+  result.stats.veto_checked = vetoChecked;
+  result.stats.vetoed_reads = vetoedReads;
 
   result.stats.reads = result.calls.read_count();
   result.stats.skipped_reads = skipped.load(std::memory_order_relaxed);
@@ -2606,7 +2697,8 @@ run_local_resolution_engine(const LocalResolutionRequest &request) {
       std::filesystem::path(request.shard_manifest_file), target_filter,
       request.diag_bin, request.max_occ, request.min_chain,
       request.min_coverage, request.min_coverage_span, request.threads,
-      request.sample_keys, request.skip_reads, request.trust_probe);
+      request.sample_keys, request.skip_reads, request.trust_probe,
+      request.trusted_core_species, request.veto_species);
 }
 
 } // namespace ChimeraClassify

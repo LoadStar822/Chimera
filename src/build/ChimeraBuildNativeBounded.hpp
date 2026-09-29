@@ -15,6 +15,11 @@ struct NativeBoundedBuildStats {
   uint64_t representativeRecords{0};
   double anchor_build_seconds{0.0};
   double layout_seconds{0.0};
+  // Every input sequence was kept (small input), and the species all of whose
+  // sequences were kept.
+  bool kept_all{false};
+  uint64_t species{0};
+  uint64_t complete_species{0};
 };
 
 struct NativeBoundedOutputPaths {
@@ -22,6 +27,7 @@ struct NativeBoundedOutputPaths {
   std::filesystem::path rep_metadata;
   std::filesystem::path shard_manifest;
   std::filesystem::path shard_dir;
+  std::filesystem::path complete_species;
 };
 
 NativeBoundedBuildStats build_native_bounded_index(

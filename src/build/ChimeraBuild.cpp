@@ -442,6 +442,7 @@ void run(BuildConfig config) {
       localRoot / "reps.bin",
       localRoot / "shards.tsv",
       localRoot / "shards",
+      localRoot / "complete_species.tsv",
   };
   if (std::filesystem::exists(databaseRoot) &&
       !std::filesystem::is_directory(databaseRoot)) {
@@ -482,11 +483,16 @@ void run(BuildConfig config) {
     print_build_time(read_total_time);
     std::cout << std::endl;
   }
+  NativeBoundedBuildStats localStats;
   if (config.native_bounded_index) {
     auto local_start = std::chrono::high_resolution_clock::now();
     std::cout << "Building local read resolution data..." << std::endl;
-    const NativeBoundedBuildStats localStats =
-        build_native_bounded_index(config, inputFiles, localPaths);
+    localStats = build_native_bounded_index(config, inputFiles, localPaths);
+    std::cout << "Local references: "
+              << (localStats.kept_all ? "every input sequence kept"
+                                      : "selected per species")
+              << ", " << localStats.complete_species << " of "
+              << localStats.species << " species complete" << std::endl;
     auto local_end = std::chrono::high_resolution_clock::now();
     auto local_total_time =
         std::chrono::duration_cast<std::chrono::milliseconds>(local_end -
@@ -854,8 +860,9 @@ void run(BuildConfig config) {
   chimera::local_resolution::write_manifest(
       corePath, config.native_bounded_index, localPaths.metadata_index,
       localPaths.rep_metadata, localPaths.shard_manifest,
-      config.native_bounded_k, config.native_bounded_w,
-      config.native_bounded_targets_per_species);
+      localPaths.complete_species, config.native_bounded_k,
+      config.native_bounded_w,
+      localStats.kept_all ? 0 : config.native_bounded_targets_per_species);
   auto save_end = std::chrono::high_resolution_clock::now();
   auto save_total_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                              save_end - save_start)

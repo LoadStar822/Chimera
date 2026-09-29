@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -2971,6 +2972,8 @@ struct LocalResolutionPanel {
   uint64_t budget_skipped_targets{};
   uint64_t budget_skipped_anchor_records{};
   uint64_t budget_skipped_anchor_bytes{};
+  // Species all of whose stored source genomes are in the panel (sorted).
+  std::vector<uint32_t> complete_species;
 };
 
 struct LocalResolutionArtifacts {
@@ -2978,6 +2981,9 @@ struct LocalResolutionArtifacts {
   std::filesystem::path rep_metadata_path;
   std::filesystem::path shard_manifest_path;
   uint32_t k{};
+  // Species whose every input sequence the local data holds (sorted); empty
+  // for databases built without the list.
+  std::vector<uint32_t> complete_species;
 };
 
 static void write_local_resolution_profile_json(
@@ -3045,7 +3051,9 @@ static void write_local_resolution_profile_json(
       << (panel == nullptr ? 0 : panel->budget_skipped_anchor_records)
       << ",\n";
   out << "    \"budget_skipped_anchor_bytes\": "
-      << (panel == nullptr ? 0 : panel->budget_skipped_anchor_bytes) << "\n";
+      << (panel == nullptr ? 0 : panel->budget_skipped_anchor_bytes) << ",\n";
+  out << "    \"complete_species\": "
+      << (panel == nullptr ? 0 : panel->complete_species.size()) << "\n";
   out << "  },\n";
   out << "  \"engine\": {\n";
   auto write_stat = [&](const char *name, auto value, bool last = false) {
@@ -3089,6 +3097,8 @@ static void write_local_resolution_profile_json(
     write_stat("probe_chained", stats->probe_chained);
     write_stat("probe_agree", stats->probe_agree);
     write_stat("trust_revoked", static_cast<uint32_t>(stats->trust_revoked));
+    write_stat("veto_checked", stats->veto_checked);
+    write_stat("vetoed_reads", stats->vetoed_reads);
     write_stat("threads", stats->threads);
     write_stat("k", static_cast<uint32_t>(stats->k));
     write_stat("w", stats->w);
@@ -3165,6 +3175,37 @@ static void write_local_resolution_panel_table(
   }
 }
 
+// Species list written by the build: a "species" header, one taxid per line.
+static std::vector<uint32_t>
+read_local_resolution_species_list(const std::filesystem::path &path) {
+  std::ifstream in(path);
+  if (!in) {
+    throw std::runtime_error("Failed to open local resolution species list: " +
+                             path.string());
+  }
+  std::vector<uint32_t> species;
+  std::string line;
+  bool header = true;
+  while (std::getline(in, line)) {
+    if (header) {
+      header = false;
+      continue;
+    }
+    if (line.empty()) {
+      continue;
+    }
+    uint32_t taxid = 0;
+    if (!chimera::utils::try_parse_u32(line, taxid) || taxid == 0) {
+      throw std::runtime_error("Malformed local resolution species list: " +
+                               path.string());
+    }
+    species.push_back(taxid);
+  }
+  std::sort(species.begin(), species.end());
+  species.erase(std::unique(species.begin(), species.end()), species.end());
+  return species;
+}
+
 static std::optional<LocalResolutionArtifacts>
 resolve_local_resolution_artifacts(const std::string &dbFile) {
   const auto manifest =
@@ -3174,7 +3215,7 @@ resolve_local_resolution_artifacts(const std::string &dbFile) {
   }
   const std::filesystem::path corePath =
       chimera::local_resolution::core_archive_path_for(dbFile);
-  return LocalResolutionArtifacts{
+  LocalResolutionArtifacts artifacts{
       chimera::local_resolution::materialize_manifest_path(
           corePath, manifest->local_index),
       chimera::local_resolution::materialize_manifest_path(
@@ -3183,6 +3224,12 @@ resolve_local_resolution_artifacts(const std::string &dbFile) {
           corePath, manifest->shard_manifest),
       manifest->k,
   };
+  if (manifest->complete_species_available) {
+    artifacts.complete_species = read_local_resolution_species_list(
+        chimera::local_resolution::materialize_manifest_path(
+            corePath, manifest->complete_species));
+  }
+  return artifacts;
 }
 
 struct LocalResolutionPostTopkScores {
@@ -3205,6 +3252,9 @@ struct LocalResolutionPostTopkScores {
   // Trusted reads per core species: unambiguous evidence for the species
   // model when the engine skips those reads.
   std::unordered_map<uint32_t, uint64_t> trusted_species_reads;
+  // Core species of each trusted read by ordinal, 0 for the other reads;
+  // filled only when the database lists its complete species.
+  std::vector<uint32_t> trusted_core_species;
 };
 
 // Probes are drawn from the first reads of the stream so that the engine can
@@ -3257,12 +3307,14 @@ static std::string local_resolution_source_key(const std::string &targetName) {
   return targetName.substr(0, pos);
 }
 
+// Keeps the targets of the first max_sources source genomes; 0 keeps all of
+// them, the anchor budget being the only cap.
 static std::vector<chimera::local_resolution::TargetRep>
 select_local_resolution_source_targets(
     const std::vector<chimera::local_resolution::TargetRep> &rows,
     size_t max_sources) {
   if (max_sources == 0 || rows.empty()) {
-    return {};
+    return rows;
   }
   std::vector<chimera::local_resolution::TargetRep> selected;
   selected.reserve(rows.size());
@@ -3401,6 +3453,7 @@ static LocalResolutionPanel build_local_resolution_panel(
 
   std::unordered_set<uint32_t> admittedSpecies;
   std::unordered_set<uint32_t> admittedGenera;
+  std::unordered_map<uint32_t, uint32_t> admittedSources;
   bool budgetExhausted = false;
   auto admitSource =
       [&](const std::vector<chimera::local_resolution::TargetRep> &rows) {
@@ -3428,6 +3481,9 @@ static LocalResolutionPanel build_local_resolution_panel(
               row.anchor_byte_offset, row.anchor_byte_size, row.target_name});
           admittedSpecies.insert(row.species);
           admittedGenera.insert(row.genus);
+        }
+        if (!rows.empty()) {
+          ++admittedSources[rows.front().species];
         }
         panel.selected_targets += rows.size();
         panel.selected_anchor_records += sourceAnchorRecords;
@@ -3491,6 +3547,20 @@ static LocalResolutionPanel build_local_resolution_panel(
   }
   panel.selected_species = admittedSpecies.size();
   panel.selected_groups = admittedGenera.size();
+  for (const auto &[species, admitted] : admittedSources) {
+    const auto found = rawTargetsBySpecies.find(species);
+    if (found == rawTargetsBySpecies.end()) {
+      continue;
+    }
+    std::unordered_set<std::string> storedSources;
+    for (const auto &row : found->second) {
+      storedSources.insert(local_resolution_source_key(row.target_name));
+    }
+    if (admitted >= storedSources.size()) {
+      panel.complete_species.push_back(species);
+    }
+  }
+  std::sort(panel.complete_species.begin(), panel.complete_species.end());
   finalize_local_resolution_panel_shadow(panel);
   return panel;
 }
@@ -3532,6 +3602,9 @@ struct LocalResolutionSpeciesModel {
 struct LocalResolutionDecision {
   const LocalResolutionCallStore *calls{nullptr};
   const ChimeraClassify::ReadBitset *trusted{nullptr};
+  // Trusted reads whose core species none of their chains reached; they are
+  // decided by their chains.
+  const ChimeraClassify::ReadBitset *vetoed{nullptr};
   LocalResolutionSpeciesModel model;
 };
 
@@ -3956,7 +4029,10 @@ static bool apply_local_resolution_result(
   if (local == nullptr || local->calls == nullptr) {
     return false;
   }
-  if (local->trusted != nullptr && local->trusted->test(result.read_ordinal)) {
+  const bool vetoed = local->vetoed != nullptr &&
+                      local->vetoed->test(result.read_ordinal);
+  if (local->trusted != nullptr && local->trusted->test(result.read_ordinal) &&
+      !vetoed) {
     return false;
   }
   auto callOpt = find_local_resolution_call(local->calls, result.read_ordinal);
@@ -3973,7 +4049,8 @@ static bool apply_local_resolution_result(
     result.taxidCount.clear();
     result.taxidCount.emplace_back("unclassified", 1.0);
     result.posteriors.clear();
-    result.reject_reason = "local_resolution_absent";
+    result.reject_reason = vetoed ? "local_resolution_unconfirmed"
+                                  : "local_resolution_absent";
     result.local_resolution_applied = true;
     return true;
   }
@@ -4099,7 +4176,8 @@ collect_local_resolution_post_topk_scores(
     const ChimeraClassify::TaxDict &tax,
     const ChimeraClassify::PresenceDecision *presenceDecision,
     const ChimeraClassify::NcbiTaxdump *ncbiTaxdump,
-    const ChimeraClassify::ClassifyConfig &config, uint64_t readCount) {
+    const ChimeraClassify::ClassifyConfig &config, uint64_t readCount,
+    bool recordTrustedCore) {
   if (candidateSpoolPaths.size() != sampleMixtureSpoolPaths.size()) {
     throw std::runtime_error(
         "Internal error: candidate and sample-mixture spool counts differ");
@@ -4109,6 +4187,10 @@ collect_local_resolution_post_topk_scores(
   const size_t path_count = candidateSpoolPaths.size();
   std::vector<LocalResolutionPostTopkScores> partial(path_count);
   ChimeraClassify::ReadBitset trusted(readCount);
+  std::vector<uint32_t> trustedCore;
+  if (recordTrustedCore) {
+    trustedCore.assign(readCount, 0);
+  }
 
   auto merge_scores = [](LocalResolutionPostTopkScores &dst,
                          const LocalResolutionPostTopkScores &src) {
@@ -4163,6 +4245,9 @@ collect_local_resolution_post_topk_scores(
               result.taxidCount.front().first, ncbiTaxdump);
           if (species != 0) {
             ++localScores.trusted_species_reads[species];
+            if (!trustedCore.empty()) {
+              trustedCore[result.read_ordinal] = species; // one writer per read
+            }
             if (result.read_ordinal < kTrustProbeWindowReads) {
               localScores.probe_candidates.emplace_back(result.read_ordinal,
                                                         species);
@@ -4270,6 +4355,7 @@ collect_local_resolution_post_topk_scores(
     merge_scores(scores, local);
   }
   scores.trusted = std::move(trusted);
+  scores.trusted_core_species = std::move(trustedCore);
   auto &probes = scores.probe_candidates;
   std::sort(probes.begin(), probes.end());
   if (probes.size() > kTrustProbeReads) {
@@ -6857,6 +6943,7 @@ void run(ClassifyConfig config) {
     }
 
     LocalResolutionCallStore localResolutionCalls;
+    ChimeraClassify::ReadBitset localResolutionVetoed;
     LocalResolutionPostTopkScores postTopkScores;
     LocalResolutionDecision localDecision;
     const LocalResolutionDecision *localDecisionPtr = nullptr;
@@ -6867,7 +6954,9 @@ void run(ClassifyConfig config) {
       postTopkScores = collect_local_resolution_post_topk_scores(
           candidateSpoolPaths, sampleMixtureSpoolPaths, speciesFit,
           sampleMixtureFit, options, decisionConfig, tax, &presenceDecision,
-          weightCtx.ncbiTaxdump, config, fileInfo.sequenceNum);
+          weightCtx.ncbiTaxdump, config, fileInfo.sequenceNum,
+          resolvedLocalArtifacts.has_value() &&
+              !resolvedLocalArtifacts->complete_species.empty());
       const LocalResolutionEligibility localEligibility =
           derive_local_resolution_eligibility(postTopkScores);
       if (classifyDebug) {
@@ -6949,6 +7038,23 @@ void run(ClassifyConfig config) {
           localRequest.sample_keys = sampleKeys.enabled() ? &sampleKeys : nullptr;
           localRequest.skip_reads = &postTopkScores.trusted;
           localRequest.trust_probe = &postTopkScores.trust_probe;
+          // Trusted reads are checked against the species the database holds
+          // every input sequence of and the panel every stored genome of: for
+          // those, a read that chains to none of the species' sequences has
+          // no support for its core call.
+          std::vector<uint32_t> vetoSpecies;
+          if (!postTopkScores.trusted_core_species.empty()) {
+            std::set_intersection(
+                resolvedLocalArtifacts->complete_species.begin(),
+                resolvedLocalArtifacts->complete_species.end(),
+                panel.complete_species.begin(), panel.complete_species.end(),
+                std::back_inserter(vetoSpecies));
+          }
+          if (!vetoSpecies.empty()) {
+            localRequest.trusted_core_species =
+                &postTopkScores.trusted_core_species;
+            localRequest.veto_species = &vetoSpecies;
+          }
           const auto started = std::chrono::steady_clock::now();
           ChimeraClassify::LocalResolutionResult localResult =
               run_local_resolution_engine(localRequest);
@@ -6962,6 +7068,29 @@ void run(ClassifyConfig config) {
           localDecision.trusted = localResult.stats.trust_revoked
                                       ? nullptr
                                       : &postTopkScores.trusted;
+          // A vetoed read is decided by its chains and no longer counts as
+          // unambiguous evidence for its core species.
+          if (localResult.stats.vetoed_reads > 0 &&
+              !localResult.stats.trust_revoked) {
+            localResolutionVetoed = std::move(localResult.vetoed);
+            localDecision.vetoed = &localResolutionVetoed;
+            const auto &core = postTopkScores.trusted_core_species;
+            for (uint64_t w = 0; w < localResolutionVetoed.words.size(); ++w) {
+              uint64_t bits = localResolutionVetoed.words[w];
+              while (bits != 0) {
+                const uint64_t ordinal =
+                    w * 64 + static_cast<uint64_t>(std::countr_zero(bits));
+                bits &= bits - 1;
+                const uint32_t species =
+                    ordinal < core.size() ? core[ordinal] : 0;
+                auto it = postTopkScores.trusted_species_reads.find(species);
+                if (it != postTopkScores.trusted_species_reads.end() &&
+                    it->second > 0) {
+                  --it->second;
+                }
+              }
+            }
+          }
           GenomeContainmentFn genomeContainment;
           if (presenceSketch.has_value() && sampleSketch.has_value()) {
             genomeContainment = [&](const std::vector<uint32_t> &species) {
@@ -6995,6 +7124,11 @@ void run(ClassifyConfig config) {
                 << " folded=" << localDecision.model.folded_species << "/"
                 << localDecision.model.fold_groups
                 << " time=" << format_seconds(seconds);
+            if (localRequest.veto_species != nullptr) {
+              msg << " vetoed=" << localResult.stats.vetoed_reads << "/"
+                  << localResult.stats.veto_checked
+                  << " veto_species=" << vetoSpecies.size();
+            }
             print_status_line(ConsoleStatusKind::Ok, msg.str());
           }
           if (classifyDebug) {
