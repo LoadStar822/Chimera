@@ -84,12 +84,12 @@ namespace ChimeraBuild {
 				<< std::setw(25) << "Threads:" << config.threads << std::endl
 					<< std::setw(25) << "Load factor:" << config.load_factor << std::endl
 					<< std::setw(25) << "Presence unique deg:" << config.presence_unique_deg << std::endl
-					<< std::setw(25) << "Local resolution data:" << config.native_bounded_index << std::endl
-					<< std::setw(25) << "Local rep pool cap:" << config.native_bounded_rep_pool_cap << std::endl
-					<< std::setw(25) << "Local targets/species:" << config.native_bounded_targets_per_species << std::endl
-					<< std::setw(25) << "Local sources/species:" << config.native_bounded_sources_per_species << std::endl
-					<< std::setw(25) << "Local targets/source:" << config.native_bounded_targets_per_source << std::endl
-					<< std::setw(25) << "Local keep-all bytes:" << config.native_bounded_keep_all_bytes << std::endl
+					<< std::setw(25) << "PROVE data:" << config.native_bounded_index << std::endl
+					<< std::setw(25) << "PROVE rep pool cap:" << config.native_bounded_rep_pool_cap << std::endl
+					<< std::setw(25) << "PROVE targets/species:" << config.native_bounded_targets_per_species << std::endl
+					<< std::setw(25) << "PROVE sources/species:" << config.native_bounded_sources_per_species << std::endl
+					<< std::setw(25) << "PROVE targets/source:" << config.native_bounded_targets_per_source << std::endl
+					<< std::setw(25) << "PROVE keep-all bytes:" << config.native_bounded_keep_all_bytes << std::endl
 					<< std::setw(25) << "Verbose:" << config.verbose << std::endl;
 
 		os << std::string(50, '=') << std::endl;

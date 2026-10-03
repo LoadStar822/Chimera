@@ -1,4 +1,4 @@
-#include "ChimeraLpcClassify.hpp"
+#include "ChimeraProveClassify.hpp"
 
 #include <utils/NativeBoundedIndex.hpp>
 
@@ -258,7 +258,7 @@ DirectReaderBudget direct_reader_budget(uint32_t workers) {
       limit.rlim_cur > reserved ? limit.rlim_cur - reserved : 0;
   if (available == 0) {
     throw std::runtime_error(
-        "local resolution has no file descriptors left: RLIMIT_NOFILE=" +
+        "PROVE has no file descriptors left: RLIMIT_NOFILE=" +
         std::to_string(limit.rlim_cur) + ", open=" + std::to_string(openCount) +
         "; raise the process file descriptor limit");
   }
@@ -298,11 +298,11 @@ public:
         if (errno == EINTR) {
           continue;
         }
-        throw std::runtime_error("failed to read local resolution shard: " +
+        throw std::runtime_error("failed to read PROVE shard: " +
                                  path.string());
       }
       if (n == 0) {
-        throw std::runtime_error("truncated local resolution anchor range: " +
+        throw std::runtime_error("truncated PROVE anchor range: " +
                                  path.string());
       }
       done += static_cast<size_t>(n);
@@ -331,7 +331,7 @@ private:
     }
     const int fd = ::open(key.c_str(), O_RDONLY);
     if (fd < 0) {
-      throw std::runtime_error("failed to open local resolution shard: " +
+      throw std::runtime_error("failed to open PROVE shard: " +
                                key + " (" + std::strerror(errno) + ")");
     }
     fds_.emplace(key, fd);
@@ -699,7 +699,7 @@ std::filesystem::path resolve_shard_entry_path(
 TargetFilter load_target_filter(const std::string &path) {
   std::ifstream in(path);
   if (!in) {
-    throw std::runtime_error("cannot open LPC target list: " + path);
+    throw std::runtime_error("cannot open PROVE target list: " + path);
   }
   TargetFilter filter;
   std::string line;
@@ -754,7 +754,7 @@ TargetFilter load_target_filter(const std::string &path) {
     }
   }
   if (filter.names.empty()) {
-    throw std::runtime_error("LPC target list is empty: " + path);
+    throw std::runtime_error("PROVE target list is empty: " + path);
   }
   return filter;
 }
@@ -775,7 +775,7 @@ TargetFilter target_filter_from_targets(
         target.anchor_byte_offset, target.anchor_byte_size, true};
   }
   if (filter.names.empty()) {
-    throw std::runtime_error("Local resolution target panel is empty");
+    throw std::runtime_error("PROVE target panel is empty");
   }
   return filter;
 }
@@ -847,7 +847,7 @@ void assign_query_hashes(ReadRecord &read, const QueryHashIndex &query_hashes) {
     const uint32_t qid = query_hashes.find_id(anchor.hash);
     if (qid == QueryHashIndex::kNotFound && !query_hashes.rank_mode()) {
       throw std::runtime_error(
-          "local resolution query hash missing from first pass");
+          "PROVE query hash missing from first pass");
     }
     read.anchor_qids.push_back(qid);
   }
@@ -966,7 +966,7 @@ uint64_t for_each_pending_read_batch(const std::vector<std::string> &paths,
   } else {
     if (paths.size() % 2 != 0) {
       throw std::runtime_error(
-          "Local resolution paired input requires an even number of files");
+          "PROVE paired input requires an even number of files");
     }
     for (size_t pathIndex = 0; pathIndex < paths.size(); pathIndex += 2) {
       seqan3::sequence_file_input<raptor::dna4_traits,
@@ -988,7 +988,7 @@ uint64_t for_each_pending_read_batch(const std::vector<std::string> &paths,
       }
       if (it1 != end1 || it2 != end2) {
         throw std::runtime_error(
-            "Local resolution paired files have different read counts");
+            "PROVE paired files have different read counts");
       }
     }
   }
@@ -1468,7 +1468,7 @@ std::vector<DirectTargetLoad> load_direct_targets_parallel(
     const std::vector<DirectTargetWork> &work_items, size_t begin, size_t end,
     const QueryHashIndex &query_hashes, uint32_t threads) {
   if (begin > end || end > work_items.size()) {
-    throw std::runtime_error("invalid direct LPC target batch range");
+    throw std::runtime_error("invalid direct PROVE target batch range");
   }
   const size_t batch_size = end - begin;
   std::vector<DirectTargetLoad> loaded(batch_size);
@@ -1652,7 +1652,7 @@ bool build_direct_target_plan(
   for (const auto &name : target_filter.ordered_names) {
     const auto route_found = target_filter.route_by_name.find(name);
     if (route_found == target_filter.route_by_name.end()) {
-      throw std::runtime_error("LPC target route missing ordered target");
+      throw std::runtime_error("PROVE target route missing ordered target");
     }
     by_genus[route_found->second.genus].push_back(
         {name, route_found->second, tid});
@@ -1672,7 +1672,7 @@ bool build_direct_target_plan(
   for (const uint32_t genus : genera) {
     const auto shard_found = shards.find(genus);
     if (shard_found == shards.end()) {
-      throw std::runtime_error("LPC target route references missing shard");
+      throw std::runtime_error("PROVE target route references missing shard");
     }
     ++plan.scanned_shards;
     auto &group = by_genus[genus];
@@ -1693,11 +1693,11 @@ bool build_direct_target_plan(
     }
   }
   if (plan.work_items.empty()) {
-    throw std::runtime_error("LPC selected no target references");
+    throw std::runtime_error("PROVE selected no target references");
   }
   for (const auto &target : plan.targets) {
     if (target.name.empty()) {
-      throw std::runtime_error("direct LPC target order invariant violated");
+      throw std::runtime_error("direct PROVE target order invariant violated");
     }
   }
   return true;
@@ -1722,7 +1722,7 @@ void add_direct_logical_match_stats(const DirectTargetLoad &loaded,
   stats.raw_chain_records += loaded.raw_chain_records;
 }
 
-std::vector<TargetRecord> load_lpc_targets(
+std::vector<TargetRecord> load_prove_targets(
     const std::filesystem::path &index_path,
     const std::filesystem::path &shard_manifest_path,
     const TargetFilter &target_filter,
@@ -1758,7 +1758,7 @@ std::vector<TargetRecord> load_lpc_targets(
       for (const auto &name : target_filter.ordered_names) {
         const auto route_found = target_filter.route_by_name.find(name);
         if (route_found == target_filter.route_by_name.end()) {
-          throw std::runtime_error("LPC target route missing ordered target");
+          throw std::runtime_error("PROVE target route missing ordered target");
         }
         by_genus[route_found->second.genus].push_back(
             {name, route_found->second, tid});
@@ -1777,7 +1777,7 @@ std::vector<TargetRecord> load_lpc_targets(
       for (const uint32_t genus : genera) {
         const auto shard_found = shards.find(genus);
         if (shard_found == shards.end()) {
-          throw std::runtime_error("LPC target route references missing shard");
+          throw std::runtime_error("PROVE target route references missing shard");
         }
         ++stats.scanned_shards;
         auto &group = by_genus[genus];
@@ -1796,7 +1796,7 @@ std::vector<TargetRecord> load_lpc_targets(
         }
       }
       if (work_items.empty()) {
-        throw std::runtime_error("LPC selected no target references");
+        throw std::runtime_error("PROVE selected no target references");
       }
       targets.resize(work_items.size());
       for (size_t begin = 0; begin < work_items.size();) {
@@ -1815,7 +1815,7 @@ std::vector<TargetRecord> load_lpc_targets(
           auto &loaded_target = loaded[loaded_idx];
           if (loaded_target.tid >= targets.size()) {
             throw std::runtime_error(
-                "direct LPC target order invariant violated");
+                "direct PROVE target order invariant violated");
           }
           targets[loaded_target.tid] = std::move(loaded_target.target);
           ++stats.selected_targets;
@@ -1847,7 +1847,7 @@ std::vector<TargetRecord> load_lpc_targets(
       }
       for (const auto &target : targets) {
         if (target.name.empty()) {
-          throw std::runtime_error("direct LPC target order invariant violated");
+          throw std::runtime_error("direct PROVE target order invariant violated");
         }
       }
       return targets;
@@ -1887,7 +1887,7 @@ std::vector<TargetRecord> load_lpc_targets(
                        matches, stats);
   }
   if (targets.empty()) {
-    throw std::runtime_error("LPC selected no target references");
+    throw std::runtime_error("PROVE selected no target references");
   }
   return targets;
 }
@@ -2001,7 +2001,7 @@ void fill_compact_postings_from_loaded(
   }
 }
 
-bool try_load_direct_lpc_targets_compact(
+bool try_load_direct_prove_targets_compact(
     const std::filesystem::path &index_path,
     const std::filesystem::path &shard_manifest_path,
     const TargetFilter &target_filter, const QueryHashIndex &query_hashes,
@@ -2477,7 +2477,7 @@ void chain_reads_to_call_store(
         for (size_t i = 0; i < pending.size(); ++i) {
           if (pending[i].ordinal != store.read_count()) {
             throw std::runtime_error(
-                "local resolution read ordinal stream is not contiguous");
+                "PROVE read ordinal stream is not contiguous");
           }
           if (veto && batch_veto[i] != 0) {
             ++veto_checked;
@@ -2539,14 +2539,14 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
                                  const std::vector<uint32_t> *trusted_core,
                                  const std::vector<uint32_t> *veto_species) {
   if (read_files.empty()) {
-    throw std::runtime_error("Local resolution route requires read input");
+    throw std::runtime_error("PROVE route requires read input");
   }
   if (index_path.empty()) {
-    throw std::runtime_error("Local resolution route requires an index file");
+    throw std::runtime_error("PROVE route requires an index file");
   }
   if (shard_manifest_path.empty()) {
     throw std::runtime_error(
-        "Local resolution route requires a shard manifest file");
+        "PROVE route requires a shard manifest file");
   }
 
   const auto started = std::chrono::steady_clock::now();
@@ -2565,12 +2565,12 @@ run_local_resolution_engine_impl(const std::vector<std::string> &read_files,
   LoadStats stats;
   std::vector<TargetRecord> targets;
   CompactPostingIndex index;
-  const bool used_direct_compact = try_load_direct_lpc_targets_compact(
+  const bool used_direct_compact = try_load_direct_prove_targets_compact(
       index_path, shard_manifest_path, target_filter, query_hashes, max_occ,
       threads, targets, index, stats);
   if (!used_direct_compact) {
     std::vector<MatchedPosting> matched_postings;
-    targets = load_lpc_targets(index_path, shard_manifest_path, target_filter,
+    targets = load_prove_targets(index_path, shard_manifest_path, target_filter,
                                query_hashes, matched_postings, stats, threads);
     const auto index_finalize_started = std::chrono::steady_clock::now();
     index = build_compact_posting_index(matched_postings, query_hashes.size(),

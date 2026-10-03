@@ -47,7 +47,7 @@ struct TargetDisk {
 template <class T> void write_raw(std::ostream &out, const T &value) {
   out.write(reinterpret_cast<const char *>(&value), sizeof(T));
   if (!out.good()) {
-    throw std::runtime_error("failed to write local resolution metadata");
+    throw std::runtime_error("failed to write PROVE metadata");
   }
 }
 
@@ -55,7 +55,7 @@ template <class T> T read_raw(std::istream &in) {
   T value{};
   in.read(reinterpret_cast<char *>(&value), sizeof(T));
   if (!in.good()) {
-    throw std::runtime_error("failed to read local resolution metadata");
+    throw std::runtime_error("failed to read PROVE metadata");
   }
   return value;
 }
@@ -77,7 +77,7 @@ HeaderDisk read_header(std::istream &in) {
   HeaderDisk header = read_raw<HeaderDisk>(in);
   if (std::memcmp(header.magic, kMagic, sizeof(kMagic)) != 0 ||
       header.version < kMinSupportedVersion || header.version > kVersion) {
-    throw std::runtime_error("invalid local resolution metadata");
+    throw std::runtime_error("invalid PROVE metadata");
   }
   return header;
 }
@@ -126,7 +126,7 @@ void write_rep_metadata(const std::filesystem::path &path,
                                           : path.parent_path());
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   if (!out) {
-    throw std::runtime_error("failed to open local resolution metadata: " +
+    throw std::runtime_error("failed to open PROVE metadata: " +
                              path.string());
   }
 
@@ -158,7 +158,7 @@ void write_rep_metadata(const std::filesystem::path &path,
     out.write(row.target_name.data(),
               static_cast<std::streamsize>(row.target_name.size()));
     if (!out.good()) {
-      throw std::runtime_error("failed to write local resolution strings");
+      throw std::runtime_error("failed to write PROVE strings");
     }
   }
 }
@@ -166,7 +166,7 @@ void write_rep_metadata(const std::filesystem::path &path,
 RepMetadata RepMetadata::open(const std::filesystem::path &path) {
   std::ifstream in(path, std::ios::binary);
   if (!in) {
-    throw std::runtime_error("failed to open local resolution metadata: " +
+    throw std::runtime_error("failed to open PROVE metadata: " +
                              path.string());
   }
   const HeaderDisk header = read_header(in);
@@ -178,7 +178,7 @@ RepMetadata RepMetadata::open(const std::filesystem::path &path) {
 
   in.seekg(static_cast<std::streamoff>(header.species_offset));
   if (!in.good()) {
-    throw std::runtime_error("failed to seek local resolution species index");
+    throw std::runtime_error("failed to seek PROVE species index");
   }
   for (uint64_t i = 0; i < header.species_count; ++i) {
     const SpeciesDisk disk = read_raw<SpeciesDisk>(in);
@@ -252,7 +252,7 @@ RepMetadata::load_targets_many(const std::vector<uint32_t> &species_ids,
 
   std::ifstream in(path_, std::ios::binary);
   if (!in) {
-    throw std::runtime_error("failed to open local resolution metadata: " +
+    throw std::runtime_error("failed to open PROVE metadata: " +
                              path_.string());
   }
   for (const auto &request : requests) {
@@ -261,7 +261,7 @@ RepMetadata::load_targets_many(const std::vector<uint32_t> &species_ids,
         target_rows_offset_ + request.first_target * sizeof(TargetDisk);
     in.seekg(static_cast<std::streamoff>(byte_offset));
     if (!in.good()) {
-      throw std::runtime_error("failed to seek local resolution target rows");
+      throw std::runtime_error("failed to seek PROVE target rows");
     }
     for (auto &disk : disks) {
       disk = read_raw<TargetDisk>(in);
@@ -274,12 +274,12 @@ RepMetadata::load_targets_many(const std::vector<uint32_t> &species_ids,
             string_data_offset_ + disk.target_name_offset;
         in.seekg(static_cast<std::streamoff>(name_offset));
         if (!in.good()) {
-          throw std::runtime_error("failed to seek local resolution strings");
+          throw std::runtime_error("failed to seek PROVE strings");
         }
         in.read(name.data(), static_cast<std::streamsize>(name.size()));
         if (!in.good()) {
           throw std::runtime_error(
-              "failed to read local resolution target name");
+              "failed to read PROVE target name");
         }
       }
       rows.push_back(TargetRep{disk.genus,

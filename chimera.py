@@ -322,7 +322,7 @@ def _prepare_build_taxonomy_dir(args) -> None:
             )
         args.taxonomy_dir = str(taxonomy_dir)
         return
-    if getattr(args, "no_local_resolution", False) and getattr(
+    if getattr(args, "no_prove", False) and getattr(
         args, "no_presence_sketch", False
     ):
         return
@@ -496,9 +496,15 @@ def add_build_arguments(parser, require_input: bool) -> None:
         help="Directory containing NCBI taxdump nodes.dmp; downloaded automatically for NCBI builds when omitted",
     )
     parser.add_argument(
-        "--no-local-resolution",
+        "--no-prove",
         action="store_true",
-        help="Do not build local read resolution (LPC) data",
+        help="Do not build PROVE (panel-restricted origin verification) data",
+    )
+    parser.add_argument(
+        "--no-local-resolution",
+        dest="no_prove",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--no-presence-sketch",
@@ -523,8 +529,8 @@ def append_build_command_args(command, args) -> None:
     command.extend(["--taxonomy-version", str(args.taxonomy_version)])
     if getattr(args, "taxonomy_dir", None):
         command.extend(["--taxonomy-dir", str(args.taxonomy_dir)])
-    if getattr(args, "no_local_resolution", False):
-        command.append("--no-local-resolution")
+    if getattr(args, "no_prove", False):
+        command.append("--no-prove")
     if getattr(args, "no_presence_sketch", False):
         command.append("--no-presence-sketch")
 
@@ -647,9 +653,15 @@ def parse_arguments():
         "-b", "--batch-size", type=int, default=400, help="Batch size for classifying"
     )
     classify_parser.add_argument(
-        "--no-local-resolution",
+        "--no-prove",
         action="store_true",
-        help="Disable local read resolution (LPC) at classify time",
+        help="Disable PROVE (panel-restricted origin verification) at classify time",
+    )
+    classify_parser.add_argument(
+        "--no-local-resolution",
+        dest="no_prove",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     classify_parser.add_argument(
         "--profile-cami",
@@ -889,8 +901,8 @@ def run_chimera(args, chimera_path=None):
         command.extend(["-d", args.database])
         command.extend(["-t", str(args.threads)])
         command.extend(["-b", str(args.batch_size)])
-        if getattr(args, "no_local_resolution", False):
-            command.append("--no-local-resolution")
+        if getattr(args, "no_prove", False):
+            command.append("--no-prove")
         if getattr(args, "profile_cami", False):
             command.append("--profile-cami")
         if getattr(args, "profile_read_trace", False):

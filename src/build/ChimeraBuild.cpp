@@ -486,9 +486,9 @@ void run(BuildConfig config) {
   NativeBoundedBuildStats localStats;
   if (config.native_bounded_index) {
     auto local_start = std::chrono::high_resolution_clock::now();
-    std::cout << "Building local read resolution data..." << std::endl;
+    std::cout << "Building PROVE data..." << std::endl;
     localStats = build_native_bounded_index(config, inputFiles, localPaths);
-    std::cout << "Local references: "
+    std::cout << "PROVE references: "
               << (localStats.kept_all ? "every input sequence kept"
                                       : "selected per species")
               << ", " << localStats.complete_species << " of "
@@ -499,20 +499,20 @@ void run(BuildConfig config) {
                                                               local_start)
             .count();
     if (config.verbose) {
-      std::cout << "Local targets: " << localStats.targets << std::endl;
-      std::cout << "Local sequences: " << localStats.sequences << std::endl;
-      std::cout << "Local base pairs: " << localStats.bp << std::endl;
-      std::cout << "Local anchors: " << localStats.anchors << std::endl;
-      std::cout << "Local representative records: "
+      std::cout << "PROVE targets: " << localStats.targets << std::endl;
+      std::cout << "PROVE sequences: " << localStats.sequences << std::endl;
+      std::cout << "PROVE base pairs: " << localStats.bp << std::endl;
+      std::cout << "PROVE anchors: " << localStats.anchors << std::endl;
+      std::cout << "PROVE representative records: "
                 << localStats.representativeRecords << std::endl;
-      std::cout << "Local anchor build time: ";
+      std::cout << "PROVE anchor build time: ";
       print_build_time(
           static_cast<long long>(localStats.anchor_build_seconds * 1000.0));
-      std::cout << "Local layout time: ";
+      std::cout << "PROVE layout time: ";
       print_build_time(
           static_cast<long long>(localStats.layout_seconds * 1000.0));
-      std::cout << "Local data: " << localRoot.string() << std::endl;
-      std::cout << "Local data build time: ";
+      std::cout << "PROVE data: " << localRoot.string() << std::endl;
+      std::cout << "PROVE data build time: ";
       print_build_time(local_total_time);
       std::cout << std::endl;
     }

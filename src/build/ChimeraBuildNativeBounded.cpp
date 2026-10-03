@@ -520,7 +520,7 @@ NativeBoundedBuildStats build_native_bounded_index_fused(
   std::filesystem::create_directories(paths.shard_dir);
 
   const auto taxdump =
-      BuildTaxonomy::load_required(config, "local read resolution build");
+      BuildTaxonomy::load_required(config, "PROVE data build");
   NativeBoundedBuildStats stats;
   const size_t workerCount =
       std::max<size_t>(1, std::min<size_t>(config.threads, tasks.size()));

@@ -31,7 +31,7 @@ int64_t artifact_mtime(const std::filesystem::path &path) {
 ArtifactStamp stamp_artifact(const std::filesystem::path &base_dir,
                              const std::filesystem::path &path) {
   if (!std::filesystem::exists(path)) {
-    throw std::runtime_error("local resolution artifact is missing: " +
+    throw std::runtime_error("database artifact is missing: " +
                              path.string());
   }
   ArtifactStamp stamp;
@@ -67,7 +67,7 @@ stamp_shards(const std::filesystem::path &base_dir,
              const std::filesystem::path &shard_manifest_path) {
   std::ifstream in(shard_manifest_path);
   if (!in) {
-    throw std::runtime_error("failed to open local resolution shard manifest: " +
+    throw std::runtime_error("failed to open PROVE shard manifest: " +
                              shard_manifest_path.string());
   }
   std::vector<ArtifactStamp> shards;
@@ -81,7 +81,7 @@ stamp_shards(const std::filesystem::path &base_dir,
       continue;
     }
     if (fields.size() < 2) {
-      throw std::runtime_error("invalid local resolution shard manifest row");
+      throw std::runtime_error("invalid PROVE shard manifest row");
     }
     shards.push_back(stamp_artifact(
         base_dir, resolve_shard_path_from_manifest(shard_manifest_path,
@@ -100,7 +100,7 @@ void write_stamp(std::ostream &out,
 ArtifactStamp parse_stamp(const std::vector<std::string> &fields,
                           const std::string &label) {
   if (fields.size() != 4) {
-    throw std::runtime_error("invalid local resolution manifest row: " + label);
+    throw std::runtime_error("invalid database manifest row: " + label);
   }
   ArtifactStamp stamp;
   stamp.relative_path = fields[1];
@@ -115,12 +115,11 @@ void verify_stamp(const std::filesystem::path &core_path,
   const std::filesystem::path path =
       materialize_manifest_path(core_path, stamp);
   if (!std::filesystem::exists(path)) {
-    throw std::runtime_error("local resolution " + label +
-                             " is missing: " + path.string());
+    throw std::runtime_error(label + " is missing: " + path.string());
   }
   const uint64_t size = static_cast<uint64_t>(std::filesystem::file_size(path));
   if (size != stamp.size) {
-    throw std::runtime_error("local resolution " + label +
+    throw std::runtime_error(label +
                              " does not match the database manifest: " +
                              path.string());
   }
@@ -177,7 +176,7 @@ void write_manifest(const std::filesystem::path &core_path,
                     uint32_t w,
                     uint32_t targets_per_species) {
   if (!std::filesystem::exists(core_path)) {
-    throw std::runtime_error("cannot write local resolution manifest without core archive: " +
+    throw std::runtime_error("cannot write database manifest without core archive: " +
                              core_path.string());
   }
   const std::filesystem::path manifest_path = manifest_path_for_core(core_path);
@@ -186,7 +185,7 @@ void write_manifest(const std::filesystem::path &core_path,
                                       : core_path.parent_path();
   std::ofstream out(manifest_path, std::ios::trunc);
   if (!out) {
-    throw std::runtime_error("failed to open local resolution manifest: " +
+    throw std::runtime_error("failed to open database manifest: " +
                              manifest_path.string());
   }
   out << "format\t" << kManifestMagic << '\n';
@@ -218,7 +217,7 @@ namespace {
 BuildManifest parse_manifest(const std::filesystem::path &manifest_path) {
   std::ifstream in(manifest_path);
   if (!in) {
-    throw std::runtime_error("failed to open local resolution manifest: " +
+    throw std::runtime_error("failed to open database manifest: " +
                              manifest_path.string());
   }
   BuildManifest manifest;
@@ -230,12 +229,12 @@ BuildManifest parse_manifest(const std::filesystem::path &manifest_path) {
     }
     const auto fields = split_tab(line);
     if (fields.size() < 2) {
-      throw std::runtime_error("invalid local resolution manifest row");
+      throw std::runtime_error("invalid database manifest row");
     }
     const std::string &key = fields[0];
     if (key == "format") {
       if (fields.size() != 2 || fields[1] != kManifestMagic) {
-        throw std::runtime_error("invalid local resolution manifest format");
+        throw std::runtime_error("invalid database manifest format");
       }
     } else if (key == "core") {
       manifest.core = parse_stamp(fields, key);
@@ -256,7 +255,7 @@ BuildManifest parse_manifest(const std::filesystem::path &manifest_path) {
     } else if (fields.size() == 2) {
       scalars.emplace(key, fields[1]);
     } else {
-      throw std::runtime_error("invalid local resolution manifest row: " + key);
+      throw std::runtime_error("invalid database manifest row: " + key);
     }
   }
 
@@ -291,15 +290,15 @@ load_and_verify_manifest_for_db(const std::filesystem::path &db_path) {
 
   verify_stamp(core_path, manifest.core, "core archive");
   if (manifest.local_available) {
-    verify_stamp(core_path, manifest.local_index, "index");
-    verify_stamp(core_path, manifest.rep_metadata, "metadata");
-    verify_stamp(core_path, manifest.shard_manifest, "shard manifest");
+    verify_stamp(core_path, manifest.local_index, "PROVE index");
+    verify_stamp(core_path, manifest.rep_metadata, "PROVE metadata");
+    verify_stamp(core_path, manifest.shard_manifest, "PROVE shard manifest");
     for (size_t i = 0; i < manifest.shards.size(); ++i) {
       verify_stamp(core_path, manifest.shards[i],
-                   "shard " + std::to_string(i));
+                   "PROVE shard " + std::to_string(i));
     }
     if (manifest.complete_species_available) {
-      verify_stamp(core_path, manifest.complete_species, "complete species");
+      verify_stamp(core_path, manifest.complete_species, "PROVE species list");
     }
   }
   return manifest;
@@ -318,7 +317,7 @@ bool stamp_presence_sketch(const std::filesystem::path &core_path,
   {
     std::ifstream in(manifest_path);
     if (!in) {
-      throw std::runtime_error("failed to open local resolution manifest: " +
+      throw std::runtime_error("failed to open database manifest: " +
                                manifest_path.string());
     }
     std::string line;
@@ -332,7 +331,7 @@ bool stamp_presence_sketch(const std::filesystem::path &core_path,
   {
     std::ofstream out(tmp_path, std::ios::trunc);
     if (!out) {
-      throw std::runtime_error("failed to write local resolution manifest: " +
+      throw std::runtime_error("failed to write database manifest: " +
                                tmp_path.string());
     }
     for (const auto &line : lines) {
@@ -344,7 +343,7 @@ bool stamp_presence_sketch(const std::filesystem::path &core_path,
     if (!out) {
       std::error_code ec;
       std::filesystem::remove(tmp_path, ec);
-      throw std::runtime_error("failed to write local resolution manifest: " +
+      throw std::runtime_error("failed to write database manifest: " +
                                tmp_path.string());
     }
   }

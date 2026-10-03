@@ -73,14 +73,14 @@ namespace ChimeraClassify {
 	// anchor byte budget being the only cap.
 	uint32_t local_resolution_targets_per_species = 0;
 	uint64_t local_resolution_max_anchor_bytes = 2ULL << 30;
-	int lpc_diag_bin = 256;
-	uint32_t lpc_max_occ = 500;
-	uint32_t lpc_min_chain = 4;
+	int prove_diag_bin = 256;
+	uint32_t prove_max_occ = 500;
+	uint32_t prove_min_chain = 4;
 	// A target's chains must span this share of the read, or at least
-	// lpc_min_coverage_span bases: a long read may run past what its
+	// prove_min_coverage_span bases: a long read may run past what its
 	// reference carries, a short match must explain most of the read.
-	double lpc_min_coverage = 0.5;
-	uint32_t lpc_min_coverage_span = 300;
+	double prove_min_coverage = 0.5;
+	uint32_t prove_min_coverage_span = 300;
 	// Genome-evidence presence calling (reference sketch sidecar) and the
 	// feedback of its calls into per-read assignments.
 	bool presence_call_enabled = true;

@@ -10,7 +10,7 @@ namespace ChimeraBuild
 {
 
 	// Taxids are used as given in the build input, without merged.dmp
-	// remapping, so that LPC and presence data carry the same labels as the
+	// remapping, so that PROVE and presence data carry the same labels as the
 	// core index and the classify-side taxonomy.
 	class BuildTaxonomy
 	{

@@ -155,10 +155,10 @@ void validate_build_config(ChimeraBuild::BuildConfig &buildConfig,
     throw CLI::ValidationError("--strobe-order currently only supports value 2");
   }
   if (buildConfig.native_bounded_k < 8) {
-    throw CLI::ValidationError("Local resolution k-mer length must be >= 8");
+    throw CLI::ValidationError("PROVE k-mer length must be >= 8");
   }
   if (buildConfig.native_bounded_w == 0) {
-    throw CLI::ValidationError("Local resolution window must be greater than 0");
+    throw CLI::ValidationError("PROVE window must be greater than 0");
   }
   buildConfig.verbose = !buildQuietRequested;
 }
@@ -265,10 +265,14 @@ int main(int argc, char **argv) {
       ->default_val("auto");
   build
       ->add_option("--taxonomy-dir", buildConfig.taxonomy_dir,
-                   "Directory containing taxonomy nodes.dmp for local read resolution")
+                   "Directory containing taxonomy nodes.dmp for PROVE and "
+                   "presence-sketch data")
       ->check(CLI::ExistingDirectory);
-  build->add_flag("--no-local-resolution", buildNoLocalResolution,
-                  "Do not build local read resolution (LPC) data");
+  build->add_flag("--no-prove", buildNoLocalResolution,
+                  "Do not build PROVE (panel-restricted origin "
+                  "verification) data");
+  // Old name, still accepted but hidden from help.
+  build->add_flag("--no-local-resolution", buildNoLocalResolution)->group("");
   build->add_flag("--no-presence-sketch", buildNoPresenceSketch,
                   "Do not build the genome presence sketch sidecar "
                   "(<output>/presence/sketch.psk) used by classify to call "
@@ -406,8 +410,12 @@ int main(int argc, char **argv) {
       ->add_option("-b,--batch-size", classifyConfig.batchSize,
                    "Batch size for classifying")
       ->default_val(400);
-  classify->add_flag("--no-local-resolution", classifyNoLocalResolution,
-                     "Disable local read resolution (LPC) at classify time");
+  classify->add_flag("--no-prove", classifyNoLocalResolution,
+                     "Disable PROVE (panel-restricted origin "
+                     "verification) at classify time");
+  // Old name, still accepted but hidden from help.
+  classify->add_flag("--no-local-resolution", classifyNoLocalResolution)
+      ->group("");
   classify->add_flag("--no-presence-call", classifyNoPresenceCall,
                      "Disable genome-evidence species presence calling");
   classify

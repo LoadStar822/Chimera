@@ -24,7 +24,7 @@ Chimera is a reference-database metagenomic classifier designed for fast custom 
 - **Profile output during classification**: `chimera classify` writes both per-read assignments and `ChimeraProfile.tsv`.
 - **Interactive NCBI download wizard** for users who do not want to hand-write genome download commands.
 - **Automatic NCBI taxdump handling** during build when the Python wrapper can infer or download the taxonomy data.
-- **Local read resolution (LPC)** re-decides the reads the core classifier cannot settle by chaining them against a panel of reference genomes chosen for the sample.
+- **PROVE (Panel-Restricted Origin VErification)** re-decides the reads the core classifier cannot settle: each is chained against a panel of reference genomes chosen for the sample, and only a genome that explains the read can claim it.
 - **Simple user workflow**: interactive genome download, automatic taxonomy handling, minimal required parameters, and classify/profile output in one command.
 
 ## Quick Links
@@ -187,27 +187,27 @@ chimera classify -i reads.fastq.gz -d ChimeraDB -o results
 
 When `target.tsv` comes from `chimera download`, the wrapper finds the adjacent `taxdump/`. If NCBI taxdump is missing, the wrapper can download and verify it automatically before invoking the native build.
 
-### Local Read Resolution
+### PROVE: Panel-Restricted Origin Verification
 
-For NCBI databases, Chimera builds local read resolution data by default when usable taxonomy data are available. When the database contains this data, `classify` runs LPC on every sample: reads whose core call is confident and well supported keep it, every other read is re-decided by chaining against a panel of reference genomes chosen for the sample, and a read that chains to nothing in the panel is left unclassified. Panel species that the sample's reads cannot tell apart (the same organism filed under several names) are reported under one name.
+For NCBI databases, Chimera builds PROVE data by default when usable taxonomy data are available. When the database contains this data, `classify` runs PROVE on every sample: reads whose core call is confident and well supported keep it, and every other read is re-decided against a panel of reference genomes chosen for the sample. A genome explains a read when colinear chains of shared minimizers span at least half of the read, or 300 bp, whichever is shorter. A read is assigned only among the panel species with a genome that explains it, and a read that no panel genome explains is left unclassified. Panel species that the sample's reads cannot tell apart (the same organism filed under several names) are reported under one name.
 
-Disable LPC during build if you want a smaller database or do not want this extra build step:
+Disable PROVE during build if you want a smaller database or do not want this extra build step:
 
 ```bash
 chimera build \
   -i genome_output/target.tsv \
   -o ChimeraDB \
-  --no-local-resolution
+  --no-prove
 ```
 
-Disable LPC during classification if you want to force the main classifier path:
+Disable PROVE during classification if you want to force the main classifier path:
 
 ```bash
 chimera classify \
   -i reads.fastq.gz \
   -d ChimeraDB \
   -o results \
-  --no-local-resolution
+  --no-prove
 ```
 
 ### Species Presence Calling
@@ -349,7 +349,7 @@ CAMI/OPAL-compatible profile output. It is written only when `--profile-cami` is
 
 ## Database Layout
 
-A Chimera database is a directory containing the core index, taxonomy metadata, optional LPC data, and the genome presence sketch:
+A Chimera database is a directory containing the core index, taxonomy metadata, optional PROVE data, and the genome presence sketch:
 
 ```text
 ChimeraDB/
@@ -374,7 +374,7 @@ Internal filenames may change between releases. For reproducibility, keep the wh
   ```
 
   On managed clusters, the hard limit may be controlled by the scheduler or system administrator.
-- LPC adds a second pass over the reads and holds up to about 2 GiB of panel anchors in memory.
+- PROVE adds a second pass over the reads and holds up to about 2 GiB of panel anchors in memory.
 - Prebuilt binaries target AVX2-capable x86-64 machines. Use a portable source build on older CPUs.
 
 ## Benchmarking
@@ -407,7 +407,7 @@ Chimera builds on several open-source projects:
 - [SeqAn3](https://github.com/seqan/seqan3) provides modern sequence I/O, sequence alphabets, and BGZF-aware stream support used throughout the build and classify pipeline.
 - [CLI11](https://github.com/CLIUtils/CLI11) provides the C++ command-line parser.
 - [cereal](https://github.com/USCiLab/cereal) and [SDSL-lite](https://github.com/simongog/sdsl-lite), distributed with SeqAn3, support serialization and succinct data-structure components used by Chimera indexes.
-- [robin-hood hashing](https://github.com/martinus/robin-hood-hashing) is used for fast hash tables in classification and local-resolution code paths.
+- [robin-hood hashing](https://github.com/martinus/robin-hood-hashing) is used for fast hash tables in classification and PROVE code paths.
 - [xxHash](https://github.com/Cyan4973/xxHash) is used for fast non-cryptographic hashing.
 - [SIMDe](https://github.com/simd-everywhere/simde) provides portable SIMD interfaces used when building Chimera without AVX2-specific code.
 - [strobemers](https://github.com/ksahlin/strobemers) and ideas from [strobealign](https://github.com/ksahlin/strobealign) inform Chimera's strobemer/randstrobe feature construction.

@@ -12,7 +12,7 @@
  */
 #include "ChimeraClassifyCommon.hpp"
 #include "ChimeraClassifyAutoPolicy.hpp"
-#include "ChimeraLpcClassify.hpp"
+#include "ChimeraProveClassify.hpp"
 #include "ChimeraClassifyReadout.hpp"
 #include "ChimeraPresenceCall.hpp"
 
@@ -2198,7 +2198,7 @@ print_classify_configuration(const ChimeraClassify::ClassifyConfig &config) {
   std::cout << "  threads     " << config.threads << "\n";
   std::cout << "  batch size  " << config.batchSize << "\n";
   std::cout << "  profile     enabled\n";
-  std::cout << "  local resolution "
+  std::cout << "  PROVE       "
             << (config.local_resolution_enabled ? "enabled" : "disabled")
             << "\n";
   std::cout << "  presence call "
@@ -3180,7 +3180,7 @@ static std::vector<uint32_t>
 read_local_resolution_species_list(const std::filesystem::path &path) {
   std::ifstream in(path);
   if (!in) {
-    throw std::runtime_error("Failed to open local resolution species list: " +
+    throw std::runtime_error("Failed to open PROVE species list: " +
                              path.string());
   }
   std::vector<uint32_t> species;
@@ -3196,7 +3196,7 @@ read_local_resolution_species_list(const std::filesystem::path &path) {
     }
     uint32_t taxid = 0;
     if (!chimera::utils::try_parse_u32(line, taxid) || taxid == 0) {
-      throw std::runtime_error("Malformed local resolution species list: " +
+      throw std::runtime_error("Malformed PROVE species list: " +
                                path.string());
     }
     species.push_back(taxid);
@@ -6960,7 +6960,7 @@ void run(ClassifyConfig config) {
       const LocalResolutionEligibility localEligibility =
           derive_local_resolution_eligibility(postTopkScores);
       if (classifyDebug) {
-        std::cout << "[classify][debug] local-resolution"
+        std::cout << "[classify][debug] prove"
                   << " sample_divergence=" << std::fixed
                   << std::setprecision(4) << localResolutionDivergence
                   << " hard_ambiguity="
@@ -6980,9 +6980,8 @@ void run(ClassifyConfig config) {
               localProfileOutput, "skipped_no_local_resolution_data",
               localResolutionDivergence, nullptr, nullptr, 0.0, 0.0, 0.0);
         }
-        print_status_line(
-            ConsoleStatusKind::Skip,
-            "local resolution (database has no local-resolution data)");
+        print_status_line(ConsoleStatusKind::Skip,
+                          "PROVE (database has no PROVE data)");
       } else if (postTopkScores.untrusted_rows == 0) {
         if (classifyDebug) {
           write_local_resolution_profile_json(
@@ -6990,7 +6989,7 @@ void run(ClassifyConfig config) {
               localResolutionDivergence, nullptr, nullptr, 0.0, 0.0, 0.0);
         }
         print_status_line(ConsoleStatusKind::Skip,
-                          "local resolution (all reads trusted)");
+                          "PROVE (all reads trusted)");
       } else {
         const std::filesystem::path localIndexPath =
             resolvedLocalArtifacts->index_path;
@@ -7000,12 +6999,12 @@ void run(ClassifyConfig config) {
             resolvedLocalArtifacts->shard_manifest_path;
         if (!std::filesystem::exists(repMetadataPath)) {
           throw std::runtime_error(
-              "Local resolution metadata is missing next to database: " +
+              "PROVE metadata is missing next to database: " +
               repMetadataPath.string());
         }
         if (!std::filesystem::exists(shardManifestPath)) {
           throw std::runtime_error(
-              "Local resolution shard manifest is missing next to database: " +
+              "PROVE shard manifest is missing next to database: " +
               shardManifestPath.string());
         }
         const auto metadataStarted = std::chrono::steady_clock::now();
@@ -7029,11 +7028,11 @@ void run(ClassifyConfig config) {
           localRequest.index_file = localIndexPath.string();
           localRequest.shard_manifest_file = shardManifestPath.string();
           localRequest.targets = panel.targets;
-          localRequest.diag_bin = config.lpc_diag_bin;
-          localRequest.max_occ = config.lpc_max_occ;
-          localRequest.min_chain = config.lpc_min_chain;
-          localRequest.min_coverage = config.lpc_min_coverage;
-          localRequest.min_coverage_span = config.lpc_min_coverage_span;
+          localRequest.diag_bin = config.prove_diag_bin;
+          localRequest.max_occ = config.prove_max_occ;
+          localRequest.min_chain = config.prove_min_chain;
+          localRequest.min_coverage = config.prove_min_coverage;
+          localRequest.min_coverage_span = config.prove_min_coverage_span;
           localRequest.threads = config.threads;
           localRequest.sample_keys = sampleKeys.enabled() ? &sampleKeys : nullptr;
           localRequest.skip_reads = &postTopkScores.trusted;
@@ -7110,7 +7109,7 @@ void run(ClassifyConfig config) {
           localDecisionPtr = &localDecision;
           {
             std::ostringstream msg;
-            msg << "local resolution"
+            msg << "PROVE"
                 << " species=" << panel.selected_species
                 << " targets=" << panel.selected_targets
                 << " reads=" << localResult.stats.reads
@@ -7132,7 +7131,7 @@ void run(ClassifyConfig config) {
             print_status_line(ConsoleStatusKind::Ok, msg.str());
           }
           if (classifyDebug) {
-            std::cout << "[classify][debug] local-resolution"
+            std::cout << "[classify][debug] prove"
                       << " groups=" << panel.selected_groups
                       << " candidate_species=" << panel.candidate_species
                       << " species=" << panel.selected_species
@@ -7181,9 +7180,9 @@ void run(ClassifyConfig config) {
                 panelSeconds, 0.0);
           }
           print_status_line(ConsoleStatusKind::Skip,
-                            "local resolution (no sample targets)");
+                            "PROVE (no sample targets)");
           if (classifyDebug) {
-            std::cout << "[classify][debug] local-resolution"
+            std::cout << "[classify][debug] prove"
                       << " skipped=no_sample_targets"
                       << " metadata_seconds=" << metadataSeconds
                       << " panel_seconds=" << panelSeconds << "\n";
