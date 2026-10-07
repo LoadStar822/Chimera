@@ -1,7 +1,7 @@
 cff-version: 1.2.0
 message: "If you use Chimera, please cite the preferred citation below."
 title: "Chimera"
-version: "1.7"
+version: "1.8"
 type: software
 license: "MIT"
 repository-code: "https://github.com/LoadStar822/Chimera"
