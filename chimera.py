@@ -498,7 +498,7 @@ def add_build_arguments(parser, require_input: bool) -> None:
     parser.add_argument(
         "--no-prove",
         action="store_true",
-        help="Do not build PROVE (panel-restricted origin verification) data",
+        help="Do not build PROVE (per-read origin verification) data",
     )
     parser.add_argument(
         "--no-local-resolution",
@@ -655,7 +655,7 @@ def parse_arguments():
     classify_parser.add_argument(
         "--no-prove",
         action="store_true",
-        help="Disable PROVE (panel-restricted origin verification) at classify time",
+        help="Disable PROVE (per-read origin verification) at classify time",
     )
     classify_parser.add_argument(
         "--no-local-resolution",

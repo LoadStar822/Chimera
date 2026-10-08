@@ -269,7 +269,7 @@ int main(int argc, char **argv) {
                    "presence-sketch data")
       ->check(CLI::ExistingDirectory);
   build->add_flag("--no-prove", buildNoLocalResolution,
-                  "Do not build PROVE (panel-restricted origin "
+                  "Do not build PROVE (per-read origin "
                   "verification) data");
   // Old name, still accepted but hidden from help.
   build->add_flag("--no-local-resolution", buildNoLocalResolution)->group("");
@@ -411,7 +411,7 @@ int main(int argc, char **argv) {
                    "Batch size for classifying")
       ->default_val(400);
   classify->add_flag("--no-prove", classifyNoLocalResolution,
-                     "Disable PROVE (panel-restricted origin "
+                     "Disable PROVE (per-read origin "
                      "verification) at classify time");
   // Old name, still accepted but hidden from help.
   classify->add_flag("--no-local-resolution", classifyNoLocalResolution)

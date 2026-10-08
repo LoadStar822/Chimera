@@ -24,7 +24,7 @@ Chimera is a reference-database metagenomic classifier designed for fast custom 
 - **Profile output during classification**: `chimera classify` writes both per-read assignments and `ChimeraProfile.tsv`.
 - **Interactive NCBI download wizard** for users who do not want to hand-write genome download commands.
 - **Automatic NCBI taxdump handling** during build when the Python wrapper can infer or download the taxonomy data.
-- **PROVE (Panel-Restricted Origin VErification)** re-decides the reads the core classifier cannot settle: each is chained against a panel of reference genomes chosen for the sample, and only a genome that explains the read can claim it.
+- **PROVE (Per-Read Origin Verification)** re-decides the reads the core classifier cannot settle: each is chained against a panel of reference genomes chosen for the sample, and only a genome that explains the read can claim it.
 - **Simple user workflow**: interactive genome download, automatic taxonomy handling, minimal required parameters, and classify/profile output in one command.
 
 ## Quick Links
@@ -187,7 +187,7 @@ chimera classify -i reads.fastq.gz -d ChimeraDB -o results
 
 When `target.tsv` comes from `chimera download`, the wrapper finds the adjacent `taxdump/`. If NCBI taxdump is missing, the wrapper can download and verify it automatically before invoking the native build.
 
-### PROVE: Panel-Restricted Origin Verification
+### PROVE: Per-Read Origin Verification
 
 For NCBI databases, Chimera builds PROVE data by default when usable taxonomy data are available. When the database contains this data, `classify` runs PROVE on every sample: reads whose core call is confident and well supported keep it, and every other read is re-decided against a panel of reference genomes chosen for the sample. A genome explains a read when colinear chains of shared minimizers span at least half of the read, or 300 bp, whichever is shorter. A read is assigned only among the panel species with a genome that explains it, and a read that no panel genome explains is left unclassified. Panel species that the sample's reads cannot tell apart (the same organism filed under several names) are reported under one name.
 
