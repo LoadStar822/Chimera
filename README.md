@@ -30,6 +30,7 @@ Chimera is a reference-database metagenomic classifier designed for fast custom 
 ## Quick Links
 
 - [Install](#install)
+- [Pre-built Database](#pre-built-database)
 - [Quick Start](#quick-start)
 - [Download Genomes](#download-genomes)
 - [Build a Database](#build-a-database)
@@ -66,6 +67,29 @@ chimera -v
 ```
 
 For AVX2-capable source builds, omit `-DCHIMERA_ENABLE_NATIVE_AVX2=OFF`. Link-time optimization is disabled by default for portability and can be enabled with `-DCHIMERA_ENABLE_LTO=ON`.
+
+## Pre-built Database
+
+To start classifying without building a database, download the pre-built database used for the results in [ChimeraBenchmark](https://github.com/LoadStar822/ChimeraBenchmark). It was built with Chimera 1.8.0 from the RefSeq snapshot distributed with the CAMI II challenge (January 2019; 141,677 assemblies of 21,049 species).
+
+| File | Size | MD5 |
+| --- | --- | --- |
+| [`chimera_v1.8.0_cami2_refseq_db.tar.gz`](https://drive.google.com/file/d/1FjRXlTqS4TJZ7FNZauE78jwxKPbfaZ3e/view) | 101 GiB | `bf0248421e406549ac9cfd653f9580e8` |
+
+```bash
+wget -c -O chimera_v1.8.0_cami2_refseq_db.tar.gz \
+  "https://drive.usercontent.google.com/download?id=1FjRXlTqS4TJZ7FNZauE78jwxKPbfaZ3e&export=download&confirm=t"
+md5sum chimera_v1.8.0_cami2_refseq_db.tar.gz
+tar -xzf chimera_v1.8.0_cami2_refseq_db.tar.gz
+
+chimera classify \
+  -i reads.fastq.gz \
+  -d cami_refseq \
+  -o results \
+  -t 32
+```
+
+`wget -c` resumes an interrupted download. The archive unpacks to a 106 GiB `cami_refseq/` directory, and classification with this database needs about 85 GiB of memory. Genomes added to RefSeq after January 2019 are not included; to use newer references, build your own database as described below.
 
 ## Quick Start
 
